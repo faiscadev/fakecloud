@@ -87,6 +87,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         ),
         ("rds", "rds", &["service.rs"], &["rds"]),
         ("kinesis", "kinesis", &["service.rs"], &["kinesis"]),
+        ("firehose", "firehose", &["service.rs"], &["firehose"]),
         (
             "elasticache",
             "elasticache",

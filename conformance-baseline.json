@@ -1,6 +1,6 @@
 {
-  "variants_passed": 88377,
-  "total_variants": 88377,
+  "variants_passed": 88793,
+  "total_variants": 88793,
   "per_service": {
     "logs": {
       "passed": 3897,
@@ -149,6 +149,10 @@
     "organizations": {
       "passed": 2050,
       "total": 2050
+    },
+    "firehose": {
+      "passed": 416,
+      "total": 416
     }
   }
 }

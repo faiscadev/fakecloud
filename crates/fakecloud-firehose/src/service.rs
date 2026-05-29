@@ -14,7 +14,9 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_s3::{memory_body, S3Object, SharedS3State};
 
-use crate::state::{DeliveryStream, FirehoseAccounts, S3Destination, SharedFirehoseState};
+use crate::state::{
+    DeliveryStream, EncryptionConfig, FirehoseAccounts, S3Destination, SharedFirehoseState,
+};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateDeliveryStream",
@@ -27,6 +29,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UntagDeliveryStream",
     "ListTagsForDeliveryStream",
     "UpdateDestination",
+    "StartDeliveryStreamEncryption",
+    "StopDeliveryStreamEncryption",
 ];
 
 pub struct FirehoseService {
@@ -77,6 +81,8 @@ impl AwsService for FirehoseService {
             "UntagDeliveryStream" => self.untag_delivery_stream(&req),
             "ListTagsForDeliveryStream" => self.list_tags_for_delivery_stream(&req),
             "UpdateDestination" => self.update_destination(&req),
+            "StartDeliveryStreamEncryption" => self.start_delivery_stream_encryption(&req),
+            "StopDeliveryStreamEncryption" => self.stop_delivery_stream_encryption(&req),
             other => Err(AwsServiceError::action_not_implemented("firehose", other)),
         }
     }
@@ -119,6 +125,34 @@ fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsService
 fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", msg)
 }
+
+/// Validate a delivery-stream name against the Firehose model constraints:
+/// length 1..=64 and pattern `^[a-zA-Z0-9_.-]+$`. AWS rejects violations with
+/// an InvalidArgumentException before any resource lookup.
+fn validate_stream_name(name: &str) -> Result<(), AwsServiceError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(invalid_argument(format!(
+            "DeliveryStreamName must be between 1 and 64 characters, got {}",
+            name.len()
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return Err(invalid_argument(
+            "DeliveryStreamName may only contain letters, digits, '_', '.' and '-'",
+        ));
+    }
+    Ok(())
+}
+
+const DELIVERY_STREAM_TYPES: &[&str] = &[
+    "DirectPut",
+    "KinesisStreamAsSource",
+    "MSKAsSource",
+    "DatabaseAsSource",
+];
 
 /// AWS limits per Firehose docs: SizeInMBs in [1,128], IntervalInSeconds
 /// either 0 (immediate) or in [60,900].
@@ -170,6 +204,17 @@ fn s3_destination_json(dest: &S3Destination) -> Value {
     })
 }
 
+fn encryption_config_json(enc: &EncryptionConfig) -> Value {
+    let mut v = json!({ "Status": enc.status });
+    if let Some(kt) = &enc.key_type {
+        v["KeyType"] = json!(kt);
+    }
+    if let Some(ka) = &enc.key_arn {
+        v["KeyARN"] = json!(ka);
+    }
+    v
+}
+
 fn arn_for(region: &str, account: &str, name: &str) -> String {
     Arn::new(
         "firehose",
@@ -191,10 +236,16 @@ impl FirehoseService {
             .as_str()
             .ok_or_else(|| missing("DeliveryStreamName"))?
             .to_string();
+        validate_stream_name(&name)?;
         let stream_type = body["DeliveryStreamType"]
             .as_str()
             .unwrap_or("DirectPut")
             .to_string();
+        if !DELIVERY_STREAM_TYPES.contains(&stream_type.as_str()) {
+            return Err(invalid_argument(format!(
+                "Invalid DeliveryStreamType: {stream_type}"
+            )));
+        }
 
         let s3_dest = match parse_s3_destination(&body["S3DestinationConfiguration"])? {
             Some(d) => Some(d),
@@ -223,6 +274,7 @@ impl FirehoseService {
             version_id: "1".to_string(),
             destination: s3_dest,
             tags: BTreeMap::new(),
+            encryption: None,
         };
         streams.insert(name, stream);
         Ok(AwsResponse::ok_json(json!({
@@ -250,28 +302,51 @@ impl FirehoseService {
             .map(|d| vec![s3_destination_json(d)])
             .unwrap_or_default();
 
+        let mut description = json!({
+            "DeliveryStreamName": stream.name,
+            "DeliveryStreamARN": stream.arn,
+            "DeliveryStreamStatus": stream.status,
+            "DeliveryStreamType": stream.stream_type,
+            "VersionId": stream.version_id,
+            "CreateTimestamp": stream.created_at.timestamp() as f64,
+            "LastUpdateTimestamp": stream.last_update.timestamp() as f64,
+            "Destinations": destinations,
+            "HasMoreDestinations": false,
+        });
+        if let Some(enc) = &stream.encryption {
+            description["DeliveryStreamEncryptionConfiguration"] = encryption_config_json(enc);
+        }
+
         Ok(AwsResponse::ok_json(json!({
-            "DeliveryStreamDescription": {
-                "DeliveryStreamName": stream.name,
-                "DeliveryStreamARN": stream.arn,
-                "DeliveryStreamStatus": stream.status,
-                "DeliveryStreamType": stream.stream_type,
-                "VersionId": stream.version_id,
-                "CreateTimestamp": stream.created_at.timestamp() as f64,
-                "LastUpdateTimestamp": stream.last_update.timestamp() as f64,
-                "Destinations": destinations,
-                "HasMoreDestinations": false,
-            }
+            "DeliveryStreamDescription": description,
         })))
     }
 
     fn list_delivery_streams(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let limit = body["Limit"].as_i64().unwrap_or(10).max(1) as usize;
+        let limit = match body["Limit"].as_i64() {
+            Some(l) => {
+                if !(1..=10000).contains(&l) {
+                    return Err(invalid_argument(format!(
+                        "Limit must be between 1 and 10000, got {l}"
+                    )));
+                }
+                l as usize
+            }
+            None => 10,
+        };
         let exclusive_start = body["ExclusiveStartDeliveryStreamName"]
             .as_str()
             .map(|s| s.to_string());
+        if let Some(ref start) = exclusive_start {
+            validate_stream_name(start)?;
+        }
         let type_filter = body["DeliveryStreamType"].as_str().map(|s| s.to_string());
+        if let Some(ref t) = type_filter {
+            if !DELIVERY_STREAM_TYPES.contains(&t.as_str()) {
+                return Err(invalid_argument(format!("Invalid DeliveryStreamType: {t}")));
+            }
+        }
 
         let accounts = self.state.read();
         let names: Vec<String> = accounts
@@ -308,6 +383,7 @@ impl FirehoseService {
         let name = body["DeliveryStreamName"]
             .as_str()
             .ok_or_else(|| missing("DeliveryStreamName"))?;
+        validate_stream_name(name)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         if state.streams_mut(&req.region).remove(name).is_none() {
@@ -484,6 +560,72 @@ impl FirehoseService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
+    fn start_delivery_stream_encryption(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = body["DeliveryStreamName"]
+            .as_str()
+            .ok_or_else(|| missing("DeliveryStreamName"))?;
+
+        let config = &body["DeliveryStreamEncryptionConfigurationInput"];
+        let key_type = config["KeyType"]
+            .as_str()
+            .unwrap_or("AWS_OWNED_CMK")
+            .to_string();
+        if key_type != "AWS_OWNED_CMK" && key_type != "CUSTOMER_MANAGED_CMK" {
+            return Err(invalid_argument(format!(
+                "KeyType must be AWS_OWNED_CMK or CUSTOMER_MANAGED_CMK, got {key_type}"
+            )));
+        }
+        let key_arn = if key_type == "CUSTOMER_MANAGED_CMK" {
+            let arn = config["KeyARN"].as_str().ok_or_else(|| {
+                invalid_argument("KeyARN is required when KeyType is CUSTOMER_MANAGED_CMK")
+            })?;
+            Some(arn.to_string())
+        } else {
+            None
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id, &req.region);
+        let stream = state
+            .streams_mut(&req.region)
+            .get_mut(name)
+            .ok_or_else(|| not_found(name))?;
+        stream.encryption = Some(EncryptionConfig {
+            status: "ENABLED".to_string(),
+            key_type: Some(key_type),
+            key_arn,
+        });
+        stream.last_update = Utc::now();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn stop_delivery_stream_encryption(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = body["DeliveryStreamName"]
+            .as_str()
+            .ok_or_else(|| missing("DeliveryStreamName"))?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id, &req.region);
+        let stream = state
+            .streams_mut(&req.region)
+            .get_mut(name)
+            .ok_or_else(|| not_found(name))?;
+        stream.encryption = Some(EncryptionConfig {
+            status: "DISABLED".to_string(),
+            key_type: None,
+            key_arn: None,
+        });
+        stream.last_update = Utc::now();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
     pub fn deliver_records(
         &self,
         account_id: &str,
@@ -582,6 +724,135 @@ fn not_found(name: &str) -> AwsServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::{HeaderMap, Method};
+
+    fn request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "firehose".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "req-1".to_string(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn service() -> FirehoseService {
+        FirehoseService::default()
+    }
+
+    fn create(svc: &FirehoseService, name: &str) {
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({ "DeliveryStreamName": name }),
+        ))
+        .unwrap();
+    }
+
+    fn describe_encryption(svc: &FirehoseService, name: &str) -> Value {
+        let resp = svc
+            .describe_delivery_stream(&request(
+                "DescribeDeliveryStream",
+                json!({ "DeliveryStreamName": name }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["DeliveryStreamDescription"]["DeliveryStreamEncryptionConfiguration"].clone()
+    }
+
+    #[test]
+    fn start_encryption_customer_managed_reflected_in_describe() {
+        let svc = service();
+        create(&svc, "enc-stream");
+        svc.start_delivery_stream_encryption(&request(
+            "StartDeliveryStreamEncryption",
+            json!({
+                "DeliveryStreamName": "enc-stream",
+                "DeliveryStreamEncryptionConfigurationInput": {
+                    "KeyType": "CUSTOMER_MANAGED_CMK",
+                    "KeyARN": "arn:aws:kms:us-east-1:123456789012:key/abc"
+                }
+            }),
+        ))
+        .unwrap();
+
+        let enc = describe_encryption(&svc, "enc-stream");
+        assert_eq!(enc["Status"], "ENABLED");
+        assert_eq!(enc["KeyType"], "CUSTOMER_MANAGED_CMK");
+        assert_eq!(enc["KeyARN"], "arn:aws:kms:us-east-1:123456789012:key/abc");
+    }
+
+    #[test]
+    fn start_encryption_defaults_to_aws_owned_cmk() {
+        let svc = service();
+        create(&svc, "default-enc");
+        svc.start_delivery_stream_encryption(&request(
+            "StartDeliveryStreamEncryption",
+            json!({ "DeliveryStreamName": "default-enc" }),
+        ))
+        .unwrap();
+
+        let enc = describe_encryption(&svc, "default-enc");
+        assert_eq!(enc["Status"], "ENABLED");
+        assert_eq!(enc["KeyType"], "AWS_OWNED_CMK");
+        assert!(enc["KeyARN"].is_null());
+    }
+
+    #[test]
+    fn stop_encryption_sets_disabled() {
+        let svc = service();
+        create(&svc, "stop-enc");
+        svc.start_delivery_stream_encryption(&request(
+            "StartDeliveryStreamEncryption",
+            json!({ "DeliveryStreamName": "stop-enc" }),
+        ))
+        .unwrap();
+        svc.stop_delivery_stream_encryption(&request(
+            "StopDeliveryStreamEncryption",
+            json!({ "DeliveryStreamName": "stop-enc" }),
+        ))
+        .unwrap();
+
+        let enc = describe_encryption(&svc, "stop-enc");
+        assert_eq!(enc["Status"], "DISABLED");
+        assert!(enc["KeyType"].is_null());
+    }
+
+    #[test]
+    fn start_encryption_unknown_stream_not_found() {
+        let svc = service();
+        let result = svc.start_delivery_stream_encryption(&request(
+            "StartDeliveryStreamEncryption",
+            json!({ "DeliveryStreamName": "ghost" }),
+        ));
+        let Err(err) = result else {
+            panic!("expected ResourceNotFoundException");
+        };
+        assert!(format!("{err:?}").contains("ResourceNotFoundException"));
+    }
+
+    #[test]
+    fn stop_encryption_unknown_stream_not_found() {
+        let svc = service();
+        let result = svc.stop_delivery_stream_encryption(&request(
+            "StopDeliveryStreamEncryption",
+            json!({ "DeliveryStreamName": "ghost" }),
+        ));
+        let Err(err) = result else {
+            panic!("expected ResourceNotFoundException");
+        };
+        assert!(format!("{err:?}").contains("ResourceNotFoundException"));
+    }
 
     #[test]
     fn buffering_size_within_range_ok() {
