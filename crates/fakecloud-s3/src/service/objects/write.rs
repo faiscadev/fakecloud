@@ -1200,7 +1200,7 @@ impl S3Service {
 /// isn't valid hex of the right length.
 fn hex_to_base64(hex: &str) -> Option<String> {
     use base64::Engine;
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
