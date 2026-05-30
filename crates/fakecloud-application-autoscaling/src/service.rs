@@ -1371,4 +1371,17 @@ mod tests {
             .scaling_activities;
         assert_eq!(activities.len(), 1);
     }
+
+    // bug-audit 2026-05-28, 1.7: list ops reject a malformed NextToken
+    // (paginate_checked -> ValidationException) instead of silently restarting
+    // at page 0. The rejection primitive is exercised here; the wiring lives in
+    // the Describe* paginated handlers above.
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("not-a-valid-token"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
+        assert!(paginate_checked(&items, None, 3).is_ok());
+    }
 }
