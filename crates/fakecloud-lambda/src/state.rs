@@ -200,6 +200,11 @@ pub struct EventSourceMapping {
     /// `Queues` — Amazon MQ broker queue list.
     #[serde(default)]
     pub queues: Vec<String>,
+    /// `SourceAccessConfigurations` — VPC/auth config (security groups,
+    /// subnets, SASL/SCRAM secrets) for Kafka/MQ/MSK sources. Round-tripped
+    /// so Get/List/Update echo back what the caller supplied (1.17).
+    #[serde(default)]
+    pub source_access_configurations: Vec<serde_json::Value>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.
