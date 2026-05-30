@@ -1673,8 +1673,19 @@ async fn sqs_encryption_defaults_and_mode_switch() {
 // MessageId + SequenceNumber instead of minting new ones / advancing the seq.
 #[tokio::test]
 async fn fifo_dedup_replays_original_id_and_sequence() {
-    let client = sqs_client().await;
-    let queue_url = create_fifo_queue(&client, "dedup-replay.fifo").await;
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let queue_url = client
+        .create_queue()
+        .queue_name("dedup-replay.fifo")
+        .attributes(QueueAttributeName::FifoQueue, "true")
+        .attributes(QueueAttributeName::ContentBasedDeduplication, "false")
+        .send()
+        .await
+        .expect("create fifo queue")
+        .queue_url()
+        .unwrap()
+        .to_string();
 
     let first = client
         .send_message()
