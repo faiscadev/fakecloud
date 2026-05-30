@@ -80,17 +80,18 @@ impl SqsService {
             }
         }
 
-        // Reject if there's already an active task for this source —
-        // RUNNING or CANCELLING. CANCELLING is still actively moving
-        // (or finishing the in-flight batch), so a second task starting
-        // alongside it would double-drain the source queue.
-        if state.message_move_tasks.iter().any(|t| {
-            t.source_arn == source_arn
-                && matches!(
-                    t.status,
-                    MessageMoveTaskStatus::Running | MessageMoveTaskStatus::Cancelling
-                )
-        }) {
+        // Reject if there's already an active task for this source — RUNNING or
+        // CANCELLING, driven by the current process. CANCELLING is still
+        // actively moving (or finishing the in-flight batch), so a second task
+        // starting alongside it would double-drain the source queue. A task left
+        // by a previous process (driver_pid mismatch) was orphaned by a restart
+        // and must not block forever (bug-audit 2026-05-28, 4.6).
+        let pid = std::process::id();
+        if state
+            .message_move_tasks
+            .iter()
+            .any(|t| task_blocks_new_move(t, &source_arn, pid))
+        {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "AWS.SimpleQueueService.UnsupportedOperation",
@@ -356,13 +357,16 @@ impl SqsService {
 }
 
 /// A persisted move task blocks a new StartMessageMoveTask for its source queue
-/// only if it is RUNNING AND driven by the current process. A RUNNING task with
-/// a different `driver_pid` was orphaned by a restart (its driver task is never
-/// re-spawned on load) and must not block new moves forever
-/// (bug-audit 2026-05-28, 4.6).
+/// only if it is actively draining (RUNNING or CANCELLING) AND driven by the
+/// current process. A task with a different `driver_pid` was orphaned by a
+/// restart (its driver task is never re-spawned on load) and must not block new
+/// moves forever (bug-audit 2026-05-28, 4.6).
 fn task_blocks_new_move(task: &MessageMoveTask, source_arn: &str, pid: u32) -> bool {
     task.source_arn == source_arn
-        && task.status == MessageMoveTaskStatus::Running
+        && matches!(
+            task.status,
+            MessageMoveTaskStatus::Running | MessageMoveTaskStatus::Cancelling
+        )
         && task.driver_pid == pid
 }
 
@@ -410,6 +414,22 @@ mod move_zombie_tests {
     fn completed_task_does_not_block() {
         let mut t = running_task(std::process::id());
         t.status = MessageMoveTaskStatus::Completed;
+        assert!(!task_blocks_new_move(&t, ARN, std::process::id()));
+    }
+
+    #[test]
+    fn current_pid_cancelling_task_blocks() {
+        // A Cancelling task is still draining the source, so a second move
+        // would double-drain — it must block (bug-audit 2026-05-28, 4.6).
+        let mut t = running_task(std::process::id());
+        t.status = MessageMoveTaskStatus::Cancelling;
+        assert!(task_blocks_new_move(&t, ARN, std::process::id()));
+    }
+
+    #[test]
+    fn stale_pid_cancelling_task_does_not_block() {
+        let mut t = running_task(0);
+        t.status = MessageMoveTaskStatus::Cancelling;
         assert!(!task_blocks_new_move(&t, ARN, std::process::id()));
     }
 }
