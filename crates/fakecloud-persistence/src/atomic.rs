@@ -5,8 +5,18 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 fn tmp_path(path: &Path) -> PathBuf {
+    // Unique temp name per write. A fixed `<path>.tmp` let two concurrent
+    // writers to the same path (e.g. the KMS snapshot_lock-guarded save and the
+    // lock-free auto-provision snapshot hook firing from another worker)
+    // truncate+write the SAME temp file and interleave their bytes, producing a
+    // corrupt blob that fails to parse on restart -> KMS keys + all ciphertext
+    // permanently lost (bug-audit 2026-05-28, 4.1). A process id + monotonic
+    // counter make every in-flight temp distinct; the rename stays atomic.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut os = path.as_os_str().to_owned();
-    os.push(".tmp");
+    os.push(format!(".{}.{}.tmp", std::process::id(), seq));
     PathBuf::from(os)
 }
 
@@ -127,6 +137,40 @@ mod tests {
         let path = tmp.path().join("out.bin");
         write_atomic_bytes(&path, b"hello world").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+    }
+
+    // bug-audit 2026-05-28, 4.1: many concurrent writers to one path must never
+    // produce a corrupt (interleaved) file. With a fixed `.tmp` suffix they
+    // raced on the same temp file; unique temp names + the atomic rename
+    // guarantee the final file equals exactly one writer's payload.
+    #[test]
+    fn concurrent_writes_never_corrupt() {
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        let path = Arc::new(dir.path().join("snap.bin"));
+        let payloads: Vec<Vec<u8>> = (0..16).map(|i| vec![b'A' + i as u8; 8192]).collect();
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|p| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || write_atomic_bytes(&path, &p).unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let got = std::fs::read(&*path).unwrap();
+        assert!(
+            payloads.contains(&got),
+            "persisted file is not any single writer's payload (corrupt interleave)"
+        );
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "leftover temp files: {leftover:?}");
     }
 
     #[test]
