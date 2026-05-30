@@ -3309,3 +3309,42 @@ async fn elasticache_modify_cache_parameter_group_applies_config_set() {
         "CONFIG SET not applied after retries. Last response: {last_response}"
     );
 }
+
+// bug-audit 2026-05-28, 4.3: deleting a cluster while it is still creating must
+// not leave an orphan or resurrect the cluster — a same-id re-create must work.
+#[tokio::test]
+async fn delete_during_create_does_not_orphan() {
+    let server = TestServer::start().await;
+    let client = ec_client(&server).await;
+    if skip_without_docker() {
+        return;
+    }
+
+    create_redis_cluster(&client, "race-redis").await;
+
+    // Delete immediately, while the background container start may still be in
+    // flight.
+    client
+        .delete_cache_cluster()
+        .cache_cluster_id("race-redis")
+        .send()
+        .await
+        .expect("delete cache cluster");
+
+    // Let the racing create-finish + delete-reap settle.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // The cluster must be gone (not resurrected to "available").
+    let desc = client
+        .describe_cache_clusters()
+        .cache_cluster_id("race-redis")
+        .send()
+        .await;
+    assert!(
+        desc.is_err(),
+        "deleted cluster must not be resurrected by the create-finish step"
+    );
+
+    // A same-id re-create must succeed.
+    create_redis_cluster(&client, "race-redis").await;
+}
