@@ -286,3 +286,51 @@ async fn sfn_sync_ecs_run_task_waits_for_stopped() {
         desc.cause(),
     );
 }
+
+// bug-audit 2026-05-28, 4.2: StartSyncExecution must mint a unique execution
+// ARN per call. It used a millisecond timestamp, so concurrent Express starts
+// in the same millisecond produced identical ARNs and overwrote each other.
+#[tokio::test]
+async fn sfn_sync_concurrent_executions_get_unique_arns() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    let definition = json!({
+        "StartAt": "Done",
+        "States": { "Done": { "Type": "Pass", "End": true } }
+    });
+
+    let created = sfn
+        .create_state_machine()
+        .name("express-unique-arns")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+        .r#type(aws_sdk_sfn::types::StateMachineType::Express)
+        .send()
+        .await
+        .unwrap();
+    let sm_arn = created.state_machine_arn().to_string();
+
+    // Fire many sync executions concurrently; every ARN must be distinct.
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let sfn = sfn.clone();
+        let sm_arn = sm_arn.clone();
+        handles.push(tokio::spawn(async move {
+            sfn.start_sync_execution()
+                .state_machine_arn(sm_arn)
+                .input("{}")
+                .send()
+                .await
+                .unwrap()
+                .execution_arn()
+                .to_string()
+        }));
+    }
+
+    let mut arns = std::collections::HashSet::new();
+    for h in handles {
+        arns.insert(h.await.unwrap());
+    }
+    assert_eq!(arns.len(), 16, "every sync execution must get a unique ARN");
+}

@@ -340,11 +340,21 @@ impl StepFunctionsService {
                 ));
             }
             let now = chrono::Utc::now();
-            let exec_name = format!("sync-{}", now.timestamp_millis());
-            let exec_arn = format!(
-                "arn:aws:states:{}:{}:express:{}:{}",
-                state.region, state.account_id, sm.name, exec_name
-            );
+            // Mint a unique execution name with a UUID rather than a
+            // millisecond timestamp: Express workflows start concurrently, so a
+            // ms-resolution name collides and same-ms starts overwrote each
+            // other (bug-audit 2026-05-28, 4.2). Loop on the (vanishingly
+            // unlikely) UUID collision, mirroring the async StartExecution path.
+            let (exec_name, exec_arn) = loop {
+                let candidate = format!("sync-{}", uuid::Uuid::new_v4());
+                let arn = format!(
+                    "arn:aws:states:{}:{}:express:{}:{}",
+                    state.region, state.account_id, sm.name, candidate
+                );
+                if !state.executions.contains_key(&arn) {
+                    break (candidate, arn);
+                }
+            };
             let execution = Execution {
                 execution_arn: exec_arn.clone(),
                 state_machine_arn: sm_arn.clone(),
