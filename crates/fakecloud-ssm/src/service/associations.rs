@@ -77,6 +77,7 @@ impl SsmService {
             last_execution_date: None,
             instance_id: input.instance_id,
             versions: vec![version],
+            executions: Vec::new(),
         };
 
         let resp = association_to_json(&assoc);
