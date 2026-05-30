@@ -241,6 +241,25 @@ pub struct SsmAssociation {
     pub last_execution_date: Option<DateTime<Utc>>,
     pub instance_id: Option<String>,
     pub versions: Vec<SsmAssociationVersion>,
+    /// Recorded executions (StartAssociationsOnce / scheduled applies). Empty
+    /// until the association runs; surfaced by DescribeAssociationExecutions
+    /// and DescribeAssociationExecutionTargets (bug-audit 2026-05-28, 1.15).
+    #[serde(default)]
+    pub executions: Vec<AssociationExecution>,
+}
+
+/// One recorded run of an SSM State Manager association. fakecloud applies
+/// associations synchronously and always succeeds, so every execution is a
+/// `Success` over the association's resolved targets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssociationExecution {
+    pub execution_id: String,
+    pub status: String,
+    pub detailed_status: String,
+    pub created_time: DateTime<Utc>,
+    pub resource_count: usize,
+    /// Resolved target resource ids covered by this execution.
+    pub resource_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
