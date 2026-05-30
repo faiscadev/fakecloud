@@ -155,20 +155,25 @@ mod tests {
     #[test]
     fn stream_records_persist_across_serde() {
         let table = make_stream_table();
-        table.stream_records.write().push(StreamRecord {
-            event_id: "e1".to_string(),
-            event_name: "INSERT".to_string(),
-            sequence_number: "100".to_string(),
-            keys: std::collections::BTreeMap::new(),
-            old_image: None,
-            new_image: None,
-            stream_view_type: "NEW_AND_OLD_IMAGES".to_string(),
-            event_source_region: "eu-west-1".to_string(),
-        });
+        let mut keys = HashMap::new();
+        keys.insert("pk".to_string(), json!({"S": "user1"}));
+        let record = generate_stream_record(
+            &table,
+            "INSERT",
+            keys,
+            None,
+            Some(HashMap::from([("pk".to_string(), json!({"S": "user1"}))])),
+            "eu-west-1",
+        )
+        .expect("stream record should be generated");
+        let want_event_id = record.event_id.clone();
+        table.stream_records.write().push(record);
+
         let json = serde_json::to_string(&table).unwrap();
         let restored: DynamoTable = serde_json::from_str(&json).unwrap();
         let recs = restored.stream_records.read();
         assert_eq!(recs.len(), 1, "pending stream record must survive restart");
-        assert_eq!(recs[0].event_id, "e1");
+        assert_eq!(recs[0].event_id, want_event_id);
+        assert_eq!(recs[0].event_name, "INSERT");
     }
 }
