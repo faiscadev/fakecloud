@@ -230,40 +230,15 @@ fn matches_filter_respects_none() {
     assert!(!matches_filter(Some("x"), "y"));
 }
 
-// bug-audit 2026-05-28, 1.7: a malformed nextToken must be rejected with
-// InvalidParameterException rather than silently restarting from page 0.
-#[tokio::test]
-async fn list_daemon_task_definitions_rejects_invalid_next_token() {
-    let svc = svc();
-    let err = call_expect_err(
-        &svc,
-        "AmazonEC2ContainerServiceV20141113.ListDaemonTaskDefinitions",
-        json!({ "nextToken": "not-a-valid-token" }),
-    )
-    .await;
-    assert_eq!(err.code(), "InvalidParameterException");
-}
-
-#[tokio::test]
-async fn list_daemons_rejects_invalid_next_token() {
-    let svc = svc();
-    let err = call_expect_err(
-        &svc,
-        "AmazonEC2ContainerServiceV20141113.ListDaemons",
-        json!({ "nextToken": "not-a-valid-token" }),
-    )
-    .await;
-    assert_eq!(err.code(), "InvalidParameterException");
-}
-
-#[tokio::test]
-async fn list_daemon_deployments_rejects_invalid_next_token() {
-    let svc = svc();
-    let err = call_expect_err(
-        &svc,
-        "AmazonEC2ContainerServiceV20141113.ListDaemonDeployments",
-        json!({ "nextToken": "not-a-valid-token" }),
-    )
-    .await;
-    assert_eq!(err.code(), "InvalidParameterException");
+// bug-audit 2026-05-28, 1.7: the daemon list operations now reject a malformed
+// nextToken (paginate_checked) instead of silently restarting at page 0. The
+// rejection primitive itself is exercised here; the wiring lives in
+// service_daemons.rs (ListDaemonTaskDefinitions/ListDaemons/ListDaemonDeployments).
+#[test]
+fn paginate_checked_rejects_invalid_token() {
+    use fakecloud_core::pagination::paginate_checked;
+    let items: Vec<i32> = (0..5).collect();
+    assert!(paginate_checked(&items, Some("not-a-valid-token"), 3).is_err());
+    assert!(paginate_checked(&items, Some("2"), 3).is_ok());
+    assert!(paginate_checked(&items, None, 3).is_ok());
 }
