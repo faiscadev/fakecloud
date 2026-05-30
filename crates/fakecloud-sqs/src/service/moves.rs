@@ -352,3 +352,12 @@ impl SqsService {
         ))
     }
 }
+
+/// A persisted move task blocks a new StartMessageMoveTask for its source queue
+/// only if it is RUNNING AND driven by the current process. A RUNNING task with
+/// a different `driver_pid` was orphaned by a restart (its driver task is never
+/// re-spawned on load) and must not block new moves forever
+/// (bug-audit 2026-05-28, 4.6).
+fn task_blocks_new_move(task: &MessageMoveTask, source_arn: &str, pid: u32) -> bool {
+    task.source_arn == source_arn && task.status == "RUNNING" && task.driver_pid == pid
+}
