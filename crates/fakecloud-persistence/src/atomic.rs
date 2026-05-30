@@ -5,8 +5,18 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 fn tmp_path(path: &Path) -> PathBuf {
+    // Unique temp name per write. A fixed `<path>.tmp` let two concurrent
+    // writers to the same path (e.g. the KMS snapshot_lock-guarded save and the
+    // lock-free auto-provision snapshot hook firing from another worker)
+    // truncate+write the SAME temp file and interleave their bytes, producing a
+    // corrupt blob that fails to parse on restart -> KMS keys + all ciphertext
+    // permanently lost (bug-audit 2026-05-28, 4.1). A process id + monotonic
+    // counter make every in-flight temp distinct; the rename stays atomic.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut os = path.as_os_str().to_owned();
-    os.push(".tmp");
+    os.push(format!(".{}.{}.tmp", std::process::id(), seq));
     PathBuf::from(os)
 }
 
