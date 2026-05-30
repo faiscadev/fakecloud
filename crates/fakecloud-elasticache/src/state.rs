@@ -570,6 +570,13 @@ pub struct ElastiCacheState {
     pub serverless_cache_snapshots: BTreeMap<String, ServerlessCacheSnapshot>,
     pub tags: BTreeMap<String, Vec<(String, String)>>,
     in_progress_cache_cluster_ids: HashSet<String>,
+    /// Cache cluster ids whose DeleteCacheCluster arrived while the cluster was
+    /// still being created (its container started during the lock-drop window of
+    /// CreateCacheCluster). The create's finish step consults this so it reaps
+    /// the container and does NOT resurrect the deleted cluster
+    /// (bug-audit 2026-05-28, 4.3).
+    #[serde(default)]
+    delete_requested_cache_clusters: HashSet<String>,
     in_progress_replication_group_ids: HashSet<String>,
     in_progress_serverless_cache_names: HashSet<String>,
     #[serde(default)]
@@ -612,6 +619,7 @@ impl ElastiCacheState {
             serverless_cache_snapshots: BTreeMap::new(),
             tags,
             in_progress_cache_cluster_ids: HashSet::new(),
+            delete_requested_cache_clusters: HashSet::new(),
             in_progress_replication_group_ids: HashSet::new(),
             in_progress_serverless_cache_names: HashSet::new(),
             security_groups: BTreeMap::new(),
@@ -673,6 +681,32 @@ impl ElastiCacheState {
 
     pub fn cancel_cache_cluster_creation(&mut self, cache_cluster_id: &str) {
         self.in_progress_cache_cluster_ids.remove(cache_cluster_id);
+    }
+
+    /// True if `id` is currently being created (in the lock-drop window of
+    /// CreateCacheCluster, before it is inserted into `cache_clusters`).
+    pub fn cache_cluster_creation_in_progress(&self, cache_cluster_id: &str) -> bool {
+        self.in_progress_cache_cluster_ids
+            .contains(cache_cluster_id)
+    }
+
+    /// Record that a DeleteCacheCluster arrived for `id` while it was still
+    /// being created. The create's finish step calls
+    /// [`take_cache_cluster_delete_request`] to detect this and reap the
+    /// container instead of resurrecting the deleted cluster
+    /// (bug-audit 2026-05-28, 4.3).
+    pub fn request_cache_cluster_delete_during_creation(&mut self, cache_cluster_id: &str) {
+        self.delete_requested_cache_clusters
+            .insert(cache_cluster_id.to_string());
+    }
+
+    /// Consume a pending delete request for `id` (set while it was creating).
+    /// Returns true if one was present, in which case the caller must drop the
+    /// in-progress marker and reap any started container without inserting the
+    /// cluster.
+    pub fn take_cache_cluster_delete_request(&mut self, cache_cluster_id: &str) -> bool {
+        self.delete_requested_cache_clusters
+            .remove(cache_cluster_id)
     }
 
     pub fn begin_replication_group_creation(&mut self, replication_group_id: &str) -> bool {

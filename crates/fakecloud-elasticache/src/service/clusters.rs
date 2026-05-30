@@ -249,6 +249,27 @@ impl ElastiCacheService {
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            // If a DeleteCacheCluster arrived while we were starting the
+            // container (the lock-drop window above), do NOT resurrect the
+            // cluster. Drop the in-progress marker and reap the container we
+            // started (bug-audit 2026-05-28, 4.3). We still return the
+            // CreateCacheCluster response — the cluster existed momentarily and
+            // a follow-up Describe correctly shows it gone.
+            if state.take_cache_cluster_delete_request(&cache_cluster_id) {
+                state.cancel_cache_cluster_creation(&cache_cluster_id);
+                drop(accounts);
+                if let Some(ref runtime) = self.runtime {
+                    runtime.stop_container(&cache_cluster_id).await;
+                }
+                return Ok(AwsResponse::xml(
+                    StatusCode::OK,
+                    query_response_xml(
+                        "CreateCacheCluster",
+                        ELASTICACHE_NS,
+                        &format!("<CacheCluster>{xml}</CacheCluster>"),
+                    ),
+                ));
+            }
             let cluster_arn = cluster.arn.clone();
             state.finish_cache_cluster_creation(cluster.clone());
             // Initialise the tag bucket for this resource ARN, then merge any
@@ -340,33 +361,50 @@ impl ElastiCacheService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let cache_cluster_id = required_query_param(request, "CacheClusterId")?;
 
-        let cluster = {
+        // A delete that arrives while the cluster is still being created (in the
+        // lock-drop window of CreateCacheCluster, before the cluster is inserted)
+        // must not 404 and must not be silently undone by the create's finish
+        // step. Record the delete request so finish reaps the container instead
+        // of resurrecting the cluster (bug-audit 2026-05-28, 4.3).
+        let removed = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
-            let cluster = state
-                .cache_clusters
-                .remove(&cache_cluster_id)
-                .ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "CacheClusterNotFound",
-                        format!("CacheCluster {cache_cluster_id} not found."),
-                    )
-                })?;
-            if let Some(ref group_id) = cluster.replication_group_id {
-                remove_cluster_from_replication_group(state, group_id, &cluster.cache_cluster_id);
+            if let Some(cluster) = state.cache_clusters.remove(&cache_cluster_id) {
+                if let Some(ref group_id) = cluster.replication_group_id {
+                    remove_cluster_from_replication_group(
+                        state,
+                        group_id,
+                        &cluster.cache_cluster_id,
+                    );
+                }
+                state.tags.remove(&cluster.arn);
+                Some(cluster)
+            } else if state.cache_cluster_creation_in_progress(&cache_cluster_id) {
+                state.request_cache_cluster_delete_during_creation(&cache_cluster_id);
+                None
+            } else {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "CacheClusterNotFound",
+                    format!("CacheCluster {cache_cluster_id} not found."),
+                ));
             }
-            state.tags.remove(&cluster.arn);
-            cluster
         };
 
         if let Some(ref runtime) = self.runtime {
             runtime.stop_container(&cache_cluster_id).await;
         }
 
-        let mut deleted_cluster = cluster;
-        deleted_cluster.cache_cluster_status = "deleting".to_string();
-        let xml = cache_cluster_xml(&deleted_cluster, true);
+        let xml = match removed {
+            Some(mut deleted_cluster) => {
+                deleted_cluster.cache_cluster_status = "deleting".to_string();
+                cache_cluster_xml(&deleted_cluster, true)
+            }
+            None => format!(
+                "<CacheClusterId>{cache_cluster_id}</CacheClusterId>\
+                 <CacheClusterStatus>deleting</CacheClusterStatus>"
+            ),
+        };
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
