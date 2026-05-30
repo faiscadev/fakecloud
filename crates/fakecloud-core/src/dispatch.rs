@@ -334,6 +334,24 @@ pub async fn dispatch(
                     detected.protocol,
                 );
             }
+            Err(fakecloud_aws::sigv4::SigV4Error::PresignedUrlExpired { .. }) => {
+                return build_error_response(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "Request has expired",
+                    &request_id,
+                    detected.protocol,
+                );
+            }
+            Err(fakecloud_aws::sigv4::SigV4Error::InvalidPresignExpires(_)) => {
+                return build_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "AuthorizationQueryParametersError",
+                    "X-Amz-Expires must be a number between 1 and 604800 seconds",
+                    &request_id,
+                    detected.protocol,
+                );
+            }
         }
     }
 
