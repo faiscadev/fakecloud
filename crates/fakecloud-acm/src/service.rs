@@ -1058,14 +1058,30 @@ impl AcmService {
                 return Err(validation_error("Invalid SortOrder"));
             }
         }
-        let key_types: Vec<String> = body
-            .get("FilterStatement")
-            .and_then(|f| f.get("Filter"))
-            .and_then(|f| f.get("KeyTypes"))
+        // Filter values live under FilterStatement.Filter.<Key>; AWS ANDs the
+        // leaf filters and, within each leaf, keeps certs that match ANY listed
+        // value. Only KeyTypes was applied before (bug-audit 2026-05-28, 1.5).
+        let filter_values = |key: &str| -> Vec<String> {
+            body.get("FilterStatement")
+                .and_then(|f| f.get("Filter"))
+                .and_then(|f| f.get(key))
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|s| s.as_str().map(|s| s.to_ascii_uppercase()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let key_types = filter_values("KeyTypes");
+
+        // CertificateStatuses is a top-level filter on the certificate status.
+        let statuses: Vec<String> = body
+            .get("CertificateStatuses")
             .and_then(Value::as_array)
             .map(|v| {
                 v.iter()
-                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .filter_map(|s| s.as_str().map(|s| s.to_ascii_uppercase()))
                     .collect()
             })
             .unwrap_or_default();
@@ -1077,10 +1093,46 @@ impl AcmService {
             .map(|a| a.certificates.values().cloned().collect())
             .unwrap_or_default();
         drop(state);
-        all.sort_by(|a, b| a.arn.cmp(&b.arn));
+
         if !key_types.is_empty() {
-            all.retain(|c| key_types.contains(&c.key_algorithm));
+            all.retain(|c| key_types.contains(&c.key_algorithm.to_ascii_uppercase()));
         }
+        if !statuses.is_empty() {
+            all.retain(|c| statuses.contains(&c.status.to_ascii_uppercase()));
+        }
+
+        // Apply SortBy/SortOrder (validated above but previously never applied,
+        // 1.5). Default order is descending; the default key is CREATED_AT.
+        let sort_by = body
+            .get("SortBy")
+            .and_then(Value::as_str)
+            .unwrap_or("CREATED_AT")
+            .to_string();
+        let descending = body
+            .get("SortOrder")
+            .and_then(Value::as_str)
+            .map(|o| !o.eq_ignore_ascii_case("ASCENDING"))
+            .unwrap_or(true);
+        all.sort_by(|a, b| {
+            let ord = match sort_by.as_str() {
+                "NOT_AFTER" => a.not_after.cmp(&b.not_after),
+                "NOT_BEFORE" => a.not_before.cmp(&b.not_before),
+                "ISSUED_AT" => a.issued_at.cmp(&b.issued_at),
+                "STATUS" => a.status.cmp(&b.status),
+                "KEY_ALGORITHM" => a.key_algorithm.cmp(&b.key_algorithm),
+                "TYPE" => a.cert_type.cmp(&b.cert_type),
+                "CERTIFICATE_ARN" => a.arn.cmp(&b.arn),
+                // CREATED_AT and any other validated-but-unmodeled key.
+                _ => a.created_at.cmp(&b.created_at),
+            };
+            // Stable tiebreak by ARN keeps paging deterministic.
+            let ord = ord.then_with(|| a.arn.cmp(&b.arn));
+            if descending {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
         let start = next_token
             .and_then(|t| t.parse::<usize>().ok())
             .unwrap_or(0);
@@ -2249,5 +2301,105 @@ mod tests {
                     .ends_with("-----END RSA PRIVATE KEY-----")
         );
         assert!(key_pem.len() > 200);
+    }
+
+    // bug-audit 2026-05-28, 1.5: SearchCertificates must honor the
+    // CertificateStatuses filter and apply SortBy/SortOrder (previously only
+    // KeyTypes was applied and the order was hardcoded).
+    #[tokio::test]
+    async fn search_certificates_filters_by_status_and_sorts() {
+        let svc = AcmService::default();
+        let mut arn: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for d in ["a.example.com", "b.example.com", "c.example.com"] {
+            let resp = svc
+                .handle(make_req("RequestCertificate", json!({ "DomainName": d })))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            arn.insert(d, body["CertificateArn"].as_str().unwrap().to_string());
+        }
+
+        // Stamp deterministic statuses + creation times: a oldest, c newest.
+        {
+            let mut state = svc.state.write();
+            let certs = &mut state.accounts.get_mut("123456789012").unwrap().certificates;
+            let now = chrono::Utc::now();
+            for c in certs.values_mut() {
+                match c.domain_name.as_str() {
+                    "a.example.com" => {
+                        c.status = "ISSUED".to_string();
+                        c.created_at = now - chrono::Duration::hours(2);
+                    }
+                    "b.example.com" => {
+                        c.status = "PENDING_VALIDATION".to_string();
+                        c.created_at = now - chrono::Duration::hours(1);
+                    }
+                    _ => {
+                        c.status = "ISSUED".to_string();
+                        c.created_at = now;
+                    }
+                }
+            }
+        }
+
+        let domains = |body: &Value| -> Vec<String> {
+            body["Results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["CertificateArn"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // CertificateStatuses filter keeps only ISSUED (a + c).
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({ "CertificateStatuses": ["ISSUED"] }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let mut issued = domains(&body);
+        issued.sort();
+        let mut want = vec![arn["a.example.com"].clone(), arn["c.example.com"].clone()];
+        want.sort();
+        assert_eq!(issued, want);
+
+        // SortBy CREATED_AT ASCENDING -> oldest first.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({ "SortBy": "CREATED_AT", "SortOrder": "ASCENDING" }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            domains(&body),
+            vec![
+                arn["a.example.com"].clone(),
+                arn["b.example.com"].clone(),
+                arn["c.example.com"].clone(),
+            ]
+        );
+
+        // DESCENDING -> newest first (reverse).
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({ "SortBy": "CREATED_AT", "SortOrder": "DESCENDING" }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            domains(&body),
+            vec![
+                arn["c.example.com"].clone(),
+                arn["b.example.com"].clone(),
+                arn["a.example.com"].clone(),
+            ]
+        );
     }
 }

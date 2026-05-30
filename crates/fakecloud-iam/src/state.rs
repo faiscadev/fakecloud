@@ -491,7 +491,10 @@ impl IamState {
         // existing GetCallerIdentity path uses).
         for keys in self.access_keys.values() {
             for key in keys {
-                if key.access_key_id == access_key_id {
+                // Deactivated (Inactive) keys must not authenticate; AWS
+                // returns InvalidClientTokenId. Skipping makes the lookup miss
+                // (bug-audit 2026-05-28, 5.1).
+                if key.access_key_id == access_key_id && key.status == "Active" {
                     if let Some(user) = self.users.get(&key.user_name) {
                         return Some(SecretLookup {
                             secret_access_key: key.secret_access_key.clone(),
@@ -540,7 +543,10 @@ impl IamState {
     pub fn credential_secret_readonly(&self, access_key_id: &str) -> Option<SecretLookup> {
         for keys in self.access_keys.values() {
             for key in keys {
-                if key.access_key_id == access_key_id {
+                // Deactivated (Inactive) keys must not authenticate; AWS
+                // returns InvalidClientTokenId. Skipping makes the lookup miss
+                // (bug-audit 2026-05-28, 5.1).
+                if key.access_key_id == access_key_id && key.status == "Active" {
                     if let Some(user) = self.users.get(&key.user_name) {
                         return Some(SecretLookup {
                             secret_access_key: key.secret_access_key.clone(),
@@ -746,5 +752,16 @@ mod tests {
     fn credential_secret_returns_none_for_unknown_akid() {
         let mut state = IamState::new("123456789012");
         assert!(state.credential_secret("FKIAUNKNOWN").is_none());
+    }
+
+    // bug-audit 2026-05-28, 5.1: a deactivated (Inactive) access key must not
+    // authenticate, so the credential lookup must miss.
+    #[test]
+    fn credential_secret_skips_inactive_key() {
+        let mut state = IamState::new("123456789012");
+        let mut key = iam_key("alice", "FKIAALICE", "secret123");
+        key.status = "Inactive".to_string();
+        state.access_keys.insert("alice".to_string(), vec![key]);
+        assert!(state.credential_secret("FKIAALICE").is_none());
     }
 }
