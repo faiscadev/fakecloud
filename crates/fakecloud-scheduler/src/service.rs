@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -388,7 +388,8 @@ impl SchedulerService {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        let (page, token) = paginate(&schedules, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&schedules, next_token.as_deref(), max_results)
+            .map_err(|_| validation("Invalid NextToken"))?;
         let summaries: Vec<Value> = page.iter().map(|s| schedule_summary_json(s)).collect();
 
         let mut out = json!({ "Schedules": summaries });
@@ -515,7 +516,8 @@ impl SchedulerService {
             .collect();
         groups.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let (page, token) = paginate(&groups, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&groups, next_token.as_deref(), max_results)
+            .map_err(|_| validation("Invalid NextToken"))?;
         let summaries: Vec<Value> = page
             .iter()
             .map(|g| schedule_group_summary_json(g))
@@ -1519,6 +1521,38 @@ mod tests {
         let body = create_body("bad");
         let err = svc
             .handle(make_request(Method::POST, "/schedules/has%20space", &body))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    // bug-audit 2026-05-28, 1.7: a malformed NextToken must be rejected with
+    // ValidationException, not silently treated as the first page.
+    #[tokio::test]
+    async fn list_schedules_rejects_invalid_next_token() {
+        let svc = SchedulerService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/schedules?NextToken=not-a-valid-token",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[tokio::test]
+    async fn list_schedule_groups_rejects_invalid_next_token() {
+        let svc = SchedulerService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/schedule-groups?NextToken=not-a-valid-token",
+                "",
+            ))
             .await
             .err()
             .unwrap();
