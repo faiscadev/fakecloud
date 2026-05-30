@@ -352,3 +352,57 @@ impl SqsService {
         ))
     }
 }
+
+/// A persisted move task blocks a new StartMessageMoveTask for its source queue
+/// only if it is RUNNING AND driven by the current process. A RUNNING task with
+/// a different `driver_pid` was orphaned by a restart (its driver task is never
+/// re-spawned on load) and must not block new moves forever
+/// (bug-audit 2026-05-28, 4.6).
+fn task_blocks_new_move(task: &MessageMoveTask, source_arn: &str, pid: u32) -> bool {
+    task.source_arn == source_arn && task.status == "RUNNING" && task.driver_pid == pid
+}
+
+#[cfg(test)]
+mod move_zombie_tests {
+    use super::task_blocks_new_move;
+    use crate::state::MessageMoveTask;
+
+    const ARN: &str = "arn:aws:sqs:us-east-1:000000000000:dlq";
+
+    fn running_task(pid: u32) -> MessageMoveTask {
+        MessageMoveTask {
+            task_handle: "h".to_string(),
+            source_arn: ARN.to_string(),
+            destination_arn: None,
+            max_number_of_messages_per_second: None,
+            approximate_number_of_messages_moved: 0,
+            approximate_number_of_messages_to_move: 0,
+            status: "RUNNING".to_string(),
+            started_at: 0,
+            failure_reason: None,
+            driver_pid: pid,
+        }
+    }
+
+    #[test]
+    fn stale_pid_running_task_does_not_block() {
+        assert!(!task_blocks_new_move(
+            &running_task(0),
+            ARN,
+            std::process::id()
+        ));
+    }
+
+    #[test]
+    fn current_pid_running_task_blocks() {
+        let pid = std::process::id();
+        assert!(task_blocks_new_move(&running_task(pid), ARN, pid));
+    }
+
+    #[test]
+    fn completed_task_does_not_block() {
+        let mut t = running_task(std::process::id());
+        t.status = "COMPLETED".to_string();
+        assert!(!task_blocks_new_move(&t, ARN, std::process::id()));
+    }
+}
