@@ -3314,13 +3314,21 @@ async fn elasticache_modify_cache_parameter_group_applies_config_set() {
 // not leave an orphan or resurrect the cluster — a same-id re-create must work.
 #[tokio::test]
 async fn delete_during_create_does_not_orphan() {
-    let server = TestServer::start().await;
-    let client = ec_client(&server).await;
-    if skip_without_docker() {
+    if !require_docker_or_skip("elasticache_delete_during_create_does_not_orphan") {
         return;
     }
 
-    create_redis_cluster(&client, "race-redis").await;
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("race-redis")
+        .cache_node_type("cache.t3.micro")
+        .preferred_availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
 
     // Delete immediately, while the background container start may still be in
     // flight.
@@ -3346,5 +3354,12 @@ async fn delete_during_create_does_not_orphan() {
     );
 
     // A same-id re-create must succeed.
-    create_redis_cluster(&client, "race-redis").await;
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("race-redis")
+        .cache_node_type("cache.t3.micro")
+        .preferred_availability_zone("us-east-1a")
+        .send()
+        .await
+        .expect("re-create with same id must succeed after delete-during-create");
 }
