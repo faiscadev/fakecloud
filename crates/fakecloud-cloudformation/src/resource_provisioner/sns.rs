@@ -44,6 +44,7 @@ impl ResourceProvisioner {
             is_fifo: topic_name.ends_with(".fifo"),
             created_at: Utc::now(),
             subscriptions_deleted: 0,
+            fifo_sequence: 0,
         };
 
         state.topics.insert(topic_arn.clone(), topic);
