@@ -2445,7 +2445,10 @@ pub(crate) fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
-    let end = xml.find(&close)?;
+    // Search for the closing tag AFTER the opening one so a malformed body
+    // (closing tag before opening) can't make end < start and panic the
+    // slice (bug-audit 2026-05-28, 2.2).
+    let end = xml[start..].find(&close)? + start;
     Some(xml[start..end].to_string())
 }
 
@@ -2712,3 +2715,33 @@ pub(crate) fn check_object_lock_for_overwrite(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod extract_xml_value_tests {
+    use super::extract_xml_value;
+
+    #[test]
+    fn returns_inner_value() {
+        assert_eq!(
+            extract_xml_value("<Root><Key>value</Key></Root>", "Key"),
+            Some("value".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_tag_is_none() {
+        assert_eq!(extract_xml_value("<Root></Root>", "Key"), None);
+    }
+
+    // bug-audit 2026-05-28, 2.2: a closing tag before the opening one used to
+    // slice with end < start and panic; must return None instead.
+    #[test]
+    fn close_before_open_does_not_panic() {
+        assert_eq!(extract_xml_value("</Key>oops<Key>value", "Key"), None);
+    }
+
+    #[test]
+    fn open_without_close_is_none() {
+        assert_eq!(extract_xml_value("<Key>value", "Key"), None);
+    }
+}
