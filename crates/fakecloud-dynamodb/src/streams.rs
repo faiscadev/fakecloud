@@ -148,4 +148,27 @@ mod tests {
             "stream record must use the configured region, not a hardcoded value"
         );
     }
+
+    // bug-audit 2026-05-28, 4.5: un-consumed stream change records must survive a
+    // serialize/deserialize (snapshot restart) cycle; they used to be
+    // #[serde(skip)] and silently vanished.
+    #[test]
+    fn stream_records_persist_across_serde() {
+        let table = make_stream_table();
+        table.stream_records.write().push(StreamRecord {
+            event_id: "e1".to_string(),
+            event_name: "INSERT".to_string(),
+            sequence_number: "100".to_string(),
+            keys: std::collections::BTreeMap::new(),
+            old_image: None,
+            new_image: None,
+            stream_view_type: "NEW_AND_OLD_IMAGES".to_string(),
+            event_source_region: "eu-west-1".to_string(),
+        });
+        let json = serde_json::to_string(&table).unwrap();
+        let restored: DynamoTable = serde_json::from_str(&json).unwrap();
+        let recs = restored.stream_records.read();
+        assert_eq!(recs.len(), 1, "pending stream record must survive restart");
+        assert_eq!(recs[0].event_id, "e1");
+    }
 }
