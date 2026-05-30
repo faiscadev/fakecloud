@@ -169,6 +169,14 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        // SourceAccessConfigurations (VPC/auth config for Kafka/MQ/MSK sources):
+        // persist what the caller sent so Get/List/Update echo it back rather
+        // than always returning [] (bug-audit 2026-05-28, 1.17).
+        let source_access_configurations: Vec<Value> = body
+            .get("SourceAccessConfigurations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let mapping = EventSourceMapping {
             uuid: mapping_uuid.clone(),
@@ -197,6 +205,7 @@ impl LambdaService {
             tumbling_window_in_seconds,
             topics,
             queues,
+            source_access_configurations,
         };
 
         let response = self.event_source_mapping_json(&mapping);
@@ -295,7 +304,7 @@ impl LambdaService {
             "TumblingWindowInSeconds": mapping.tumbling_window_in_seconds.unwrap_or(0),
             "Topics": mapping.topics,
             "Queues": mapping.queues,
-            "SourceAccessConfigurations": [],
+            "SourceAccessConfigurations": mapping.source_access_configurations,
             "LastProcessingResult": "No records processed",
             "StateTransitionReason": "User action",
         });
