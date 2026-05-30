@@ -163,6 +163,7 @@ impl SqsService {
                 messages_to_move: total,
                 started_timestamp: Utc::now().timestamp_millis(),
                 failure_reason: None,
+                driver_pid: std::process::id(),
                 cancel_flag: Arc::new(AtomicBool::new(false)),
             });
             return Ok(sqs_response(
@@ -187,6 +188,7 @@ impl SqsService {
             messages_to_move: total,
             started_timestamp: Utc::now().timestamp_millis(),
             failure_reason: None,
+            driver_pid: std::process::id(),
             cancel_flag: cancel_flag.clone(),
         });
         drop(accounts);
@@ -359,13 +361,17 @@ impl SqsService {
 /// re-spawned on load) and must not block new moves forever
 /// (bug-audit 2026-05-28, 4.6).
 fn task_blocks_new_move(task: &MessageMoveTask, source_arn: &str, pid: u32) -> bool {
-    task.source_arn == source_arn && task.status == "RUNNING" && task.driver_pid == pid
+    task.source_arn == source_arn
+        && task.status == MessageMoveTaskStatus::Running
+        && task.driver_pid == pid
 }
 
 #[cfg(test)]
 mod move_zombie_tests {
     use super::task_blocks_new_move;
-    use crate::state::MessageMoveTask;
+    use crate::state::{MessageMoveTask, MessageMoveTaskStatus};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     const ARN: &str = "arn:aws:sqs:us-east-1:000000000000:dlq";
 
@@ -374,13 +380,14 @@ mod move_zombie_tests {
             task_handle: "h".to_string(),
             source_arn: ARN.to_string(),
             destination_arn: None,
-            max_number_of_messages_per_second: None,
-            approximate_number_of_messages_moved: 0,
-            approximate_number_of_messages_to_move: 0,
-            status: "RUNNING".to_string(),
-            started_at: 0,
+            max_messages_per_second: None,
+            status: MessageMoveTaskStatus::Running,
+            messages_moved: 0,
+            messages_to_move: 0,
+            started_timestamp: 0,
             failure_reason: None,
             driver_pid: pid,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -402,7 +409,7 @@ mod move_zombie_tests {
     #[test]
     fn completed_task_does_not_block() {
         let mut t = running_task(std::process::id());
-        t.status = "COMPLETED".to_string();
+        t.status = MessageMoveTaskStatus::Completed;
         assert!(!task_blocks_new_move(&t, ARN, std::process::id()));
     }
 }
