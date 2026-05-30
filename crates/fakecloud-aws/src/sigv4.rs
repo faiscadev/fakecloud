@@ -91,11 +91,40 @@ pub enum SigV4Error {
     /// `X-Amz-Date` / credential-scope date could not be parsed.
     #[error("invalid x-amz-date: {0}")]
     InvalidDate(&'static str),
+    /// Presigned URL is past its `X-Amz-Expires` lifetime. Maps to AWS
+    /// `AccessDenied` ("Request has expired").
+    #[error("presigned URL signed at {signed} has expired (X-Amz-Expires={expires_secs}s) relative to {server}")]
+    PresignedUrlExpired {
+        signed: DateTime<Utc>,
+        server: DateTime<Utc>,
+        expires_secs: i64,
+    },
+    /// Presigned `X-Amz-Expires` was absent or outside the 1..=604800 range.
+    #[error("invalid X-Amz-Expires value {0} (must be 1..=604800 seconds)")]
+    InvalidPresignExpires(i64),
 }
 
 /// Maximum allowed drift between the request's `X-Amz-Date` and the server's
 /// wall clock. Matches the 15-minute window AWS uses.
 pub const CLOCK_SKEW_SECONDS: i64 = 15 * 60;
+
+/// Maximum `X-Amz-Expires` AWS accepts for a presigned URL: 7 days.
+pub const MAX_PRESIGN_EXPIRES_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Extract the `X-Amz-Expires` value (seconds) from a presigned request's
+/// query string. Returns `DateParseError` when absent or not an integer, so a
+/// presigned request that omits it is rejected rather than treated as
+/// never-expiring (bug-audit 2026-05-28, 5.2).
+fn presigned_expires_secs(query: &str) -> Result<i64, SigV4Error> {
+    query
+        .split('&')
+        .find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k == "X-Amz-Expires").then(|| v.to_string())
+        })
+        .and_then(|v| v.parse::<i64>().ok())
+        .ok_or(SigV4Error::Malformed("missing or invalid X-Amz-Expires"))
+}
 
 /// Legacy routing-only parse. Extracts access key, region, and service from
 /// either an `Authorization: AWS4-HMAC-SHA256 …` header or a presigned URL's
@@ -268,14 +297,37 @@ pub fn verify(
     secret_access_key: &str,
     now: DateTime<Utc>,
 ) -> Result<(), SigV4Error> {
-    // 1. Clock-skew check.
+    // 1. Time-validity check. Header-signed requests must be within the fixed
+    // clock-skew window; presigned URLs instead live for their own
+    // `X-Amz-Expires` lifetime measured from the signing time (bug-audit
+    // 2026-05-28, 5.2: X-Amz-Expires was never enforced, so a 1-second URL
+    // lived the full 15-minute skew window and a legitimate 7-day URL died
+    // after 15 minutes).
     let signed_at = parse_amz_date(&parsed.amz_date)?;
-    let drift = (now - signed_at).num_seconds().abs();
-    if drift > CLOCK_SKEW_SECONDS {
-        return Err(SigV4Error::RequestTimeTooSkewed {
-            signed: signed_at,
-            server: now,
-        });
+    if parsed.is_presigned {
+        let expires = presigned_expires_secs(req.query)?;
+        if !(1..=MAX_PRESIGN_EXPIRES_SECONDS).contains(&expires) {
+            return Err(SigV4Error::InvalidPresignExpires(expires));
+        }
+        // The URL is valid from signing time until signing time + expires.
+        // A small negative drift (clock skew before signing) is tolerated via
+        // the same window AWS allows; anything past the lifetime is rejected.
+        let age = (now - signed_at).num_seconds();
+        if age < -CLOCK_SKEW_SECONDS || age > expires {
+            return Err(SigV4Error::PresignedUrlExpired {
+                signed: signed_at,
+                server: now,
+                expires_secs: expires,
+            });
+        }
+    } else {
+        let drift = (now - signed_at).num_seconds().abs();
+        if drift > CLOCK_SKEW_SECONDS {
+            return Err(SigV4Error::RequestTimeTooSkewed {
+                signed: signed_at,
+                server: now,
+            });
+        }
     }
 
     // 2. Canonical request.
