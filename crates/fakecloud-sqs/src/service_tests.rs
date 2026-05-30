@@ -2254,6 +2254,7 @@ fn start_message_move_task_blocks_concurrent_running() {
             messages_to_move: 0,
             started_timestamp: 0,
             failure_reason: None,
+            driver_pid: std::process::id(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
         });
     }
@@ -2280,6 +2281,7 @@ fn cancel_message_move_task_cancels_running() {
             messages_to_move: 10,
             started_timestamp: 0,
             failure_reason: None,
+            driver_pid: std::process::id(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
         });
     }
@@ -2315,6 +2317,7 @@ fn list_message_move_tasks_caps_at_max_and_excludes_running_handle() {
                 messages_to_move: 0,
                 started_timestamp: i,
                 failure_reason: None,
+                driver_pid: std::process::id(),
                 cancel_flag: Arc::new(AtomicBool::new(false)),
             });
         }

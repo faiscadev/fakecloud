@@ -109,6 +109,13 @@ pub struct MessageMoveTask {
     pub messages_to_move: u64,
     pub started_timestamp: i64,
     pub failure_reason: Option<String>,
+    /// Process id of the worker driving this task. A Running task whose pid is
+    /// not the current process was orphaned by a restart (the background mover
+    /// is never re-spawned on load), so it is treated as stale rather than
+    /// blocking new move tasks for the queue forever (bug-audit 2026-05-28,
+    /// 4.6). Defaults to 0 for tasks persisted before this field existed.
+    #[serde(default)]
+    pub driver_pid: u32,
     /// Set to `true` by `CancelMessageMoveTask` to request that the
     /// background mover stop after its current iteration. Not persisted
     /// — restored snapshots resume with a fresh flag in its default
