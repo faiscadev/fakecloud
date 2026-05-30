@@ -9,6 +9,28 @@ fn empty_stream_records() -> Arc<RwLock<Vec<StreamRecord>>> {
     Arc::new(RwLock::new(Vec::new()))
 }
 
+/// Serde for `Arc<RwLock<Vec<StreamRecord>>>`: persist the inner change records
+/// so a stream consumer's un-read records survive a snapshot restart
+/// (bug-audit 2026-05-28, 4.5). The field was `#[serde(skip)]`, so table data
+/// was preserved across restart but pending stream records silently vanished.
+mod stream_records_serde {
+    use super::{Arc, RwLock, StreamRecord};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        v: &Arc<RwLock<Vec<StreamRecord>>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        v.read().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Arc<RwLock<Vec<StreamRecord>>>, D::Error> {
+        Ok(Arc::new(RwLock::new(Vec::<StreamRecord>::deserialize(d)?)))
+    }
+}
+
 /// A single DynamoDB attribute value (tagged union matching the AWS wire format).
 /// AWS sends attribute values as `{"S": "hello"}`, `{"N": "42"}`, etc.
 pub type AttributeValue = Value;
@@ -108,7 +130,7 @@ pub struct DynamoTable {
     pub stream_arn: Option<String>,
     /// Stream records (retained for 24 hours). Not persisted: stream
     /// records are ephemeral and would be garbage anyway across restarts.
-    #[serde(skip, default = "empty_stream_records")]
+    #[serde(with = "stream_records_serde", default = "empty_stream_records")]
     pub stream_records: Arc<RwLock<Vec<StreamRecord>>>,
     /// Server-side encryption type: AES256 (owned) or KMS
     pub sse_type: Option<String>,
