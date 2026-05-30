@@ -11,7 +11,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
@@ -181,7 +181,14 @@ impl EcsService {
         }
         summaries.sort_by(|a, b| a.task_definition_arn.cmp(&b.task_definition_arn));
 
-        let (page, token) = paginate(&summaries, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Invalid nextToken".to_string(),
+                )
+            })?;
         let json_page: Vec<Value> = page
             .iter()
             .map(daemon_task_definition_summary_json)
@@ -673,7 +680,14 @@ impl EcsService {
                     + daemon.updated_at.timestamp_subsec_micros() as f64 / 1_000_000.0,
             }));
         }
-        let (page, token) = paginate(&summaries, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Invalid nextToken".to_string(),
+                )
+            })?;
         Ok(AwsResponse::ok_json(json!({
             "daemonSummariesList": page,
             "nextToken": token,
@@ -751,7 +765,14 @@ impl EcsService {
             }
             summaries.push(daemon_deployment_summary_json(d));
         }
-        let (page, token) = paginate(&summaries, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Invalid nextToken".to_string(),
+                )
+            })?;
         Ok(AwsResponse::ok_json(json!({
             "daemonDeployments": page,
             "nextToken": token,

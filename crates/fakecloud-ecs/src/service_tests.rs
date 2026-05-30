@@ -229,3 +229,41 @@ fn matches_filter_respects_none() {
     assert!(matches_filter(Some("x"), "x"));
     assert!(!matches_filter(Some("x"), "y"));
 }
+
+// bug-audit 2026-05-28, 1.7: a malformed nextToken must be rejected with
+// InvalidParameterException rather than silently restarting from page 0.
+#[tokio::test]
+async fn list_daemon_task_definitions_rejects_invalid_next_token() {
+    let svc = svc();
+    let err = call_expect_err(
+        &svc,
+        "AmazonEC2ContainerServiceV20141113.ListDaemonTaskDefinitions",
+        json!({ "nextToken": "not-a-valid-token" }),
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterException");
+}
+
+#[tokio::test]
+async fn list_daemons_rejects_invalid_next_token() {
+    let svc = svc();
+    let err = call_expect_err(
+        &svc,
+        "AmazonEC2ContainerServiceV20141113.ListDaemons",
+        json!({ "nextToken": "not-a-valid-token" }),
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterException");
+}
+
+#[tokio::test]
+async fn list_daemon_deployments_rejects_invalid_next_token() {
+    let svc = svc();
+    let err = call_expect_err(
+        &svc,
+        "AmazonEC2ContainerServiceV20141113.ListDaemonDeployments",
+        json!({ "nextToken": "not-a-valid-token" }),
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterException");
+}
