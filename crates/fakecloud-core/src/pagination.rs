@@ -27,6 +27,44 @@ pub fn paginate<T: Clone>(
     (result, token)
 }
 
+/// Error from [`paginate_checked`]: `next_token` was present but is not a valid
+/// offset token (not produced by a prior page of the same list op). AWS rejects
+/// such tokens with `InvalidNextToken` (or a service-specific equivalent);
+/// callers map this to their wire error (bug-audit 2026-05-28, 1.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidNextToken;
+
+/// Strict variant of [`paginate`]: a `next_token` that is present but does not
+/// parse as a non-negative offset is rejected with [`InvalidNextToken`] instead
+/// of being silently treated as offset 0 (which can drive an infinite client
+/// pagination loop). `None` still means "first page".
+pub fn paginate_checked<T: Clone>(
+    items: &[T],
+    next_token: Option<&str>,
+    max_results: usize,
+) -> Result<(Vec<T>, Option<String>), InvalidNextToken> {
+    let offset: usize = match next_token {
+        None => 0,
+        Some(tok) => tok.parse().map_err(|_| InvalidNextToken)?,
+    };
+    if max_results == 0 {
+        return Ok((Vec::new(), None));
+    }
+    let page = if offset < items.len() {
+        &items[offset..]
+    } else {
+        &[][..]
+    };
+    let has_more = page.len() > max_results;
+    let result: Vec<T> = page.iter().take(max_results).cloned().collect();
+    let token = if has_more {
+        Some((offset + max_results).to_string())
+    } else {
+        None
+    };
+    Ok((result, token))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +134,41 @@ mod tests {
         let (page, token) = paginate(&items, None, 10);
         assert!(page.is_empty());
         assert_eq!(token, None);
+    }
+
+    // bug-audit 2026-05-28, 1.7: paginate_checked rejects a malformed next_token
+    // instead of silently treating it as offset 0.
+    #[test]
+    fn checked_none_is_first_page() {
+        let items: Vec<i32> = (0..5).collect();
+        let (page, token) = paginate_checked(&items, None, 3).unwrap();
+        assert_eq!(page, vec![0, 1, 2]);
+        assert_eq!(token, Some("3".to_string()));
+    }
+
+    #[test]
+    fn checked_valid_token_advances() {
+        let items: Vec<i32> = (0..5).collect();
+        let (page, token) = paginate_checked(&items, Some("3"), 3).unwrap();
+        assert_eq!(page, vec![3, 4]);
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn checked_garbage_token_is_rejected() {
+        let items: Vec<i32> = (0..5).collect();
+        assert_eq!(
+            paginate_checked(&items, Some("not_a_number"), 3),
+            Err(InvalidNextToken)
+        );
+    }
+
+    #[test]
+    fn checked_negative_token_is_rejected() {
+        let items: Vec<i32> = (0..5).collect();
+        assert_eq!(
+            paginate_checked(&items, Some("-1"), 3),
+            Err(InvalidNextToken)
+        );
     }
 }
