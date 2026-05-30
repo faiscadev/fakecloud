@@ -970,4 +970,16 @@ mod managed_rule_set_validation_tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().code(), "WAFInvalidParameterException");
     }
+
+    // bug-audit 2026-05-28, 1.7: List* operations reject a malformed NextMarker
+    // (paginate_checked -> WAFInvalidParameterException) instead of silently
+    // restarting at page 0.
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("not-a-valid-token"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
+        assert!(paginate_checked(&items, None, 3).is_ok());
+    }
 }
