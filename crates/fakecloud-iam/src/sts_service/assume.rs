@@ -208,6 +208,23 @@ impl StsService {
                     ));
                 }
             }
+        } else {
+            // AssumeRole against a role that does not exist must be denied
+            // rather than fall through to credential minting with no trust
+            // check (bug-audit 2026-05-28, 5.4). AWS returns AccessDenied for
+            // sts:AssumeRole on a role it cannot resolve.
+            let caller_arn = req
+                .principal
+                .as_ref()
+                .map(|p| p.arn.clone())
+                .unwrap_or_else(|| Arn::global("iam", &req.account_id, "root").to_string());
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                format!(
+                    "User: {caller_arn} is not authorized to perform: sts:AssumeRole on resource: {role_arn}"
+                ),
+            ));
         }
 
         let role_id = target_state
