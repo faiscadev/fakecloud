@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn concurrent_writes_never_corrupt() {
         use std::sync::Arc;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = Arc::new(dir.path().join("snap.bin"));
         let payloads: Vec<Vec<u8>> = (0..16).map(|i| vec![b'A' + i as u8; 8192]).collect();
         let handles: Vec<_> = payloads
