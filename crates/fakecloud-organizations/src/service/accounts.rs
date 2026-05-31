@@ -228,7 +228,8 @@ impl OrganizationsService {
             .filter(|s| states.is_empty() || states.iter().any(|st| st == &s.state))
             .map(create_account_status_payload)
             .collect();
-        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&filtered, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut body = json!({ "CreateAccountStatuses": page });
         if let Some(t) = token {
             body["NextToken"] = json!(t);
@@ -363,7 +364,8 @@ impl OrganizationsService {
                 .collect(),
             None => Vec::new(),
         };
-        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&filtered, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut body = json!({ "Handshakes": page });
         if let Some(t) = token {
             body["NextToken"] = json!(t);
@@ -391,7 +393,8 @@ impl OrganizationsService {
                 })
             })
             .collect();
-        let (page, token) = paginate(&entries, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&entries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut body = json!({ "DelegatedServices": page });
         if let Some(t) = token {
             body["NextToken"] = json!(t);

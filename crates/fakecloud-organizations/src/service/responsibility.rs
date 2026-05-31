@@ -272,7 +272,8 @@ impl OrganizationsService {
             .filter(|t| t.direction == direction && t.transfer_type == transfer_type)
             .map(transfer_payload)
             .collect();
-        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&filtered, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut out = json!({ "ResponsibilityTransfers": page });
         if let Some(t) = token {
             out["NextToken"] = json!(t);

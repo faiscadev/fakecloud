@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use http::StatusCode;
 use rand::Rng;
 use serde_json::{json, Value};
@@ -398,6 +398,10 @@ fn invalid_policy_filter(filter: &str) -> AwsServiceError {
     )
 }
 
+pub(super) fn invalid_input(msg: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidInputException", msg)
+}
+
 fn org_error_to_aws(err: OrgError) -> AwsServiceError {
     match err {
         OrgError::ParentNotFound(id) => AwsServiceError::aws_error(
@@ -730,3 +734,14 @@ fn organization_payload(org: &OrganizationState) -> Value {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod pagination_reject_test {
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("bad"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
+    }
+}
