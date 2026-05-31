@@ -185,9 +185,9 @@ async fn sts_assume_role_unique_credentials() {
 
     // AssumeRole requires the role to exist with a trust policy admitting the
     // caller; assuming a non-existent role is denied (matches AWS).
+    let iam = server.iam_client().await;
     for role in ["role-a", "role-b"] {
-        client
-            .create_role()
+        iam.create_role()
             .role_name(role)
             .assume_role_policy_document(
                 r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
@@ -242,7 +242,10 @@ async fn sts_assume_role_temp_credentials_resolve_via_get_caller_identity() {
 
     // The role must exist with a trust policy admitting the caller before
     // AssumeRole succeeds — assuming a non-existent role is denied (matches AWS).
-    sts.create_role()
+    server
+        .iam_client()
+        .await
+        .create_role()
         .role_name("ops")
         .assume_role_policy_document(
             r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
