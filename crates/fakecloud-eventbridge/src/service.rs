@@ -10,7 +10,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_core::pagination::paginate_checked;
+use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
@@ -372,14 +372,7 @@ impl EventBridgeService {
             })
             .collect();
 
-        let (page, next_token) = paginate_checked(&filtered, body["NextToken"].as_str(), limit)
-            .map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    "Invalid NextToken".to_string(),
-                )
-            })?;
+        let (page, next_token) = paginate(&filtered, body["NextToken"].as_str(), limit);
         let buses: Vec<Value> = page
             .iter()
             .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
