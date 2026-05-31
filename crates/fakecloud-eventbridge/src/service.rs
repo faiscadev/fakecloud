@@ -1592,3 +1592,14 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod pagination_reject_test {
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("bad"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
+    }
+}
