@@ -378,6 +378,7 @@ impl ResourceProvisioner {
             tumbling_window_in_seconds: cfg.tumbling_window_in_seconds,
             topics: cfg.topics,
             queues: cfg.queues,
+            source_access_configurations: Vec::new(),
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
