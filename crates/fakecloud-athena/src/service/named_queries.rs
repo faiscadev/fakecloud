@@ -87,7 +87,8 @@ impl AthenaService {
             .map(|q| q.named_query_id.clone())
             .collect();
         ids.sort();
-        let (page, next) = paginate(&ids, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&ids, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let mut response = json!({ "NamedQueryIds": page });
         if let Some(t) = next {
             response

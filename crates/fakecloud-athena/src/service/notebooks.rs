@@ -117,7 +117,8 @@ impl AthenaService {
             .cloned()
             .collect();
         all.sort_by(|a, b| a.notebook_id.cmp(&b.notebook_id));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let metadatas: Vec<Value> = page.iter().map(notebook_metadata_json).collect();
         let mut response = json!({ "NotebookMetadataList": metadatas });
         if let Some(t) = next {
@@ -324,7 +325,8 @@ impl AthenaService {
             .cloned()
             .collect();
         all.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let summaries: Vec<Value> = page.iter().map(session_summary_json).collect();
         let mut response = json!({ "Sessions": summaries });
         if let Some(t) = next {
@@ -532,7 +534,8 @@ impl AthenaService {
             .cloned()
             .collect();
         all.sort_by(|a, b| a.calculation_execution_id.cmp(&b.calculation_execution_id));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let summaries: Vec<Value> = page.iter().map(calculation_summary_json).collect();
         let mut response = json!({ "Calculations": summaries });
         if let Some(t) = next {

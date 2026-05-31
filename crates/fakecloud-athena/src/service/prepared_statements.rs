@@ -83,7 +83,8 @@ impl AthenaService {
             .map(|(_, p)| p.clone())
             .collect();
         ps.sort_by(|a, b| a.statement_name.cmp(&b.statement_name));
-        let (page, next) = paginate(&ps, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&ps, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let summaries: Vec<Value> = page
             .iter()
             .map(|p| {

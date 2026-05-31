@@ -87,7 +87,8 @@ impl AthenaService {
         let account = account_mut(&mut state, &req.account_id);
         let mut all: Vec<DataCatalog> = account.data_catalogs.values().cloned().collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let summaries: Vec<Value> = page
             .iter()
             .map(|c| {

@@ -66,7 +66,8 @@ impl AthenaService {
         let account = account_mut(&mut state, &req.account_id);
         let mut all: Vec<WorkGroup> = account.work_groups.values().cloned().collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let summaries: Vec<Value> = page.iter().map(workgroup_summary_json).collect();
         let mut response = json!({ "WorkGroups": summaries });
         if let Some(t) = next {
