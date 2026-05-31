@@ -587,6 +587,7 @@ mod tests {
                 tumbling_window_in_seconds: None,
                 topics: Vec::new(),
                 queues: Vec::new(),
+                source_access_configurations: Vec::new(),
             };
             l.event_source_mappings
                 .insert(mapping.uuid.clone(), mapping);
