@@ -7,7 +7,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use fakecloud_core::pagination::paginate_checked;
+use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
@@ -257,14 +257,7 @@ impl EventBridgeService {
             })
             .collect();
 
-        let (archives, next_token) = paginate_checked(&all, body["NextToken"].as_str(), limit)
-            .map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    "Invalid NextToken".to_string(),
-                )
-            })?;
+        let (archives, next_token) = paginate(&all, body["NextToken"].as_str(), limit);
         let mut resp = json!({ "Archives": archives });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -683,14 +676,7 @@ impl EventBridgeService {
             })
             .collect();
 
-        let (replays, next_token) = paginate_checked(&all, body["NextToken"].as_str(), limit)
-            .map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    "Invalid NextToken".to_string(),
-                )
-            })?;
+        let (replays, next_token) = paginate(&all, body["NextToken"].as_str(), limit);
         let mut resp = json!({ "Replays": replays });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
