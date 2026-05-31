@@ -216,7 +216,8 @@ impl StepFunctionsService {
             })
             .collect();
 
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
 
         let mut resp = json!({ "executions": page });
         if let Some(t) = token {
@@ -272,7 +273,8 @@ impl StepFunctionsService {
             events.reverse();
         }
 
-        let (page, token) = paginate(&events, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&events, next_token, max_results).map_err(|_| invalid_token())?;
 
         let mut resp = json!({ "events": page });
         if let Some(t) = token {

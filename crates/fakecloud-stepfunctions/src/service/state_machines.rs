@@ -153,7 +153,8 @@ impl StepFunctionsService {
             })
             .collect();
 
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
 
         let mut resp = json!({ "stateMachines": page });
         if let Some(t) = token {
@@ -359,7 +360,8 @@ impl StepFunctionsService {
                 })
             })
             .collect();
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
         let mut resp = json!({ "stateMachineVersions": page });
         if let Some(t) = token {
             resp["nextToken"] = json!(t);
@@ -500,7 +502,8 @@ impl StepFunctionsService {
                 })
             })
             .collect();
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
         let mut resp = json!({ "stateMachineAliases": page });
         if let Some(t) = token {
             resp["nextToken"] = json!(t);
