@@ -246,43 +246,51 @@ impl ElastiCacheService {
         };
 
         let xml = cache_cluster_xml(&cluster, true);
-        {
+        // All write-guard work is confined to this block so the (non-Send) lock
+        // guard is fully released before any `.await` below — otherwise the
+        // returned `handle` future is not `Send`.
+        let deleted_during_create = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             // If a DeleteCacheCluster arrived while we were starting the
             // container (the lock-drop window above), do NOT resurrect the
-            // cluster. Drop the in-progress marker and reap the container we
-            // started (bug-audit 2026-05-28, 4.3). We still return the
-            // CreateCacheCluster response — the cluster existed momentarily and
-            // a follow-up Describe correctly shows it gone.
+            // cluster. Drop the in-progress marker; the container is reaped
+            // after the lock is released (bug-audit 2026-05-28, 4.3). We still
+            // return the CreateCacheCluster response — the cluster existed
+            // momentarily and a follow-up Describe correctly shows it gone.
             if state.take_cache_cluster_delete_request(&cache_cluster_id) {
                 state.cancel_cache_cluster_creation(&cache_cluster_id);
-                drop(accounts);
-                if let Some(ref runtime) = self.runtime {
-                    runtime.stop_container(&cache_cluster_id).await;
+                true
+            } else {
+                let cluster_arn = cluster.arn.clone();
+                state.finish_cache_cluster_creation(cluster.clone());
+                // Initialise the tag bucket for this resource ARN, then merge
+                // any `Tags.Tag.N` entries supplied at create time. Mirrors the
+                // pattern used by CreateReplicationGroup / CreateUser etc.
+                state.tags.entry(cluster_arn.clone()).or_default();
+                if !tags.is_empty() {
+                    merge_tags(state.tags.entry(cluster_arn).or_default(), &tags);
                 }
-                return Ok(AwsResponse::xml(
-                    StatusCode::OK,
-                    query_response_xml(
-                        "CreateCacheCluster",
-                        ELASTICACHE_NS,
-                        &format!("<CacheCluster>{xml}</CacheCluster>"),
-                        &request.request_id,
-                    ),
-                ));
+                if let Some(ref group_id) = cluster.replication_group_id {
+                    add_cluster_to_replication_group(state, group_id, &cluster.cache_cluster_id);
+                }
+                false
             }
-            let cluster_arn = cluster.arn.clone();
-            state.finish_cache_cluster_creation(cluster.clone());
-            // Initialise the tag bucket for this resource ARN, then merge any
-            // `Tags.Tag.N` entries supplied at create time. Mirrors the
-            // pattern used by CreateReplicationGroup / CreateUser etc.
-            state.tags.entry(cluster_arn.clone()).or_default();
-            if !tags.is_empty() {
-                merge_tags(state.tags.entry(cluster_arn).or_default(), &tags);
+        };
+
+        if deleted_during_create {
+            if let Some(ref runtime) = self.runtime {
+                runtime.stop_container(&cache_cluster_id).await;
             }
-            if let Some(ref group_id) = cluster.replication_group_id {
-                add_cluster_to_replication_group(state, group_id, &cluster.cache_cluster_id);
-            }
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                query_response_xml(
+                    "CreateCacheCluster",
+                    ELASTICACHE_NS,
+                    &format!("<CacheCluster>{xml}</CacheCluster>"),
+                    &request.request_id,
+                ),
+            ));
         }
         if let Some(ref param_group) = cache_parameter_group_name {
             self.apply_parameters_for_group(&request.account_id, param_group)
