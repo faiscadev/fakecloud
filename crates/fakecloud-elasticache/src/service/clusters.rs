@@ -267,6 +267,7 @@ impl ElastiCacheService {
                         "CreateCacheCluster",
                         ELASTICACHE_NS,
                         &format!("<CacheCluster>{xml}</CacheCluster>"),
+                        &request.request_id,
                     ),
                 ));
             }
