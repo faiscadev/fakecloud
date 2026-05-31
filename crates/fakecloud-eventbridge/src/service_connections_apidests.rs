@@ -6,7 +6,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
@@ -216,7 +216,14 @@ impl EventBridgeService {
             })
             .collect();
 
-        let (conns, next_token) = paginate(&all, body["NextToken"].as_str(), limit);
+        let (conns, next_token) = paginate_checked(&all, body["NextToken"].as_str(), limit)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Invalid NextToken".to_string(),
+                )
+            })?;
         let mut resp = json!({ "Connections": conns });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -462,7 +469,14 @@ impl EventBridgeService {
             })
             .collect();
 
-        let (dests, next_token) = paginate(&all, body["NextToken"].as_str(), limit);
+        let (dests, next_token) = paginate_checked(&all, body["NextToken"].as_str(), limit)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Invalid NextToken".to_string(),
+                )
+            })?;
         let mut resp = json!({ "ApiDestinations": dests });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
