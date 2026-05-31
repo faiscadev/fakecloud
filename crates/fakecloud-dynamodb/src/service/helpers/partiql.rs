@@ -19,9 +19,11 @@ fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
         Some(v) => v,
         None => return Ordering::Equal,
     };
+    // (is_negative_x, is_negative_y): a negative value is always less than a
+    // non-negative one. Only decide by sign when the signs actually differ.
     match (xn, yn) {
-        (false, true) => return Ordering::Less,
-        (true, false) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
         _ => {}
     }
     let mag = compare_magnitude(&xd, &yd);
@@ -1126,5 +1128,22 @@ mod number_compare_tests {
         assert_eq!(compare_number_strings("10", "9"), Ordering::Greater);
         assert_eq!(compare_number_strings("1e3", "1000"), Ordering::Equal);
         assert_eq!(compare_number_strings("1e-2", "0.01"), Ordering::Equal);
+    }
+
+    // A negative value must always sort below a non-negative one regardless of
+    // magnitude; the cross-sign arms must not be swapped.
+    #[test]
+    fn cross_sign_ordering_is_directional() {
+        assert_eq!(compare_number_strings("-1", "1"), Ordering::Less);
+        assert_eq!(compare_number_strings("1", "-1"), Ordering::Greater);
+        // A small negative still loses to a large positive, and vice versa.
+        assert_eq!(compare_number_strings("-100", "1"), Ordering::Less);
+        assert_eq!(compare_number_strings("100", "-1"), Ordering::Greater);
+        // Negative zero is normalized, so it ties zero rather than sorting low.
+        assert_eq!(compare_number_strings("-0", "5"), Ordering::Less);
+        assert_eq!(compare_number_strings("-0", "0"), Ordering::Equal);
+        // Both negative: larger magnitude is the smaller value.
+        assert_eq!(compare_number_strings("-100", "-1"), Ordering::Less);
+        assert_eq!(compare_number_strings("-1", "-100"), Ordering::Greater);
     }
 }
