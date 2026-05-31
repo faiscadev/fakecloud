@@ -179,6 +179,18 @@ async fn sts_assume_role_temp_credentials_verify_successfully() {
     let server = start_verified().await;
 
     let boot = sdk_config_with(&server, "test", "test", None).await;
+    // AssumeRole requires the role to exist with a trust policy admitting the
+    // caller; assuming a non-existent role is denied (matches AWS).
+    let iam_boot = aws_sdk_iam::Client::new(&boot);
+    iam_boot
+        .create_role()
+        .role_name("temp-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
     let sts_boot = StsClient::new(&boot);
     let resp = sts_boot
         .assume_role()

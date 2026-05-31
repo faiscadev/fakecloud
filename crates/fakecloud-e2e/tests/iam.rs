@@ -183,6 +183,20 @@ async fn sts_assume_role_unique_credentials() {
     let server = TestServer::start().await;
     let client = server.sts_client().await;
 
+    // AssumeRole requires the role to exist with a trust policy admitting the
+    // caller; assuming a non-existent role is denied (matches AWS).
+    for role in ["role-a", "role-b"] {
+        client
+            .create_role()
+            .role_name(role)
+            .assume_role_policy_document(
+                r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+    }
+
     let resp1 = client
         .assume_role()
         .role_arn("arn:aws:iam::123456789012:role/role-a")
@@ -225,6 +239,17 @@ async fn sts_assume_role_temp_credentials_resolve_via_get_caller_identity() {
 
     let server = TestServer::start().await;
     let sts = server.sts_client().await;
+
+    // The role must exist with a trust policy admitting the caller before
+    // AssumeRole succeeds — assuming a non-existent role is denied (matches AWS).
+    sts.create_role()
+        .role_name("ops")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
 
     let resp = sts
         .assume_role()

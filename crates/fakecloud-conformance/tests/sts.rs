@@ -18,6 +18,19 @@ async fn sts_get_caller_identity() {
 async fn sts_assume_role() {
     let server = TestServer::start().await;
     let client = server.sts_client().await;
+    // The role must exist with a trust policy admitting the caller before
+    // AssumeRole succeeds — assuming a non-existent role is denied (matches AWS).
+    server
+        .iam_client()
+        .await
+        .create_role()
+        .role_name("test-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
     let resp = client
         .assume_role()
         .role_arn("arn:aws:iam::123456789012:role/test-role")
