@@ -66,7 +66,8 @@ impl StepFunctionsService {
                 })
             })
             .collect();
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
         let mut resp = json!({ "mapRuns": page });
         if let Some(t) = token {
             resp["nextToken"] = json!(t);

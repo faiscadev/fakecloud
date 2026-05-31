@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -268,7 +268,8 @@ impl StepFunctionsService {
                 })
             })
             .collect();
-        let (page, token) = paginate(&items, next_token, max_results);
+        let (page, token) =
+            paginate_checked(&items, next_token, max_results).map_err(|_| invalid_token())?;
         let mut resp = json!({ "activities": page });
         if let Some(t) = token {
             resp["nextToken"] = json!(t);
@@ -584,6 +585,13 @@ fn validate_arn_length(field: &str, value: &str, max: usize) -> Result<(), AwsSe
         ));
     }
     Ok(())
+}
+
+/// Shared error for a malformed (unparseable) `nextToken` reaching the
+/// pagination helper — `InvalidToken` is the only pagination error code
+/// declared on every list op.
+pub(super) fn invalid_token() -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidToken", "Invalid nextToken")
 }
 
 /// `nextToken` is declared as `PageToken` (length 1..=1024). The only
@@ -1484,5 +1492,16 @@ mod tests {
         let req = make_request("StartSyncExecution", &body.to_string());
         let err = expect_err(svc.start_sync_execution(&req).await);
         assert!(err.to_string().contains("InvalidExecutionInput"));
+    }
+}
+
+#[cfg(test)]
+mod pagination_reject_test {
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("bad"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
     }
 }
