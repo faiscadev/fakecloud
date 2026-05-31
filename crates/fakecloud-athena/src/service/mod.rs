@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use fakecloud_aws::arn::Arn;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_glue::SharedGlueState;
 use fakecloud_s3::SharedS3State;
@@ -1367,5 +1367,16 @@ mod tests {
         // Exact expression must match the name, not every name.
         assert!(match_table_expression("orders", "orders"));
         assert!(!match_table_expression("orders", "sales"));
+    }
+}
+
+#[cfg(test)]
+mod pagination_reject_test {
+    #[test]
+    fn paginate_checked_rejects_invalid_token() {
+        use fakecloud_core::pagination::paginate_checked;
+        let items: Vec<i32> = (0..5).collect();
+        assert!(paginate_checked(&items, Some("bad"), 3).is_err());
+        assert!(paginate_checked(&items, Some("2"), 3).is_ok());
     }
 }

@@ -218,7 +218,8 @@ impl AthenaService {
             .collect();
         all.sort_by_key(|q| std::cmp::Reverse(q.submission_time));
         let ids: Vec<String> = all.iter().map(|q| q.query_execution_id.clone()).collect();
-        let (page, next) = paginate(&ids, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&ids, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_request("Invalid NextToken"))?;
         let mut response = json!({ "QueryExecutionIds": page });
         if let Some(t) = next {
             response
