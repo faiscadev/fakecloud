@@ -311,6 +311,26 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
         .unwrap();
     let sm_arn = created.state_machine_arn().to_string();
 
+    // Warm the shared client's connection pool with one sequential call before
+    // the concurrent burst. Firing 16 cold `start_sync_execution` calls in the
+    // same instant otherwise makes every spawned task open its own brand-new
+    // TCP connection simultaneously, and under load the SDK connector
+    // intermittently fails one of those cold dials (surfacing as a spurious
+    // "dns error" against 127.0.0.1). One warm-up call establishes a pooled
+    // connection the concurrent tasks reuse; the invariant under test —
+    // concurrent starts mint unique ARNs — is unchanged.
+    let mut arns = std::collections::HashSet::new();
+    arns.insert(
+        sfn.start_sync_execution()
+            .state_machine_arn(&sm_arn)
+            .input("{}")
+            .send()
+            .await
+            .unwrap()
+            .execution_arn()
+            .to_string(),
+    );
+
     // Fire many sync executions concurrently; every ARN must be distinct.
     let mut handles = Vec::new();
     for _ in 0..16 {
@@ -328,9 +348,12 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
         }));
     }
 
-    let mut arns = std::collections::HashSet::new();
     for h in handles {
         arns.insert(h.await.unwrap());
     }
-    assert_eq!(arns.len(), 16, "every sync execution must get a unique ARN");
+    assert_eq!(
+        arns.len(),
+        17,
+        "every sync execution (1 warm-up + 16 concurrent) must get a unique ARN"
+    );
 }
