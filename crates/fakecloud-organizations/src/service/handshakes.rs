@@ -115,7 +115,8 @@ impl OrganizationsService {
             .filter(|h| handshake_matches_filter(h, &filter))
             .map(|h| handshake_payload(&h))
             .collect();
-        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&filtered, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut body = json!({ "Handshakes": page });
         if let Some(t) = token {
             body["NextToken"] = json!(t);

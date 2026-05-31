@@ -63,7 +63,8 @@ impl OrganizationsService {
                 }))
             })
             .collect();
-        let (page, token) = paginate(&entries, next_token.as_deref(), max_results);
+        let (page, token) = paginate_checked(&entries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_input("Invalid NextToken"))?;
         let mut body = json!({ "DelegatedAdministrators": page });
         if let Some(t) = token {
             body["NextToken"] = json!(t);
