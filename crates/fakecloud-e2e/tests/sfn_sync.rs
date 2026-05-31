@@ -312,19 +312,39 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
     let sm_arn = created.state_machine_arn().to_string();
 
     // Fire many sync executions concurrently; every ARN must be distinct.
+    // A semaphore caps in-flight calls so we still exercise real parallelism
+    // (multiple simultaneous starts, which is what the unique-ARN invariant is
+    // about) without opening all 16 cold TCP connections in the exact same
+    // instant. The unbounded burst made the SDK connector intermittently fail a
+    // dial under load and surface a spurious "dns error" against 127.0.0.1.
+    // Each call also retries on transient DispatchFailure so a momentarily
+    // saturated connector can't fail the run; every start must still ultimately
+    // succeed with a distinct ARN.
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
     let mut handles = Vec::new();
     for _ in 0..16 {
         let sfn = sfn.clone();
         let sm_arn = sm_arn.clone();
+        let limit = limit.clone();
         handles.push(tokio::spawn(async move {
-            sfn.start_sync_execution()
-                .state_machine_arn(sm_arn)
-                .input("{}")
-                .send()
-                .await
-                .unwrap()
-                .execution_arn()
-                .to_string()
+            let _permit = limit.acquire().await.unwrap();
+            for attempt in 0..5 {
+                match sfn
+                    .start_sync_execution()
+                    .state_machine_arn(sm_arn.clone())
+                    .input("{}")
+                    .send()
+                    .await
+                {
+                    Ok(resp) => return resp.execution_arn().to_string(),
+                    Err(aws_sdk_sfn::error::SdkError::DispatchFailure(e)) if attempt < 4 => {
+                        eprintln!("transient dispatch failure (attempt {attempt}): {e:?}");
+                        tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+                    }
+                    Err(e) => panic!("start_sync_execution failed: {e:?}"),
+                }
+            }
+            unreachable!("retry loop returns or panics")
         }));
     }
 
