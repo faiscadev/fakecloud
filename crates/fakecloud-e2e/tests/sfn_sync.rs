@@ -312,19 +312,33 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
     let sm_arn = created.state_machine_arn().to_string();
 
     // Fire many sync executions concurrently; every ARN must be distinct.
+    // Each task retries on transient dispatch (connection) errors: 16 brand-new
+    // cold TCP connections opened in the same instant occasionally trip the
+    // SDK connector under the heavily-parallel CI nextest partition (surfacing
+    // as a spurious "dns error" against 127.0.0.1). The retry keeps the test
+    // focused on its real invariant — concurrent starts mint unique ARNs — and
+    // every call must still ultimately succeed with a distinct ARN.
     let mut handles = Vec::new();
     for _ in 0..16 {
         let sfn = sfn.clone();
         let sm_arn = sm_arn.clone();
         handles.push(tokio::spawn(async move {
-            sfn.start_sync_execution()
-                .state_machine_arn(sm_arn)
-                .input("{}")
-                .send()
-                .await
-                .unwrap()
-                .execution_arn()
-                .to_string()
+            for attempt in 0..5 {
+                match sfn
+                    .start_sync_execution()
+                    .state_machine_arn(sm_arn.clone())
+                    .input("{}")
+                    .send()
+                    .await
+                {
+                    Ok(resp) => return resp.execution_arn().to_string(),
+                    Err(e) if attempt < 4 && matches!(e, aws_sdk_sfn::error::SdkError::DispatchFailure(_)) => {
+                        tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+                    }
+                    Err(e) => panic!("start_sync_execution failed: {e:?}"),
+                }
+            }
+            unreachable!("retry loop returns or panics")
         }));
     }
 
