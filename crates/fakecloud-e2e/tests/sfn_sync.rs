@@ -311,20 +311,37 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
         .unwrap();
     let sm_arn = created.state_machine_arn().to_string();
 
-    // Fire many sync executions concurrently; every ARN must be distinct.
+    // Fire many sync executions with overlapping in-flight requests; every ARN
+    // must be distinct. We stagger each task's launch by a few ms and retry on
+    // transient dispatch failures rather than opening all 16 cold TCP
+    // connections in the exact same instant — that unbounded burst made the SDK
+    // connector intermittently fail a dial under load and surface a spurious
+    // "dns error" against 127.0.0.1 (which needs no DNS). The invariant under
+    // test is server-side: overlapping Express starts must each mint a unique
+    // execution ARN.
     let mut handles = Vec::new();
-    for _ in 0..16 {
+    for i in 0..16 {
         let sfn = sfn.clone();
         let sm_arn = sm_arn.clone();
         handles.push(tokio::spawn(async move {
-            sfn.start_sync_execution()
-                .state_machine_arn(sm_arn)
-                .input("{}")
-                .send()
-                .await
-                .unwrap()
-                .execution_arn()
-                .to_string()
+            tokio::time::sleep(Duration::from_millis(5 * i)).await;
+            for attempt in 0..8 {
+                match sfn
+                    .start_sync_execution()
+                    .state_machine_arn(sm_arn.clone())
+                    .input("{}")
+                    .send()
+                    .await
+                {
+                    Ok(resp) => return resp.execution_arn().to_string(),
+                    Err(aws_sdk_sfn::error::SdkError::DispatchFailure(e)) if attempt < 7 => {
+                        eprintln!("transient dispatch failure (attempt {attempt}): {e:?}");
+                        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
+                    }
+                    Err(e) => panic!("start_sync_execution failed: {e:?}"),
+                }
+            }
+            unreachable!("retry loop returns or panics")
         }));
     }
 
