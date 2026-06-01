@@ -104,7 +104,7 @@ impl ElastiCacheService {
             groups
         };
 
-        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records)?;
 
         let members_xml: String = page
             .iter()

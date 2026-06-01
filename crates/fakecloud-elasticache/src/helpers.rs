@@ -479,13 +479,24 @@ pub(crate) fn parse_reserved_duration_filter(
 
 /// ElastiCache wraps the core paginate helper to carry its `Option<usize>`
 /// max_records convention (default 100, hard cap 100, matching real AWS).
+///
+/// A `marker` that does not parse as a valid offset is rejected with
+/// `InvalidParameterValue` rather than being silently treated as the first
+/// page (which can drive an infinite client pagination loop). bug-audit
+/// 2026-05-28, 1.7.
 pub(crate) fn paginate<T: Clone>(
     items: &[T],
     marker: Option<&str>,
     max_records: Option<usize>,
-) -> (Vec<T>, Option<String>) {
+) -> Result<(Vec<T>, Option<String>), AwsServiceError> {
     let limit = max_records.unwrap_or(100).min(100);
-    fakecloud_core::pagination::paginate(items, marker, limit)
+    fakecloud_core::pagination::paginate_checked(items, marker, limit).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "Invalid value for parameter Marker.",
+        )
+    })
 }
 
 // Tag helpers

@@ -221,7 +221,7 @@ fn filter_engine_versions_unknown_engine() {
 #[test]
 fn paginate_returns_all_when_within_limit() {
     let items = vec![1, 2, 3];
-    let (page, marker) = paginate(&items, None, None);
+    let (page, marker) = paginate(&items, None, None).unwrap();
     assert_eq!(page, vec![1, 2, 3]);
     assert!(marker.is_none());
 }
@@ -229,17 +229,28 @@ fn paginate_returns_all_when_within_limit() {
 #[test]
 fn paginate_respects_max_records() {
     let items = vec![1, 2, 3, 4, 5];
-    let (page, marker) = paginate(&items, None, Some(2));
+    let (page, marker) = paginate(&items, None, Some(2)).unwrap();
     assert_eq!(page, vec![1, 2]);
     assert_eq!(marker, Some("2".to_string()));
 
-    let (page2, marker2) = paginate(&items, Some("2"), Some(2));
+    let (page2, marker2) = paginate(&items, Some("2"), Some(2)).unwrap();
     assert_eq!(page2, vec![3, 4]);
     assert_eq!(marker2, Some("4".to_string()));
 
-    let (page3, marker3) = paginate(&items, Some("4"), Some(2));
+    let (page3, marker3) = paginate(&items, Some("4"), Some(2)).unwrap();
     assert_eq!(page3, vec![5]);
     assert!(marker3.is_none());
+}
+
+#[test]
+fn paginate_rejects_invalid_marker() {
+    // bug-audit 2026-05-28, 1.7: a Marker that does not parse as a valid offset
+    // must surface InvalidParameterValue rather than being silently treated as
+    // the first page (which can drive an infinite client pagination loop).
+    let items = vec![1, 2, 3, 4, 5];
+    let err =
+        paginate(&items, Some("not-a-number"), Some(2)).expect_err("malformed Marker must error");
+    assert_eq!(err.code(), "InvalidParameterValue");
 }
 
 #[test]

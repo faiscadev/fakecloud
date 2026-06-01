@@ -134,7 +134,7 @@ impl ElastiCacheService {
                 snapshots
             };
 
-        let (page, next_token) = paginate(&snapshots, next_token.as_deref(), max_results);
+        let (page, next_token) = paginate(&snapshots, next_token.as_deref(), max_results)?;
         let members_xml: String = page
             .iter()
             .map(|snapshot| {
@@ -383,7 +383,7 @@ impl ElastiCacheService {
             snaps
         };
 
-        let (page, next_marker) = paginate(&snapshots, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&snapshots, marker.as_deref(), max_records)?;
 
         let members_xml: String = page
             .iter()

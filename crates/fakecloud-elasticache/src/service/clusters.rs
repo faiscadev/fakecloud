@@ -339,7 +339,7 @@ impl ElastiCacheService {
             clusters
         };
 
-        let (page, next_marker) = paginate(&clusters, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&clusters, marker.as_deref(), max_records)?;
         let members_xml: String = page
             .iter()
             .map(|cluster| {

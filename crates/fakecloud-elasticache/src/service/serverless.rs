@@ -166,7 +166,7 @@ impl ElastiCacheService {
             caches
         };
 
-        let (page, next_token) = paginate(&caches, next_token.as_deref(), max_results);
+        let (page, next_token) = paginate(&caches, next_token.as_deref(), max_results)?;
         let members_xml: String = page
             .iter()
             .map(|cache| format!("<member>{}</member>", serverless_cache_xml(cache)))
