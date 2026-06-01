@@ -622,7 +622,12 @@ impl SsmService {
             paginate_checked(&all_docs, body["NextToken"].as_str(), max_results)
                 .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "DocumentIdentifiers": result });
-        resp["NextToken"] = json!(next_token.unwrap_or_default());
+        // Omit NextToken on the last page rather than emitting an empty string:
+        // an empty token echoed back by a client would now be rejected by
+        // paginate_checked as a malformed offset (and AWS omits it too).
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
 
         Ok(AwsResponse::ok_json(resp))
     }

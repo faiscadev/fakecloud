@@ -3601,6 +3601,57 @@ fn describe_document_not_found_branch() {
 }
 
 #[test]
+fn list_documents_pagination_round_trip_and_omits_empty_token() {
+    // bug-audit 2026-05-28, 1.7 regression guard: list_documents must emit a
+    // NextToken it will accept on the next request, and must OMIT NextToken on
+    // the last page. Previously it emitted an empty-string token there, which
+    // the stricter paginate_checked would reject if a client echoed it back.
+    let svc = make_service();
+    for i in 0..3 {
+        let req = make_request(
+            "CreateDocument",
+            json!({
+                "Name": format!("doc-{i}"),
+                "Content": "{\"schemaVersion\":\"2.2\",\"mainSteps\":[]}",
+                "DocumentType": "Command"
+            }),
+        );
+        svc.create_document(&req).unwrap();
+    }
+
+    let mut next: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut params = json!({ "MaxResults": 2 });
+        if let Some(t) = &next {
+            params["NextToken"] = json!(t);
+        }
+        let req = make_request("ListDocuments", params);
+        // The token emitted by the previous page must round-trip, not error.
+        let resp = svc.list_documents(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        pages += 1;
+        assert!(pages < 50, "pagination did not terminate");
+        match body["NextToken"].as_str() {
+            Some(t) if !t.is_empty() => next = Some(t.to_string()),
+            _ => {
+                // Last page: NextToken omitted or null, never an empty string.
+                assert!(
+                    body.get("NextToken").is_none_or(|v| v.is_null()),
+                    "last page must omit NextToken, got {:?}",
+                    body.get("NextToken")
+                );
+                break;
+            }
+        }
+    }
+    assert!(
+        pages >= 2,
+        "expected multiple pages for 3 docs at MaxResults=2"
+    );
+}
+
+#[test]
 fn update_document_default_version_not_found() {
     let svc = make_service();
     let req = make_request(
