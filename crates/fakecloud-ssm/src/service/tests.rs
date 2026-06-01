@@ -88,6 +88,25 @@ fn list_commands_pagination() {
 }
 
 #[test]
+fn list_commands_rejects_invalid_next_token() {
+    // bug-audit 2026-05-28, 1.7: a NextToken that does not parse as a valid
+    // offset must surface SSM's declared `InvalidNextToken` wire code rather
+    // than being silently treated as the first page (which can drive an
+    // infinite client pagination loop).
+    let svc = make_service();
+    send_command(&svc, "AWS-RunShellScript");
+
+    let req = make_request(
+        "ListCommands",
+        json!({ "MaxResults": 1, "NextToken": "not-a-valid-offset" }),
+    );
+    match svc.list_commands(&req) {
+        Ok(_) => panic!("malformed NextToken must be rejected"),
+        Err(err) => assert_eq!(err.code(), "InvalidNextToken"),
+    }
+}
+
+#[test]
 fn send_command_response_omits_non_shape_fields() {
     let svc = make_service();
 

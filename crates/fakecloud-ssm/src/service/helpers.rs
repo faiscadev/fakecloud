@@ -115,6 +115,15 @@ pub(crate) fn aws_400(code: &str, msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, msg.into())
 }
 
+/// Reject a `NextToken` that is present but does not parse as a valid offset.
+/// SSM's paginated list/describe ops declare `InvalidNextToken` in their
+/// Smithy model, so a malformed token must surface that wire code rather than
+/// being silently treated as the first page (which can drive an infinite
+/// client pagination loop). bug-audit 2026-05-28, 1.7.
+pub(crate) fn invalid_next_token() -> AwsServiceError {
+    aws_400("InvalidNextToken", "The specified token is not valid.")
+}
+
 /// Many SSM operations declare specific `Invalid*` errors in their Smithy
 /// model but the shared `validate_*` helpers in `fakecloud-core` emit the
 /// generic `ValidationException` (which AWS itself returns at runtime but

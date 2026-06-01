@@ -4,7 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -618,7 +618,9 @@ impl SsmService {
             .map(document_identifier_json)
             .collect();
 
-        let (result, next_token) = paginate(&all_docs, body["NextToken"].as_str(), max_results);
+        let (result, next_token) =
+            paginate_checked(&all_docs, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "DocumentIdentifiers": result });
         resp["NextToken"] = json!(next_token.unwrap_or_default());
 
@@ -797,7 +799,8 @@ impl SsmService {
             })
             .collect();
 
-        let (items, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let (items, next_token) = paginate_checked(&all, body["NextToken"].as_str(), max_results)
+            .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "DocumentVersions": items });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -844,7 +847,9 @@ impl SsmService {
             })
             .collect();
 
-        let (page, next_token) = paginate(&all_responses, body["NextToken"].as_str(), max_results);
+        let (page, next_token) =
+            paginate_checked(&all_responses, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
 
         let mut resp = json!({
             "Name": name,

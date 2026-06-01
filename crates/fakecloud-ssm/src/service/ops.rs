@@ -5,7 +5,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_aws::arn::Arn;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -221,7 +221,8 @@ impl SsmService {
             })
             .collect();
 
-        let (items, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let (items, next_token) = paginate_checked(&all, body["NextToken"].as_str(), max_results)
+            .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "OpsItemSummaries": items });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);

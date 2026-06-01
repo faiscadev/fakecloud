@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -141,7 +141,8 @@ impl SsmService {
             .collect();
 
         let (baselines, next_token) =
-            paginate(&all_baselines, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_baselines, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "BaselineIdentities": baselines });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -444,7 +445,8 @@ impl SsmService {
             .collect();
 
         let (mappings, next_token) =
-            paginate(&all_mappings, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_mappings, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "Mappings": mappings });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -554,7 +556,8 @@ impl SsmService {
             .filter_map(|iid| build_instance_patch_state(state, iid))
             .collect();
 
-        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let (page, next_token) = paginate_checked(&all, body["NextToken"].as_str(), max_results)
+            .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "InstancePatchStates": page });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -585,7 +588,8 @@ impl SsmService {
             .filter_map(|iid| build_instance_patch_state(state, iid))
             .collect();
 
-        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let (page, next_token) = paginate_checked(&all, body["NextToken"].as_str(), max_results)
+            .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "InstancePatchStates": page });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -637,7 +641,9 @@ impl SsmService {
             })
             .unwrap_or_default();
 
-        let (page, next_token) = paginate(&patches, body["NextToken"].as_str(), max_results);
+        let (page, next_token) =
+            paginate_checked(&patches, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "Patches": page });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -702,7 +708,9 @@ impl SsmService {
             })
             .collect();
 
-        let (page, next_token) = paginate(&effective, body["NextToken"].as_str(), max_results);
+        let (page, next_token) =
+            paginate_checked(&effective, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "EffectivePatches": page });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -822,7 +830,8 @@ impl SsmService {
             })
             .collect();
 
-        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let (page, next_token) = paginate_checked(&all, body["NextToken"].as_str(), max_results)
+            .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "Properties": page });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
