@@ -191,6 +191,13 @@ pub struct CloudFormationDeps {
     pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub glue: fakecloud_glue::SharedGlueState,
     pub delivery: Arc<DeliveryBus>,
+    /// Lambda container runtime, when Docker/Podman is available. Used to
+    /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
+    /// in the background so its first Invoke doesn't pay the cold-pull cost
+    /// (the #1539 timeout, through the CloudFormation door). `None` when no
+    /// runtime is configured — provisioning still works, the first Invoke just
+    /// falls back to a cold pull.
+    pub lambda_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
 }
 
 pub struct CloudFormationService {
@@ -279,6 +286,7 @@ impl CloudFormationService {
             glue_state: self.deps.glue.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
+            lambda_runtime: self.deps.lambda_runtime.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),
@@ -1907,6 +1915,7 @@ mod tests {
             )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
+            lambda_runtime: None,
         };
         CloudFormationService::new(cf_state, deps)
     }
