@@ -106,7 +106,7 @@ impl ElastiCacheService {
                 ));
             }
         }
-        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records)?;
         let members: String = page
             .iter()
             .map(|g| {

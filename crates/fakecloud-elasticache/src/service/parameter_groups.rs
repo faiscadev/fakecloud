@@ -29,7 +29,7 @@ impl ElastiCacheService {
             versions.retain(|v| seen_engines.insert(v.engine.clone()));
         }
 
-        let (page, next_marker) = paginate(&versions, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&versions, marker.as_deref(), max_records)?;
 
         let members_xml: String = page.iter().map(engine_version_xml).collect();
         let marker_xml = next_marker
@@ -79,7 +79,7 @@ impl ElastiCacheService {
             }
         }
 
-        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records)?;
 
         let members_xml: String = page.iter().map(|g| cache_parameter_group_xml(g)).collect();
         let marker_xml = next_marker
@@ -106,7 +106,7 @@ impl ElastiCacheService {
         let marker = optional_query_param(request, "Marker");
 
         let params = default_parameters_for_family(&family);
-        let (page, next_marker) = paginate(&params, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&params, marker.as_deref(), max_records)?;
 
         let params_xml: String = page.iter().map(parameter_xml).collect();
         let marker_xml = next_marker
@@ -341,7 +341,7 @@ impl ElastiCacheService {
             .get(&name)
             .map(|v| v.iter().collect())
             .unwrap_or_default();
-        let (page, next_marker) = paginate(&params, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&params, marker.as_deref(), max_records)?;
         let members: String = page.iter().map(|p| cache_parameter_xml(p)).collect();
         let marker_xml = next_marker
             .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))

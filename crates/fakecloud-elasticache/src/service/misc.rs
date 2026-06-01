@@ -55,7 +55,7 @@ impl ElastiCacheService {
             }
         }
 
-        let (page, next_marker) = paginate(&nodes, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&nodes, marker.as_deref(), max_records)?;
         let members_xml: String = page
             .iter()
             .map(|node| reserved_cache_node_xml(node))
@@ -123,7 +123,7 @@ impl ElastiCacheService {
             }
         }
 
-        let (page, next_marker) = paginate(&offerings, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&offerings, marker.as_deref(), max_records)?;
         let members_xml: String = page
             .iter()
             .map(|offering| reserved_cache_nodes_offering_xml(offering))
@@ -637,7 +637,7 @@ impl ElastiCacheService {
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
         let events: Vec<&crate::state::CacheEvent> = state.events.iter().collect();
-        let (page, next_marker) = paginate(&events, marker.as_deref(), max_records);
+        let (page, next_marker) = paginate(&events, marker.as_deref(), max_records)?;
         let members: String = page
             .iter()
             .map(|e| {
