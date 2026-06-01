@@ -1235,6 +1235,36 @@ fn tag_untag_role() {
     assert!(!body.contains("<Key>env</Key>"));
 }
 
+#[test]
+fn list_role_tags_rejects_invalid_marker() {
+    // bug-audit 2026-05-28, 1.7: a Marker that does not parse as a valid offset
+    // must be rejected with "Invalid Marker." (the same ValidationError the
+    // other IAM list ops return) rather than silently falling back to the first
+    // page.
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![
+            ("RoleName", "marker-role"),
+            ("AssumeRolePolicyDocument", trust),
+        ],
+    ))
+    .unwrap();
+
+    let req = make_request(
+        "ListRoleTags",
+        vec![("RoleName", "marker-role"), ("Marker", "not-a-number")],
+    );
+    match svc.list_role_tags(&req) {
+        Ok(_) => panic!("malformed Marker must be rejected"),
+        Err(err) => {
+            assert_eq!(err.code(), "ValidationError");
+            assert!(err.message().contains("Invalid Marker"));
+        }
+    }
+}
+
 // ---- Tag Policy Tests ----
 
 #[test]
