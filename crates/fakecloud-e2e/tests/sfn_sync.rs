@@ -290,6 +290,15 @@ async fn sfn_sync_ecs_run_task_waits_for_stopped() {
 // bug-audit 2026-05-28, 4.2: StartSyncExecution must mint a unique execution
 // ARN per call. It used a millisecond timestamp, so concurrent Express starts
 // in the same millisecond produced identical ARNs and overwrote each other.
+//
+// This is driven over raw AWS-JSON 1.0 rather than the typed SDK on purpose:
+// the Step Functions SDK injects a static `sync-` host prefix for
+// StartSyncExecution (modelling the real sync-states.<region>.amazonaws.com
+// endpoint), so even with `endpoint_url` overridden to the local server it
+// resolves `sync-127.0.0.1` — a host with no DNS record — and fails to dial
+// before reaching fakecloud. fakecloud serves every action on one endpoint, so
+// a plain POST hits the real handler directly. The invariant under test is
+// purely server-side: overlapping Express starts must each mint a distinct ARN.
 #[tokio::test]
 async fn sfn_sync_concurrent_executions_get_unique_arns() {
     let server = TestServer::start().await;
@@ -311,37 +320,41 @@ async fn sfn_sync_concurrent_executions_get_unique_arns() {
         .unwrap();
     let sm_arn = created.state_machine_arn().to_string();
 
-    // Fire many sync executions with overlapping in-flight requests; every ARN
-    // must be distinct. We stagger each task's launch by a few ms and retry on
-    // transient dispatch failures rather than opening all 16 cold TCP
-    // connections in the exact same instant — that unbounded burst made the SDK
-    // connector intermittently fail a dial under load and surface a spurious
-    // "dns error" against 127.0.0.1 (which needs no DNS). The invariant under
-    // test is server-side: overlapping Express starts must each mint a unique
-    // execution ARN.
+    // Fire 16 overlapping StartSyncExecution calls through a shared, pooled
+    // HTTP client (all to numeric 127.0.0.1, so no DNS is involved); every
+    // minted ARN must be distinct.
+    let endpoint = server.endpoint().to_string();
+    let http = reqwest::Client::new();
     let mut handles = Vec::new();
-    for i in 0..16 {
-        let sfn = sfn.clone();
+    for _ in 0..16 {
+        let http = http.clone();
+        let endpoint = endpoint.clone();
         let sm_arn = sm_arn.clone();
         handles.push(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(5 * i)).await;
-            for attempt in 0..8 {
-                match sfn
-                    .start_sync_execution()
-                    .state_machine_arn(sm_arn.clone())
-                    .input("{}")
-                    .send()
-                    .await
-                {
-                    Ok(resp) => return resp.execution_arn().to_string(),
-                    Err(aws_sdk_sfn::error::SdkError::DispatchFailure(e)) if attempt < 7 => {
-                        eprintln!("transient dispatch failure (attempt {attempt}): {e:?}");
-                        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
-                    }
-                    Err(e) => panic!("start_sync_execution failed: {e:?}"),
-                }
-            }
-            unreachable!("retry loop returns or panics")
+            let resp = http
+                .post(&endpoint)
+                .header("X-Amz-Target", "AWSStepFunctions.StartSyncExecution")
+                .header("Content-Type", "application/x-amz-json-1.0")
+                .header(
+                    "Authorization",
+                    "AWS4-HMAC-SHA256 \
+                     Credential=root/20260101/us-east-1/states/aws4_request, \
+                     SignedHeaders=host, Signature=00",
+                )
+                .body(json!({ "stateMachineArn": sm_arn, "input": "{}" }).to_string())
+                .send()
+                .await
+                .expect("StartSyncExecution request");
+            assert!(
+                resp.status().is_success(),
+                "StartSyncExecution must return 2xx, got {}",
+                resp.status()
+            );
+            let body: Value = resp.json().await.expect("JSON response body");
+            body["executionArn"]
+                .as_str()
+                .expect("executionArn in StartSyncExecution response")
+                .to_string()
         }));
     }
 
