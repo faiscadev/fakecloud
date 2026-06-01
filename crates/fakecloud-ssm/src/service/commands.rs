@@ -5,7 +5,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -366,7 +366,8 @@ impl SsmService {
         }
 
         let (commands, next_token) =
-            paginate(&all_commands, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_commands, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "Commands": commands });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
@@ -493,7 +494,8 @@ impl SsmService {
             .collect();
 
         let (invocations, next_token) =
-            paginate(&all_invocations, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_invocations, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "CommandInvocations": invocations });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);

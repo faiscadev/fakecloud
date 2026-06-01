@@ -5,7 +5,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_aws::arn::Arn;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
@@ -1215,7 +1215,8 @@ impl SsmService {
             .collect();
 
         let (page_params, next_token) =
-            paginate(&all_params, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_params, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let parameters: Vec<Value> = page_params
             .iter()
             .map(|p| {
@@ -1347,7 +1348,8 @@ impl SsmService {
             .collect();
 
         let (page_params, next_token) =
-            paginate(&all_params, body["NextToken"].as_str(), max_results);
+            paginate_checked(&all_params, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let parameters: Vec<Value> = page_params
             .iter()
             .map(|p| param_to_describe_json(p, &req.region))
@@ -1434,7 +1436,9 @@ impl SsmService {
             with_decryption,
         ));
 
-        let (result, next_token) = paginate(&all_history, body["NextToken"].as_str(), max_results);
+        let (result, next_token) =
+            paginate_checked(&all_history, body["NextToken"].as_str(), max_results)
+                .map_err(|_| super::invalid_next_token())?;
         let mut resp = json!({ "Parameters": result });
         if let Some(token) = next_token {
             resp["NextToken"] = json!(token);
