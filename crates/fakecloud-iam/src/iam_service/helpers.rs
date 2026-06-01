@@ -631,7 +631,16 @@ pub(crate) fn paginated_tags_response(
     let max_items: usize = max_items_i64.unwrap_or(100) as usize;
 
     let next_token = req.query_params.get("Marker").map(|s| s.as_str());
-    let (page, next_marker) = paginate(tags, next_token, max_items);
+    // A Marker that does not parse as a valid offset is rejected with the same
+    // "Invalid Marker." ValidationError the other IAM list ops emit, rather than
+    // being silently treated as the first page (bug-audit 2026-05-28, 1.7).
+    let (page, next_marker) = paginate_checked(tags, next_token, max_items).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationError",
+            "Invalid Marker.",
+        )
+    })?;
 
     let is_truncated = next_marker.is_some();
     let members = tags_xml(&page);

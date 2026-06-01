@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 // NOTE: The shared validation helpers use ValidationException error codes, but real IAM
 // typically returns InvalidInput or ValidationError for input validation failures. This is
