@@ -125,6 +125,7 @@ impl ElastiCacheService {
             let name = serverless_cache_name.clone();
             tokio::spawn(async move {
                 let result = runtime.ensure_redis(&name, None).await;
+                let mut stop_container = false;
                 {
                     let mut accounts = state.write();
                     if let Some(s) = accounts.get_mut(&account_id) {
@@ -136,6 +137,11 @@ impl ElastiCacheService {
                                     c.reader_endpoint.port = running.host_port;
                                     c.host_port = running.host_port;
                                     c.container_id = running.container_id.clone();
+                                } else {
+                                    // Deleted during startup: the container came
+                                    // up but the cache is gone — reap it after
+                                    // the lock is released so it isn't orphaned.
+                                    stop_container = true;
                                 }
                             }
                             Err(error) => {
@@ -149,7 +155,12 @@ impl ElastiCacheService {
                                 }
                             }
                         }
+                    } else {
+                        stop_container = result.is_ok();
                     }
+                }
+                if stop_container {
+                    runtime.stop_container(&name).await;
                 }
                 save_snapshot_static(state, snapshot_store, snapshot_lock).await;
             });

@@ -264,6 +264,7 @@ impl ElastiCacheService {
             let cluster_enabled_flag = cluster_enabled;
             tokio::spawn(async move {
                 let result = runtime.ensure_redis(&id, rdb_path.as_deref()).await;
+                let mut stop_container = false;
                 {
                     let mut accounts = state.write();
                     if let Some(s) = accounts.get_mut(&account_id) {
@@ -280,6 +281,11 @@ impl ElastiCacheService {
                                             Some("127.0.0.1".to_string());
                                         g.configuration_endpoint_port = Some(running.host_port);
                                     }
+                                } else {
+                                    // Deleted during startup: the container came
+                                    // up but the group is gone — reap it after
+                                    // the lock is released so it isn't orphaned.
+                                    stop_container = true;
                                 }
                             }
                             Err(error) => {
@@ -293,7 +299,13 @@ impl ElastiCacheService {
                                 }
                             }
                         }
+                    } else {
+                        // Whole account gone; reap a started container.
+                        stop_container = result.is_ok();
                     }
+                }
+                if stop_container {
+                    runtime.stop_container(&id).await;
                 }
                 save_snapshot_static(state, snapshot_store, snapshot_lock).await;
             });
