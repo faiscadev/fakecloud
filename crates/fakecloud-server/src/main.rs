@@ -77,6 +77,11 @@ use hooks::*;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    // `fakecloud healthcheck` probes a running server and exits — used by the
+    // container HEALTHCHECK so the slim published image needs no curl/wget.
+    if let Some(cli::Command::Healthcheck) = cli.command {
+        std::process::exit(run_healthcheck(&cli.addr));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_new(&cli.log_level)
@@ -7322,6 +7327,57 @@ fn fatal_exit(args: std::fmt::Arguments<'_>) -> ! {
     let _ = std::io::stderr().flush();
     std::process::exit(1);
 }
+
+/// Probe `127.0.0.1:<port>/_fakecloud/health` over a raw TCP request (the
+/// published image ships no curl/wget) and return a process exit code: 0 when
+/// the server answers `200 OK`, 1 otherwise. The port is taken from the same
+/// `--addr`/`FAKECLOUD_ADDR` the server binds, so the container HEALTHCHECK and
+/// the server agree without extra configuration.
+fn run_healthcheck(addr: &str) -> i32 {
+    use std::io::{Read, Write};
+    let port = match addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+        Some(p) => p,
+        None => {
+            eprintln!("healthcheck: could not parse port from addr {addr:?}");
+            return 1;
+        }
+    };
+    let target = (std::net::Ipv4Addr::LOCALHOST, port);
+    let timeout = std::time::Duration::from_secs(2);
+    let socket = match std::net::TcpStream::connect(target) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("healthcheck: connect 127.0.0.1:{port} failed: {e}");
+            return 1;
+        }
+    };
+    let _ = socket.set_read_timeout(Some(timeout));
+    let _ = socket.set_write_timeout(Some(timeout));
+    let mut socket = socket;
+    let request = "GET /_fakecloud/health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if let Err(e) = socket.write_all(request.as_bytes()) {
+        eprintln!("healthcheck: write failed: {e}");
+        return 1;
+    }
+    let mut response = String::new();
+    if let Err(e) = socket.read_to_string(&mut response) {
+        eprintln!("healthcheck: read failed: {e}");
+        return 1;
+    }
+    // Status line looks like `HTTP/1.0 200 OK`. Accept any 2xx.
+    let healthy = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .is_some_and(|code| code.starts_with('2'));
+    if healthy {
+        0
+    } else {
+        let first = response.lines().next().unwrap_or("<no response>");
+        eprintln!("healthcheck: unhealthy response: {first}");
+        1
+    }
+}
 /// Route panics through `tracing::error!` so they show up in CI logs with
 /// the same formatting as regular errors. Runs the default hook afterwards
 /// so the process keeps its usual backtrace behaviour for developers
@@ -7617,6 +7673,52 @@ mod endpoint_url_tests {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    // Spawn a one-shot TCP server that replies with `status_line`, then probe
+    // it via run_healthcheck. Returns the exit code.
+    fn probe_with_status(status_line: &'static str) -> i32 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    format!("{status_line}\r\nConnection: close\r\n\r\nbody").as_bytes(),
+                );
+            }
+        });
+        let code = run_healthcheck(&format!("0.0.0.0:{port}"));
+        handle.join().unwrap();
+        code
+    }
+
+    #[test]
+    fn healthcheck_zero_on_2xx() {
+        assert_eq!(probe_with_status("HTTP/1.0 200 OK"), 0);
+    }
+
+    #[test]
+    fn healthcheck_one_on_5xx() {
+        assert_eq!(probe_with_status("HTTP/1.0 500 Internal Server Error"), 1);
+    }
+
+    #[test]
+    fn healthcheck_one_when_unreachable() {
+        // Grab a port then drop the listener so nothing is accepting on it.
+        let port = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert_eq!(run_healthcheck(&format!("0.0.0.0:{port}")), 1);
+    }
+
+    #[test]
+    fn healthcheck_one_on_unparseable_addr() {
+        assert_eq!(run_healthcheck("not-an-addr"), 1);
+    }
+
     #[test]
     fn announce_bound_port_uses_tagged_prefix() {
         let mut buf: Vec<u8> = Vec::new();

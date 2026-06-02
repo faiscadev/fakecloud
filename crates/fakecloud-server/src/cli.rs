@@ -108,6 +108,19 @@ pub(crate) struct Cli {
         env = "FAKECLOUD_IAM",
     )]
     pub iam_mode: IamModeArg,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Optional subcommands. Absent (the default) starts the server.
+#[derive(clap::Subcommand)]
+pub(crate) enum Command {
+    /// Probe a running server's `/_fakecloud/health` endpoint and exit 0 if
+    /// healthy, non-zero otherwise. Used by the container HEALTHCHECK so the
+    /// published image needs no extra tooling (curl/wget are not installed).
+    /// Targets `127.0.0.1:<port>`, where the port is taken from `--addr`.
+    Healthcheck,
 }
 
 impl Cli {
