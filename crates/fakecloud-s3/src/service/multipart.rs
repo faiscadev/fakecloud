@@ -647,6 +647,14 @@ impl S3Service {
                 }
                 return Err(no_such_upload(upload_id));
             }
+            // Re-check IfNoneMatch under the commit lock: the object may have
+            // been created concurrently after the phase-1 snapshot, so the
+            // `*` precondition must be revalidated here rather than trusting the
+            // stale `already_has_object` (Cubic, 4.7). Leave the upload intact
+            // for retry/abort.
+            if if_none_match.as_deref() == Some("*") && b.objects.contains_key(key) {
+                return Err(precondition_failed("If-None-Match"));
+            }
             b.objects.insert(key.to_string(), obj);
             b.multipart_uploads.remove(upload_id);
             if versioning_enabled {
