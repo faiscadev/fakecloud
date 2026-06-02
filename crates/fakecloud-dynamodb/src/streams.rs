@@ -17,23 +17,43 @@ use uuid::Uuid;
 ///
 /// The counter is *seeded once* from the current wall-clock nanoseconds rather
 /// than from 1. Stream records persist across restart (4.5), so a counter that
-/// reset to 1 on restart would re-mint sequence numbers that collide with
-/// already-persisted records. Seeding from the clock — which only moves forward
-/// between restarts — keeps every post-restart number above any minted before,
-/// while the atomic increment preserves uniqueness + monotonicity within a run.
-/// Zero-padded to a fixed width so the decimal strings sort lexicographically.
-/// bug-audit 2026-05-28, 4.4.
-fn next_stream_sequence() -> String {
-    static STREAM_SEQUENCE: OnceLock<AtomicU64> = OnceLock::new();
-    let counter = STREAM_SEQUENCE.get_or_init(|| {
+/// reset to 1 would re-mint sequence numbers that collide with already-persisted
+/// records. The clock seed handles the common forward-moving case; because a
+/// clock can also step *backwards* (NTP), `observe_stream_sequence` additionally
+/// raises the floor above every persisted record loaded on restart, so the next
+/// minted number is guaranteed greater. The atomic increment preserves
+/// uniqueness + monotonicity within a run; zero-padding to a fixed width keeps
+/// the decimal strings lexicographically ordered. bug-audit 2026-05-28, 4.4.
+static STREAM_SEQUENCE: OnceLock<AtomicU64> = OnceLock::new();
+
+fn stream_sequence_counter() -> &'static AtomicU64 {
+    STREAM_SEQUENCE.get_or_init(|| {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1)
             .max(1);
         AtomicU64::new(seed)
-    });
-    format!("{:021}", counter.fetch_add(1, Ordering::Relaxed))
+    })
+}
+
+fn next_stream_sequence() -> String {
+    format!(
+        "{:021}",
+        stream_sequence_counter().fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Raise the sequence-number floor so the next minted number exceeds an
+/// already-existing one. Called for every persisted stream record loaded on
+/// restart: the wall-clock seed alone is not restart-safe (the clock can step
+/// backwards via NTP and reissue a persisted number), so we also bump the
+/// counter above the maximum sequence number we have ever seen. bug-audit
+/// 2026-05-28, 4.4.
+pub fn observe_stream_sequence(sequence_number: &str) {
+    if let Ok(seq) = sequence_number.parse::<u64>() {
+        stream_sequence_counter().fetch_max(seq.saturating_add(1), Ordering::Relaxed);
+    }
 }
 
 /// Generate a stream record for a table mutation.
@@ -144,6 +164,22 @@ mod tests {
         assert!(
             n > 1_000_000_000_000_000_000,
             "sequence not clock-seeded: {seq}"
+        );
+    }
+
+    #[test]
+    fn observe_stream_sequence_raises_floor_above_persisted() {
+        // bug-audit 4.4 (Cubic): after observing a persisted sequence number,
+        // the next minted number must exceed it — even if it is far above the
+        // wall-clock seed (simulating a clock that went backwards on restart).
+        // A high-but-u64-valid value (real sequence numbers are u64), well
+        // above the ~1.7e18 nanosecond seed, zero-padded to the 21-char width.
+        let high = format!("{:021}", 9_000_000_000_000_000_000u64);
+        observe_stream_sequence(&high);
+        let next: u64 = next_stream_sequence().parse().unwrap();
+        assert!(
+            next >= 9_000_000_000_000_000_000,
+            "floor not raised: {next}"
         );
     }
 
