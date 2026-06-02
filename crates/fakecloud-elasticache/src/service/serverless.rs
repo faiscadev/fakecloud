@@ -67,33 +67,17 @@ impl ElastiCacheService {
             (arn, "127.0.0.1".to_string())
         };
 
-        let running = if let Some(runtime) = self.runtime.as_ref() {
-            match runtime.ensure_redis(&serverless_cache_name, None).await {
-                Ok(r) => r,
-                Err(e) => {
-                    self.state
-                        .write()
-                        .get_or_create(&request.account_id)
-                        .cancel_serverless_cache_creation(&serverless_cache_name);
-                    return Err(runtime_error_to_service_error(e));
-                }
-            }
-        } else {
-            // No container runtime: metadata-only serverless cache. Matches
-            // the CreateCacheCluster / CreateReplicationGroup degradation.
-            crate::runtime::RunningCacheContainer {
-                container_id: String::new(),
-                host_port: 0,
-            }
-        };
-
+        // The backing container is started off the request path (below); the
+        // cache begins with no endpoint port and is filled in once ready, so the
+        // response doesn't block on the cold image pull + readiness (which made
+        // the AWS CLI hit its 60s read timeout). bug-audit 2026-05-28, 3.2.
         let endpoint = ServerlessCacheEndpoint {
             address: endpoint_address.clone(),
-            port: running.host_port,
+            port: 0,
         };
         let reader_endpoint = ServerlessCacheEndpoint {
             address: endpoint_address,
-            port: running.host_port,
+            port: 0,
         };
         let cache = ServerlessCache {
             serverless_cache_name: serverless_cache_name.clone(),
@@ -101,7 +85,11 @@ impl ElastiCacheService {
             engine,
             major_engine_version,
             full_engine_version,
-            status: "available".to_string(),
+            status: if self.runtime.is_some() {
+                "creating".to_string()
+            } else {
+                "available".to_string()
+            },
             endpoint,
             reader_endpoint,
             arn: arn.clone(),
@@ -113,8 +101,8 @@ impl ElastiCacheService {
             user_group_id,
             snapshot_retention_limit,
             daily_snapshot_time,
-            container_id: running.container_id,
-            host_port: running.host_port,
+            container_id: String::new(),
+            host_port: 0,
         };
 
         let xml = serverless_cache_xml(&cache);
@@ -125,6 +113,46 @@ impl ElastiCacheService {
             if !tags.is_empty() {
                 merge_tags(state.tags.entry(arn).or_default(), &tags);
             }
+        }
+
+        // Start the backing container off the request path and flip the cache
+        // to "available" (filling in the endpoint ports) once it is ready.
+        if let Some(runtime) = self.runtime.clone() {
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let account_id = request.account_id.clone();
+            let name = serverless_cache_name.clone();
+            tokio::spawn(async move {
+                let result = runtime.ensure_redis(&name, None).await;
+                {
+                    let mut accounts = state.write();
+                    if let Some(s) = accounts.get_mut(&account_id) {
+                        match &result {
+                            Ok(running) => {
+                                if let Some(c) = s.serverless_caches.get_mut(&name) {
+                                    c.status = "available".to_string();
+                                    c.endpoint.port = running.host_port;
+                                    c.reader_endpoint.port = running.host_port;
+                                    c.host_port = running.host_port;
+                                    c.container_id = running.container_id.clone();
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    %error,
+                                    serverless_cache_name = %name,
+                                    "failed to start elasticache serverless cache container",
+                                );
+                                if let Some(c) = s.serverless_caches.get_mut(&name) {
+                                    c.status = "create-failed".to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+            });
         }
 
         Ok(AwsResponse::xml(

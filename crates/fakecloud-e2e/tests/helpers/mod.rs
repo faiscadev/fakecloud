@@ -105,3 +105,82 @@ pub async fn wait_for_db_available(
         db_instance_identifier, max_secs
     );
 }
+
+/// Poll DescribeCacheClusters until the cluster reaches "available" and return
+/// it. CreateCacheCluster now returns "creating" and starts the backing
+/// container in the background (bug-audit 3.2), so tests that read the endpoint
+/// or assert availability must wait first.
+pub async fn wait_for_cache_cluster_available(
+    client: &aws_sdk_elasticache::Client,
+    cache_cluster_id: &str,
+    max_secs: u64,
+) -> aws_sdk_elasticache::types::CacheCluster {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = client
+            .describe_cache_clusters()
+            .cache_cluster_id(cache_cluster_id)
+            .show_cache_node_info(true)
+            .send()
+            .await
+        {
+            for c in resp.cache_clusters() {
+                if c.cache_cluster_status() == Some("available") {
+                    return c.clone();
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("cache cluster {cache_cluster_id} did not reach 'available' within {max_secs}s");
+}
+
+/// Poll DescribeReplicationGroups until the group reaches "available".
+pub async fn wait_for_replication_group_available(
+    client: &aws_sdk_elasticache::Client,
+    replication_group_id: &str,
+    max_secs: u64,
+) -> aws_sdk_elasticache::types::ReplicationGroup {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = client
+            .describe_replication_groups()
+            .replication_group_id(replication_group_id)
+            .send()
+            .await
+        {
+            for g in resp.replication_groups() {
+                if g.status() == Some("available") {
+                    return g.clone();
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("replication group {replication_group_id} did not reach 'available' within {max_secs}s");
+}
+
+/// Poll DescribeServerlessCaches until the cache reaches "available".
+pub async fn wait_for_serverless_cache_available(
+    client: &aws_sdk_elasticache::Client,
+    serverless_cache_name: &str,
+    max_secs: u64,
+) -> aws_sdk_elasticache::types::ServerlessCache {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = client
+            .describe_serverless_caches()
+            .serverless_cache_name(serverless_cache_name)
+            .send()
+            .await
+        {
+            for c in resp.serverless_caches() {
+                if c.status() == Some("available") {
+                    return c.clone();
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("serverless cache {serverless_cache_name} did not reach 'available' within {max_secs}s");
+}

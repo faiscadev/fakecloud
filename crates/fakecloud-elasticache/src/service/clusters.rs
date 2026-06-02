@@ -166,46 +166,25 @@ impl ElastiCacheService {
             (preferred_availability_zone, arn, rdb_path)
         };
 
-        // When a container runtime is available, start the backing redis /
-        // memcached container so clients connecting to the returned endpoint
-        // talk to a real engine. When no runtime is available, fall back to
-        // metadata-only creation (no container, host_port=0): the cluster is
-        // visible to control-plane APIs and survives describe/modify/delete
-        // round-trips, just without a live data-plane. This mirrors how
-        // LocalStack-class fakes degrade and matches the Smithy contract —
-        // no declared error covers "Docker missing" so refusing the call
-        // would emit an undeclared wire code.
-        let running = if let Some(runtime) = self.runtime.as_ref() {
-            let runtime_result = if engine == ENGINE_MEMCACHED {
-                runtime.ensure_memcached(&cache_cluster_id).await
-            } else {
-                runtime
-                    .ensure_redis(&cache_cluster_id, rdb_path.as_deref())
-                    .await
-            };
-            match runtime_result {
-                Ok(r) => r,
-                Err(e) => {
-                    self.state
-                        .write()
-                        .get_or_create(&request.account_id)
-                        .cancel_cache_cluster_creation(&cache_cluster_id);
-                    return Err(runtime_error_to_service_error(e));
-                }
-            }
-        } else {
-            crate::runtime::RunningCacheContainer {
-                container_id: String::new(),
-                host_port: 0,
-            }
-        };
-
+        // Insert the cluster in the "creating" state and return immediately.
+        // Starting the backing container can cold-pull a multi-hundred-MB image
+        // and wait ~20s for readiness; blocking the CreateCacheCluster response
+        // on that made the AWS CLI hit its 60s read timeout. Instead we register
+        // the cluster as "creating" (endpoint port 0) and start the container in
+        // a background task that flips it to "available" once ready — matching
+        // real AWS and how RDS/ECS/Lambda already behave. When no runtime is
+        // available we degrade to a metadata-only cluster that is immediately
+        // "available" (no data plane), as before. bug-audit 2026-05-28, 3.2.
         let cluster = CacheCluster {
             cache_cluster_id: cache_cluster_id.clone(),
             cache_node_type,
-            engine,
+            engine: engine.clone(),
             engine_version,
-            cache_cluster_status: "available".to_string(),
+            cache_cluster_status: if self.runtime.is_some() {
+                "creating".to_string()
+            } else {
+                "available".to_string()
+            },
             num_cache_nodes,
             preferred_availability_zone,
             cache_subnet_group_name,
@@ -213,10 +192,10 @@ impl ElastiCacheService {
             arn,
             created_at: chrono::Utc::now().to_rfc3339(),
             endpoint_address: "127.0.0.1".to_string(),
-            endpoint_port: running.host_port,
-            container_id: running.container_id,
-            host_port: running.host_port,
-            replication_group_id,
+            endpoint_port: 0,
+            container_id: String::new(),
+            host_port: 0,
+            replication_group_id: replication_group_id.clone(),
             cache_parameter_group_name: cache_parameter_group_name.clone(),
             security_group_ids,
             log_delivery_configurations,
@@ -246,51 +225,92 @@ impl ElastiCacheService {
         };
 
         let xml = cache_cluster_xml(&cluster, true);
-        // All write-guard work is confined to this block so the (non-Send) lock
-        // guard is fully released before any `.await` below — otherwise the
-        // returned `handle` future is not `Send`.
-        let deleted_during_create = {
+        {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
-            // If a DeleteCacheCluster arrived while we were starting the
-            // container (the lock-drop window above), do NOT resurrect the
-            // cluster. Drop the in-progress marker; the container is reaped
-            // after the lock is released (bug-audit 2026-05-28, 4.3). We still
-            // return the CreateCacheCluster response — the cluster existed
-            // momentarily and a follow-up Describe correctly shows it gone.
+            // A DeleteCacheCluster may have raced in during param validation;
+            // honor it and do not resurrect the cluster (bug-audit 4.3).
             if state.take_cache_cluster_delete_request(&cache_cluster_id) {
                 state.cancel_cache_cluster_creation(&cache_cluster_id);
-                true
-            } else {
-                let cluster_arn = cluster.arn.clone();
-                state.finish_cache_cluster_creation(cluster.clone());
-                // Initialise the tag bucket for this resource ARN, then merge
-                // any `Tags.Tag.N` entries supplied at create time. Mirrors the
-                // pattern used by CreateReplicationGroup / CreateUser etc.
-                state.tags.entry(cluster_arn.clone()).or_default();
-                if !tags.is_empty() {
-                    merge_tags(state.tags.entry(cluster_arn).or_default(), &tags);
-                }
-                if let Some(ref group_id) = cluster.replication_group_id {
-                    add_cluster_to_replication_group(state, group_id, &cluster.cache_cluster_id);
-                }
-                false
+                return Ok(AwsResponse::xml(
+                    StatusCode::OK,
+                    query_response_xml(
+                        "CreateCacheCluster",
+                        ELASTICACHE_NS,
+                        &format!("<CacheCluster>{xml}</CacheCluster>"),
+                        &request.request_id,
+                    ),
+                ));
             }
-        };
+            let cluster_arn = cluster.arn.clone();
+            state.finish_cache_cluster_creation(cluster);
+            // Initialise the tag bucket for this resource ARN, then merge any
+            // `Tags.Tag.N` entries supplied at create time.
+            state.tags.entry(cluster_arn.clone()).or_default();
+            if !tags.is_empty() {
+                merge_tags(state.tags.entry(cluster_arn).or_default(), &tags);
+            }
+            if let Some(ref group_id) = replication_group_id {
+                add_cluster_to_replication_group(state, group_id, &cache_cluster_id);
+            }
+        }
 
-        if deleted_during_create {
-            if let Some(ref runtime) = self.runtime {
-                runtime.stop_container(&cache_cluster_id).await;
-            }
-            return Ok(AwsResponse::xml(
-                StatusCode::OK,
-                query_response_xml(
-                    "CreateCacheCluster",
-                    ELASTICACHE_NS,
-                    &format!("<CacheCluster>{xml}</CacheCluster>"),
-                    &request.request_id,
-                ),
-            ));
+        // Start the backing container off the request path. The task flips the
+        // cluster to "available" (and fills in the endpoint port) when ready, or
+        // tears it down if a DeleteCacheCluster arrived while it was starting.
+        if let Some(runtime) = self.runtime.clone() {
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let account_id = request.account_id.clone();
+            let id = cache_cluster_id.clone();
+            let is_memcached = engine == ENGINE_MEMCACHED;
+            tokio::spawn(async move {
+                let result = if is_memcached {
+                    runtime.ensure_memcached(&id).await
+                } else {
+                    runtime.ensure_redis(&id, rdb_path.as_deref()).await
+                };
+                let mut stop_container = false;
+                {
+                    let mut accounts = state.write();
+                    if let Some(s) = accounts.get_mut(&account_id) {
+                        let deleted = s.take_cache_cluster_delete_request(&id);
+                        match &result {
+                            Ok(running) if !deleted => {
+                                if let Some(c) = s.cache_clusters.get_mut(&id) {
+                                    c.cache_cluster_status = "available".to_string();
+                                    c.endpoint_address = "127.0.0.1".to_string();
+                                    c.endpoint_port = running.host_port;
+                                    c.host_port = running.host_port;
+                                    c.container_id = running.container_id.clone();
+                                }
+                            }
+                            Ok(_) => {
+                                // Deleted while creating: drop it, reap the
+                                // container after the lock is released.
+                                s.cancel_cache_cluster_creation(&id);
+                                s.cache_clusters.remove(&id);
+                                stop_container = true;
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    %error,
+                                    cache_cluster_id = %id,
+                                    "failed to start elasticache cache cluster container",
+                                );
+                                if let Some(c) = s.cache_clusters.get_mut(&id) {
+                                    c.cache_cluster_status = "incompatible-network".to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                if stop_container {
+                    runtime.stop_container(&id).await;
+                }
+                save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+            });
         }
         if let Some(ref param_group) = cache_parameter_group_name {
             self.apply_parameters_for_group(&request.account_id, param_group)
