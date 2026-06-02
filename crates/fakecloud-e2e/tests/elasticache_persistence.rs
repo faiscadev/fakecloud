@@ -47,6 +47,11 @@ async fn persistence_cache_cluster_endpoint_works_after_restart() {
         .await
         .unwrap();
 
+    // The backing container starts in the background; let the cluster reach
+    // "available" before snapshotting so the restart recovers a complete row
+    // (bug-audit 2026-05-28, 3.2).
+    helpers::wait_for_cache_cluster_available(&client, "restart-cache", 120).await;
+
     drop(client);
     server.restart().await;
     let client = server.elasticache_client().await;
