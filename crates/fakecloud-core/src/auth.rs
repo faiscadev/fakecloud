@@ -469,6 +469,18 @@ pub trait ResourcePolicyProvider: Send + Sync {
     /// match the service prefix they own and return `None` for
     /// anything else so providers can be composed safely.
     fn resource_policy(&self, service: &str, resource_arn: &str) -> Option<String>;
+
+    /// Resolve the 12-digit account that owns `resource_arn` on `service`,
+    /// when the ARN itself does not carry it. S3 ARNs have an empty account
+    /// field (`arn:aws:s3:::bucket`), so without this the dispatcher would
+    /// fall back to the caller's account and treat every S3 request as
+    /// same-account — letting account A reach account B's bucket without B's
+    /// bucket policy granting it (bug-audit 2026-05-28, 5.3). Providers whose
+    /// ARNs already carry the account (SQS/SNS/Lambda/…) return `None` and let
+    /// the dispatcher parse it from the ARN. Default `None`.
+    fn resource_owner_account(&self, _service: &str, _resource_arn: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Failure mode for IAM PassRole trust-policy validation.
@@ -576,6 +588,12 @@ impl ResourcePolicyProvider for MultiResourcePolicyProvider {
         self.providers
             .iter()
             .find_map(|p| p.resource_policy(service, resource_arn))
+    }
+
+    fn resource_owner_account(&self, service: &str, resource_arn: &str) -> Option<String> {
+        self.providers
+            .iter()
+            .find_map(|p| p.resource_owner_account(service, resource_arn))
     }
 }
 
