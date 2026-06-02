@@ -1251,6 +1251,44 @@ pub(crate) fn deployment_to_json(d: &Deployment) -> Value {
     })
 }
 
+/// Build the `lifecycleHookDetails` array for a service deployment. Surfaces
+/// the PAUSE hook the deployment is currently waiting on (if any) so callers
+/// can discover the `hookId` to pass to `ContinueServiceDeployment`.
+pub(crate) fn lifecycle_hook_details_json(d: &Deployment) -> Value {
+    let Some(hook_id) = d.pending_hook_id.as_ref() else {
+        return json!([]);
+    };
+    let pause_hook = d
+        .lifecycle_hooks
+        .iter()
+        .find(|h| h.get("targetType").and_then(|v| v.as_str()) == Some("PAUSE"));
+    let target_arn = pause_hook
+        .and_then(|h| h.get("hookTargetArn"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let timeout_action = pause_hook
+        .and_then(|h| h.get("timeoutConfiguration"))
+        .and_then(|t| t.get("timeoutAction"))
+        .and_then(|v| v.as_str());
+    json!([{
+        "hookId": hook_id,
+        "targetType": "PAUSE",
+        "targetArn": target_arn,
+        "status": "AWAITING_ACTION",
+        "timeoutAction": timeout_action,
+    }])
+}
+
+/// Error raised when a `serviceDeploymentArn` does not resolve to a known
+/// service deployment.
+pub(crate) fn service_deployment_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ServiceDeploymentNotFoundException",
+        format!("The service deployment could not be found: {arn}"),
+    )
+}
+
 pub(crate) fn container_instance_id_from_ref(input: &str) -> String {
     input.rsplit('/').next().unwrap_or(input).to_string()
 }

@@ -1011,6 +1011,59 @@ impl EcsService {
         )))
     }
 
+    /// Continue or roll back a service deployment that is paused at a PAUSE
+    /// lifecycle hook. `CONTINUE` resolves the hook and lets the deployment
+    /// complete; `ROLLBACK` reverts the deployment.
+    pub(super) fn continue_service_deployment(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let deployment_ref = req_str(&body, "serviceDeploymentArn")?.to_string();
+        let hook_id = req_str(&body, "hookId")?.to_string();
+        let action = req_str(&body, "action")?.to_string();
+        if action != "CONTINUE" && action != "ROLLBACK" {
+            return Err(invalid_parameter(format!(
+                "Invalid action '{action}': must be CONTINUE or ROLLBACK"
+            )));
+        }
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&request.account_id)
+            .ok_or_else(|| service_deployment_not_found(&deployment_ref))?;
+        for svc in state.services.values_mut() {
+            for d in svc.deployments.iter_mut() {
+                if deployment_ref.contains(&d.deployment_id) {
+                    match d.pending_hook_id.as_deref() {
+                        Some(pending) if pending == hook_id => {}
+                        _ => {
+                            return Err(invalid_parameter(format!(
+                                "Service deployment {deployment_ref} has no paused hook {hook_id}"
+                            )));
+                        }
+                    }
+                    d.pending_hook_id = None;
+                    d.lifecycle_stage = None;
+                    d.updated_at = Utc::now();
+                    if action == "CONTINUE" {
+                        d.rollout_state = "COMPLETED".into();
+                        d.rollout_state_reason =
+                            Some("Continued via ContinueServiceDeployment.".into());
+                    } else {
+                        d.status = "STOPPED".into();
+                        d.rollout_state = "ROLLBACK_COMPLETED".into();
+                        d.rollout_state_reason =
+                            Some("Rolled back via ContinueServiceDeployment.".into());
+                    }
+                    return Ok(AwsResponse::ok_json(json!({
+                        "serviceDeploymentArn": deployment_ref,
+                    })));
+                }
+            }
+        }
+        Err(service_deployment_not_found(&deployment_ref))
+    }
+
     pub(super) fn list_service_deployments(
         &self,
         request: &AwsRequest,
@@ -1080,6 +1133,8 @@ impl EcsService {
                                     "pendingTaskCount": d.pending_count,
                                     "failedTasks": d.failed_tasks,
                                 },
+                                "lifecycleStage": d.lifecycle_stage,
+                                "lifecycleHookDetails": lifecycle_hook_details_json(d),
                             }));
                             continue 'next_ref;
                         }

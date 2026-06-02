@@ -240,6 +240,9 @@ impl SesV2Service {
                 Some(("ListExportJobs", None, None))
             }
             "tenants" => resolve_tenants_action(method, segs),
+            "tenant" if segs.len() == 4 && segs[3] == "suppression" && *method == Method::POST => {
+                Some(("PutTenantSuppressionAttributes", None, None))
+            }
             "resources" => resolve_resources_action(method, segs),
             "reputation" => resolve_reputation_action(method, segs),
             "metrics" if segs.len() == 4 && segs[3] == "batch" && *method == Method::POST => {
@@ -492,6 +495,7 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "ListExportJobs" => self.list_export_jobs(&req),
             "CancelExportJob" => self.cancel_export_job(res, &req),
             "CreateTenant" => self.create_tenant(&req),
+            "PutTenantSuppressionAttributes" => self.put_tenant_suppression_attributes(&req),
             "GetTenant" => self.get_tenant(&req),
             "ListTenants" => self.list_tenants(&req),
             "DeleteTenant" => self.delete_tenant(&req),
@@ -616,6 +620,7 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "ListExportJobs",
             "CancelExportJob",
             "CreateTenant",
+            "PutTenantSuppressionAttributes",
             "GetTenant",
             "ListTenants",
             "DeleteTenant",

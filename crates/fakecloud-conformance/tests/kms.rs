@@ -807,7 +807,7 @@ async fn kms_get_public_key() {
 // Grants
 // ---------------------------------------------------------------------------
 
-#[test_action("kms", "CreateGrant", checksum = "b5d6ae81")]
+#[test_action("kms", "CreateGrant", checksum = "67adbcc7")]
 #[tokio::test]
 async fn kms_create_grant() {
     let server = TestServer::start().await;
@@ -829,7 +829,7 @@ async fn kms_create_grant() {
     assert!(resp.grant_token().is_some());
 }
 
-#[test_action("kms", "ListGrants", checksum = "21c4f1b9")]
+#[test_action("kms", "ListGrants", checksum = "a96e800c")]
 #[tokio::test]
 async fn kms_list_grants() {
     let server = TestServer::start().await;
@@ -851,7 +851,7 @@ async fn kms_list_grants() {
     assert_eq!(resp.grants().len(), 1);
 }
 
-#[test_action("kms", "ListRetirableGrants", checksum = "22e7c42a")]
+#[test_action("kms", "ListRetirableGrants", checksum = "b77c26b6")]
 #[tokio::test]
 async fn kms_list_retirable_grants() {
     let server = TestServer::start().await;

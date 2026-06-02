@@ -616,6 +616,21 @@ pub struct Deployment {
     pub launch_type: String,
     pub rollout_state: String,
     pub rollout_state_reason: Option<String>,
+    /// Lifecycle hooks attached via `deploymentConfiguration.lifecycleHooks`,
+    /// preserved as the raw JSON the caller supplied so every optional field
+    /// round-trips faithfully.
+    #[serde(default)]
+    pub lifecycle_hooks: Vec<Value>,
+    /// ID of the PAUSE lifecycle hook the deployment is currently waiting on.
+    /// `Some` while the deployment is paused; cleared by
+    /// `ContinueServiceDeployment`.
+    #[serde(default)]
+    pub pending_hook_id: Option<String>,
+    /// Lifecycle stage the deployment paused at (e.g.
+    /// `POST_PRODUCTION_TRAFFIC_SHIFT`). `None` when the deployment is not
+    /// paused on a hook.
+    #[serde(default)]
+    pub lifecycle_stage: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -306,6 +306,11 @@ pub struct Tenant {
     pub created_timestamp: DateTime<Utc>,
     pub sending_status: String,
     pub tags: Vec<serde_json::Value>,
+    /// Suppression-list preferences for the tenant: `{ SuppressedReasons,
+    /// ValidationAttributes }`. Set on CreateTenant or via
+    /// PutTenantSuppressionAttributes. `None` until configured.
+    #[serde(default)]
+    pub suppression_attributes: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

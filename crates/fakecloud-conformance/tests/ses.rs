@@ -80,8 +80,8 @@ async fn ses_identity_lifecycle() {
 
 // -- Configuration Set CRUD --
 
-#[test_action("ses", "CreateConfigurationSet", checksum = "a48841bc")]
-#[test_action("ses", "GetConfigurationSet", checksum = "00b213d2")]
+#[test_action("ses", "CreateConfigurationSet", checksum = "85fe8f9d")]
+#[test_action("ses", "GetConfigurationSet", checksum = "c0be65b9")]
 #[test_action("ses", "ListConfigurationSets", checksum = "31486196")]
 #[test_action("ses", "DeleteConfigurationSet", checksum = "3c50e07a")]
 #[tokio::test]
@@ -617,10 +617,10 @@ async fn ses_tagging_lifecycle() {
 
 // -- Suppression List --
 
-#[test_action("ses", "PutSuppressedDestination", checksum = "6c67e4ef")]
-#[test_action("ses", "GetSuppressedDestination", checksum = "7c4f3480")]
-#[test_action("ses", "ListSuppressedDestinations", checksum = "3ef5cbaf")]
-#[test_action("ses", "DeleteSuppressedDestination", checksum = "e8abb2a8")]
+#[test_action("ses", "PutSuppressedDestination", checksum = "e4abae4e")]
+#[test_action("ses", "GetSuppressedDestination", checksum = "4f493c2f")]
+#[test_action("ses", "ListSuppressedDestinations", checksum = "0b373d02")]
+#[test_action("ses", "DeleteSuppressedDestination", checksum = "a931fb9f")]
 #[tokio::test]
 async fn ses_suppression_list_lifecycle() {
     let server = TestServer::start().await;
@@ -956,7 +956,7 @@ async fn ses_identity_attributes() {
 #[test_action("ses", "PutConfigurationSetSendingOptions", checksum = "e420c1ea")]
 #[test_action("ses", "PutConfigurationSetDeliveryOptions", checksum = "554afc97")]
 #[test_action("ses", "PutConfigurationSetTrackingOptions", checksum = "10410773")]
-#[test_action("ses", "PutConfigurationSetSuppressionOptions", checksum = "8330b701")]
+#[test_action("ses", "PutConfigurationSetSuppressionOptions", checksum = "b1d44201")]
 #[test_action("ses", "PutConfigurationSetReputationOptions", checksum = "eeda6d26")]
 #[test_action("ses", "PutConfigurationSetVdmOptions", checksum = "b745e5c2")]
 #[test_action("ses", "PutConfigurationSetArchivingOptions", checksum = "c5730f19")]
@@ -1611,8 +1611,8 @@ async fn ses_export_job_lifecycle() {
 
 // -- Tenants --
 
-#[test_action("ses", "CreateTenant", checksum = "931dc927")]
-#[test_action("ses", "GetTenant", checksum = "4562e96b")]
+#[test_action("ses", "CreateTenant", checksum = "3ba0dcf6")]
+#[test_action("ses", "GetTenant", checksum = "8167f8fd")]
 #[test_action("ses", "ListTenants", checksum = "75f62d1f")]
 #[test_action("ses", "DeleteTenant", checksum = "c7010419")]
 #[test_action("ses", "CreateTenantResourceAssociation", checksum = "d10a9bd3")]
@@ -1694,6 +1694,78 @@ async fn ses_tenant_lifecycle() {
 
     let list = client.list_tenants().send().await.unwrap();
     assert!(list.tenants().is_empty());
+}
+
+#[test_action("ses", "PutTenantSuppressionAttributes", checksum = "a76440aa")]
+#[tokio::test]
+async fn ses_put_tenant_suppression_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_tenant()
+        .tenant_name("supp-tenant")
+        .send()
+        .await
+        .unwrap();
+
+    // PutTenantSuppressionAttributes is newer than aws-sdk-sesv2 1.x, so drive
+    // it over raw HTTP against the REST-JSON endpoint.
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/v2/email/tenant/suppression", server.endpoint()))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(
+            serde_json::json!({
+                "TenantName": "supp-tenant",
+                "SuppressedReasons": ["BOUNCE", "COMPLAINT"]
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // GetTenant should echo the configured suppression reasons. SuppressionAttributes
+    // is newer than aws-sdk-sesv2 1.x, so read the raw GetTenant response.
+    let get = http
+        .post(format!("{}/v2/email/tenants/get", server.endpoint()))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::json!({"TenantName": "supp-tenant"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    let reasons = &body["Tenant"]["SuppressionAttributes"]["SuppressedReasons"];
+    assert_eq!(reasons[0].as_str().unwrap(), "BOUNCE");
+    assert_eq!(reasons[1].as_str().unwrap(), "COMPLAINT");
+}
+
+#[tokio::test]
+async fn ses_put_tenant_suppression_attributes_unknown_tenant() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/v2/email/tenant/suppression", server.endpoint()))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::json!({"TenantName": "no-such-tenant", "SuppressedReasons": ["BOUNCE"]}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 // -- Reputation Entities --
