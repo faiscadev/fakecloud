@@ -1147,6 +1147,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutEmailIdentityFeedbackAttributes`
 - `PutEmailIdentityMailFromAttributes`
 - `PutSuppressedDestination`
+- `PutTenantSuppressionAttributes`
 - `SendBulkEmail`
 - `SendCustomVerificationEmail`
 - `SendEmail`
@@ -2167,6 +2168,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [ECS](@/docs/services/ecs.md)
 
+- `ContinueServiceDeployment`
 - `CreateCapacityProvider`
 - `CreateCluster`
 - `CreateDaemon`

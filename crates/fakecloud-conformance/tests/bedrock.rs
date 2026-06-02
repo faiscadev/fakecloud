@@ -458,7 +458,7 @@ async fn bedrock_logging_configuration() {
 // Bedrock Runtime — InvokeModel & Converse
 // ---------------------------------------------------------------------------
 
-#[test_action("bedrock-runtime", "InvokeModel", checksum = "a289714a")]
+#[test_action("bedrock-runtime", "InvokeModel", checksum = "9291d51a")]
 #[tokio::test]
 async fn bedrock_invoke_model() {
     let server = TestServer::start().await;
@@ -486,7 +486,7 @@ async fn bedrock_invoke_model() {
     assert!(response_body["content"][0]["text"].as_str().is_some());
 }
 
-#[test_action("bedrock-runtime", "Converse", checksum = "813a7054")]
+#[test_action("bedrock-runtime", "Converse", checksum = "b543e50c")]
 #[tokio::test]
 async fn bedrock_converse_conformance() {
     let server = TestServer::start().await;
@@ -567,7 +567,7 @@ async fn bedrock_apply_guardrail_conformance() {
     assert_eq!(result.action().as_str(), "GUARDRAIL_INTERVENED");
 }
 
-#[test_action("bedrock-runtime", "CountTokens", checksum = "6f28bb5c")]
+#[test_action("bedrock-runtime", "CountTokens", checksum = "6bfae761")]
 #[tokio::test]
 async fn bedrock_count_tokens_conformance() {
     let server = TestServer::start().await;
@@ -711,17 +711,17 @@ async fn bedrock_bidirectional_stream_conformance() {
 #[test_action(
     "bedrock",
     "StartAutomatedReasoningPolicyBuildWorkflow",
-    checksum = "ffad1b60"
+    checksum = "217ecc35"
 )]
 #[test_action(
     "bedrock",
     "GetAutomatedReasoningPolicyBuildWorkflow",
-    checksum = "24cafd85"
+    checksum = "d0953e3a"
 )]
 #[test_action(
     "bedrock",
     "ListAutomatedReasoningPolicyBuildWorkflows",
-    checksum = "c8a0242f"
+    checksum = "28cd0dff"
 )]
 #[test_action(
     "bedrock",
@@ -2049,7 +2049,7 @@ async fn bedrock_model_copy_lifecycle() {
 // Custom Models
 // ---------------------------------------------------------------------------
 
-#[test_action("bedrock", "CreateCustomModel", checksum = "4887448e")]
+#[test_action("bedrock", "CreateCustomModel", checksum = "ff464b7f")]
 #[test_action("bedrock", "GetCustomModel", checksum = "93aaf6da")]
 #[test_action("bedrock", "ListCustomModels", checksum = "0966941c")]
 #[test_action("bedrock", "DeleteCustomModel", checksum = "287a1b06")]
@@ -2196,7 +2196,7 @@ async fn bedrock_custom_model_deployment_crud() {
 #[test_action(
     "bedrock-runtime",
     "InvokeModelWithResponseStream",
-    checksum = "b594a2e9"
+    checksum = "29c6e879"
 )]
 #[tokio::test]
 async fn bedrock_invoke_model_with_response_stream() {
@@ -2229,7 +2229,7 @@ async fn bedrock_invoke_model_with_response_stream() {
     assert!(body_bytes.len() > 16);
 }
 
-#[test_action("bedrock-runtime", "ConverseStream", checksum = "94a08bea")]
+#[test_action("bedrock-runtime", "ConverseStream", checksum = "f26e243a")]
 #[tokio::test]
 async fn bedrock_converse_stream() {
     let server = TestServer::start().await;

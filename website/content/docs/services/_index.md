@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 40 AWS services with 2,935 total operations. 99,678/99,678 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 40 AWS services with 2,937 total operations. 99,678/99,678 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -25,7 +25,7 @@ fakecloud implements 40 AWS services with 2,935 total operations. 99,678/99,678 
 | CloudWatch Logs        | 113 | Groups, streams, subscription filters, query language                  |
 | KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import, **cross-service hook** |
 | CloudFormation         |  90 | Template parsing, resource provisioning, custom resources              |
-| SES (v2 + v1 inbound)  | 110 | Sending, templates, DKIM, **real receipt rule execution**              |
+| SES (v2 + v1 inbound)  | 111 | Sending, templates, DKIM, **real receipt rule execution**              |
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
@@ -36,7 +36,7 @@ fakecloud implements 40 AWS services with 2,935 total operations. 99,678/99,678 
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle eval, scanning, pull-through cache, registry templates, real cosign signature verification |
-| ECS                    |  76 | Full API — clusters, real Fargate-style task execution via Docker, services + rolling deployments, task sets, container instances, ECS Exec, awslogs -> Logs, secrets injection, task role credentials |
+| ECS                    |  77 | Full API — clusters, real Fargate-style task execution via Docker, services + rolling deployments, task sets, container instances, ECS Exec, awslogs -> Logs, secrets injection, task role credentials |
 | Elastic Load Balancing v2 |  51 | Full control plane — ALB/NLB/GWLB CRUD, target groups + targets + real health probes, listeners + rules + certificates, attributes, capacity reservations, **mTLS trust stores + revocations**, resource policies, SSL policies, tags. **In-process HTTP data plane for ALBs** — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions |
 | CloudFront                | 147 | Distributions, invalidations, tagging, by-X listings, web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP). Field-Level Encryption configs + profiles + Realtime Log Configs. VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies. **Connection Groups + Domain Association/DNS Verification + Managed Certificate Details + Promote-Staging Distribution** — full CRUD with ETag/If-Match concurrency. Full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
 | Application Auto Scaling  |  14 | **Full control plane.** Scalable targets (`Register`/`Deregister`/`Describe`) for ECS, Lambda, DynamoDB, RDS, ElastiCache, SageMaker, EMR, AppStream, Cassandra, Kafka, Neptune, EC2 Spot Fleet, Comprehend. Step + target-tracking + predictive scaling policies (`Put`/`Describe`/`Delete`). Scheduled actions with cron / one-shot start/end times + `Timezone`. `DescribeScalingActivities` honors `IncludeNotScaledActivities`, deterministic `GetPredictiveScalingForecast` with hourly Load + Capacity buckets capped at one week. `RoleARN` defaults to the per-namespace service-linked role ARN. `Deregister` cascades to policies + scheduled actions for the same target. `TagResource`/`UntagResource`/`ListTagsForResource` keyed by ARN, reject unknown ARNs with `ObjectNotFoundException`. JSON 1.1 protocol |

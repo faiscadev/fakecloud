@@ -1,10 +1,10 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 2,935 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 2,937 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 2,935 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 2,937 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 39
@@ -17,7 +17,7 @@ fakecloud provides 100% API conformance across 2,935 operations. Unlike mocks, f
 ### Compute & Containers
 - **Lambda**: 70 operations. Full execution environment in real Docker containers across 23 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
 - **ECR**: 58 operations. Full OCI v2 Distribution protocol support for `docker push` and `docker pull`.
-- **ECS**: 76 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.
+- **ECS**: 77 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.
 
 ### Storage & Databases
 - **S3**: 107 operations. Bucket lifecycle, Object tagging, Multipart uploads, real `SelectObjectContent` EventStream.

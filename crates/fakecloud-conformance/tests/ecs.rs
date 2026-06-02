@@ -155,7 +155,7 @@ async fn ecs_put_cluster_capacity_providers() {
     assert!(resp.cluster().is_some());
 }
 
-#[test_action("ecs", "RegisterTaskDefinition", checksum = "dcbae024")]
+#[test_action("ecs", "RegisterTaskDefinition", checksum = "f752354e")]
 #[tokio::test]
 async fn ecs_register_task_definition() {
     let server = TestServer::start().await;
@@ -176,7 +176,7 @@ async fn ecs_register_task_definition() {
     assert_eq!(resp.task_definition().unwrap().family(), Some("confo-td"));
 }
 
-#[test_action("ecs", "DescribeTaskDefinition", checksum = "6b7e9ff5")]
+#[test_action("ecs", "DescribeTaskDefinition", checksum = "54669c17")]
 #[tokio::test]
 async fn ecs_describe_task_definition() {
     let server = TestServer::start().await;
@@ -206,7 +206,7 @@ async fn ecs_describe_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeregisterTaskDefinition", checksum = "0c55a26a")]
+#[test_action("ecs", "DeregisterTaskDefinition", checksum = "f830a947")]
 #[tokio::test]
 async fn ecs_deregister_task_definition() {
     let server = TestServer::start().await;
@@ -238,7 +238,7 @@ async fn ecs_deregister_task_definition() {
     );
 }
 
-#[test_action("ecs", "DeleteTaskDefinitions", checksum = "ad0b6663")]
+#[test_action("ecs", "DeleteTaskDefinitions", checksum = "181b7b9d")]
 #[tokio::test]
 async fn ecs_delete_task_definitions() {
     let server = TestServer::start().await;
@@ -480,7 +480,7 @@ async fn register_conformance_task_def(client: &aws_sdk_ecs::Client, family: &st
         .unwrap();
 }
 
-#[test_action("ecs", "RunTask", checksum = "f0ae3fb6")]
+#[test_action("ecs", "RunTask", checksum = "1486abbf")]
 #[tokio::test]
 async fn ecs_run_task() {
     let server = TestServer::start().await;
@@ -503,7 +503,7 @@ async fn ecs_run_task() {
     assert!(resp.failures().is_empty());
 }
 
-#[test_action("ecs", "StartTask", checksum = "75d41d3b")]
+#[test_action("ecs", "StartTask", checksum = "8ae1f503")]
 #[tokio::test]
 async fn ecs_start_task() {
     let server = TestServer::start().await;
@@ -526,7 +526,7 @@ async fn ecs_start_task() {
     assert_eq!(resp.tasks().len(), 1);
 }
 
-#[test_action("ecs", "DescribeTasks", checksum = "84135240")]
+#[test_action("ecs", "DescribeTasks", checksum = "c33cdef2")]
 #[tokio::test]
 async fn ecs_describe_tasks() {
     let server = TestServer::start().await;
@@ -584,7 +584,7 @@ async fn ecs_list_tasks() {
     assert!(!resp.task_arns().is_empty());
 }
 
-#[test_action("ecs", "StopTask", checksum = "b4f8ca9a")]
+#[test_action("ecs", "StopTask", checksum = "f998789e")]
 #[tokio::test]
 async fn ecs_stop_task() {
     let server = TestServer::start().await;
@@ -666,7 +666,7 @@ async fn bootstrap_external_service_fixtures(
         .unwrap();
 }
 
-#[test_action("ecs", "CreateService", checksum = "15a6dbd5")]
+#[test_action("ecs", "CreateService", checksum = "2f5d1dd4")]
 #[tokio::test]
 async fn ecs_create_service() {
     let server = TestServer::start().await;
@@ -684,7 +684,7 @@ async fn ecs_create_service() {
     assert_eq!(resp.service().unwrap().service_name(), Some("svc-a"));
 }
 
-#[test_action("ecs", "DescribeServices", checksum = "ca07d4ee")]
+#[test_action("ecs", "DescribeServices", checksum = "ab003bb2")]
 #[tokio::test]
 async fn ecs_describe_services() {
     let server = TestServer::start().await;
@@ -745,7 +745,7 @@ async fn ecs_list_services_by_namespace() {
     resp.service_arns();
 }
 
-#[test_action("ecs", "UpdateService", checksum = "c1482ff6")]
+#[test_action("ecs", "UpdateService", checksum = "54dc7f2f")]
 #[tokio::test]
 async fn ecs_update_service() {
     let server = TestServer::start().await;
@@ -771,7 +771,7 @@ async fn ecs_update_service() {
     assert_eq!(resp.service().unwrap().desired_count(), 2);
 }
 
-#[test_action("ecs", "DeleteService", checksum = "d4f5fbe7")]
+#[test_action("ecs", "DeleteService", checksum = "ce676050")]
 #[tokio::test]
 async fn ecs_delete_service() {
     let server = TestServer::start().await;
@@ -798,7 +798,7 @@ async fn ecs_delete_service() {
 
 // ── Batch 4: completeness ──────────────────────────────────────────
 
-#[test_action("ecs", "RegisterContainerInstance", checksum = "007c13b4")]
+#[test_action("ecs", "RegisterContainerInstance", checksum = "ddca1d63")]
 #[tokio::test]
 async fn ecs_register_container_instance() {
     let server = TestServer::start().await;
@@ -1495,7 +1495,7 @@ async fn ecs_list_service_deployments() {
     resp.service_deployments();
 }
 
-#[test_action("ecs", "DescribeServiceDeployments", checksum = "cd7d2a70")]
+#[test_action("ecs", "DescribeServiceDeployments", checksum = "ca2984b3")]
 #[tokio::test]
 async fn ecs_describe_service_deployments() {
     let server = TestServer::start().await;
@@ -1519,6 +1519,220 @@ async fn ecs_describe_service_deployments() {
         .await
         .unwrap();
     resp.service_deployments();
+}
+
+/// POST an awsJson1.1 ECS request directly. `ContinueServiceDeployment` and
+/// the PAUSE lifecycle-hook target type are newer than aws-sdk-ecs 1.x, so the
+/// typed client can't express them yet — drive them over raw HTTP instead.
+async fn ecs_json(
+    http: &reqwest::Client,
+    endpoint: &str,
+    action: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let resp = http
+        .post(endpoint)
+        .header("content-type", "application/x-amz-json-1.1")
+        .header(
+            "x-amz-target",
+            format!("AmazonEC2ContainerServiceV20141113.{action}"),
+        )
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ecs/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "ECS {action} failed: {:?}",
+        resp.status()
+    );
+    resp.json().await.unwrap()
+}
+
+#[test_action("ecs", "ContinueServiceDeployment", checksum = "e1f3b96b")]
+#[tokio::test]
+async fn ecs_continue_service_deployment() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+
+    ecs_json(
+        &http,
+        ep,
+        "CreateCluster",
+        serde_json::json!({"clusterName": "confo-csd"}),
+    )
+    .await;
+    ecs_json(
+        &http,
+        ep,
+        "RegisterTaskDefinition",
+        serde_json::json!({
+            "family": "confo-csd-td",
+            "containerDefinitions": [{"name": "app", "image": "nginx:latest", "memory": 128}],
+        }),
+    )
+    .await;
+
+    // Create a service whose deployment pauses at a PAUSE lifecycle hook.
+    let created = ecs_json(
+        &http,
+        ep,
+        "CreateService",
+        serde_json::json!({
+            "cluster": "confo-csd",
+            "serviceName": "csd-svc",
+            "taskDefinition": "confo-csd-td",
+            "desiredCount": 1,
+            "deploymentConfiguration": {
+                "lifecycleHooks": [{
+                    "targetType": "PAUSE",
+                    "lifecycleStages": ["POST_PRODUCTION_TRAFFIC_SHIFT"],
+                    "hookTargetArn": "arn:aws:lambda:us-east-1:123456789012:function:noop",
+                    "roleArn": "arn:aws:iam::123456789012:role/hook"
+                }]
+            }
+        }),
+    )
+    .await;
+    let svc = &created["service"];
+    let service_arn = svc["serviceArn"].as_str().unwrap();
+    let deployment_id = svc["deployments"][0]["id"].as_str().unwrap();
+    let arn = format!("{service_arn}/{deployment_id}");
+
+    // The paused deployment surfaces its hookId via DescribeServiceDeployments.
+    let described = ecs_json(
+        &http,
+        ep,
+        "DescribeServiceDeployments",
+        serde_json::json!({"serviceDeploymentArns": [arn]}),
+    )
+    .await;
+    let hook_id = described["serviceDeployments"][0]["lifecycleHookDetails"][0]["hookId"]
+        .as_str()
+        .expect("paused deployment should expose a hookId");
+
+    // Continue the paused deployment.
+    let resp = ecs_json(
+        &http,
+        ep,
+        "ContinueServiceDeployment",
+        serde_json::json!({
+            "serviceDeploymentArn": arn,
+            "hookId": hook_id,
+            "action": "CONTINUE"
+        }),
+    )
+    .await;
+    assert_eq!(resp["serviceDeploymentArn"].as_str().unwrap(), arn);
+}
+
+#[tokio::test]
+async fn ecs_continue_service_deployment_rollback_and_errors() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+
+    ecs_json(
+        &http,
+        ep,
+        "CreateCluster",
+        serde_json::json!({"clusterName": "confo-csd-rb"}),
+    )
+    .await;
+    ecs_json(
+        &http,
+        ep,
+        "RegisterTaskDefinition",
+        serde_json::json!({
+            "family": "confo-csd-rb-td",
+            "containerDefinitions": [{"name": "app", "image": "nginx:latest", "memory": 128}],
+        }),
+    )
+    .await;
+    let created = ecs_json(
+        &http,
+        ep,
+        "CreateService",
+        serde_json::json!({
+            "cluster": "confo-csd-rb",
+            "serviceName": "csd-rb-svc",
+            "taskDefinition": "confo-csd-rb-td",
+            "desiredCount": 1,
+            "deploymentConfiguration": {
+                "lifecycleHooks": [{
+                    "targetType": "PAUSE",
+                    "lifecycleStages": ["PRODUCTION_TRAFFIC_SHIFT"]
+                }]
+            }
+        }),
+    )
+    .await;
+    let svc = &created["service"];
+    let arn = format!(
+        "{}/{}",
+        svc["serviceArn"].as_str().unwrap(),
+        svc["deployments"][0]["id"].as_str().unwrap()
+    );
+    let hook_id = ecs_json(
+        &http,
+        ep,
+        "DescribeServiceDeployments",
+        serde_json::json!({"serviceDeploymentArns": [arn]}),
+    )
+    .await["serviceDeployments"][0]["lifecycleHookDetails"][0]["hookId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ROLLBACK stops the deployment.
+    ecs_json(
+        &http,
+        ep,
+        "ContinueServiceDeployment",
+        serde_json::json!({"serviceDeploymentArn": arn, "hookId": hook_id, "action": "ROLLBACK"}),
+    )
+    .await;
+    let after = ecs_json(
+        &http,
+        ep,
+        "DescribeServiceDeployments",
+        serde_json::json!({"serviceDeploymentArns": [arn]}),
+    )
+    .await;
+    assert_eq!(
+        after["serviceDeployments"][0]["status"].as_str().unwrap(),
+        "STOPPED"
+    );
+
+    // An unknown service deployment ARN errors.
+    let resp = http
+        .post(ep)
+        .header("content-type", "application/x-amz-json-1.1")
+        .header(
+            "x-amz-target",
+            "AmazonEC2ContainerServiceV20141113.ContinueServiceDeployment",
+        )
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ecs/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(
+            serde_json::json!({
+                "serviceDeploymentArn": "arn:aws:ecs:us-east-1:111122223333:service-deployment/c/s/missing",
+                "hookId": "hook-x",
+                "action": "CONTINUE"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.status().is_success());
 }
 
 #[test_action("ecs", "DescribeServiceRevisions", checksum = "324b5e93")]

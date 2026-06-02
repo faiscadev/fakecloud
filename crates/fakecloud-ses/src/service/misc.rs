@@ -1408,6 +1408,8 @@ impl SesV2Service {
             .cloned()
             .unwrap_or_default();
 
+        let suppression_attributes = body.get("SuppressionAttributes").cloned();
+
         let tenant = Tenant {
             tenant_name: tenant_name.clone(),
             tenant_id: tenant_id.clone(),
@@ -1415,11 +1417,12 @@ impl SesV2Service {
             created_timestamp: now,
             sending_status: "ENABLED".to_string(),
             tags: tags.clone(),
+            suppression_attributes: suppression_attributes.clone(),
         };
 
         state.tenants.insert(tenant_name.clone(), tenant);
 
-        let response = json!({
+        let mut response = json!({
             "TenantName": tenant_name,
             "TenantId": tenant_id,
             "TenantArn": tenant_arn,
@@ -1427,6 +1430,9 @@ impl SesV2Service {
             "SendingStatus": "ENABLED",
             "Tags": tags,
         });
+        if let Some(attrs) = suppression_attributes {
+            response["SuppressionAttributes"] = attrs;
+        }
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
@@ -1457,7 +1463,7 @@ impl SesV2Service {
             }
         };
 
-        let response = json!({
+        let mut response = json!({
             "Tenant": {
                 "TenantName": tenant.tenant_name,
                 "TenantId": tenant.tenant_id,
@@ -1467,7 +1473,57 @@ impl SesV2Service {
                 "Tags": tenant.tags,
             }
         });
+        if let Some(attrs) = &tenant.suppression_attributes {
+            response["Tenant"]["SuppressionAttributes"] = attrs.clone();
+        }
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+
+    /// Configure the suppression-list preferences for a tenant. Sets the
+    /// reasons (BOUNCE / COMPLAINT) that automatically add recipients to the
+    /// tenant's suppression list. Returns an empty 200 on success.
+    pub(super) fn put_tenant_suppression_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let tenant_name = match body["TenantName"].as_str() {
+            Some(n) => n.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "TenantName is required",
+                ));
+            }
+        };
+        let suppressed_reasons = body
+            .get("SuppressedReasons")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let tenant = match state.tenants.get_mut(&tenant_name) {
+            Some(t) => t,
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    &format!("Tenant {} does not exist", tenant_name),
+                ));
+            }
+        };
+        // Preserve any existing ValidationAttributes; replace SuppressedReasons.
+        let mut attrs = tenant
+            .suppression_attributes
+            .clone()
+            .unwrap_or_else(|| json!({}));
+        attrs["SuppressedReasons"] = Value::Array(suppressed_reasons);
+        tenant.suppression_attributes = Some(attrs);
+
+        Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
     }
 
     pub(super) fn list_tenants(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
