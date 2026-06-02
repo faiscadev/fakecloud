@@ -17,6 +17,37 @@ use super::{
     parse_url_encoded_tags, precondition_failed, resolve_object, s3_xml, xml_escape, S3Service,
 };
 
+/// Build the `CompleteMultipartUploadResult` XML response for an object that
+/// already exists — used by the idempotent re-completion paths (an upload that
+/// was already completed by a prior or concurrent request). `checksum_xml` is
+/// the optional pre-rendered `<ChecksumX>…</ChecksumX>` element, or `""`.
+fn completion_xml_response(bucket: &str, key: &str, etag: &str, checksum_xml: &str) -> AwsResponse {
+    let location = format!(
+        "https://{bucket_h}.s3.amazonaws.com/{key_h}",
+        bucket_h = xml_escape(bucket),
+        key_h = xml_escape(key),
+    );
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Location>{location}</Location>\
+         <Bucket>{}</Bucket>\
+         <Key>{}</Key>\
+         <ETag>&quot;{}&quot;</ETag>\
+         {checksum_xml}\
+         </CompleteMultipartUploadResult>",
+        xml_escape(bucket),
+        xml_escape(key),
+        xml_escape(etag),
+    );
+    AwsResponse {
+        status: StatusCode::OK,
+        content_type: "application/xml".to_string(),
+        body: body.into(),
+        headers: HeaderMap::new(),
+    }
+}
+
 impl S3Service {
     pub(super) fn create_multipart_upload(
         &self,
@@ -412,55 +443,45 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let (upload, already_has_object) = {
+        // Capture the upload + the bucket facts we need under a brief read
+        // lock, then release it so the (potentially multi-GB) part assembly +
+        // disk persist below runs OFF-LOCK instead of holding the global S3
+        // write lock and serializing every other S3 operation server-wide
+        // while it runs (bug-audit 2026-05-28, 4.7).
+        let (
+            upload,
+            already_has_object,
+            region,
+            notification_config,
+            versioning_enabled,
+            acl_owner_id,
+        ) = {
+            let accts = self.state.read();
+            let empty = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&empty);
             let b = state
                 .buckets
                 .get(bucket)
                 .ok_or_else(|| no_such_bucket(bucket))?;
-            match b.multipart_uploads.get(upload_id) {
-                Some(u) => (Some(u.clone()), b.objects.contains_key(key)),
-                None => (None, b.objects.contains_key(key)),
-            }
-        };
-        let upload = match upload {
-            Some(u) => u,
-            None => {
-                let b = state
-                    .buckets
-                    .get(bucket)
-                    .ok_or_else(|| no_such_bucket(bucket))?;
-                // Upload already completed - return existing object if it exists
-                // IfNoneMatch does NOT apply to re-completions
-                if let Some(obj) = b.objects.get(key) {
-                    let etag = obj.etag.clone();
-                    let location = format!(
-                        "https://{bucket_h}.s3.amazonaws.com/{key_h}",
-                        bucket_h = xml_escape(bucket),
-                        key_h = xml_escape(key),
-                    );
-                    let body = format!(
-                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                         <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                         <Location>{location}</Location>\
-                         <Bucket>{}</Bucket>\
-                         <Key>{}</Key>\
-                         <ETag>&quot;{}&quot;</ETag>\
-                         </CompleteMultipartUploadResult>",
-                        xml_escape(bucket),
-                        xml_escape(key),
-                        xml_escape(&etag),
-                    );
-                    return Ok(AwsResponse {
-                        status: StatusCode::OK,
-                        content_type: "application/xml".to_string(),
-                        body: body.into(),
-                        headers: HeaderMap::new(),
-                    });
+            let upload = match b.multipart_uploads.get(upload_id) {
+                Some(u) => u.clone(),
+                None => {
+                    // Upload already completed - return existing object if it
+                    // exists. IfNoneMatch does NOT apply to re-completions.
+                    if let Some(obj) = b.objects.get(key) {
+                        return Ok(completion_xml_response(bucket, key, &obj.etag, ""));
+                    }
+                    return Err(no_such_upload(upload_id));
                 }
-                return Err(no_such_upload(upload_id));
-            }
+            };
+            (
+                upload,
+                b.objects.contains_key(key),
+                state.region.clone(),
+                b.notification_config.clone(),
+                b.versioning.as_deref() == Some("Enabled"),
+                b.acl_owner_id.clone(),
+            )
         };
 
         if upload.key != key {
@@ -517,7 +538,9 @@ impl S3Service {
             }
         }
 
-        // Assemble the object from parts
+        // Assemble the object from its parts OFF-LOCK. Bodies are read via the
+        // state-free `read_body_uncached`, so no S3 lock is held during the
+        // (potentially large) concatenation, hashing, and disk persist below.
         let mut combined_data = Vec::new();
         let mut md5_digests = Vec::new();
         let mut part_sizes = Vec::new();
@@ -537,7 +560,8 @@ impl S3Service {
                     "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
                 ));
             }
-            let part_bytes = state.read_body(&part.body).map_err(super::io_to_aws)?;
+            let part_bytes =
+                crate::state::S3State::read_body_uncached(&part.body).map_err(super::io_to_aws)?;
             combined_data.extend_from_slice(&part_bytes);
             let part_md5 = Md5::digest(&part_bytes);
             md5_digests.extend_from_slice(&part_md5);
@@ -560,19 +584,13 @@ impl S3Service {
             std::collections::BTreeMap::new()
         };
 
-        let region = state.region.clone();
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        let notification_config = b.notification_config.clone();
-        let version_id = if b.versioning.as_deref() == Some("Enabled") {
+        let version_id = if versioning_enabled {
             Some(uuid::Uuid::new_v4().to_string())
         } else {
             None
         };
 
-        let obj = S3Object {
+        let mut obj = S3Object {
             key: key.to_string(),
             size: data.len() as u64,
             body: crate::state::memory_body(data),
@@ -583,42 +601,77 @@ impl S3Service {
             storage_class: upload.storage_class.clone(),
             tags,
             acl_grants: upload.acl_grants.clone(),
-            acl_owner_id: Some(b.acl_owner_id.clone()),
+            acl_owner_id: Some(acl_owner_id),
             parts_count: Some(sorted_parts.len() as u32),
             part_sizes: Some(part_sizes),
             sse_algorithm: upload.sse_algorithm.clone(),
             sse_kms_key_id: upload.sse_kms_key_id.clone(),
             version_id: version_id.clone(),
             checksum_algorithm: upload.checksum_algorithm.clone(),
-            checksum_value,
+            checksum_value: checksum_value.clone(),
             ..Default::default()
         };
-        b.objects.insert(key.to_string(), obj);
-        b.multipart_uploads.remove(upload_id);
-        let meta = {
-            let o = b.objects.get(key).ok_or_else(|| no_such_key(key))?;
-            object_meta_snapshot(o)
-        };
-        self.store
-            .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
-            .map_err(super::persistence_error)?;
-        let returned_body = self
-            .store
-            .put_object(
-                bucket,
-                key,
-                meta.version_id.as_deref(),
-                BodySource::Bytes(store_body.clone()),
-                &meta,
-            )
-            .map_err(super::persistence_error)?;
-        if let Some(o) = b.objects.get_mut(key) {
-            o.body = returned_body.clone();
-        }
-        if b.versioning.as_deref() == Some("Enabled") {
-            if let Some(versions) = b.object_versions.get_mut(key) {
-                if let Some(last) = versions.last_mut() {
-                    last.body = returned_body;
+
+        // Commit under the write lock. The expensive work — reading,
+        // assembling, and hashing every part — already ran off-lock above; only
+        // the validation, the durable persist, and the in-memory insert happen
+        // here. Crucially the persist runs *after* the upload + precondition
+        // checks pass and within the same lock hold as the insert, so a rejected
+        // completion never leaves a half-written object on disk while memory
+        // says otherwise (Cubic, 4.7; the off-lock persist could diverge on a
+        // concurrent complete). A concurrent Abort/Complete that removed the
+        // upload during assembly is honored (idempotent re-completion) rather
+        // than resurrected (bug-audit 2026-05-28, 4.3 class).
+        let meta = object_meta_snapshot(&obj);
+        {
+            let mut accts = self.state.write();
+            {
+                let b = accts
+                    .get_or_create(account_id)
+                    .buckets
+                    .get_mut(bucket)
+                    .ok_or_else(|| no_such_bucket(bucket))?;
+                if !b.multipart_uploads.contains_key(upload_id) {
+                    if let Some(existing) = b.objects.get(key) {
+                        return Ok(completion_xml_response(bucket, key, &existing.etag, ""));
+                    }
+                    return Err(no_such_upload(upload_id));
+                }
+                // The object may have been created concurrently after the
+                // phase-1 snapshot, so revalidate `If-None-Match: *` here rather
+                // than trusting the stale `already_has_object`. Leave the upload
+                // intact for retry/abort; nothing has been persisted yet.
+                if if_none_match.as_deref() == Some("*") && b.objects.contains_key(key) {
+                    return Err(precondition_failed("If-None-Match"));
+                }
+            }
+            // Checks passed — persist, then commit to memory, all under the lock.
+            self.store
+                .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
+                .map_err(super::persistence_error)?;
+            let returned_body = self
+                .store
+                .put_object(
+                    bucket,
+                    key,
+                    meta.version_id.as_deref(),
+                    BodySource::Bytes(store_body.clone()),
+                    &meta,
+                )
+                .map_err(super::persistence_error)?;
+            obj.body = returned_body.clone();
+            let b = accts
+                .get_or_create(account_id)
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.objects.insert(key.to_string(), obj);
+            b.multipart_uploads.remove(upload_id);
+            if versioning_enabled {
+                if let Some(versions) = b.object_versions.get_mut(key) {
+                    if let Some(last) = versions.last_mut() {
+                        last.body = returned_body;
+                    }
                 }
             }
         }
@@ -645,14 +698,11 @@ impl S3Service {
         // Surface the per-algorithm checksum element AWS emits so
         // SDK clients that round-trip Complete -> Get can verify
         // integrity end-to-end.
-        let checksum_xml = match (
-            upload.checksum_algorithm.as_deref(),
-            b.objects.get(key).and_then(|o| o.checksum_value.clone()),
-        ) {
+        let checksum_xml = match (upload.checksum_algorithm.as_deref(), &checksum_value) {
             (Some(algo), Some(value)) => format!(
                 "<Checksum{algo}>{val}</Checksum{algo}>",
                 algo = algo,
-                val = xml_escape(&value),
+                val = xml_escape(value),
             ),
             _ => String::new(),
         };
@@ -670,14 +720,13 @@ impl S3Service {
             xml_escape(&etag),
         );
 
-        // Drop the write lock before firing event delivery so any
-        // listener that re-enters the S3 service to read state
-        // doesn't deadlock against our outstanding write.
+        // The write lock was already released after committing the object, so
+        // event delivery (which may re-enter the S3 service to read state)
+        // cannot deadlock against an outstanding write.
         let bucket_name = bucket.to_string();
         let obj_key = key.to_string();
         let obj_size = store_body.len() as u64;
         let obj_etag = etag.clone();
-        drop(accts);
         if let Some(ref config) = notification_config {
             super::deliver_notifications(
                 &self.delivery,

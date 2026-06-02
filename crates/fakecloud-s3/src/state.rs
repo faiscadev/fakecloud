@@ -260,6 +260,19 @@ impl S3State {
         self.object_lambda_responses.clear();
     }
 
+    /// Read the full body referenced by a [`BodyRef`] without touching the
+    /// [`BodyCache`] or any `S3State`. Because it borrows nothing from state,
+    /// callers can read part bodies after dropping the global S3 lock — used by
+    /// CompleteMultipartUpload to assemble a multi-GB object off-lock instead of
+    /// serializing every other S3 operation behind the assembly (bug-audit
+    /// 2026-05-28, 4.7). Disk bodies are read straight from their path.
+    pub fn read_body_uncached(body: &BodyRef) -> io::Result<Bytes> {
+        match body {
+            BodyRef::Memory(b) => Ok(b.clone()),
+            BodyRef::Disk { path, .. } => Ok(Bytes::from(std::fs::read(path)?)),
+        }
+    }
+
     /// Read the full body referenced by a [`BodyRef`], consulting the
     /// persistent [`BodyCache`] when one is configured.
     pub fn read_body(&self, body: &BodyRef) -> io::Result<Bytes> {
@@ -387,6 +400,28 @@ mod tests {
         };
         let state = S3State::new("123", "us-east-1");
         assert_eq!(state.read_body(&body).unwrap(), &b"file-body"[..]);
+    }
+
+    #[test]
+    fn read_body_uncached_reads_memory_and_disk() {
+        // bug-audit 4.7: the off-lock multipart assembler relies on this
+        // state-free reader for both body kinds.
+        let mem = memory_body(Bytes::from_static(b"hello"));
+        assert_eq!(S3State::read_body_uncached(&mem).unwrap(), &b"hello"[..]);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.as_file().write_all(b"file-body").unwrap();
+        let disk = BodyRef::Disk {
+            bucket: "b".to_string(),
+            key: "k".to_string(),
+            version: None,
+            path: tmp.path().to_path_buf(),
+            size: 9,
+        };
+        assert_eq!(
+            S3State::read_body_uncached(&disk).unwrap(),
+            &b"file-body"[..]
+        );
     }
 
     #[test]
