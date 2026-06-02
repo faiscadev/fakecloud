@@ -1,7 +1,23 @@
 use crate::state::{AttributeValue, DynamoDbStreamRecord, DynamoTable, StreamRecord};
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
+
+/// Mint a strictly-monotonic, unique DynamoDB stream sequence number.
+///
+/// Sequence numbers were previously the wall-clock nanosecond timestamp, which
+/// collides under batch writes in the same nanosecond and can go backwards on
+/// a coarse clock or NTP step. Since `AT_SEQUENCE_NUMBER`/`AFTER_SEQUENCE_NUMBER`
+/// iterators locate a record by exact match, a duplicate seq makes them replay
+/// or skip records. A process-global atomic counter guarantees every record
+/// gets a unique, monotonically increasing number (per-stream ordering is a
+/// monotonic subset of the global one). Zero-padded to a fixed width so the
+/// decimal strings also sort lexicographically. bug-audit 2026-05-28, 4.4.
+fn next_stream_sequence() -> String {
+    static STREAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    format!("{:021}", STREAM_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+}
 
 /// Generate a stream record for a table mutation.
 /// This should be called after the mutation is applied.
@@ -42,7 +58,7 @@ pub fn generate_stream_record(
             .unwrap_or(0);
 
     let event_id = Uuid::new_v4().to_string();
-    let sequence_number = Utc::now().timestamp_nanos_opt()?.to_string();
+    let sequence_number = next_stream_sequence();
 
     Some(StreamRecord {
         event_id,
@@ -82,6 +98,45 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    #[test]
+    fn stream_sequence_numbers_are_unique_and_monotonic() {
+        // bug-audit 4.4: even when minted in a tight loop (formerly all the
+        // same nanosecond timestamp), every sequence number must be distinct
+        // and strictly increasing — otherwise AT/AFTER_SEQUENCE_NUMBER
+        // iterators replay or skip records.
+        let seqs: Vec<String> = (0..10_000).map(|_| next_stream_sequence()).collect();
+        let unique: std::collections::HashSet<&String> = seqs.iter().collect();
+        assert_eq!(unique.len(), seqs.len(), "sequence numbers must be unique");
+        for w in seqs.windows(2) {
+            // Fixed-width zero-padding makes lexicographic order == numeric.
+            assert!(w[0] < w[1], "sequence numbers must strictly increase");
+            assert_eq!(w[0].len(), w[1].len(), "fixed-width padding");
+        }
+    }
+
+    #[test]
+    fn stream_sequence_numbers_unique_under_concurrency() {
+        // Mint from many threads at once: the atomic counter must still hand
+        // out distinct numbers (no same-instant collision).
+        use std::thread;
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                thread::spawn(|| {
+                    (0..1000)
+                        .map(|_| next_stream_sequence())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut all = std::collections::HashSet::new();
+        for h in handles {
+            for s in h.join().unwrap() {
+                assert!(all.insert(s), "duplicate sequence number across threads");
+            }
+        }
+        assert_eq!(all.len(), 8 * 1000);
+    }
 
     fn make_stream_table() -> DynamoTable {
         DynamoTable {
