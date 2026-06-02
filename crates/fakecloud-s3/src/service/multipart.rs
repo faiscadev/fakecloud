@@ -612,49 +612,59 @@ impl S3Service {
             ..Default::default()
         };
 
-        // Persist OFF-LOCK, then record the durable body handle on the object.
+        // Commit under the write lock. The expensive work — reading,
+        // assembling, and hashing every part — already ran off-lock above; only
+        // the validation, the durable persist, and the in-memory insert happen
+        // here. Crucially the persist runs *after* the upload + precondition
+        // checks pass and within the same lock hold as the insert, so a rejected
+        // completion never leaves a half-written object on disk while memory
+        // says otherwise (Cubic, 4.7; the off-lock persist could diverge on a
+        // concurrent complete). A concurrent Abort/Complete that removed the
+        // upload during assembly is honored (idempotent re-completion) rather
+        // than resurrected (bug-audit 2026-05-28, 4.3 class).
         let meta = object_meta_snapshot(&obj);
-        self.store
-            .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
-            .map_err(super::persistence_error)?;
-        let returned_body = self
-            .store
-            .put_object(
-                bucket,
-                key,
-                meta.version_id.as_deref(),
-                BodySource::Bytes(store_body.clone()),
-                &meta,
-            )
-            .map_err(super::persistence_error)?;
-        obj.body = returned_body.clone();
-
-        // Re-acquire the write lock only to commit the result. A concurrent
-        // AbortMultipartUpload / CompleteMultipartUpload may have removed the
-        // upload while we assembled off-lock — if it is gone, do not resurrect
-        // it: honor whoever won (idempotent re-completion) or surface
-        // NoSuchUpload (bug-audit 2026-05-28, 4.3 class, for S3 multipart).
         {
             let mut accts = self.state.write();
-            let state = accts.get_or_create(account_id);
-            let b = state
+            {
+                let b = accts
+                    .get_or_create(account_id)
+                    .buckets
+                    .get_mut(bucket)
+                    .ok_or_else(|| no_such_bucket(bucket))?;
+                if !b.multipart_uploads.contains_key(upload_id) {
+                    if let Some(existing) = b.objects.get(key) {
+                        return Ok(completion_xml_response(bucket, key, &existing.etag, ""));
+                    }
+                    return Err(no_such_upload(upload_id));
+                }
+                // The object may have been created concurrently after the
+                // phase-1 snapshot, so revalidate `If-None-Match: *` here rather
+                // than trusting the stale `already_has_object`. Leave the upload
+                // intact for retry/abort; nothing has been persisted yet.
+                if if_none_match.as_deref() == Some("*") && b.objects.contains_key(key) {
+                    return Err(precondition_failed("If-None-Match"));
+                }
+            }
+            // Checks passed — persist, then commit to memory, all under the lock.
+            self.store
+                .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
+                .map_err(super::persistence_error)?;
+            let returned_body = self
+                .store
+                .put_object(
+                    bucket,
+                    key,
+                    meta.version_id.as_deref(),
+                    BodySource::Bytes(store_body.clone()),
+                    &meta,
+                )
+                .map_err(super::persistence_error)?;
+            obj.body = returned_body.clone();
+            let b = accts
+                .get_or_create(account_id)
                 .buckets
                 .get_mut(bucket)
                 .ok_or_else(|| no_such_bucket(bucket))?;
-            if !b.multipart_uploads.contains_key(upload_id) {
-                if let Some(existing) = b.objects.get(key) {
-                    return Ok(completion_xml_response(bucket, key, &existing.etag, ""));
-                }
-                return Err(no_such_upload(upload_id));
-            }
-            // Re-check IfNoneMatch under the commit lock: the object may have
-            // been created concurrently after the phase-1 snapshot, so the
-            // `*` precondition must be revalidated here rather than trusting the
-            // stale `already_has_object` (Cubic, 4.7). Leave the upload intact
-            // for retry/abort.
-            if if_none_match.as_deref() == Some("*") && b.objects.contains_key(key) {
-                return Err(precondition_failed("If-None-Match"));
-            }
             b.objects.insert(key.to_string(), obj);
             b.multipart_uploads.remove(upload_id);
             if versioning_enabled {
