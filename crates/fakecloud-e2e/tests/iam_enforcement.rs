@@ -1703,21 +1703,12 @@ async fn kms_identity_policy_explicit_deny_beats_key_policy() {
 
 #[tokio::test]
 async fn kms_no_identity_policy_denied() {
-    // User with no identity policy at all is denied even though the
-    // default key policy grants kms:* to the account root. In same-account
-    // mode, identity OR resource policy must allow — but the resource
-    // policy names the root, not the specific user.
-    //
-    // Wait — actually in same-account, identity OR resource policy
-    // allowing is enough. The default key policy grants root (which
-    // matches any principal in the account via AwsAccountRoot), so
-    // the user IS granted by the key policy alone.
-    //
-    // This test verifies that the key policy root grant works: a user
-    // with an identity-policy allowing kms:CreateKey (to avoid the
-    // IAM gate on CreateKey itself) can use the key even without
-    // explicit kms:Encrypt in identity policy, because the key policy
-    // grants root.
+    // The default key policy's "Enable IAM permissions" statement grants the
+    // account *root* (kms:* on the key). In AWS this does NOT directly authorize
+    // every principal in the account — it *delegates* authorization to IAM, so a
+    // principal still needs an identity policy allowing the KMS action. A user
+    // whose only identity grant is kms:DescribeKey is therefore denied
+    // kms:Encrypt (bug-audit 2026-05-28, 5.5).
     let server = start_strict().await;
     let (akid, secret) = bootstrap_user(&server, "kms_keypol_user").await;
     attach_inline_policy(
@@ -1730,23 +1721,27 @@ async fn kms_no_identity_policy_denied() {
     )
     .await;
 
-    // Create a key as root.
+    // Create a key as root (gets the default IAM-delegating key policy).
     let boot = sdk_config_with(&server, "test", "test").await;
     let kms_boot = aws_sdk_kms::Client::new(&boot);
     let key = kms_boot.create_key().send().await.unwrap();
     let key_id = key.key_metadata().unwrap().key_id().to_string();
 
-    // User encrypts -> should succeed because key policy grants root
-    // (same-account Allow-union: resource policy Allow is enough).
+    // User encrypts -> denied: the key policy only delegates to IAM, and the
+    // user's identity policy does not allow kms:Encrypt.
     let user_cfg = sdk_config_with(&server, &akid, &secret).await;
     let kms_user = aws_sdk_kms::Client::new(&user_cfg);
-    kms_user
+    let err = kms_user
         .encrypt()
         .key_id(&key_id)
         .plaintext(aws_sdk_kms::primitives::Blob::new(b"keypol-test"))
         .send()
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("AccessDenied"),
+        "expected AccessDenied for kms:Encrypt without an identity grant, got {err:?}"
+    );
 }
 
 #[tokio::test]

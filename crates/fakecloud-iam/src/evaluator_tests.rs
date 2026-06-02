@@ -1894,3 +1894,150 @@ fn scp_caps_identity_side_of_resource_policy() {
         Decision::ImplicitDeny
     );
 }
+
+// --- KMS key-policy delegation (bug-audit 2026-05-28, 5.5) ----------
+
+const KMS_ACCT: &str = "123456789012";
+const KMS_KEY_ARN: &str = "arn:aws:kms:us-east-1:123456789012:key/k1";
+
+fn kms_identity_allow() -> PolicyDocument {
+    doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "kms:Decrypt", "Resource": "*"}]
+    }))
+}
+
+#[test]
+fn kms_nondelegating_key_policy_blocks_identity_grant() {
+    // Key policy grants only some other principal; it neither names this
+    // caller nor delegates to the account root. Identity allows kms:Decrypt,
+    // but AWS denies because identity is powerless without key-policy
+    // delegation.
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:user/bob"},
+            "Action": "kms:*",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[kms_identity_allow()], Some(&key_policy), &r, KMS_ACCT),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn kms_default_delegating_policy_plus_identity_allows() {
+    // Default "Enable IAM permissions" key policy delegates to the account
+    // root; the identity grant then takes effect.
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "kms:*",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[kms_identity_allow()], Some(&key_policy), &r, KMS_ACCT),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn kms_delegating_policy_without_identity_denies() {
+    // Delegation merely enables IAM; with no identity policy the request is
+    // denied.
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "kms:*",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[], Some(&key_policy), &r, KMS_ACCT),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn kms_direct_key_policy_grant_allows_without_identity() {
+    // Key policy names the principal directly -> allowed even with no identity
+    // policy.
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:user/alice"},
+            "Action": "kms:Decrypt",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[], Some(&key_policy), &r, KMS_ACCT),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn kms_explicit_deny_in_key_policy_wins() {
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+                "Action": "kms:*",
+                "Resource": "*"
+            },
+            {
+                "Effect": "Deny",
+                "Principal": {"AWS": "*"},
+                "Action": "kms:Decrypt",
+                "Resource": "*"
+            }
+        ]
+    }));
+    let r = req(&p, "kms:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[kms_identity_allow()], Some(&key_policy), &r, KMS_ACCT),
+        Decision::ExplicitDeny
+    );
+}
+
+#[test]
+fn kms_delegation_rule_is_case_insensitive_on_action_prefix() {
+    // IAM actions are case-insensitive; a mixed-case service prefix must still
+    // route through the KMS key-policy delegation rule, not the generic
+    // identity-OR-resource path (bug-audit 5.5 hardening).
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:user/bob"},
+            "Action": "kms:*",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "KMS:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[kms_identity_allow()], Some(&key_policy), &r, KMS_ACCT),
+        Decision::ImplicitDeny
+    );
+}
