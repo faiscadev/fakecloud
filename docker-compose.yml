@@ -8,13 +8,21 @@ services:
       - "4566:4566"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    # Lambda / RDS / ElastiCache / ECS publish their backing-container ports on
+    # the host loopback; the fakecloud container reaches them via
+    # host.docker.internal. Docker Desktop maps this automatically, but on
+    # native-Linux Docker it must be wired explicitly (matches install.md).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       FAKECLOUD_ADDR: "0.0.0.0:4566"
       FAKECLOUD_REGION: "us-east-1"
       FAKECLOUD_ACCOUNT_ID: "123456789012"
       FAKECLOUD_LOG: "info"
+    # The slim image ships no curl/wget — use the binary's own healthcheck
+    # subcommand, which probes 127.0.0.1:<port>/_fakecloud/health.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_fakecloud/health"]
+      test: ["CMD", "fakecloud", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 3

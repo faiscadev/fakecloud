@@ -77,6 +77,11 @@ use hooks::*;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    // `fakecloud healthcheck` probes a running server and exits — used by the
+    // container HEALTHCHECK so the slim published image needs no curl/wget.
+    if let Some(cli::Command::Healthcheck) = cli.command {
+        std::process::exit(run_healthcheck(&cli.addr));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_new(&cli.log_level)
@@ -7322,6 +7327,88 @@ fn fatal_exit(args: std::fmt::Arguments<'_>) -> ! {
     let _ = std::io::stderr().flush();
     std::process::exit(1);
 }
+
+/// Probe `<loopback>:<port>/_fakecloud/health` over a raw TCP request (the
+/// published image ships no curl/wget) and return a process exit code: 0 when
+/// the server answers `200 OK`, 1 otherwise. The port is taken from the same
+/// `--addr`/`FAKECLOUD_ADDR` the server binds, so the container HEALTHCHECK and
+/// the server agree without extra configuration.
+///
+/// The bind host decides which loopback to probe: a specific IP is used as-is,
+/// while a wildcard / unspecified bind (`0.0.0.0`, `::`, empty) is probed on
+/// both IPv4 and IPv6 loopback so a server listening only on `::` is still
+/// reported healthy.
+fn run_healthcheck(addr: &str) -> i32 {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let (host, port) = match split_host_port(addr) {
+        Some(hp) => hp,
+        None => {
+            eprintln!("healthcheck: could not parse host:port from addr {addr:?}");
+            return 1;
+        }
+    };
+    let candidates: Vec<IpAddr> = match host.parse::<IpAddr>() {
+        // Wildcard / unspecified bind: try both loopback families.
+        Ok(ip) if ip.is_unspecified() => {
+            vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ]
+        }
+        Ok(ip) => vec![ip],
+        // Non-IP host (e.g. "localhost" or empty): try both loopbacks.
+        Err(_) => vec![
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ],
+    };
+    for ip in &candidates {
+        if healthcheck_probe(*ip, port) {
+            return 0;
+        }
+    }
+    eprintln!("healthcheck: no healthy response on port {port} (tried {candidates:?})");
+    1
+}
+
+/// Split a bind address into its host and port. Handles bracketed IPv6
+/// (`[::1]:4566`), plain `host:port`, and `0.0.0.0:4566`.
+fn split_host_port(addr: &str) -> Option<(String, u16)> {
+    if let Some(rest) = addr.strip_prefix('[') {
+        // [ipv6]:port
+        let (host, tail) = rest.split_once(']')?;
+        let port = tail.strip_prefix(':')?.parse().ok()?;
+        return Some((host.to_string(), port));
+    }
+    let (host, port) = addr.rsplit_once(':')?;
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+/// Open one probe to `ip:port`, send the health request, and return whether the
+/// server answered with a 2xx status line.
+fn healthcheck_probe(ip: std::net::IpAddr, port: u16) -> bool {
+    use std::io::{Read, Write};
+    let timeout = std::time::Duration::from_secs(2);
+    let Ok(mut socket) = std::net::TcpStream::connect((ip, port)) else {
+        return false;
+    };
+    let _ = socket.set_read_timeout(Some(timeout));
+    let _ = socket.set_write_timeout(Some(timeout));
+    let request = "GET /_fakecloud/health HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if socket.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if socket.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    // Status line looks like `HTTP/1.0 200 OK`. Accept any 2xx.
+    response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .is_some_and(|code| code.starts_with('2'))
+}
 /// Route panics through `tracing::error!` so they show up in CI logs with
 /// the same formatting as regular errors. Runs the default hook afterwards
 /// so the process keeps its usual backtrace behaviour for developers
@@ -7617,6 +7704,89 @@ mod endpoint_url_tests {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    // Spawn a one-shot TCP server that replies with `status_line`, then probe
+    // it via run_healthcheck. Returns the exit code.
+    fn probe_with_status(status_line: &'static str) -> i32 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    format!("{status_line}\r\nConnection: close\r\n\r\nbody").as_bytes(),
+                );
+            }
+        });
+        let code = run_healthcheck(&format!("0.0.0.0:{port}"));
+        handle.join().unwrap();
+        code
+    }
+
+    #[test]
+    fn healthcheck_zero_on_2xx() {
+        assert_eq!(probe_with_status("HTTP/1.0 200 OK"), 0);
+    }
+
+    #[test]
+    fn healthcheck_one_on_5xx() {
+        assert_eq!(probe_with_status("HTTP/1.0 500 Internal Server Error"), 1);
+    }
+
+    #[test]
+    fn healthcheck_one_when_unreachable() {
+        // Grab a port then drop the listener so nothing is accepting on it.
+        let port = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert_eq!(run_healthcheck(&format!("0.0.0.0:{port}")), 1);
+    }
+
+    #[test]
+    fn healthcheck_one_on_unparseable_addr() {
+        assert_eq!(run_healthcheck("not-an-addr"), 1);
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv4_ipv6_and_wildcard() {
+        assert_eq!(
+            split_host_port("0.0.0.0:4566"),
+            Some(("0.0.0.0".to_string(), 4566))
+        );
+        assert_eq!(
+            split_host_port("[::1]:4566"),
+            Some(("::1".to_string(), 4566))
+        );
+        assert_eq!(split_host_port("[::]:80"), Some(("::".to_string(), 80)));
+        assert_eq!(split_host_port("no-colon"), None);
+    }
+
+    #[test]
+    fn healthcheck_probes_ipv6_loopback_when_bound_on_ipv6() {
+        // Cubic: a server bound on IPv6 must still be reported healthy. Bind an
+        // IPv6 loopback listener and probe it via a bracketed IPv6 addr.
+        use std::io::{Read, Write};
+        let listener = match std::net::TcpListener::bind(("::1", 0)) {
+            Ok(l) => l,
+            // Some CI sandboxes lack IPv6 loopback; skip rather than fail.
+            Err(_) => return,
+        };
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nok");
+            }
+        });
+        let code = run_healthcheck(&format!("[::1]:{port}"));
+        handle.join().unwrap();
+        assert_eq!(code, 0);
+    }
+
     #[test]
     fn announce_bound_port_uses_tagged_prefix() {
         let mut buf: Vec<u8> = Vec::new();
