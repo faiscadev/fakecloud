@@ -2,6 +2,7 @@ use crate::state::{AttributeValue, DynamoDbStreamRecord, DynamoTable, StreamReco
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Mint a strictly-monotonic, unique DynamoDB stream sequence number.
@@ -10,13 +11,29 @@ use uuid::Uuid;
 /// collides under batch writes in the same nanosecond and can go backwards on
 /// a coarse clock or NTP step. Since `AT_SEQUENCE_NUMBER`/`AFTER_SEQUENCE_NUMBER`
 /// iterators locate a record by exact match, a duplicate seq makes them replay
-/// or skip records. A process-global atomic counter guarantees every record
-/// gets a unique, monotonically increasing number (per-stream ordering is a
-/// monotonic subset of the global one). Zero-padded to a fixed width so the
-/// decimal strings also sort lexicographically. bug-audit 2026-05-28, 4.4.
+/// or skip records. An atomic counter guarantees every record gets a unique,
+/// monotonically increasing number (per-stream ordering is a monotonic subset
+/// of the global one).
+///
+/// The counter is *seeded once* from the current wall-clock nanoseconds rather
+/// than from 1. Stream records persist across restart (4.5), so a counter that
+/// reset to 1 on restart would re-mint sequence numbers that collide with
+/// already-persisted records. Seeding from the clock — which only moves forward
+/// between restarts — keeps every post-restart number above any minted before,
+/// while the atomic increment preserves uniqueness + monotonicity within a run.
+/// Zero-padded to a fixed width so the decimal strings sort lexicographically.
+/// bug-audit 2026-05-28, 4.4.
 fn next_stream_sequence() -> String {
-    static STREAM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-    format!("{:021}", STREAM_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+    static STREAM_SEQUENCE: OnceLock<AtomicU64> = OnceLock::new();
+    let counter = STREAM_SEQUENCE.get_or_init(|| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1)
+            .max(1);
+        AtomicU64::new(seed)
+    });
+    format!("{:021}", counter.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Generate a stream record for a table mutation.
@@ -113,6 +130,21 @@ mod tests {
             assert!(w[0] < w[1], "sequence numbers must strictly increase");
             assert_eq!(w[0].len(), w[1].len(), "fixed-width padding");
         }
+    }
+
+    #[test]
+    fn stream_sequence_numbers_seeded_above_low_persisted_values() {
+        // bug-audit 4.4 (Cubic): the counter is wall-clock seeded, not reset to
+        // 1, so post-restart numbers never collide with low sequence numbers
+        // already persisted from a prior run.
+        let seq = next_stream_sequence();
+        let n: u128 = seq.parse().unwrap();
+        // Nanoseconds since the 2017 epoch are well above 1e18; certainly above
+        // any handful of records a prior run would have minted from a low seed.
+        assert!(
+            n > 1_000_000_000_000_000_000,
+            "sequence not clock-seeded: {seq}"
+        );
     }
 
     #[test]
