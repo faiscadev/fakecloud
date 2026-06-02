@@ -646,6 +646,17 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
     }
 
     let same_account = request.principal.account_id == resource_account_id;
+    // KMS keys are governed by their key policy. Unlike the generic
+    // same-account `identity OR resource` rule, a KMS identity-policy grant
+    // only takes effect when the key policy delegates to the account's IAM
+    // (the default "Enable IAM permissions" root statement). A key policy that
+    // neither names the principal directly nor delegates to the account root
+    // makes identity grants powerless. bug-audit 2026-05-28, 5.5.
+    if same_account && request.action.starts_with("kms:") {
+        if let Some(policy) = resource_policy {
+            return evaluate_kms_same_account(policy, identity_gated, request);
+        }
+    }
     // Same-account with no resource policy: preserve the identity-only
     // path so rollouts without a bucket/topic policy behave as before.
     if resource_policy.is_none() && same_account {
@@ -672,10 +683,58 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
     }
 }
 
+/// Same-account KMS authorization. The key policy is the root of trust:
+///
+/// 1. An explicit `Deny` in the key policy denies.
+/// 2. A *direct* grant — the key policy names this specific principal (by ARN,
+///    service, or federation, not the account-wide root entry) — allows on its
+///    own.
+/// 3. Otherwise a key-policy `Allow` can only have come from the account-root /
+///    `"AWS": "*"` delegation, which merely *enables* IAM: the request is
+///    allowed only if an identity policy (already gated by boundary/session/SCP)
+///    also allows it.
+/// 4. A key policy that neither grants directly nor delegates denies, even if
+///    identity policies allow.
+fn evaluate_kms_same_account(
+    key_policy: &PolicyDocument,
+    identity_gated: Decision,
+    request: &EvalRequest<'_>,
+) -> Decision {
+    let policies = std::slice::from_ref(key_policy);
+    let full = evaluate_inner_scoped(policies, request, true, false);
+    if matches!(full, Decision::ExplicitDeny) {
+        return Decision::ExplicitDeny;
+    }
+    // Direct grant ignores the account-wide delegation entries.
+    let direct = evaluate_inner_scoped(policies, request, true, true);
+    if matches!(direct, Decision::Allow) {
+        return Decision::Allow;
+    }
+    // A non-direct key-policy Allow is the account-root delegation to IAM:
+    // identity policies now decide. No delegation (`full` not Allow) -> deny.
+    if matches!(full, Decision::Allow) && matches!(identity_gated, Decision::Allow) {
+        return Decision::Allow;
+    }
+    Decision::ImplicitDeny
+}
+
 fn evaluate_inner(
     policies: &[PolicyDocument],
     request: &EvalRequest<'_>,
     is_resource_policy: bool,
+) -> Decision {
+    evaluate_inner_scoped(policies, request, is_resource_policy, false)
+}
+
+/// As [`evaluate_inner`], but when `ignore_account_wide` is set, account-wide
+/// resource-policy principals (`"AWS": "*"` / account root) do not match. KMS
+/// evaluation uses this to isolate a direct grant of a specific principal from
+/// the account-root delegation entry.
+fn evaluate_inner_scoped(
+    policies: &[PolicyDocument],
+    request: &EvalRequest<'_>,
+    is_resource_policy: bool,
+    ignore_account_wide: bool,
 ) -> Decision {
     let mut allowed = false;
     for policy in policies {
@@ -699,7 +758,7 @@ fn evaluate_inner(
                     }
                 }
                 PrincipalPattern::Principal(refs) => {
-                    if !principal_matches(refs, request.principal) {
+                    if !principal_matches_scoped(refs, request.principal, ignore_account_wide) {
                         continue;
                     }
                 }
@@ -752,9 +811,23 @@ fn evaluate_inner(
 /// keep unimplemented principal types (`Federated`, `CanonicalUser`)
 /// from silently granting.
 fn principal_matches(refs: &[PrincipalRef], principal: &Principal) -> bool {
+    principal_matches_scoped(refs, principal, false)
+}
+
+/// As [`principal_matches`], but when `ignore_account_wide` is set the
+/// account-wide entries (`"AWS": "*"` and `arn:aws:iam::<acct>:root`) do not
+/// match. KMS evaluation uses this to tell a *direct* grant of a specific
+/// principal apart from the default "Enable IAM" account-root delegation.
+fn principal_matches_scoped(
+    refs: &[PrincipalRef],
+    principal: &Principal,
+    ignore_account_wide: bool,
+) -> bool {
     refs.iter().any(|r| match r {
-        PrincipalRef::AnyAws => true,
-        PrincipalRef::AwsAccountRoot(account) => &principal.account_id == account,
+        PrincipalRef::AnyAws => !ignore_account_wide,
+        PrincipalRef::AwsAccountRoot(account) => {
+            !ignore_account_wide && &principal.account_id == account
+        }
         PrincipalRef::AwsArn(arn) => &principal.arn == arn,
         PrincipalRef::Service(service) => principal_is_service(principal, service),
         PrincipalRef::Federated(provider) => principal_is_federated(principal, provider),
