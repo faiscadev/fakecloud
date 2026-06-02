@@ -178,8 +178,8 @@ mod tests {
         observe_stream_sequence(&high);
         let next: u64 = next_stream_sequence().parse().unwrap();
         assert!(
-            next >= 9_000_000_000_000_000_000,
-            "floor not raised: {next}"
+            next > 9_000_000_000_000_000_000,
+            "floor not strictly above observed: {next}"
         );
     }
 
