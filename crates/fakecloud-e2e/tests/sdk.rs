@@ -235,7 +235,14 @@ async fn sdk_elasticache_get_serverless_caches() {
         .find(|c| c.serverless_cache_name == "sdk-ec-serverless")
         .expect("sdk-ec-serverless");
     assert_eq!(cache.engine, "redis");
-    assert_eq!(cache.status, "available");
+    // The backing container starts asynchronously, so right after create the
+    // cache is "creating" and transitions to "available" (bug-audit 3.2). This
+    // test only verifies introspection lists the cache, so accept either.
+    assert!(
+        cache.status == "creating" || cache.status == "available",
+        "unexpected serverless cache status: {}",
+        cache.status
+    );
 }
 
 #[tokio::test]

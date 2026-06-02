@@ -45,9 +45,14 @@ async fn elasticache_create_cache_cluster_and_describe() {
 
     let cluster = create_resp.cache_cluster().expect("cache cluster");
     assert_eq!(cluster.cache_cluster_id(), Some("classic-cluster"));
-    assert_eq!(cluster.cache_cluster_status(), Some("available"));
+    assert_eq!(cluster.cache_cluster_status(), Some("creating"));
     assert_eq!(cluster.engine(), Some("redis"));
-    let arn = cluster.arn().expect("cluster arn");
+    let arn = cluster.arn().expect("cluster arn").to_string();
+
+    // The backing container starts in the background, so the cluster comes up
+    // as "creating"; wait for "available" before reading its endpoint
+    // (bug-audit 2026-05-28, 3.2).
+    helpers::wait_for_cache_cluster_available(&client, "classic-cluster", 120).await;
 
     let describe_resp = client
         .describe_cache_clusters()
@@ -683,7 +688,11 @@ async fn elasticache_create_replication_group_and_describe() {
     let group = create_resp.replication_group().expect("replication group");
     assert_eq!(group.replication_group_id(), Some("my-repl-group"));
     assert_eq!(group.description(), Some("My test replication group"));
-    assert_eq!(group.status(), Some("available"));
+    assert_eq!(group.status(), Some("creating"));
+
+    // Backing container starts in the background; wait for "available", then
+    // read the endpoint from the ready group (bug-audit 2026-05-28, 3.2).
+    let group = helpers::wait_for_replication_group_available(&client, "my-repl-group", 120).await;
 
     // Verify endpoint is populated and reachable
     let node_groups = group.node_groups();
@@ -1970,6 +1979,7 @@ async fn elasticache_test_failover() {
         .send()
         .await
         .unwrap();
+    helpers::wait_for_replication_group_available(&client, "fo-rg", 120).await;
 
     let response = client
         .test_failover()
@@ -2213,7 +2223,10 @@ async fn elasticache_create_serverless_cache_and_describe() {
 
     let cache = create_resp.serverless_cache().expect("serverless cache");
     assert_eq!(cache.serverless_cache_name(), Some("serverless-main"));
-    assert_eq!(cache.status(), Some("available"));
+    assert_eq!(cache.status(), Some("creating"));
+    // Backing container starts in the background; wait for "available" then read
+    // the endpoint from the ready cache (bug-audit 2026-05-28, 3.2).
+    let cache = helpers::wait_for_serverless_cache_available(&client, "serverless-main", 120).await;
     let endpoint = cache.endpoint().expect("endpoint");
     let addr = endpoint.address().expect("endpoint address");
     let port = endpoint.port().expect("endpoint port");
@@ -2559,7 +2572,10 @@ async fn elasticache_create_memcached_cluster_and_connect() {
     let cluster = create_resp.cache_cluster().expect("cache cluster");
     assert_eq!(cluster.engine(), Some("memcached"));
     assert_eq!(cluster.engine_version(), Some("1.6.22"));
-    assert_eq!(cluster.cache_cluster_status(), Some("available"));
+    assert_eq!(cluster.cache_cluster_status(), Some("creating"));
+
+    // Backing container starts in the background; wait before reading endpoint.
+    helpers::wait_for_cache_cluster_available(&client, "mc-cluster", 120).await;
 
     let describe = client
         .describe_cache_clusters()
@@ -3045,8 +3061,13 @@ async fn elasticache_memcached_cluster_emits_configuration_endpoint() {
         .await
         .unwrap();
 
-    let cluster = create_resp.cache_cluster().expect("cache cluster");
-    assert_eq!(cluster.engine(), Some("memcached"));
+    assert_eq!(
+        create_resp.cache_cluster().and_then(|c| c.engine()),
+        Some("memcached")
+    );
+    // Backing container starts in the background; the configuration endpoint
+    // port is filled in once it is ready (bug-audit 2026-05-28, 3.2).
+    let cluster = helpers::wait_for_cache_cluster_available(&client, "memc-config", 120).await;
     let ep = cluster
         .configuration_endpoint()
         .expect("memcached cluster must emit ConfigurationEndpoint");
@@ -3171,18 +3192,17 @@ async fn elasticache_modify_user_applies_acl_to_running_redis() {
         .await
         .unwrap();
 
-    let rg = client
+    client
         .create_replication_group()
         .replication_group_id("acl-rg")
         .replication_group_description("acl test")
         .user_group_ids("aclgroup")
         .send()
         .await
-        .unwrap()
-        .replication_group()
-        .expect("replication group")
-        .clone();
+        .unwrap();
 
+    // Backing container starts in the background; wait for the endpoint port.
+    let rg = helpers::wait_for_replication_group_available(&client, "acl-rg", 120).await;
     let port = rg
         .node_groups()
         .first()
@@ -3247,18 +3267,17 @@ async fn elasticache_modify_cache_parameter_group_applies_config_set() {
         .await
         .unwrap();
 
-    let cluster = client
+    client
         .create_cache_cluster()
         .cache_cluster_id("param-cluster")
         .cache_parameter_group_name("param-test")
         .cache_node_type("cache.t3.micro")
         .send()
         .await
-        .unwrap()
-        .cache_cluster()
-        .expect("cache cluster")
-        .clone();
+        .unwrap();
 
+    // Backing container starts in the background; wait for the endpoint port.
+    let cluster = helpers::wait_for_cache_cluster_available(&client, "param-cluster", 120).await;
     let port = cluster.cache_nodes()[0]
         .endpoint()
         .expect("cache node endpoint")

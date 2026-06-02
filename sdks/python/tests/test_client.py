@@ -212,7 +212,9 @@ def test_elasticache_get_serverless_caches(
         if c.serverless_cache_name == "py-sdk-ec-serverless"
     )
     assert cache.engine == "redis"
-    assert cache.status == "available"
+    # Backing container starts asynchronously; status is "creating" right after
+    # create and transitions to "available" (bug-audit 3.2).
+    assert cache.status in ("creating", "available")
 
 
 # ── Reset ─────────────────────────────────────────────────────────────

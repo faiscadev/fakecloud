@@ -425,7 +425,11 @@ class E2ETest {
                 .findFirst()
                 .orElseThrow();
         assertEquals("redis", cache.engine());
-        assertEquals("available", cache.status());
+        // Backing container starts asynchronously; status is "creating" right
+        // after create and transitions to "available" (bug-audit 3.2).
+        assertTrue(
+                "creating".equals(cache.status()) || "available".equals(cache.status()),
+                "unexpected status: " + cache.status());
     }
 
     // ── Bedrock introspection ──────────────────────────────────────

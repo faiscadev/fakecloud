@@ -156,29 +156,13 @@ impl ElastiCacheService {
                 .and_then(|snap| snap.rdb_path.clone())
         };
 
-        let running = if let Some(runtime) = self.runtime.as_ref() {
-            match runtime
-                .ensure_redis(&replication_group_id, rdb_path.as_deref())
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    self.state
-                        .write()
-                        .get_or_create(&request.account_id)
-                        .cancel_replication_group_creation(&replication_group_id);
-                    return Err(runtime_error_to_service_error(e));
-                }
-            }
-        } else {
-            // No container runtime: degrade to metadata-only replication
-            // group. The control-plane response shape is unaffected and
-            // describe/modify/delete still work; only the data plane
-            // (connecting to the endpoint) is unavailable.
-            crate::runtime::RunningCacheContainer {
-                container_id: String::new(),
-                host_port: 0,
-            }
+        // The backing container is started off the request path (below), so the
+        // group begins life with no endpoint port and is filled in once ready.
+        // Blocking the response on the cold image pull + readiness made the AWS
+        // CLI hit its 60s read timeout (bug-audit 2026-05-28, 3.2).
+        let running = crate::runtime::RunningCacheContainer {
+            container_id: String::new(),
+            host_port: 0,
         };
 
         let member_clusters: Vec<String> = (1..=num_cache_clusters)
@@ -201,7 +185,11 @@ impl ElastiCacheService {
             description,
             global_replication_group_id: None,
             global_replication_group_role: None,
-            status: "available".to_string(),
+            status: if self.runtime.is_some() {
+                "creating".to_string()
+            } else {
+                "available".to_string()
+            },
             cache_node_type,
             engine,
             engine_version,
@@ -263,6 +251,64 @@ impl ElastiCacheService {
             if !tags.is_empty() {
                 merge_tags(state.tags.entry(arn).or_default(), &tags);
             }
+        }
+
+        // Start the backing container off the request path and flip the group
+        // to "available" (filling in the endpoint port) once it is ready.
+        if let Some(runtime) = self.runtime.clone() {
+            let state = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let account_id = request.account_id.clone();
+            let id = replication_group_id.clone();
+            let cluster_enabled_flag = cluster_enabled;
+            tokio::spawn(async move {
+                let result = runtime.ensure_redis(&id, rdb_path.as_deref()).await;
+                let mut stop_container = false;
+                {
+                    let mut accounts = state.write();
+                    if let Some(s) = accounts.get_mut(&account_id) {
+                        match &result {
+                            Ok(running) => {
+                                if let Some(g) = s.replication_groups.get_mut(&id) {
+                                    g.status = "available".to_string();
+                                    g.endpoint_address = "127.0.0.1".to_string();
+                                    g.endpoint_port = running.host_port;
+                                    g.host_port = running.host_port;
+                                    g.container_id = running.container_id.clone();
+                                    if cluster_enabled_flag {
+                                        g.configuration_endpoint_address =
+                                            Some("127.0.0.1".to_string());
+                                        g.configuration_endpoint_port = Some(running.host_port);
+                                    }
+                                } else {
+                                    // Deleted during startup: the container came
+                                    // up but the group is gone — reap it after
+                                    // the lock is released so it isn't orphaned.
+                                    stop_container = true;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    %error,
+                                    replication_group_id = %id,
+                                    "failed to start elasticache replication group container",
+                                );
+                                if let Some(g) = s.replication_groups.get_mut(&id) {
+                                    g.status = "incompatible-network".to_string();
+                                }
+                            }
+                        }
+                    } else {
+                        // Whole account gone; reap a started container.
+                        stop_container = result.is_ok();
+                    }
+                }
+                if stop_container {
+                    runtime.stop_container(&id).await;
+                }
+                save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+            });
         }
         if !user_group_ids.is_empty() {
             self.apply_acls_for_replication_group(&request.account_id, &replication_group_id)

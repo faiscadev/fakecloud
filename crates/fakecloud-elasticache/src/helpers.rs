@@ -1432,22 +1432,6 @@ pub(crate) fn user_group_xml(g: &ElastiCacheUserGroup) -> String {
     )
 }
 
-pub(crate) fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
-    match error {
-        RuntimeError::Unavailable => AwsServiceError::aws_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "InvalidParameterValue",
-            "Docker/Podman is required for ElastiCache replication groups but is not available"
-                .to_string(),
-        ),
-        RuntimeError::ContainerStartFailed(msg) => AwsServiceError::aws_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "InvalidParameterValue",
-            format!("Failed to start Redis container: {msg}"),
-        ),
-    }
-}
-
 pub(crate) fn add_cluster_to_replication_group(
     state: &mut ElastiCacheState,
     replication_group_id: &str,

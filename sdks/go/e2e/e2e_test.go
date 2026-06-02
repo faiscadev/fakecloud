@@ -239,28 +239,43 @@ func TestE2EElastiCacheClusters(t *testing.T) {
 	}
 
 	fc := fakecloud.New(fakecloudURL)
-	resp, err := fc.ElastiCache().GetClusters(ctx)
-	if err != nil {
-		t.Fatalf("ElastiCache().GetClusters() failed: %v", err)
-	}
 
-	found := false
-	for _, cluster := range resp.Clusters {
-		if cluster.CacheClusterID == "sdk-go-ec-cluster" {
-			found = true
-			if cluster.Engine != "redis" {
-				t.Fatalf("expected redis engine, got %s", cluster.Engine)
-			}
-			if cluster.NumCacheNodes != 1 {
-				t.Fatalf("expected 1 cache node, got %d", cluster.NumCacheNodes)
-			}
-			if cluster.ContainerID == nil || *cluster.ContainerID == "" {
-				t.Fatal("expected container id")
+	// The backing container starts asynchronously (bug-audit 3.2), so poll the
+	// introspection endpoint until the cluster reaches "available".
+	var found *fakecloud.ElastiCacheCluster
+	for i := 0; i < 120; i++ {
+		resp, err := fc.ElastiCache().GetClusters(ctx)
+		if err != nil {
+			t.Fatalf("ElastiCache().GetClusters() failed: %v", err)
+		}
+		found = nil
+		for idx := range resp.Clusters {
+			if resp.Clusters[idx].CacheClusterID == "sdk-go-ec-cluster" {
+				found = &resp.Clusters[idx]
+				break
 			}
 		}
+		if found != nil && found.CacheClusterStatus == "available" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	if !found {
-		t.Fatal("expected to find sdk-go-ec-cluster via introspection")
+	if found == nil || found.CacheClusterStatus != "available" {
+		t.Fatal("expected to find sdk-go-ec-cluster 'available' via introspection")
+	}
+	if found.Engine != "redis" {
+		t.Fatalf("expected redis engine, got %s", found.Engine)
+	}
+	if found.NumCacheNodes != 1 {
+		t.Fatalf("expected 1 cache node, got %d", found.NumCacheNodes)
+	}
+	// A real backing container exposes a host port + container id; without a
+	// container runtime the cluster is metadata-only (host port 0), so only
+	// assert the container id when a container actually started.
+	if found.HostPort != nil && *found.HostPort != 0 {
+		if found.ContainerID == nil || *found.ContainerID == "" {
+			t.Fatal("expected container id for a running cluster")
+		}
 	}
 }
 
@@ -339,8 +354,10 @@ func TestE2EElastiCacheServerlessCaches(t *testing.T) {
 			if cache.Engine != "redis" {
 				t.Fatalf("expected redis engine, got %s", cache.Engine)
 			}
-			if cache.Status != "available" {
-				t.Fatalf("expected available status, got %s", cache.Status)
+			// Backing container starts asynchronously; status is "creating"
+			// right after create and transitions to "available" (bug-audit 3.2).
+			if cache.Status != "available" && cache.Status != "creating" {
+				t.Fatalf("expected available or creating status, got %s", cache.Status)
 			}
 		}
 	}

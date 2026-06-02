@@ -10,7 +10,7 @@ use fakecloud_core::query::{optional_query_param, query_response_xml, required_q
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
-use crate::runtime::{ElastiCacheRuntime, RuntimeError};
+use crate::runtime::ElastiCacheRuntime;
 use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheCluster, CacheEngineVersion,
     CacheParameterGroup, CacheSnapshot, CacheSubnetGroup, ElastiCacheSnapshot, ElastiCacheState,
