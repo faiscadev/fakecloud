@@ -685,8 +685,30 @@ impl CloudFormationService {
         )?;
 
         let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
-        let resources =
-            provision_stack_resources(&provisioner, &parsed.resources, template_body, &parameters)?;
+        // Provisioning is synchronous and can run for a long time — cold image
+        // pulls, and custom-resource Lambda invokes that block on their own
+        // runtime (`invoke_lambda_sync`). On the multi-threaded server runtime,
+        // run it via `block_in_place` so the current worker is handed off and a
+        // replacement keeps serving other requests; otherwise enough concurrent
+        // CreateStack calls would starve the worker pool and stall unrelated
+        // requests server-wide (bug-audit 2026-05-28, 3.1). Outside a
+        // multi-thread runtime (unit tests / current-thread), provision inline.
+        let resources = {
+            let provision = || {
+                provision_stack_resources(
+                    &provisioner,
+                    &parsed.resources,
+                    template_body,
+                    &parameters,
+                )
+            };
+            match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+                Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+                    tokio::task::block_in_place(provision)
+                }
+                _ => provision(),
+            }
+        }?;
 
         let outputs =
             Self::resolve_template_outputs(template_body, &parameters, &resources, &self.state);
