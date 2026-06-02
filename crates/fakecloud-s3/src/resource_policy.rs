@@ -56,6 +56,21 @@ impl ResourcePolicyProvider for S3ResourcePolicyProvider {
             .get(bucket_name)
             .and_then(|b| b.policy.clone())
     }
+
+    fn resource_owner_account(&self, service: &str, resource_arn: &str) -> Option<String> {
+        if !service.eq_ignore_ascii_case("s3") {
+            return None;
+        }
+        // S3 ARNs carry no account, so resolve the bucket's owner from state.
+        // This lets the dispatcher detect cross-account access (account A
+        // reaching account B's bucket) and require B's bucket policy to grant
+        // it, instead of falling back to the caller's account and treating it
+        // as same-account (bug-audit 2026-05-28, 5.3).
+        let bucket_name = parse_bucket_name(resource_arn)?;
+        let mas = self.state.read();
+        mas.find_account(|s| s.buckets.contains_key(bucket_name))
+            .map(|a| a.to_string())
+    }
 }
 
 /// Extract the bucket name from an S3 ARN.
@@ -144,6 +159,45 @@ mod tests {
         let provider = S3ResourcePolicyProvider::new(state);
         assert_eq!(
             provider.resource_policy("s3", "arn:aws:s3:::mybucket"),
+            None
+        );
+    }
+
+    #[test]
+    fn resource_owner_account_resolves_bucket_owner() {
+        // bug-audit 5.3: a bucket owned by account B must report B as its
+        // owner so the dispatcher detects cross-account access from account A
+        // and requires B's bucket policy to grant it.
+        let mut mas: fakecloud_core::multi_account::MultiAccountState<S3State> =
+            fakecloud_core::multi_account::MultiAccountState::new("111111111111", "us-east-1", "");
+        let s = mas.get_or_create("222222222222");
+        s.buckets.insert(
+            "acct-b-bucket".to_string(),
+            S3Bucket::new("acct-b-bucket", "us-east-1", "owner"),
+        );
+        let provider = S3ResourcePolicyProvider::new(Arc::new(RwLock::new(mas)));
+        assert_eq!(
+            provider.resource_owner_account("s3", "arn:aws:s3:::acct-b-bucket"),
+            Some("222222222222".to_string())
+        );
+    }
+
+    #[test]
+    fn resource_owner_account_none_for_unknown_bucket() {
+        let state = state_with_bucket("mybucket", None);
+        let provider = S3ResourcePolicyProvider::new(state);
+        assert_eq!(
+            provider.resource_owner_account("s3", "arn:aws:s3:::ghost"),
+            None
+        );
+    }
+
+    #[test]
+    fn resource_owner_account_none_for_non_s3_service() {
+        let state = state_with_bucket("mybucket", None);
+        let provider = S3ResourcePolicyProvider::new(state);
+        assert_eq!(
+            provider.resource_owner_account("sqs", "arn:aws:s3:::mybucket"),
             None
         );
     }
