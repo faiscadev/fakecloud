@@ -789,6 +789,7 @@ async fn main() {
             firehose: firehose_state.clone(),
             glue: glue_state.clone(),
             delivery: delivery_for_cf,
+            lambda_runtime: container_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {

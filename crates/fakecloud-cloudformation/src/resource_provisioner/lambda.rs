@@ -141,6 +141,36 @@ impl ResourceProvisioner {
             last_update_status_reason_code: None,
         };
 
+        // Pre-pull the runtime image in the background so the first Invoke of
+        // this CFN-provisioned function doesn't pay the cold-pull cost (the
+        // #1539 timeout, through the CloudFormation door — mirrors the
+        // CreateFunction path in the lambda service). Best-effort: Invoke still
+        // re-pulls as a fallback, so a pre-pull error is not fatal, and we only
+        // spawn when a Tokio runtime is active (provisioning runs inside the
+        // async request handler; unit tests that call the provisioner directly
+        // have no runtime and simply skip the warm-up).
+        if let Some(runtime) = self.lambda_runtime.clone() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let func_for_prepull = func.clone();
+                let name = function_name.clone();
+                handle.spawn(async move {
+                    match runtime.prepull_for_function(&func_for_prepull).await {
+                        Some(Ok(())) => {
+                            tracing::info!(function = %name, "pre-pulled CFN Lambda runtime image");
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!(
+                                function = %name,
+                                error = %e,
+                                "CFN Lambda runtime image pre-pull failed; Invoke will retry on cold path"
+                            );
+                        }
+                        None => {} // no resolvable image (e.g. unsupported runtime)
+                    }
+                });
+            }
+        }
+
         let mut accounts = self.lambda_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.functions.insert(function_name.clone(), func);

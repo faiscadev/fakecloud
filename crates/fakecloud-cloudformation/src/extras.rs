@@ -1908,6 +1908,7 @@ mod tests {
             )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
+            lambda_runtime: None,
         }
     }
 

@@ -860,6 +860,10 @@ pub struct ResourceProvisioner {
     pub glue_state: fakecloud_glue::SharedGlueState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
+    /// Lambda container runtime for pre-pulling CFN-provisioned function
+    /// images (see `CloudFormationDeps::lambda_runtime`). `None` outside a
+    /// configured runtime (e.g. unit tests).
+    pub lambda_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
@@ -5932,6 +5936,7 @@ mod tests {
                 fakecloud_glue::GlueAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
+            lambda_runtime: None,
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),
