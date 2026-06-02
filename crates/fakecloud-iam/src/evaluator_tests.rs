@@ -2019,3 +2019,25 @@ fn kms_explicit_deny_in_key_policy_wins() {
         Decision::ExplicitDeny
     );
 }
+
+#[test]
+fn kms_delegation_rule_is_case_insensitive_on_action_prefix() {
+    // IAM actions are case-insensitive; a mixed-case service prefix must still
+    // route through the KMS key-policy delegation rule, not the generic
+    // identity-OR-resource path (bug-audit 5.5 hardening).
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let key_policy = doc(json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:user/bob"},
+            "Action": "kms:*",
+            "Resource": "*"
+        }]
+    }));
+    let r = req(&p, "KMS:Decrypt", KMS_KEY_ARN);
+    assert_eq!(
+        evaluate_with_resource_policy(&[kms_identity_allow()], Some(&key_policy), &r, KMS_ACCT),
+        Decision::ImplicitDeny
+    );
+}

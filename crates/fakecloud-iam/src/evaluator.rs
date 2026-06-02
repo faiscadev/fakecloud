@@ -652,7 +652,14 @@ pub fn evaluate_with_resource_policy_and_gates_and_scps(
     // (the default "Enable IAM permissions" root statement). A key policy that
     // neither names the principal directly nor delegates to the account root
     // makes identity grants powerless. bug-audit 2026-05-28, 5.5.
-    if same_account && request.action.starts_with("kms:") {
+    // IAM actions are case-insensitive, so match the `kms:` service prefix
+    // case-insensitively rather than letting a mixed-case `KMS:Decrypt` slip
+    // past the key-policy delegation rule.
+    let is_kms = request
+        .action
+        .split_once(':')
+        .is_some_and(|(svc, _)| svc.eq_ignore_ascii_case("kms"));
+    if same_account && is_kms {
         if let Some(policy) = resource_policy {
             return evaluate_kms_same_account(policy, identity_gated, request);
         }
