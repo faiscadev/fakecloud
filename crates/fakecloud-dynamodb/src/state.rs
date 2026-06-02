@@ -27,7 +27,14 @@ mod stream_records_serde {
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<Arc<RwLock<Vec<StreamRecord>>>, D::Error> {
-        Ok(Arc::new(RwLock::new(Vec::<StreamRecord>::deserialize(d)?)))
+        let records = Vec::<StreamRecord>::deserialize(d)?;
+        // Raise the in-memory sequence-number floor above every persisted
+        // record so newly-minted numbers cannot collide with them after a
+        // restart, even if the wall-clock seed went backwards (4.4 / Cubic).
+        for r in &records {
+            crate::streams::observe_stream_sequence(&r.dynamodb.sequence_number);
+        }
+        Ok(Arc::new(RwLock::new(records)))
     }
 }
 
