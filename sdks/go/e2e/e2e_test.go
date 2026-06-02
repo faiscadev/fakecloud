@@ -339,8 +339,10 @@ func TestE2EElastiCacheServerlessCaches(t *testing.T) {
 			if cache.Engine != "redis" {
 				t.Fatalf("expected redis engine, got %s", cache.Engine)
 			}
-			if cache.Status != "available" {
-				t.Fatalf("expected available status, got %s", cache.Status)
+			// Backing container starts asynchronously; status is "creating"
+			// right after create and transitions to "available" (bug-audit 3.2).
+			if cache.Status != "available" && cache.Status != "creating" {
+				t.Fatalf("expected available or creating status, got %s", cache.Status)
 			}
 		}
 	}

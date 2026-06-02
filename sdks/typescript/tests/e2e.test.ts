@@ -214,7 +214,9 @@ describe("elasticache", () => {
     );
     expect(cache).toBeDefined();
     expect(cache!.engine).toBe("redis");
-    expect(cache!.status).toBe("available");
+    // The backing container starts asynchronously, so the cache is "creating"
+    // right after create and transitions to "available" (bug-audit 3.2).
+    expect(["creating", "available"]).toContain(cache!.status);
   });
 });
 

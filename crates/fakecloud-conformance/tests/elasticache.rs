@@ -194,7 +194,9 @@ async fn elasticache_create_replication_group() {
 
     let group = response.replication_group().expect("replication group");
     assert_eq!(group.replication_group_id(), Some("test-repl-group"));
-    assert_eq!(group.status(), Some("available"));
+    // CreateReplicationGroup returns "creating"; the backing container starts
+    // asynchronously (matches real AWS — bug-audit 2026-05-28, 3.2).
+    assert_eq!(group.status(), Some("creating"));
 }
 
 #[test_action("elasticache", "CreateGlobalReplicationGroup", checksum = "5a6b779c")]
@@ -245,7 +247,10 @@ async fn elasticache_create_cache_cluster() {
 
     let cluster = response.cache_cluster().expect("cache cluster");
     assert_eq!(cluster.cache_cluster_id(), Some("test-cache-cluster"));
-    assert_eq!(cluster.cache_cluster_status(), Some("available"));
+    // CreateCacheCluster returns "creating"; the backing container is started
+    // asynchronously and the cluster transitions to "available" (matches real
+    // AWS — bug-audit 2026-05-28, 3.2).
+    assert_eq!(cluster.cache_cluster_status(), Some("creating"));
     assert_eq!(cluster.engine(), Some("redis"));
 }
 
@@ -991,7 +996,13 @@ async fn elasticache_test_failover() {
 
     let group = response.replication_group().expect("replication group");
     assert_eq!(group.replication_group_id(), Some("fo-repl-group"));
-    assert_eq!(group.status(), Some("available"));
+    // The backing container starts asynchronously, so the group may still be
+    // "creating" when TestFailover runs right after create (bug-audit 3.2).
+    assert!(
+        matches!(group.status(), Some("creating") | Some("available")),
+        "unexpected status: {:?}",
+        group.status()
+    );
 }
 
 #[test_action("elasticache", "CreateServerlessCache", checksum = "f551fb86")]
@@ -1016,7 +1027,9 @@ async fn elasticache_create_serverless_cache() {
     let cache = response.serverless_cache().expect("serverless cache");
     assert_eq!(cache.serverless_cache_name(), Some("test-serverless"));
     assert_eq!(cache.engine(), Some("redis"));
-    assert_eq!(cache.status(), Some("available"));
+    // CreateServerlessCache returns "creating"; the backing container starts
+    // asynchronously (matches real AWS — bug-audit 2026-05-28, 3.2).
+    assert_eq!(cache.status(), Some("creating"));
 }
 
 #[test_action("elasticache", "DescribeServerlessCaches", checksum = "130bb42b")]
