@@ -158,6 +158,10 @@ Your Postgres integration tests run against a real Postgres that RDS manages. No
 
 If you want the RDS API + real engines without paying LocalStack Pro, fakecloud is the option.
 
+## Running inside Kubernetes
+
+Running fakecloud inside Kubernetes? Set `FAKECLOUD_RDS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) and DB instances run as native Pods instead of Docker containers — no docker-in-docker. See the [Kubernetes backend guide](/docs/guides/kubernetes-backend/).
+
 ## Links
 
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`

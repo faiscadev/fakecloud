@@ -1,12 +1,12 @@
 +++
-title = "Kubernetes backend for Lambda"
-description = "Run fakecloud Lambda functions as native Kubernetes Pods instead of Docker containers. Avoid docker-in-docker, get real resource limits, debug with kubectl."
+title = "Kubernetes backend"
+description = "Run fakecloud's container-backed services (Lambda, ECS, RDS, ElastiCache) as native Kubernetes Pods instead of Docker containers. Avoid docker-in-docker, get real resource limits, debug with kubectl."
 weight = 30
 +++
 
-By default, fakecloud executes Lambda functions in Docker containers via `docker run`. When fakecloud itself runs inside Kubernetes (CI pipelines, multi-tenant test clusters), that means docker-in-docker: privileged pods, opaque resource accounting, and harder debugging.
+By default, fakecloud runs its container-backed services — Lambda, ECS, RDS, ElastiCache — in Docker containers via `docker run`. When fakecloud itself runs inside Kubernetes (CI pipelines, multi-tenant test clusters), that means docker-in-docker: privileged pods, opaque resource accounting, and harder debugging.
 
-The Kubernetes backend (issue [#1234](https://github.com/faiscadev/fakecloud/issues/1234)) replaces the Docker path with native Pods. Each Lambda function gets a Pod sized from the function's `MemorySize`, executes the AWS Runtime Interface Emulator image, and is reused across invocations exactly like a warm Docker container.
+The Kubernetes backend (issue [#1234](https://github.com/faiscadev/fakecloud/issues/1234)) replaces the Docker path with native Pods. Flip the whole stack with `FAKECLOUD_CONTAINER_BACKEND=k8s`, or opt a single service in/out with its `FAKECLOUD_<SERVICE>_BACKEND` variable. Each Lambda function gets a Pod sized from the function's `MemorySize`, executes the AWS Runtime Interface Emulator image, and is reused across invocations exactly like a warm Docker container; ECS tasks, RDS instances, and ElastiCache nodes get Pods too (see the per-service sections below).
 
 ## When to use it
 
