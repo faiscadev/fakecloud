@@ -174,6 +174,7 @@ jobs:
           publish fakecloud-aws
           publish fakecloud-sdk
           publish fakecloud-persistence
+          publish fakecloud-k8s   # only external deps (kube/k8s-openapi); dependents: lambda/elasticache/rds/ecs/server
 
           # Layer 2: depends on fakecloud-aws
           publish fakecloud-core
