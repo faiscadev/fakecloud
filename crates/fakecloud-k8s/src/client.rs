@@ -144,18 +144,21 @@ impl K8sClient {
         loop {
             let pod = api.get(name).await?;
             let status = pod.status.as_ref();
+            let phase = status.and_then(|s| s.phase.as_deref()).unwrap_or("Unknown");
+            // Fail fast on a terminal phase regardless of whether an IP was
+            // ever assigned — a Pod that crashes before getting an IP should
+            // error immediately, not wait out the full timeout.
+            if let "Failed" | "Succeeded" = phase {
+                return Err(K8sError::Other(format!(
+                    "pod {name} reached terminal phase {phase} during startup"
+                )));
+            }
             let ip = status
                 .and_then(|s| s.pod_ip.as_ref())
                 .filter(|s| !s.is_empty());
             if let Some(ip) = ip {
-                match status.and_then(|s| s.phase.as_deref()).unwrap_or("Unknown") {
-                    "Running" => return Ok(ip.clone()),
-                    phase @ ("Failed" | "Succeeded") => {
-                        return Err(K8sError::Other(format!(
-                            "pod {name} reached terminal phase {phase} during startup"
-                        )));
-                    }
-                    _ => {}
+                if phase == "Running" {
+                    return Ok(ip.clone());
                 }
             }
             if Instant::now() >= deadline {

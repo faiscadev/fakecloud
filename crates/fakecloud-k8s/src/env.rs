@@ -77,9 +77,16 @@ impl K8sEnv {
             None => (self_host.clone(), self_port),
         };
 
-        let namespace =
-            std::env::var("FAKECLOUD_K8S_NAMESPACE").unwrap_or_else(|_| "default".to_string());
-        let pull_secret = std::env::var("FAKECLOUD_K8S_PULL_SECRET").ok();
+        // An explicitly-empty value is treated as unset: an empty namespace
+        // is invalid, and an empty pull-secret name would attach a bogus
+        // imagePullSecrets reference.
+        let namespace = std::env::var("FAKECLOUD_K8S_NAMESPACE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let pull_secret = std::env::var("FAKECLOUD_K8S_PULL_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
 
         Ok(Self {
             namespace,
@@ -108,12 +115,27 @@ mod tests {
         "FAKECLOUD_K8S_PULL_SECRET",
     ];
 
+    /// Restores saved env vars on drop, so a panicking test closure can't
+    /// leak its mutated environment into the next test.
+    struct EnvGuard(Vec<(String, Option<String>)>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     fn with_env(set: &[(&str, &str)], f: impl FnOnce()) {
-        let _g = ENV_LOCK.lock().unwrap();
-        let saved: Vec<(String, Option<String>)> = VARS
-            .iter()
-            .map(|k| (k.to_string(), std::env::var(k).ok()))
-            .collect();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _restore = EnvGuard(
+            VARS.iter()
+                .map(|k| (k.to_string(), std::env::var(k).ok()))
+                .collect(),
+        );
         for k in VARS {
             std::env::remove_var(k);
         }
@@ -121,12 +143,6 @@ mod tests {
             std::env::set_var(k, v);
         }
         f();
-        for (k, v) in saved {
-            match v {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
     }
 
     #[test]
@@ -181,6 +197,22 @@ mod tests {
                 assert_eq!(env.ecr_port, 5000);
                 assert_eq!(env.namespace, "fc");
                 assert_eq!(env.pull_secret.as_deref(), Some("ecr-secret"));
+            },
+        );
+    }
+
+    #[test]
+    fn empty_namespace_and_pull_secret_treated_as_unset() {
+        with_env(
+            &[
+                ("FAKECLOUD_K8S_SELF_URL", "http://fakecloud.svc:4566"),
+                ("FAKECLOUD_K8S_NAMESPACE", "  "),
+                ("FAKECLOUD_K8S_PULL_SECRET", ""),
+            ],
+            || {
+                let env = K8sEnv::from_env(4566).unwrap();
+                assert_eq!(env.namespace, "default");
+                assert_eq!(env.pull_secret, None);
             },
         );
     }

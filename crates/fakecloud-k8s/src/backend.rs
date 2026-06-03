@@ -66,12 +66,29 @@ mod tests {
     // Env vars are process-global; serialize the tests that mutate them.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Restores saved env vars on drop, so a panicking test closure can't
+    /// leak its mutated environment into the next test.
+    struct EnvGuard(Vec<(String, Option<String>)>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     fn with_env(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
-        let _g = ENV_LOCK.lock().unwrap();
-        let saved: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-            .collect();
+        // Tolerate a poisoned lock from an earlier panicking test — the
+        // EnvGuard already restored the environment, so the data is sound.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _restore = EnvGuard(
+            vars.iter()
+                .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+                .collect(),
+        );
         for (k, v) in vars {
             match v {
                 Some(v) => std::env::set_var(k, v),
@@ -79,12 +96,6 @@ mod tests {
             }
         }
         f();
-        for (k, v) in saved {
-            match v {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
     }
 
     const SVC: &str = "FAKECLOUD_ELASTICACHE_BACKEND";

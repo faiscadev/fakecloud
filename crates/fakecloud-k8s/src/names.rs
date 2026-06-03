@@ -10,11 +10,12 @@
 pub const DNS1123_MAX: usize = 63;
 
 /// Lowercase + replace anything outside `[a-z0-9-]` with `-`, then trim
-/// trailing dashes so the result ends in an alphanumeric (a DNS-1123
-/// label requirement). Does not enforce the length cap — callers that
-/// need a bounded label should truncate the result.
+/// leading and trailing dashes so the result both starts and ends in an
+/// alphanumeric (DNS-1123 label requirements — a leading dash is just as
+/// invalid as a trailing one). Does not enforce the length cap — callers
+/// that need a bounded label should truncate the result.
 pub fn label_safe(s: &str) -> String {
-    let mut out: String = s
+    let out: String = s
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -24,10 +25,7 @@ pub fn label_safe(s: &str) -> String {
             }
         })
         .collect();
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
+    out.trim_matches('-').to_string()
 }
 
 /// 12-char hex projection of an arbitrary string. Used to suffix Pod
@@ -78,6 +76,14 @@ mod tests {
     #[test]
     fn label_safe_trims_trailing_dashes() {
         assert_eq!(label_safe("foo___"), "foo");
+    }
+
+    #[test]
+    fn label_safe_trims_leading_dashes() {
+        // A leading non-alphanumeric must not produce a leading dash —
+        // that's an invalid DNS-1123 label value.
+        assert_eq!(label_safe("_foo"), "foo");
+        assert_eq!(label_safe(".9lives-"), "9lives");
     }
 
     #[test]
