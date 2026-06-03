@@ -214,10 +214,30 @@ impl EcsRuntime {
         let mut marked_running = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(300);
         loop {
-            let pod = api
-                .get(&pod_name)
-                .await
-                .map_err(|e| RuntimeError::Wait(format!("get pod {pod_name}: {e}")))?;
+            let pod = match api.get(&pod_name).await {
+                Ok(p) => p,
+                // A 404 means the Pod is gone — almost always an
+                // intentional StopTask (which deletes the Pod). Finalize
+                // as a clean stop instead of surfacing TaskFailedToStart.
+                Err(e) if is_not_found(&e) => {
+                    if !marked_running {
+                        mark_running_multi(state, account_id, task_id, &started);
+                        self.emit_state_change(state, account_id, task_id, "RUNNING", None);
+                    }
+                    return self
+                        .k8s_finalize(
+                            state,
+                            account_id,
+                            task_id,
+                            &pod_name,
+                            &container_map,
+                            started.clone(),
+                            true,
+                        )
+                        .await;
+                }
+                Err(e) => return Err(RuntimeError::Wait(format!("get pod {pod_name}: {e}"))),
+            };
             let phase = pod
                 .status
                 .as_ref()
@@ -248,6 +268,7 @@ impl EcsRuntime {
                         &pod_name,
                         &container_map,
                         snapshot,
+                        false,
                     )
                     .await;
             }
@@ -262,6 +283,7 @@ impl EcsRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn k8s_finalize(
         &self,
         state: &SharedEcsState,
@@ -270,22 +292,11 @@ impl EcsRuntime {
         pod_name: &str,
         container_map: &[ContainerMapEntry],
         mut final_containers: Vec<RunningContainer>,
+        stopped_externally: bool,
     ) -> Result<(), RuntimeError> {
         let backend = self.k8s.as_ref().expect("k8s backend");
 
-        // Primary exit = first essential container's exit (or first exit
-        // when none essential).
-        let any_essential = final_containers.iter().any(|c| c.essential);
-        let primary = final_containers
-            .iter()
-            .find(|c| (c.essential || !any_essential) && c.exit_code.is_some())
-            .and_then(|c| c.exit_code)
-            .unwrap_or(0);
-        let stop_code = if any_essential {
-            "EssentialContainerExited"
-        } else {
-            "TaskCompleted"
-        };
+        let (primary, stop_code) = task_outcome(&final_containers, stopped_externally);
 
         // Capture logs from every container (init + app).
         let mut captured = String::new();
@@ -331,6 +342,48 @@ impl EcsRuntime {
         );
         Ok(())
     }
+}
+
+/// Decide a task's primary exit code + ECS stopCode from its containers'
+/// final exit codes. Handles the case where a non-essential dependency /
+/// initContainer fails before the essential container ever runs (which
+/// must surface as a failure, not a spurious exit 0).
+fn task_outcome(containers: &[RunningContainer], stopped_externally: bool) -> (i64, &'static str) {
+    let any_essential = containers.iter().any(|c| c.essential);
+    let essential_exit = containers
+        .iter()
+        .find(|c| c.essential && c.exit_code.is_some())
+        .and_then(|c| c.exit_code);
+    let failed_exit = containers
+        .iter()
+        .find(|c| matches!(c.exit_code, Some(code) if code != 0))
+        .and_then(|c| c.exit_code);
+    if stopped_externally {
+        // Pod deleted out from under us (StopTask): containers were
+        // terminated. 137 = SIGKILL, matching a killed container.
+        (
+            essential_exit.or(failed_exit).unwrap_or(137),
+            "EssentialContainerExited",
+        )
+    } else if let Some(code) = essential_exit {
+        (code, "EssentialContainerExited")
+    } else if let Some(code) = failed_exit {
+        // A dependency/init container failed before the essential
+        // container started — report the failure, not a spurious 0.
+        (code, "TaskFailedToStart")
+    } else if !any_essential {
+        (
+            containers.iter().find_map(|c| c.exit_code).unwrap_or(0),
+            "TaskCompleted",
+        )
+    } else {
+        (0, "EssentialContainerExited")
+    }
+}
+
+/// Whether a kube error is a `404 Not Found` (the Pod is gone).
+fn is_not_found(e: &kube::Error) -> bool {
+    matches!(e, kube::Error::Api(api_err) if api_err.code == 404)
 }
 
 /// Maps a task's containers between their ECS name and the sanitized
@@ -678,6 +731,48 @@ mod tests {
             "task-1",
             resolved,
         )
+    }
+
+    fn rc(name: &str, essential: bool, exit: Option<i64>) -> RunningContainer {
+        RunningContainer {
+            name: name.into(),
+            container_id: name.into(),
+            essential,
+            exit_code: exit,
+            network_bindings: vec![],
+            image_digest: None,
+        }
+    }
+
+    #[test]
+    fn failed_init_before_essential_reports_failure_not_zero() {
+        // Non-essential init exited 1; essential app never started (no exit).
+        let containers = vec![rc("migrate", false, Some(1)), rc("app", true, None)];
+        assert_eq!(task_outcome(&containers, false), (1, "TaskFailedToStart"));
+    }
+
+    #[test]
+    fn essential_exit_governs_outcome() {
+        let containers = vec![rc("app", true, Some(0)), rc("side", false, Some(3))];
+        assert_eq!(
+            task_outcome(&containers, false),
+            (0, "EssentialContainerExited")
+        );
+    }
+
+    #[test]
+    fn no_essential_completes_with_first_exit() {
+        let containers = vec![rc("job", false, Some(0))];
+        assert_eq!(task_outcome(&containers, false), (0, "TaskCompleted"));
+    }
+
+    #[test]
+    fn stopped_externally_with_unknown_exits_is_sigkill() {
+        let containers = vec![rc("app", true, None)];
+        assert_eq!(
+            task_outcome(&containers, true),
+            (137, "EssentialContainerExited")
+        );
     }
 
     #[test]
