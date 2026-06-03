@@ -135,6 +135,10 @@ test('app caches via real redis behind ElastiCache emulation', async () => {
 | Plain `docker run redis` | Yes | N/A | N/A | Manual | N/A | Free, but no ElastiCache API |
 | Moto | Stubbed | Stubbed | Stubbed | Stubbed | Stubbed | Free |
 
+## Running inside Kubernetes
+
+Running fakecloud inside Kubernetes? Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) and cache clusters run as native Pods instead of Docker containers — no docker-in-docker. See the [Kubernetes backend guide](/docs/guides/kubernetes-backend/).
+
 ## Links
 
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`

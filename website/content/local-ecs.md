@@ -70,8 +70,13 @@ Same API in Python, Go, Java, PHP, and Rust. See [the SDKs page](/docs/sdks) for
 
 LocalStack's ECS support is paid-only since the March 2026 Community switch. fakecloud is free, AGPL-3.0, and ships the full 60-operation API plus real container execution.
 
+## Running inside Kubernetes
+
+Running fakecloud itself inside Kubernetes? Set `FAKECLOUD_ECS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) and ECS tasks run as native Pods instead of Docker containers — no docker-in-docker. See the [Kubernetes backend guide](/docs/guides/kubernetes-backend/).
+
 ## Read the docs
 
+- [Kubernetes backend](/docs/guides/kubernetes-backend/) — run ECS tasks (and Lambda / RDS / ElastiCache) as native Pods.
 - [ECS service page](/docs/services/ecs/) — full operation list, introspection endpoints, awslogs / secrets / task-role wiring.
 - [Cross-service integration guide](/docs/guides/cross-service-integration/) — every ECR / ECS / Logs / Secrets / SSM / EventBridge wiring fakecloud actually executes.
 - [`crates/fakecloud-ecs`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-ecs) source.
