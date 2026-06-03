@@ -73,9 +73,14 @@ pub struct EcsRuntime {
     /// SSM Parameter Store state for resolving `secrets[]` entries whose
     /// `valueFrom` is an SSM parameter ARN.
     ssm_state: Option<SharedSsmState>,
+    /// `Some` when running on the Kubernetes backend; `run_task` then maps
+    /// each task to a Pod instead of `docker run`. `None` is the default
+    /// Docker/Podman backend, and the fields above drive it.
+    k8s: Option<k8s::K8sTaskBackend>,
 }
 
 mod config;
+mod k8s;
 mod lb;
 mod monitoring;
 mod secrets;
@@ -100,7 +105,51 @@ impl EcsRuntime {
             logs_state: None,
             secretsmanager_state: None,
             ssm_state: None,
+            k8s: None,
         })
+    }
+
+    /// Construct the Kubernetes backend. `server_port` is fakecloud's
+    /// bound port (used when `FAKECLOUD_K8S_SELF_URL` omits one). Fails
+    /// fast on misconfiguration — never silently degrades to Docker.
+    pub async fn new_k8s(server_port: u16) -> Result<Self, k8s::BackendInitError> {
+        let backend = k8s::K8sTaskBackend::from_env(server_port).await?;
+        // Docker fields are inert on the k8s backend; populate the cheap
+        // ones and leave docker_config unset.
+        let net = fakecloud_core::container_net::HostNetworking {
+            host_alias: String::new(),
+            add_host_arg: None,
+            sibling_host: String::new(),
+        };
+        Ok(Self {
+            cli: String::new(),
+            net,
+            server_port,
+            docker_config: None,
+            containers: RwLock::new(std::collections::HashMap::new()),
+            delivery_bus: None,
+            logs_state: None,
+            secretsmanager_state: None,
+            ssm_state: None,
+            k8s: Some(backend),
+        })
+    }
+
+    /// Backend name for logging.
+    pub fn cli_name(&self) -> &str {
+        if self.k8s.is_some() {
+            "kubernetes"
+        } else {
+            &self.cli
+        }
+    }
+
+    /// Sweep task Pods orphaned by a previous process (k8s only; no-op on
+    /// the Docker backend, handled by the shared container reaper).
+    pub async fn reap_stale(&self) {
+        if let Some(k) = &self.k8s {
+            k.reap_stale().await;
+        }
     }
 
     /// Wire EventBridge delivery so task state transitions emit

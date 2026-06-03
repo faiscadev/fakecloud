@@ -171,9 +171,20 @@ Set `FAKECLOUD_RDS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`
 - **Reboot** recreates the Pod; for the dumpable engines the dataset is snapshotted and reloaded across the recreate.
 - Because fakecloud connects to the DB over the Pod IP, the RDS k8s backend requires fakecloud to run **in-cluster** (the standard `FAKECLOUD_K8S_SELF_URL` deployment).
 
+## ECS
+
+Set `FAKECLOUD_ECS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run ECS tasks as native Pods.
+
+- Each task becomes **one Pod**, with one Pod container per `containerDefinitions` entry — all sharing the Pod's network namespace (`localhost`), which is exactly the `awsvpc` model.
+- A container that is the target of a `dependsOn` `COMPLETE`/`SUCCESS` condition becomes an **initContainer** (Kubernetes runs initContainers to completion, in order, before the app containers) — the natural fit for run-once migration/bootstrap containers. `START`/`HEALTHY` ordering among the long-running app containers isn't strictly enforceable inside one Pod, so it's best-effort; the `healthCheck` still becomes a container `readinessProbe`.
+- `secrets[]` resolve from SecretsManager / SSM exactly as on the Docker backend and are injected as env; the task-role and metadata endpoints (`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `ECS_CONTAINER_METADATA_URI[_V4]`) point at the in-cluster `FAKECLOUD_K8S_SELF_URL`.
+- The task lifecycle (`PENDING` → `RUNNING` → `STOPPED`, per-container exit codes, captured logs) is driven off the Pod's container statuses; logs are captured per container via the Pod log API. Task lifetime follows ECS semantics — the first essential container's exit stops the task.
+- Container images (including AWS ECR URIs, rewritten to the in-cluster registry) must be pullable by the cluster.
+- Low-level Docker-runtime knobs (`ulimits`, `devices`, `sysctls`, `tmpfs`, Linux capabilities) aren't translated to the Pod; `privileged`, `readonlyRootFilesystem`, and a numeric `user` are. Task volumes become Pod-local `emptyDir` scratch shared by name within the task.
+
 ## Limitations
 
-- The Kubernetes backend covers Lambda, ElastiCache, and RDS execution. ECS task execution still shells out to Docker — it's follow-up work tracked off issue #1234.
+- The Kubernetes backend covers Lambda, ElastiCache, RDS, and ECS execution — the whole container-backed stack can run natively on Kubernetes.
 - Container-image Lambda functions whose image registry requires auth need a manually-created `kubernetes.io/dockerconfigjson` Secret referenced via `FAKECLOUD_K8S_PULL_SECRET`. Auto-creating that secret requires `secrets` permissions that not every cluster admin wants to grant fakecloud.
 - Cold-start latency adds the init container HTTP round-trip to download code + layers (typically <500ms intra-cluster), on top of image pull + RIE start. Warm-Pod reuse keeps subsequent invocations as fast as the Docker backend.
 - The K8s backend requires fakecloud's process to remain reachable at `FAKECLOUD_K8S_SELF_URL` for the lifetime of each Pod's init container. If fakecloud restarts mid-init, that Pod's bootstrap fails and the facade will spawn a fresh one on the next invocation.

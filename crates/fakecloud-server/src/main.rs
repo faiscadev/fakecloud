@@ -621,7 +621,22 @@ async fn main() {
                 state: elbv2_state.clone(),
             })),
     );
-    ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port())
+    let ecs_base = if fakecloud_k8s::backend_choice("FAKECLOUD_ECS_BACKEND")
+        == fakecloud_k8s::Backend::K8s
+    {
+        match fakecloud_ecs::runtime::EcsRuntime::new_k8s(bound_addr.port()).await {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                eprintln!(
+                    "Kubernetes ECS backend selected (FAKECLOUD_ECS_BACKEND/FAKECLOUD_CONTAINER_BACKEND=k8s) but failed to initialize: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port())
+    };
+    ecs_runtime = ecs_base
         .map(|rt| {
             rt.with_delivery_bus(ecs_delivery_bus.clone())
                 .with_logs(logs_state.clone())
@@ -630,6 +645,9 @@ async fn main() {
         })
         .map(Arc::new);
     if let Some(ref rt) = ecs_runtime {
+        // Sweep task Pods left by a previous process (k8s only; no-op on
+        // the Docker backend, handled by the shared container reaper).
+        rt.reap_stale().await;
         tracing::info!(
             cli = rt.cli_name(),
             "ECS task execution enabled via container runtime"

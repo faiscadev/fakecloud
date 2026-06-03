@@ -7,6 +7,7 @@ on:
       - 'crates/fakecloud-lambda/**'
       - 'crates/fakecloud-elasticache/**'
       - 'crates/fakecloud-rds/**'
+      - 'crates/fakecloud-ecs/**'
       - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   pull_request:
@@ -15,6 +16,7 @@ on:
       - 'crates/fakecloud-lambda/**'
       - 'crates/fakecloud-elasticache/**'
       - 'crates/fakecloud-rds/**'
+      - 'crates/fakecloud-ecs/**'
       - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   workflow_dispatch:
@@ -53,6 +55,8 @@ jobs:
           kind load docker-image redis:7-alpine --name fakecloud-k8s-test
           docker pull postgres:16-alpine
           kind load docker-image postgres:16-alpine --name fakecloud-k8s-test
+          docker pull busybox:1.36
+          kind load docker-image busybox:1.36 --name fakecloud-k8s-test
 
       - name: Lambda K8s integration tests
         env:
@@ -77,6 +81,15 @@ jobs:
           FAKECLOUD_K8S_TEST: '1'
         run: |
           cargo test -p fakecloud-rds \
+            --features k8s-integration \
+            --test k8s_integration \
+            -- --test-threads=1
+
+      - name: ECS K8s integration tests
+        env:
+          FAKECLOUD_K8S_TEST: '1'
+        run: |
+          cargo test -p fakecloud-ecs \
             --features k8s-integration \
             --test k8s_integration \
             -- --test-threads=1
