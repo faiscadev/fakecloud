@@ -430,8 +430,8 @@ impl RdsService {
                             if let Some(s) = accounts.get_mut(&p.account_id) {
                                 if let Some(inst) = s.instances.get_mut(&p.id) {
                                     inst.db_instance_status = "available".to_string();
-                                    inst.endpoint_address = "127.0.0.1".to_string();
-                                    inst.port = i32::from(running.host_port);
+                                    inst.endpoint_address = running.endpoint_address.clone();
+                                    inst.port = i32::from(running.endpoint_port);
                                     inst.host_port = running.host_port;
                                     inst.container_id = running.container_id;
                                 }
@@ -627,7 +627,8 @@ impl RdsService {
             inst.db_instance_status = "available".to_string();
             inst.endpoint_address = "127.0.0.1".to_string();
             if let Some(r) = running {
-                inst.port = i32::from(r.host_port);
+                inst.endpoint_address = r.endpoint_address.clone();
+                inst.port = i32::from(r.endpoint_port);
                 inst.host_port = r.host_port;
                 inst.container_id = r.container_id;
             }

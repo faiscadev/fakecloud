@@ -5,25 +5,29 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use tokio_postgres::NoTls;
 
-const POSTGRES_DOCKERFILE: &str = include_str!("../assets/postgres/Dockerfile");
-const AWS_COMMONS_CONTROL: &str = include_str!("../assets/postgres/aws_commons.control");
-const AWS_COMMONS_SQL: &str = include_str!("../assets/postgres/aws_commons--1.1.sql");
-const AWS_COMMONS_UPGRADE_SQL: &str = include_str!("../assets/postgres/aws_commons--1.0--1.1.sql");
-const AWS_LAMBDA_CONTROL: &str = include_str!("../assets/postgres/aws_lambda.control");
-const AWS_LAMBDA_SQL: &str = include_str!("../assets/postgres/aws_lambda--1.0.sql");
-const AWS_S3_CONTROL: &str = include_str!("../assets/postgres/aws_s3.control");
-const AWS_S3_SQL: &str = include_str!("../assets/postgres/aws_s3--1.0.sql");
+mod k8s;
 
-const MYSQL_DOCKERFILE: &str = include_str!("../assets/mysql/Dockerfile");
-const MYSQL_UDF_C: &str = include_str!("../assets/mysql/fakecloud_udf.c");
-const MYSQL_BOOTSTRAP_SH: &str = include_str!("../assets/mysql/fakecloud-bootstrap.sh");
-const MYSQL_BOOTSTRAP_SQL: &str = include_str!("../assets/mysql/99-fakecloud-bootstrap.sql.tmpl");
+const POSTGRES_DOCKERFILE: &str = include_str!("../../assets/postgres/Dockerfile");
+const AWS_COMMONS_CONTROL: &str = include_str!("../../assets/postgres/aws_commons.control");
+const AWS_COMMONS_SQL: &str = include_str!("../../assets/postgres/aws_commons--1.1.sql");
+const AWS_COMMONS_UPGRADE_SQL: &str =
+    include_str!("../../assets/postgres/aws_commons--1.0--1.1.sql");
+const AWS_LAMBDA_CONTROL: &str = include_str!("../../assets/postgres/aws_lambda.control");
+const AWS_LAMBDA_SQL: &str = include_str!("../../assets/postgres/aws_lambda--1.0.sql");
+const AWS_S3_CONTROL: &str = include_str!("../../assets/postgres/aws_s3.control");
+const AWS_S3_SQL: &str = include_str!("../../assets/postgres/aws_s3--1.0.sql");
 
-const MARIADB_DOCKERFILE: &str = include_str!("../assets/mariadb/Dockerfile");
-const MARIADB_UDF_C: &str = include_str!("../assets/mariadb/fakecloud_udf.c");
-const MARIADB_BOOTSTRAP_SH: &str = include_str!("../assets/mariadb/fakecloud-bootstrap.sh");
+const MYSQL_DOCKERFILE: &str = include_str!("../../assets/mysql/Dockerfile");
+const MYSQL_UDF_C: &str = include_str!("../../assets/mysql/fakecloud_udf.c");
+const MYSQL_BOOTSTRAP_SH: &str = include_str!("../../assets/mysql/fakecloud-bootstrap.sh");
+const MYSQL_BOOTSTRAP_SQL: &str =
+    include_str!("../../assets/mysql/99-fakecloud-bootstrap.sql.tmpl");
+
+const MARIADB_DOCKERFILE: &str = include_str!("../../assets/mariadb/Dockerfile");
+const MARIADB_UDF_C: &str = include_str!("../../assets/mariadb/fakecloud_udf.c");
+const MARIADB_BOOTSTRAP_SH: &str = include_str!("../../assets/mariadb/fakecloud-bootstrap.sh");
 const MARIADB_BOOTSTRAP_SQL: &str =
-    include_str!("../assets/mariadb/99-fakecloud-bootstrap.sql.tmpl");
+    include_str!("../../assets/mariadb/99-fakecloud-bootstrap.sql.tmpl");
 
 /// Default registry that hosts the prebuilt postgres images. CI publishes
 /// to `ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>` on each
@@ -35,8 +39,16 @@ const DEFAULT_POSTGRES_REGISTRY: &str = "ghcr.io/faiscadev";
 
 #[derive(Debug, Clone)]
 pub struct RunningDbContainer {
+    /// Backend-specific handle: a Docker container id, or a Pod name.
     pub container_id: String,
+    /// Host-published port (Docker) or the engine's in-Pod port (k8s).
     pub host_port: u16,
+    /// Address clients (and fakecloud's own readiness/restore) connect to:
+    /// `127.0.0.1` for Docker, the Pod IP for k8s.
+    pub endpoint_address: String,
+    /// Port clients connect to: the published host port for Docker, the
+    /// engine's standard port for k8s.
+    pub endpoint_port: u16,
 }
 
 pub struct RdsRuntime {
@@ -46,6 +58,10 @@ pub struct RdsRuntime {
     host_ip: String,
     server_port: u16,
     image_cache: RwLock<HashMap<String, Arc<tokio::sync::Mutex<bool>>>>,
+    /// `Some` when running on the Kubernetes backend; the public methods
+    /// dispatch to it and the Docker fields above go unused. `None` is the
+    /// default Docker/Podman backend.
+    k8s: Option<k8s::K8sDb>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +70,17 @@ pub enum RuntimeError {
     Unavailable,
     #[error("container failed to start: {0}")]
     ContainerStartFailed(String),
+}
+
+/// Error initializing the Kubernetes backend at startup. Surfaced to the
+/// operator so a misconfigured cluster fails fast rather than silently
+/// falling back to Docker.
+#[derive(Debug, thiserror::Error)]
+pub enum BackendInitError {
+    #[error(transparent)]
+    Env(#[from] fakecloud_k8s::K8sEnvError),
+    #[error("failed to connect to the Kubernetes cluster: {0}")]
+    Connect(String),
 }
 
 impl RdsRuntime {
@@ -88,11 +115,40 @@ impl RdsRuntime {
             host_ip,
             server_port,
             image_cache: RwLock::new(HashMap::new()),
+            k8s: None,
+        })
+    }
+
+    /// Construct the Kubernetes backend. `server_port` is fakecloud's
+    /// bound port (used when `FAKECLOUD_K8S_SELF_URL` omits one). Fails
+    /// fast on misconfiguration — never silently degrades to Docker.
+    pub async fn new_k8s(server_port: u16) -> Result<Self, BackendInitError> {
+        let db = k8s::K8sDb::from_env(server_port).await?;
+        Ok(Self {
+            cli: String::new(),
+            containers: RwLock::new(HashMap::new()),
+            instance_id: format!("fakecloud-{}", std::process::id()),
+            host_ip: String::new(),
+            server_port,
+            image_cache: RwLock::new(HashMap::new()),
+            k8s: Some(db),
         })
     }
 
     pub fn cli_name(&self) -> &str {
-        &self.cli
+        if self.k8s.is_some() {
+            "kubernetes"
+        } else {
+            &self.cli
+        }
+    }
+
+    /// Sweep DB Pods orphaned by a previous process (k8s only; no-op on
+    /// the Docker backend, which the shared container reaper handles).
+    pub async fn reap_stale(&self) {
+        if let Some(k) = &self.k8s {
+            k.reap_stale().await;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -107,6 +163,24 @@ impl RdsRuntime {
         account_id: &str,
         region: &str,
     ) -> Result<RunningDbContainer, RuntimeError> {
+        if let Some(k) = &self.k8s {
+            let running = k
+                .ensure(
+                    db_instance_identifier,
+                    engine,
+                    engine_version,
+                    username,
+                    password,
+                    db_name,
+                    account_id,
+                    region,
+                )
+                .await?;
+            self.containers
+                .write()
+                .insert(db_instance_identifier.to_string(), running.clone());
+            return Ok(running);
+        }
         self.stop_container(db_instance_identifier).await;
 
         // Determine Docker image and port based on engine. Postgres,
@@ -324,6 +398,8 @@ impl RdsRuntime {
         let running = RunningDbContainer {
             container_id,
             host_port,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: host_port,
         };
         self.containers
             .write()
@@ -334,7 +410,11 @@ impl RdsRuntime {
     pub async fn stop_container(&self, db_instance_identifier: &str) {
         let container = self.containers.write().remove(db_instance_identifier);
         if let Some(container) = container {
-            self.remove_container(&container.container_id).await;
+            if let Some(k) = &self.k8s {
+                k.delete_pod(&container.container_id).await;
+            } else {
+                self.remove_container(&container.container_id).await;
+            }
         }
     }
 
@@ -346,6 +426,15 @@ impl RdsRuntime {
         password: &str,
         db_name: &str,
     ) -> Result<RunningDbContainer, RuntimeError> {
+        if let Some(k) = &self.k8s {
+            let running = k
+                .restart(db_instance_identifier, engine, username, password, db_name)
+                .await?;
+            self.containers
+                .write()
+                .insert(db_instance_identifier.to_string(), running.clone());
+            return Ok(running);
+        }
         let running = self
             .containers
             .read()
@@ -403,6 +492,8 @@ impl RdsRuntime {
         let running = RunningDbContainer {
             container_id: running.container_id,
             host_port,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: host_port,
         };
         self.containers
             .write()
@@ -863,6 +954,12 @@ impl RdsRuntime {
             .cloned()
             .ok_or(RuntimeError::Unavailable)?;
 
+        if let Some(k) = &self.k8s {
+            return k
+                .dump_database(&container.container_id, engine, username, password, db_name)
+                .await;
+        }
+
         let args: Vec<String> = match engine {
             "mysql" | "mariadb" => vec![
                 "exec".into(),
@@ -936,6 +1033,10 @@ impl RdsRuntime {
             .cloned()
             .ok_or(RuntimeError::Unavailable)?;
 
+        if let Some(k) = &self.k8s {
+            return k.read_file(&container.container_id, container_path).await;
+        }
+
         let output = tokio::process::Command::new(&self.cli)
             .args(["exec", &container.container_id, "cat", container_path])
             .output()
@@ -967,6 +1068,19 @@ impl RdsRuntime {
             .get(db_instance_identifier)
             .cloned()
             .ok_or(RuntimeError::Unavailable)?;
+
+        if let Some(k) = &self.k8s {
+            return k
+                .restore_database(
+                    &container.container_id,
+                    engine,
+                    username,
+                    password,
+                    db_name,
+                    dump_data,
+                )
+                .await;
+        }
 
         let args: Vec<String> = match engine {
             "mysql" | "mariadb" => vec![
@@ -1080,7 +1194,7 @@ fn detect_bridge_gateway(cli: &str) -> Option<String> {
 /// same image CI publishes for this fakecloud release; mismatched
 /// assets force a local rebuild via the fall-through in
 /// `ensure_bridge_image`.
-fn bridge_image_tag(image: &str, major_version: &str) -> String {
+pub(crate) fn bridge_image_tag(image: &str, major_version: &str) -> String {
     let registry = std::env::var("FAKECLOUD_POSTGRES_REGISTRY")
         .unwrap_or_else(|_| DEFAULT_POSTGRES_REGISTRY.to_string());
     let registry = registry.trim_end_matches('/');
