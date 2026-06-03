@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'crates/fakecloud-lambda/**'
+      - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   pull_request:
     branches: [main]
     paths:
       - 'crates/fakecloud-lambda/**'
+      - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   workflow_dispatch:
 

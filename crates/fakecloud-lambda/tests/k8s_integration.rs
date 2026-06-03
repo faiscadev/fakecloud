@@ -85,6 +85,9 @@ fn dummy_pod(name: &str, instance_label: &str) -> Pod {
     let mut labels = BTreeMap::new();
     labels.insert("fakecloud-managed-by".into(), "fakecloud".into());
     labels.insert("fakecloud-instance".into(), instance_label.into());
+    // reap_stale() now filters on the per-service label, so a Pod must
+    // carry it to be a reap candidate.
+    labels.insert("fakecloud-service".into(), "lambda".into());
     labels.insert("fakecloud-lambda".into(), "test-fn".into());
     Pod {
         metadata: ObjectMeta {

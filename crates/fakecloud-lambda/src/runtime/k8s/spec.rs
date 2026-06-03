@@ -12,6 +12,8 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
+use fakecloud_k8s::names::label_safe;
+
 use super::super::docker::runtime_to_image;
 use super::super::env_rewrite::rewrite_localhost_envs;
 use crate::state::LambdaFunction;
@@ -79,8 +81,15 @@ pub fn build_pod_spec(
     let pod_name = pod_name_for(&func.function_name, deploy_id);
 
     let mut labels = BTreeMap::new();
-    labels.insert("fakecloud-managed-by".into(), "fakecloud".into());
-    labels.insert("fakecloud-instance".into(), ctx.instance_id.into());
+    labels.insert(
+        fakecloud_k8s::labels::MANAGED_BY.into(),
+        fakecloud_k8s::labels::MANAGED_BY_VALUE.into(),
+    );
+    labels.insert(
+        fakecloud_k8s::labels::INSTANCE.into(),
+        ctx.instance_id.into(),
+    );
+    labels.insert(fakecloud_k8s::labels::SERVICE.into(), super::SERVICE.into());
     labels.insert("fakecloud-lambda".into(), label_safe(&func.function_name));
     labels.insert(
         "fakecloud-deploy-id".into(),
@@ -252,17 +261,10 @@ pub fn build_pod_spec(
 
 /// Build a deterministic, DNS-1123-safe Pod name for the given
 /// function + deploy_id. Truncated/lowercased so it fits the 63-char
-/// label limit.
+/// label limit. The suffix is a stable hash of `deploy_id` so a new
+/// deploy gets a fresh, non-colliding Pod name.
 pub fn pod_name_for(function_name: &str, deploy_id: &str) -> String {
-    // function_name may contain underscores or uppercase; convert.
-    let fn_part = label_safe(function_name);
-    // deploy_id is base64 — pick the first 12 chars of a hex projection
-    // so the suffix is stable across restarts and DNS-safe.
-    let digest = simple_hex12(deploy_id);
-    // Keep total length under 63. fn_part already <=40, digest is 12,
-    // prefix "fakecloud-lambda-" is 17. Trim function part to 30.
-    let fn_short: String = fn_part.chars().take(30).collect();
-    format!("fakecloud-lambda-{fn_short}-{digest}")
+    fakecloud_k8s::names::pod_name("fakecloud-lambda", function_name, deploy_id)
 }
 
 /// Map the function's `memory_size` (MiB) onto both `requests` and
@@ -286,40 +288,6 @@ fn memory_resources(memory_size: i64) -> ResourceRequirements {
         limits: Some(lim),
         claims: None,
     }
-}
-
-/// Lowercase + replace anything outside `[a-z0-9-]` with `-`. DNS-1123
-/// label rules: 63 chars max, ends with alphanumeric.
-fn label_safe(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    // Trim trailing dashes so the label ends in an alphanumeric.
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
-/// 12-char hex projection of an arbitrary string, used to suffix Pod
-/// names so deploy_id changes produce a new Pod without colliding with
-/// the old one. Deterministic so the watcher and the launch step agree
-/// on the name. Not a cryptographic hash — collision space (2^48) is
-/// plenty for per-function uniqueness.
-fn simple_hex12(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    let bytes = h.finalize();
-    let hex: String = bytes.iter().take(6).map(|b| format!("{b:02x}")).collect();
-    hex
 }
 
 #[cfg(test)]
