@@ -133,8 +133,10 @@ impl ElastiCacheService {
                             Ok(running) => {
                                 if let Some(c) = s.serverless_caches.get_mut(&name) {
                                     c.status = "available".to_string();
-                                    c.endpoint.port = running.host_port;
-                                    c.reader_endpoint.port = running.host_port;
+                                    c.endpoint.address = running.endpoint_address.clone();
+                                    c.endpoint.port = running.endpoint_port;
+                                    c.reader_endpoint.address = running.endpoint_address.clone();
+                                    c.reader_endpoint.port = running.endpoint_port;
                                     c.host_port = running.host_port;
                                     c.container_id = running.container_id.clone();
                                 } else {

@@ -48,7 +48,7 @@ Optional env vars:
 
 ## RBAC
 
-The fakecloud Pod's ServiceAccount needs permission to create / list / watch / delete Pods in the configured namespace.
+The fakecloud Pod's ServiceAccount needs permission to create / list / watch / delete Pods in the configured namespace. The ElastiCache backend additionally execs into cache Pods (`redis-cli` for CONFIG/ACL and snapshot SAVE), so it needs `pods/exec` too.
 
 ```yaml
 apiVersion: v1
@@ -66,6 +66,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # Required only for the ElastiCache backend (exec into cache Pods).
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -147,9 +151,19 @@ spec:
 - Pods carry labels `fakecloud-managed-by=fakecloud`, `fakecloud-instance=<pid>`, `fakecloud-lambda=<function>`, `fakecloud-deploy-id=<hash>` so you can `kubectl get pods -l fakecloud-managed-by=fakecloud`.
 - Pods run with whatever default security context your cluster's `PodSecurityPolicy` / `PodSecurityAdmission` enforces — no `privileged`, no special capabilities. The fakecloud Pod itself also doesn't need privileged.
 
+## ElastiCache backend
+
+Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run cache clusters, replication groups, and serverless caches as native Pods instead of Docker containers.
+
+- Each cache resource becomes one Pod with a single `redis:7-alpine` or `memcached:1.6-alpine` container; the resource's endpoint address is the Pod IP and the standard engine port (6379 / 11211).
+- CONFIG / ACL changes and snapshot `SAVE` are applied by `kubectl exec`-style calls through the API server (hence the `pods/exec` RBAC rule) — no dependency on Pod-IP routability from fakecloud.
+- **Snapshot restore**: a cache created from a snapshot gets a Pod whose container `wget`s the snapshot RDB from a per-process, bearer-token-guarded `/_fakecloud/elasticache/_internal/rdb/<pod>` endpoint into `/data/dump.rdb` before launching `redis-server`, so the engine loads it at startup — the k8s analogue of the Docker backend's `docker cp`.
+- **Reboot** (RebootCacheCluster) recreates the Pod; for Redis the live dataset is snapshotted and reloaded across the recreate so data survives, matching the Docker backend's in-place restart. Memcached reboots flush (no persistence), as on AWS.
+- Cache Pods carry `fakecloud-service=elasticache`; the startup reaper sweeps only its own service's orphans.
+
 ## Limitations
 
-- The Kubernetes backend only covers Lambda execution. ECS task execution, the RDS Postgres / MySQL container runtimes, and ElastiCache still shell out to Docker — they're follow-up work tracked off issue #1234.
+- The Kubernetes backend covers Lambda and ElastiCache execution. ECS task execution and the RDS Postgres / MySQL container runtimes still shell out to Docker — they're follow-up work tracked off issue #1234.
 - Container-image Lambda functions whose image registry requires auth need a manually-created `kubernetes.io/dockerconfigjson` Secret referenced via `FAKECLOUD_K8S_PULL_SECRET`. Auto-creating that secret requires `secrets` permissions that not every cluster admin wants to grant fakecloud.
 - Cold-start latency adds the init container HTTP round-trip to download code + layers (typically <500ms intra-cluster), on top of image pull + RIE start. Warm-Pod reuse keeps subsequent invocations as fast as the Docker backend.
 - The K8s backend requires fakecloud's process to remain reachable at `FAKECLOUD_K8S_SELF_URL` for the lifetime of each Pod's init container. If fakecloud restarts mid-init, that Pod's bootstrap fails and the facade will spawn a fresh one on the next invocation.

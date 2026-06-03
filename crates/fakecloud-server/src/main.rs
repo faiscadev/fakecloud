@@ -13,6 +13,7 @@ use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_sdk::types;
 
+mod admin_elasticache_artifacts;
 mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
@@ -409,9 +410,30 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — RDS CreateDBInstance will return errors");
     }
-    let elasticache_runtime =
-        fakecloud_elasticache::runtime::ElastiCacheRuntime::new().map(Arc::new);
+    let elasticache_runtime = if fakecloud_k8s::backend_choice("FAKECLOUD_ELASTICACHE_BACKEND")
+        == fakecloud_k8s::Backend::K8s
+    {
+        match fakecloud_elasticache::runtime::ElastiCacheRuntime::new_k8s(
+            bound_addr.port(),
+            (*k8s_internal_token).clone(),
+        )
+        .await
+        {
+            Ok(rt) => Some(Arc::new(rt)),
+            Err(e) => {
+                eprintln!(
+                    "Kubernetes ElastiCache backend selected (FAKECLOUD_ELASTICACHE_BACKEND/FAKECLOUD_CONTAINER_BACKEND=k8s) but failed to initialize: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        fakecloud_elasticache::runtime::ElastiCacheRuntime::new().map(Arc::new)
+    };
     if let Some(ref rt) = elasticache_runtime {
+        // Sweep cache Pods left by a previous process (k8s only; no-op on
+        // the Docker backend, which the shared container reaper handles).
+        rt.reap_stale().await;
         tracing::info!(
             cli = rt.cli_name(),
             "ElastiCache execution enabled via container runtime"
@@ -7242,6 +7264,24 @@ async fn main() {
                 )
             } else {
                 axum::Router::new()
+            }
+        })
+        .merge({
+            // Internal RDB endpoint for the ElastiCache Kubernetes backend:
+            // restoring Redis Pods fetch their snapshot here. Present only
+            // when the k8s backend is active (Docker stages RDBs via the
+            // daemon, not HTTP). Bearer-token guarded like the Lambda routes.
+            match elasticache_runtime
+                .as_ref()
+                .and_then(|rt| rt.pending_rdb())
+            {
+                Some(pending_rdb) => admin_elasticache_artifacts::router(
+                    admin_elasticache_artifacts::RdbRoutesContext {
+                        pending_rdb,
+                        bearer_token: k8s_internal_token.clone(),
+                    },
+                ),
+                None => axum::Router::new(),
             }
         })
         .fallback(dispatch::dispatch)

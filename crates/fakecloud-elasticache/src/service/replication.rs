@@ -163,6 +163,9 @@ impl ElastiCacheService {
         let running = crate::runtime::RunningCacheContainer {
             container_id: String::new(),
             host_port: 0,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: 0,
+            engine: crate::runtime::CacheEngineKind::Redis,
         };
 
         let member_clusters: Vec<String> = (1..=num_cache_clusters)
@@ -272,14 +275,14 @@ impl ElastiCacheService {
                             Ok(running) => {
                                 if let Some(g) = s.replication_groups.get_mut(&id) {
                                     g.status = "available".to_string();
-                                    g.endpoint_address = "127.0.0.1".to_string();
-                                    g.endpoint_port = running.host_port;
+                                    g.endpoint_address = running.endpoint_address.clone();
+                                    g.endpoint_port = running.endpoint_port;
                                     g.host_port = running.host_port;
                                     g.container_id = running.container_id.clone();
                                     if cluster_enabled_flag {
                                         g.configuration_endpoint_address =
-                                            Some("127.0.0.1".to_string());
-                                        g.configuration_endpoint_port = Some(running.host_port);
+                                            Some(running.endpoint_address.clone());
+                                        g.configuration_endpoint_port = Some(running.endpoint_port);
                                     }
                                 } else {
                                     // Deleted during startup: the container came
@@ -1360,7 +1363,7 @@ impl ElastiCacheService {
             .exec_redis(rg_id, &["ACL".to_string(), "USERS".to_string()])
             .await
         {
-            Ok(output) if output.status.success() => {
+            Ok(output) if output.success => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     let username = line.trim().trim_matches('"');
@@ -1378,7 +1381,7 @@ impl ElastiCacheService {
                             username.to_string(),
                         ];
                         if let Ok(del_out) = runtime.exec_redis(rg_id, &del_args).await {
-                            if !del_out.status.success() {
+                            if !del_out.success {
                                 tracing::warn!(
                                     rg_id = %rg_id,
                                     user_id = %username,
@@ -1415,7 +1418,7 @@ impl ElastiCacheService {
             ];
             args.extend(user.access_string.split_whitespace().map(|s| s.to_string()));
             match runtime.exec_redis(rg_id, &args).await {
-                Ok(output) if !output.status.success() => {
+                Ok(output) if !output.success => {
                     tracing::warn!(
                         rg_id = %rg_id,
                         user_id = %user.user_id,
