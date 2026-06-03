@@ -321,6 +321,25 @@ impl EcsRuntime {
             }
         }
 
+        // A StopTask sets stopCode=UserInitiated + a reason before the
+        // runtime observes the Pod deletion. Preserve that user-initiated
+        // stop instead of overwriting it with EssentialContainerExited.
+        let (final_stop_code, final_reason): (&str, Option<String>) = if stopped_externally {
+            let existing = {
+                let accounts = state.read();
+                accounts
+                    .get(account_id)
+                    .and_then(|s| s.tasks.get(task_id))
+                    .map(|t| (t.stop_code.clone(), t.stopped_reason.clone()))
+            };
+            match existing {
+                Some((Some(sc), reason)) if sc == "UserInitiated" => ("UserInitiated", reason),
+                _ => (stop_code, None),
+            }
+        } else {
+            (stop_code, None)
+        };
+
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         finalize_stopped_multi(
             state,
@@ -329,16 +348,17 @@ impl EcsRuntime {
             &final_containers,
             primary,
             &captured,
-            stop_code,
-            None,
+            final_stop_code,
+            final_reason.clone(),
         );
         self.deregister_lb_targets(state, account_id, task_id);
+        let reason_msg = final_reason.unwrap_or_else(|| format!("Exit code {primary}"));
         self.emit_state_change(
             state,
             account_id,
             task_id,
             "STOPPED",
-            Some((stop_code, format!("Exit code {primary}"))),
+            Some((final_stop_code, reason_msg)),
         );
         Ok(())
     }
