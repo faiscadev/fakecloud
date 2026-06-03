@@ -25,6 +25,7 @@ fakecloud-ssm = { workspace = true }
 fakecloud-s3 = { workspace = true }
 fakecloud-dynamodb = { workspace = true }
 fakecloud-lambda = { workspace = true }
+fakecloud-k8s = { workspace = true }
 fakecloud-secretsmanager = { workspace = true }
 fakecloud-logs = { workspace = true }
 fakecloud-kms = { workspace = true }

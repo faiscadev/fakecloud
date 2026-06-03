@@ -28,6 +28,16 @@ FAKECLOUD_K8S_SELF_URL=http://fakecloud.fakecloud.svc.cluster.local:4566
 
 `FAKECLOUD_K8S_SELF_URL` must resolve from inside Lambda Pods — that's how init containers pull function code and layers from the fakecloud process. Use the in-cluster service DNS name, never `localhost` or `127.0.0.1`.
 
+### Selecting the backend
+
+Backend selection is per-service with a global fallback:
+
+- `FAKECLOUD_<SERVICE>_BACKEND=k8s|docker` — an explicit per-service override (`FAKECLOUD_LAMBDA_BACKEND`, and the same pattern for the other container-backed services). An explicit value always wins.
+- `FAKECLOUD_CONTAINER_BACKEND=k8s|docker` — a global default applied to any service whose own variable is unset. Set this once to flip the whole stack to Kubernetes.
+- Unset everywhere — Docker (the default).
+
+So `FAKECLOUD_CONTAINER_BACKEND=k8s` with `FAKECLOUD_LAMBDA_BACKEND=docker` runs everything on Kubernetes *except* Lambda, which stays on Docker.
+
 Optional env vars:
 
 | Variable | Default | Purpose |

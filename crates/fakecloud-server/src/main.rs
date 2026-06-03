@@ -188,14 +188,13 @@ async fn main() {
     // Reap any backing containers left behind by a previous fakecloud process
     // that was killed before it could run its own cleanup (SIGKILL, crash, OOM).
     reaper::reap_stale_containers();
-    // Lambda execution backend. FAKECLOUD_LAMBDA_BACKEND=k8s opts into
-    // the native Kubernetes Pod backend (issue #1234); anything else
-    // (or unset) auto-detects Docker/Podman.
-    let lambda_backend_choice = std::env::var("FAKECLOUD_LAMBDA_BACKEND")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    // Lambda execution backend. FAKECLOUD_LAMBDA_BACKEND=k8s (or the
+    // global FAKECLOUD_CONTAINER_BACKEND=k8s) opts into the native
+    // Kubernetes Pod backend (issue #1234); anything else (or unset)
+    // auto-detects Docker/Podman.
+    let lambda_backend = fakecloud_k8s::backend_choice("FAKECLOUD_LAMBDA_BACKEND");
     let k8s_internal_token: Arc<String> = Arc::new(generate_k8s_internal_token());
-    let container_runtime = if lambda_backend_choice == "k8s" {
+    let container_runtime = if lambda_backend == fakecloud_k8s::Backend::K8s {
         match fakecloud_lambda::runtime::LambdaRuntime::new_k8s(
             bound_addr.port(),
             (*k8s_internal_token).clone(),
@@ -205,7 +204,7 @@ async fn main() {
             Ok(rt) => Some(Arc::new(rt)),
             Err(e) => {
                 eprintln!(
-                    "FAKECLOUD_LAMBDA_BACKEND=k8s but Kubernetes backend failed to initialize: {e}"
+                    "Kubernetes Lambda backend selected (FAKECLOUD_LAMBDA_BACKEND/FAKECLOUD_CONTAINER_BACKEND=k8s) but failed to initialize: {e}"
                 );
                 std::process::exit(1);
             }
@@ -218,7 +217,7 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — Lambda Invoke will return errors for functions with code");
     }
-    let lambda_backend_is_k8s = lambda_backend_choice == "k8s";
+    let lambda_backend_is_k8s = lambda_backend == fakecloud_k8s::Backend::K8s;
     let secretsmanager_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,

@@ -1764,7 +1764,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -3002,6 +3002,7 @@ dependencies = [
  "fakecloud-firehose",
  "fakecloud-glue",
  "fakecloud-iam",
+ "fakecloud-k8s",
  "fakecloud-kinesis",
  "fakecloud-kms",
  "fakecloud-lambda",
@@ -3110,7 +3111,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tracing",
  "uuid",
 ]
@@ -3554,7 +3555,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "x509-cert",
  "zip",
 ]
@@ -3749,6 +3750,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-k8s"
+version = "0.16.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "rustls 0.23.38",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fakecloud-kinesis"
 version = "0.16.0"
 dependencies = [
@@ -3810,8 +3828,8 @@ dependencies = [
  "crc32fast",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-k8s",
  "fakecloud-persistence",
- "futures-util",
  "http 1.4.0",
  "k8s-openapi",
  "kube",
@@ -5453,6 +5471,7 @@ dependencies = [
  "k8s-openapi",
  "kube-core",
  "pem",
+ "rand 0.8.5",
  "rustls 0.23.38",
  "rustls-pemfile",
  "secrecy",
@@ -5461,6 +5480,7 @@ dependencies = [
  "serde_yaml",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -7949,6 +7969,18 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.24.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
@@ -7956,7 +7988,7 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tungstenite",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -8197,6 +8229,24 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.8.5",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
@@ -8306,6 +8356,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf16_iter"

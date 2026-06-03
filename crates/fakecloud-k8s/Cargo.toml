@@ -1,0 +1,26 @@
+[package]
+name = "fakecloud-k8s"
+description = "Shared Kubernetes backend primitives for FakeCloud (client bootstrap, Pod lifecycle, exec, reaping, naming, backend selection)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+futures-util = "0.3"
+# rustls 0.23 dropped the implicit default CryptoProvider; kube's
+# rustls-tls feature builds a Client but every request panics unless
+# one is installed up front. Installed once at client construction so
+# neither the server runtime nor opt-in integration tests have to wire
+# it in themselves.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
