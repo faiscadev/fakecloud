@@ -296,8 +296,8 @@ impl ElastiCacheService {
                             if let Some(s) = accounts.get_mut(&c.account_id) {
                                 if let Some(cluster) = s.cache_clusters.get_mut(&c.id) {
                                     cluster.cache_cluster_status = "available".to_string();
-                                    cluster.endpoint_address = "127.0.0.1".to_string();
-                                    cluster.endpoint_port = running.host_port;
+                                    cluster.endpoint_address = running.endpoint_address.clone();
+                                    cluster.endpoint_port = running.endpoint_port;
                                     cluster.host_port = running.host_port;
                                     cluster.container_id = running.container_id;
                                 }
@@ -344,8 +344,8 @@ impl ElastiCacheService {
                             if let Some(s) = accounts.get_mut(&r.account_id) {
                                 if let Some(rg) = s.replication_groups.get_mut(&r.id) {
                                     rg.status = "available".to_string();
-                                    rg.endpoint_address = "127.0.0.1".to_string();
-                                    rg.endpoint_port = running.host_port;
+                                    rg.endpoint_address = running.endpoint_address.clone();
+                                    rg.endpoint_port = running.endpoint_port;
                                     rg.host_port = running.host_port;
                                     rg.container_id = running.container_id;
                                 }
@@ -386,10 +386,11 @@ impl ElastiCacheService {
                             if let Some(st) = accounts.get_mut(&s.account_id) {
                                 if let Some(cache) = st.serverless_caches.get_mut(&s.name) {
                                     cache.status = "available".to_string();
-                                    cache.endpoint.address = "127.0.0.1".to_string();
-                                    cache.endpoint.port = running.host_port;
-                                    cache.reader_endpoint.address = "127.0.0.1".to_string();
-                                    cache.reader_endpoint.port = running.host_port;
+                                    cache.endpoint.address = running.endpoint_address.clone();
+                                    cache.endpoint.port = running.endpoint_port;
+                                    cache.reader_endpoint.address =
+                                        running.endpoint_address.clone();
+                                    cache.reader_endpoint.port = running.endpoint_port;
                                     cache.host_port = running.host_port;
                                     cache.container_id = running.container_id;
                                 }
@@ -740,7 +741,7 @@ impl ElastiCacheService {
                     param.parameter_value.clone(),
                 ];
                 match runtime.exec_redis(&id, &args).await {
-                    Ok(output) if !output.status.success() => {
+                    Ok(output) if !output.success => {
                         tracing::warn!(
                             resource_id = %id,
                             param = %param.parameter_name,

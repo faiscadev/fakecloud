@@ -37,7 +37,10 @@ pub fn router(ctx: ArtifactRoutesContext) -> Router {
         .with_state(ctx)
 }
 
-fn check_bearer(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
+/// Validate an `Authorization: Bearer <token>` header against `expected`
+/// in constant time. Shared with other internal Pod-facing endpoints
+/// (e.g. the ElastiCache snapshot-RDB route).
+pub fn check_bearer(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

@@ -280,8 +280,8 @@ impl ElastiCacheService {
                             Ok(running) if !deleted => {
                                 if let Some(c) = s.cache_clusters.get_mut(&id) {
                                     c.cache_cluster_status = "available".to_string();
-                                    c.endpoint_address = "127.0.0.1".to_string();
-                                    c.endpoint_port = running.host_port;
+                                    c.endpoint_address = running.endpoint_address.clone();
+                                    c.endpoint_port = running.endpoint_port;
                                     c.host_port = running.host_port;
                                     c.container_id = running.container_id.clone();
                                 }
