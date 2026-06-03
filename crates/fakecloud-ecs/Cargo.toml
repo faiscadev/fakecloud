@@ -10,10 +10,13 @@ version.workspace = true
 [dependencies]
 fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
+fakecloud-k8s = { workspace = true }
 fakecloud-logs = { workspace = true }
 fakecloud-persistence = { workspace = true }
 fakecloud-secretsmanager = { workspace = true }
 fakecloud-ssm = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
@@ -29,3 +32,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+# Opt-in integration tests needing a real Kubernetes cluster (a local
+# `kind` cluster works). Run with:
+#   FAKECLOUD_K8S_TEST=1 cargo test -p fakecloud-ecs \
+#       --features k8s-integration --test k8s_integration -- --test-threads=1
+# Without the feature the test binary isn't built; with it, the first
+# test hard-fails if FAKECLOUD_K8S_TEST is unset rather than silently
+# skipping (see feedback_tests_never_silently_skip).
+k8s-integration = []

@@ -20,10 +20,6 @@ impl EcsRuntime {
         cmd
     }
 
-    pub fn cli_name(&self) -> &str {
-        &self.cli
-    }
-
     /// Wire SecretsManager state so `secrets[].valueFrom` entries
     /// pointing at SecretsManager ARNs resolve at task launch.
     pub fn with_secretsmanager(mut self, state: SharedSecretsManagerState) -> Self {

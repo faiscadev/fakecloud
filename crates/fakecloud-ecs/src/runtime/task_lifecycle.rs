@@ -33,6 +33,9 @@ impl EcsRuntime {
         task_id: &str,
         account_id: &str,
     ) -> Result<(), RuntimeError> {
+        if self.k8s.is_some() {
+            return self.k8s_run_task_inner(state, task_id, account_id).await;
+        }
         // Build a per-container launch plan up-front so we hold the read
         // lock once. Each entry carries everything needed to compose a
         // `docker run` invocation for one container in the task.
@@ -624,6 +627,10 @@ impl EcsRuntime {
     /// synchronously from `StopTask`; the wait loop in `run_task_inner`
     /// observes the exits and transitions the task to `STOPPED`.
     pub async fn stop_task(&self, task_id: &str, reason: &str) -> bool {
+        if let Some(k) = &self.k8s {
+            tracing::info!(task = %task_id, reason = %reason, "ecs task stop requested (k8s)");
+            return k.stop_task(task_id).await;
+        }
         let containers = self.containers.read().get(task_id).cloned();
         let Some(list) = containers else {
             return false;
@@ -646,6 +653,10 @@ impl EcsRuntime {
     /// shutdown so docker state matches fakecloud state after a fresh
     /// boot.
     pub async fn stop_all(&self) {
+        if let Some(k) = &self.k8s {
+            k.stop_all().await;
+            return;
+        }
         let ids: Vec<String> = self
             .containers
             .read()
