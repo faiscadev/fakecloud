@@ -2234,6 +2234,8 @@ async fn restore_db_instance_from_db_snapshot_persists_tags() {
     let running = crate::runtime::RunningDbContainer {
         container_id: "c-restored".to_string(),
         host_port: 15432,
+        endpoint_address: "127.0.0.1".to_string(),
+        endpoint_port: 15432,
     };
     let instance = build_restored_instance(
         "restored",

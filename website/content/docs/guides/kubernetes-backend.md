@@ -161,9 +161,19 @@ Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACK
 - **Reboot** (RebootCacheCluster) recreates the Pod; for Redis the live dataset is snapshotted and reloaded across the recreate so data survives, matching the Docker backend's in-place restart. Memcached reboots flush (no persistence), as on AWS.
 - Cache Pods carry `fakecloud-service=elasticache`; the startup reaper sweeps only its own service's orphans.
 
+## RDS
+
+Set `FAKECLOUD_RDS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run DB instances as native Pods.
+
+- Each DB instance becomes one Pod. The bridge engines (`postgres` / `mysql` / `mariadb`) use the prebuilt `ghcr.io/faiscadev/fakecloud-*` images — the cluster pulls them (there's no in-cluster image build, unlike the Docker backend; override the registry with `FAKECLOUD_POSTGRES_REGISTRY`, or supply `FAKECLOUD_K8S_PULL_SECRET` for a private one). The heavy engines (Oracle / SQL Server / Db2) use their upstream images; Db2 runs with a privileged security context.
+- Bridge engines receive `FAKECLOUD_ENDPOINT` pointing at the in-cluster `FAKECLOUD_K8S_SELF_URL`, so their `aws_lambda` / `aws_s3` / UDF callbacks reach fakecloud.
+- Readiness is a real connection for Postgres / MySQL / MariaDB and a Pod-log marker (then a TCP probe) for the heavy engines. Snapshot dump / restore and log-file reads run through `kubectl exec` (`pg_dump` / `mysqldump` / `psql` / `cat`) — another reason for the `pods/exec` RBAC rule.
+- **Reboot** recreates the Pod; for the dumpable engines the dataset is snapshotted and reloaded across the recreate.
+- Because fakecloud connects to the DB over the Pod IP, the RDS k8s backend requires fakecloud to run **in-cluster** (the standard `FAKECLOUD_K8S_SELF_URL` deployment).
+
 ## Limitations
 
-- The Kubernetes backend covers Lambda and ElastiCache execution. ECS task execution and the RDS Postgres / MySQL container runtimes still shell out to Docker — they're follow-up work tracked off issue #1234.
+- The Kubernetes backend covers Lambda, ElastiCache, and RDS execution. ECS task execution still shells out to Docker — it's follow-up work tracked off issue #1234.
 - Container-image Lambda functions whose image registry requires auth need a manually-created `kubernetes.io/dockerconfigjson` Secret referenced via `FAKECLOUD_K8S_PULL_SECRET`. Auto-creating that secret requires `secrets` permissions that not every cluster admin wants to grant fakecloud.
 - Cold-start latency adds the init container HTTP round-trip to download code + layers (typically <500ms intra-cluster), on top of image pull + RIE start. Warm-Pod reuse keeps subsequent invocations as fast as the Docker backend.
 - The K8s backend requires fakecloud's process to remain reachable at `FAKECLOUD_K8S_SELF_URL` for the lifetime of each Pod's init container. If fakecloud restarts mid-init, that Pod's bootstrap fails and the facade will spawn a fresh one on the next invocation.

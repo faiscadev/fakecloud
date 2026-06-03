@@ -401,8 +401,25 @@ async fn main() {
             &endpoint_url,
         )),
     );
-    let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new(bound_addr.port()).map(Arc::new);
+    let rds_runtime = if fakecloud_k8s::backend_choice("FAKECLOUD_RDS_BACKEND")
+        == fakecloud_k8s::Backend::K8s
+    {
+        match fakecloud_rds::runtime::RdsRuntime::new_k8s(bound_addr.port()).await {
+            Ok(rt) => Some(Arc::new(rt)),
+            Err(e) => {
+                eprintln!(
+                    "Kubernetes RDS backend selected (FAKECLOUD_RDS_BACKEND/FAKECLOUD_CONTAINER_BACKEND=k8s) but failed to initialize: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        fakecloud_rds::runtime::RdsRuntime::new(bound_addr.port()).map(Arc::new)
+    };
     if let Some(ref rt) = rds_runtime {
+        // Sweep DB Pods left by a previous process (k8s only; no-op on the
+        // Docker backend, handled by the shared container reaper).
+        rt.reap_stale().await;
         tracing::info!(
             cli = rt.cli_name(),
             "RDS execution enabled via container runtime"

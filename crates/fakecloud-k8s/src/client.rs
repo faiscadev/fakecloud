@@ -248,6 +248,73 @@ impl K8sClient {
         })
     }
 
+    /// Like [`exec`](Self::exec) but writes `stdin` to the command's
+    /// standard input first (then closes it). Used for piping a SQL dump
+    /// into `psql`/`mysql` during a restore — the k8s equivalent of
+    /// `docker exec -i ... < dump`.
+    pub async fn exec_with_stdin(
+        &self,
+        pod: &str,
+        container: Option<&str>,
+        cmd: &[&str],
+        stdin: &[u8],
+    ) -> Result<ExecOutput, K8sError> {
+        use tokio::io::AsyncWriteExt;
+        let api = self.pods();
+        let mut ap = AttachParams::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(true);
+        if let Some(c) = container {
+            ap = ap.container(c.to_string());
+        }
+        let mut proc = api.exec(pod, cmd.iter().copied(), &ap).await?;
+
+        if let Some(mut w) = proc.stdin() {
+            w.write_all(stdin)
+                .await
+                .map_err(|e| K8sError::Other(format!("writing exec stdin: {e}")))?;
+            w.shutdown()
+                .await
+                .map_err(|e| K8sError::Other(format!("closing exec stdin: {e}")))?;
+        }
+
+        let mut stdout = Vec::new();
+        if let Some(mut s) = proc.stdout() {
+            s.read_to_end(&mut stdout)
+                .await
+                .map_err(|e| K8sError::Other(format!("reading exec stdout: {e}")))?;
+        }
+        let mut stderr_buf = Vec::new();
+        if let Some(mut s) = proc.stderr() {
+            let _ = s.read_to_end(&mut stderr_buf).await;
+        }
+        let status = match proc.take_status() {
+            Some(fut) => fut.await,
+            None => None,
+        };
+        let _ = proc.join().await;
+
+        Ok(ExecOutput {
+            stdout,
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+            exit_code: exit_code_from_status(status.as_ref()),
+        })
+    }
+
+    /// Fetch a Pod container's logs (the k8s equivalent of `docker logs`)
+    /// — used for log-marker readiness on engines that don't expose a
+    /// connect-based probe (Oracle / SQL Server / Db2).
+    pub async fn pod_logs(&self, pod: &str, container: Option<&str>) -> Result<String, K8sError> {
+        use kube::api::LogParams;
+        let api = self.pods();
+        let lp = LogParams {
+            container: container.map(|c| c.to_string()),
+            ..LogParams::default()
+        };
+        Ok(api.logs(pod, &lp).await?)
+    }
+
     /// Delete a Pod by name. Idempotent — a `404` (already gone) is
     /// treated as success; other errors are logged but not returned,
     /// since teardown is best-effort.

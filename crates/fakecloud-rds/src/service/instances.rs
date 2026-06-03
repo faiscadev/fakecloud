@@ -287,8 +287,8 @@ impl RdsService {
                             let state = accounts.get_or_create(&account_id);
                             if let Some(inst) = state.instances.get_mut(&id) {
                                 inst.db_instance_status = "available".to_string();
-                                inst.endpoint_address = "127.0.0.1".to_string();
-                                inst.port = i32::from(running.host_port);
+                                inst.endpoint_address = running.endpoint_address.clone();
+                                inst.port = i32::from(running.endpoint_port);
                                 inst.host_port = running.host_port;
                                 inst.container_id = running.container_id;
                             }
@@ -940,7 +940,8 @@ impl RdsService {
                 .get_mut(&db_instance_identifier)
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
             instance.host_port = running.host_port;
-            instance.port = i32::from(running.host_port);
+            instance.port = i32::from(running.endpoint_port);
+            instance.endpoint_address = running.endpoint_address.clone();
 
             // Apply any pending modifications
             if let Some(pending) = instance.pending_modified_values.take() {
