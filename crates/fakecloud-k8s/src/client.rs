@@ -174,11 +174,22 @@ impl K8sClient {
     ///
     /// [`wait_for_pod_ip`]: Self::wait_for_pod_ip
     pub async fn wait_for_tcp(ip: &str, port: u16, timeout: Duration) -> Result<(), K8sError> {
+        // Bound each connect so a single hung handshake (SYN dropped, no
+        // RST) can't run past the overall deadline. The kernel's default
+        // connect timeout is tens of seconds, well beyond `timeout`.
+        const PER_ATTEMPT: Duration = Duration::from_secs(2);
         let deadline = Instant::now() + timeout;
         let addr = format!("{ip}:{port}");
         loop {
-            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                return Ok(());
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let attempt_budget = remaining.min(PER_ATTEMPT);
+            if !attempt_budget.is_zero() {
+                if let Ok(Ok(_)) =
+                    tokio::time::timeout(attempt_budget, tokio::net::TcpStream::connect(&addr))
+                        .await
+                {
+                    return Ok(());
+                }
             }
             if Instant::now() >= deadline {
                 return Err(K8sError::Timeout(format!(

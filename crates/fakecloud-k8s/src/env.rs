@@ -58,7 +58,10 @@ impl K8sEnv {
             .host_str()
             .ok_or_else(|| K8sEnvError::InvalidSelfUrl("missing host".into()))?
             .to_string();
-        let self_port = parsed.port_or_known_default().unwrap_or(default_port);
+        // When the URL omits a port, fall back to fakecloud's actual bound
+        // port — not the scheme default (80/443), which fakecloud doesn't
+        // serve on in-cluster.
+        let self_port = parsed.port().unwrap_or(default_port);
 
         let (ecr_host, ecr_port) = match std::env::var("FAKECLOUD_K8S_ECR_URL").ok() {
             Some(raw) => {
@@ -68,7 +71,7 @@ impl K8sEnv {
                     .host_str()
                     .ok_or_else(|| K8sEnvError::InvalidEcrUrl("missing host".into()))?
                     .to_string();
-                let p = u.port_or_known_default().unwrap_or(default_port);
+                let p = u.port().unwrap_or(default_port);
                 (h, p)
             }
             None => (self_host.clone(), self_port),
@@ -87,5 +90,108 @@ impl K8sEnv {
             ecr_port,
             pull_secret,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // from_env reads process-global vars; serialize the tests touching them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const VARS: &[&str] = &[
+        "FAKECLOUD_K8S_SELF_URL",
+        "FAKECLOUD_K8S_ECR_URL",
+        "FAKECLOUD_K8S_NAMESPACE",
+        "FAKECLOUD_K8S_PULL_SECRET",
+    ];
+
+    fn with_env(set: &[(&str, &str)], f: impl FnOnce()) {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved: Vec<(String, Option<String>)> = VARS
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for k in VARS {
+            std::env::remove_var(k);
+        }
+        for (k, v) in set {
+            std::env::set_var(k, v);
+        }
+        f();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+    }
+
+    #[test]
+    fn missing_self_url_errors() {
+        with_env(&[], || {
+            assert!(matches!(
+                K8sEnv::from_env(4566),
+                Err(K8sEnvError::MissingSelfUrl)
+            ));
+        });
+    }
+
+    #[test]
+    fn portless_url_falls_back_to_default_port_not_scheme_default() {
+        with_env(
+            &[("FAKECLOUD_K8S_SELF_URL", "http://fakecloud.svc")],
+            || {
+                let env = K8sEnv::from_env(4566).unwrap();
+                // Not 80 (the http scheme default) — fakecloud's bound port.
+                assert_eq!(env.self_port, 4566);
+                assert_eq!(env.self_host, "fakecloud.svc");
+                // ECR defaults to the self host:port when its URL is unset.
+                assert_eq!(env.ecr_host, "fakecloud.svc");
+                assert_eq!(env.ecr_port, 4566);
+            },
+        );
+    }
+
+    #[test]
+    fn explicit_port_is_respected() {
+        with_env(
+            &[("FAKECLOUD_K8S_SELF_URL", "http://fakecloud.svc:4566")],
+            || {
+                let env = K8sEnv::from_env(9999).unwrap();
+                assert_eq!(env.self_port, 4566);
+            },
+        );
+    }
+
+    #[test]
+    fn ecr_url_overrides_and_defaults_namespace_pull_secret() {
+        with_env(
+            &[
+                ("FAKECLOUD_K8S_SELF_URL", "http://fakecloud.svc:4566"),
+                ("FAKECLOUD_K8S_ECR_URL", "http://registry.svc:5000"),
+                ("FAKECLOUD_K8S_NAMESPACE", "fc"),
+                ("FAKECLOUD_K8S_PULL_SECRET", "ecr-secret"),
+            ],
+            || {
+                let env = K8sEnv::from_env(4566).unwrap();
+                assert_eq!(env.ecr_host, "registry.svc");
+                assert_eq!(env.ecr_port, 5000);
+                assert_eq!(env.namespace, "fc");
+                assert_eq!(env.pull_secret.as_deref(), Some("ecr-secret"));
+            },
+        );
+    }
+
+    #[test]
+    fn namespace_defaults_to_default() {
+        with_env(
+            &[("FAKECLOUD_K8S_SELF_URL", "http://fakecloud.svc:4566")],
+            || {
+                assert_eq!(K8sEnv::from_env(4566).unwrap().namespace, "default");
+            },
+        );
     }
 }
