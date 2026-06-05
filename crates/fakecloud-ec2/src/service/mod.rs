@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod meta;
+mod sg;
 mod subnet;
 mod tags;
 mod vpc;
@@ -58,6 +59,24 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateSubnetCidrReservation",
     "DeleteSubnetCidrReservation",
     "GetSubnetCidrReservations",
+    // Security groups
+    "CreateSecurityGroup",
+    "DeleteSecurityGroup",
+    "DescribeSecurityGroups",
+    "AuthorizeSecurityGroupIngress",
+    "AuthorizeSecurityGroupEgress",
+    "RevokeSecurityGroupIngress",
+    "RevokeSecurityGroupEgress",
+    "DescribeSecurityGroupRules",
+    "ModifySecurityGroupRules",
+    "UpdateSecurityGroupRuleDescriptionsIngress",
+    "UpdateSecurityGroupRuleDescriptionsEgress",
+    "AssociateSecurityGroupVpc",
+    "DisassociateSecurityGroupVpc",
+    "DescribeSecurityGroupVpcAssociations",
+    "GetSecurityGroupsForVpc",
+    "DescribeStaleSecurityGroups",
+    "DescribeSecurityGroupReferences",
 ];
 
 /// Amazon EC2 service.
@@ -134,6 +153,31 @@ impl AwsService for Ec2Service {
             "CreateSubnetCidrReservation" => subnet::create_subnet_cidr_reservation(self, &request),
             "DeleteSubnetCidrReservation" => subnet::delete_subnet_cidr_reservation(self, &request),
             "GetSubnetCidrReservations" => subnet::get_subnet_cidr_reservations(self, &request),
+            "CreateSecurityGroup" => sg::create_security_group(self, &request),
+            "DeleteSecurityGroup" => sg::delete_security_group(self, &request),
+            "DescribeSecurityGroups" => sg::describe_security_groups(self, &request),
+            "AuthorizeSecurityGroupIngress" => sg::authorize_security_group_ingress(self, &request),
+            "AuthorizeSecurityGroupEgress" => sg::authorize_security_group_egress(self, &request),
+            "RevokeSecurityGroupIngress" => sg::revoke_security_group_ingress(self, &request),
+            "RevokeSecurityGroupEgress" => sg::revoke_security_group_egress(self, &request),
+            "DescribeSecurityGroupRules" => sg::describe_security_group_rules(self, &request),
+            "ModifySecurityGroupRules" => sg::modify_security_group_rules(self, &request),
+            "UpdateSecurityGroupRuleDescriptionsIngress" => {
+                sg::update_rule_descriptions_ingress(self, &request)
+            }
+            "UpdateSecurityGroupRuleDescriptionsEgress" => {
+                sg::update_rule_descriptions_egress(self, &request)
+            }
+            "AssociateSecurityGroupVpc" => sg::associate_security_group_vpc(self, &request),
+            "DisassociateSecurityGroupVpc" => sg::disassociate_security_group_vpc(self, &request),
+            "DescribeSecurityGroupVpcAssociations" => {
+                sg::describe_security_group_vpc_associations(self, &request)
+            }
+            "GetSecurityGroupsForVpc" => sg::get_security_groups_for_vpc(self, &request),
+            "DescribeStaleSecurityGroups" => sg::describe_stale_security_groups(self, &request),
+            "DescribeSecurityGroupReferences" => {
+                sg::describe_security_group_references(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

@@ -784,3 +784,331 @@ async fn ec2_delete_subnet_cidr_reservation() {
         Some(id.as_str())
     );
 }
+
+// ---- Security groups ----
+
+async fn make_sg(client: &aws_sdk_ec2::Client) -> String {
+    client
+        .create_security_group()
+        .group_name({
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            format!(
+                "sg-test-{}",
+                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        })
+        .description("test")
+        .send()
+        .await
+        .unwrap()
+        .group_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateSecurityGroup", checksum = "a08ce784")]
+#[tokio::test]
+async fn ec2_create_security_group() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .create_security_group()
+        .group_name("web")
+        .description("web sg")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.group_id().unwrap().starts_with("sg-"));
+}
+
+#[test_action("ec2", "DescribeSecurityGroups", checksum = "76d99894")]
+#[tokio::test]
+async fn ec2_describe_security_groups() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    let r = client
+        .describe_security_groups()
+        .group_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.security_groups().len(), 1);
+    assert_eq!(r.security_groups()[0].group_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DeleteSecurityGroup", checksum = "1dc96802")]
+#[tokio::test]
+async fn ec2_delete_security_group() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .delete_security_group()
+        .group_id(&id)
+        .send()
+        .await
+        .unwrap();
+    let r = client.describe_security_groups().send().await.unwrap();
+    assert!(!r
+        .security_groups()
+        .iter()
+        .any(|g| g.group_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "AuthorizeSecurityGroupIngress", checksum = "1aab945e")]
+#[tokio::test]
+async fn ec2_authorize_ingress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    let r = client
+        .authorize_security_group_ingress()
+        .group_id(&id)
+        .ip_permissions(
+            aws_sdk_ec2::types::IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(80)
+                .to_port(80)
+                .ip_ranges(
+                    aws_sdk_ec2::types::IpRange::builder()
+                        .cidr_ip("0.0.0.0/0")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+    assert!(!r.security_group_rules().is_empty());
+}
+
+#[test_action("ec2", "AuthorizeSecurityGroupEgress", checksum = "851ec8cb")]
+#[tokio::test]
+async fn ec2_authorize_egress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    let r = client
+        .authorize_security_group_egress()
+        .group_id(&id)
+        .ip_permissions(
+            aws_sdk_ec2::types::IpPermission::builder()
+                .ip_protocol("-1")
+                .ip_ranges(
+                    aws_sdk_ec2::types::IpRange::builder()
+                        .cidr_ip("10.0.0.0/8")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "RevokeSecurityGroupIngress", checksum = "fb623089")]
+#[tokio::test]
+async fn ec2_revoke_ingress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .revoke_security_group_ingress()
+        .group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "RevokeSecurityGroupEgress", checksum = "8e867b68")]
+#[tokio::test]
+async fn ec2_revoke_egress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .revoke_security_group_egress()
+        .group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeSecurityGroupRules", checksum = "f9e733db")]
+#[tokio::test]
+async fn ec2_describe_security_group_rules() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .authorize_security_group_ingress()
+        .group_id(&id)
+        .ip_permissions(
+            aws_sdk_ec2::types::IpPermission::builder()
+                .ip_protocol("tcp")
+                .from_port(22)
+                .to_port(22)
+                .ip_ranges(
+                    aws_sdk_ec2::types::IpRange::builder()
+                        .cidr_ip("0.0.0.0/0")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let r = client.describe_security_group_rules().send().await.unwrap();
+    assert!(r
+        .security_group_rules()
+        .iter()
+        .any(|x| x.from_port() == Some(22)));
+}
+
+#[test_action("ec2", "ModifySecurityGroupRules", checksum = "2a014064")]
+#[tokio::test]
+async fn ec2_modify_security_group_rules() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .modify_security_group_rules()
+        .group_id(&id)
+        .security_group_rules(
+            aws_sdk_ec2::types::SecurityGroupRuleUpdate::builder()
+                .security_group_rule_id("sgr-1")
+                .security_group_rule(
+                    aws_sdk_ec2::types::SecurityGroupRuleRequest::builder()
+                        .ip_protocol("tcp")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "UpdateSecurityGroupRuleDescriptionsIngress",
+    checksum = "3ee3289d"
+)]
+#[tokio::test]
+async fn ec2_update_descriptions_ingress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .update_security_group_rule_descriptions_ingress()
+        .group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "UpdateSecurityGroupRuleDescriptionsEgress",
+    checksum = "32ae7304"
+)]
+#[tokio::test]
+async fn ec2_update_descriptions_egress() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let id = make_sg(&client).await;
+    client
+        .update_security_group_rule_descriptions_egress()
+        .group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateSecurityGroupVpc", checksum = "df1e5167")]
+#[tokio::test]
+async fn ec2_associate_security_group_vpc() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .associate_security_group_vpc()
+        .group_id("sg-1")
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.state().is_some());
+}
+
+#[test_action("ec2", "DisassociateSecurityGroupVpc", checksum = "90e47c4b")]
+#[tokio::test]
+async fn ec2_disassociate_security_group_vpc() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .disassociate_security_group_vpc()
+        .group_id("sg-1")
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.state().is_some());
+}
+
+#[test_action("ec2", "DescribeSecurityGroupVpcAssociations", checksum = "0ab905a5")]
+#[tokio::test]
+async fn ec2_describe_security_group_vpc_associations() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .describe_security_group_vpc_associations()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.security_group_vpc_associations().is_empty());
+}
+
+#[test_action("ec2", "GetSecurityGroupsForVpc", checksum = "d1ef3542")]
+#[tokio::test]
+async fn ec2_get_security_groups_for_vpc() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .get_security_groups_for_vpc()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = r.security_group_for_vpcs();
+}
+
+#[test_action("ec2", "DescribeStaleSecurityGroups", checksum = "dd50f4fa")]
+#[tokio::test]
+async fn ec2_describe_stale_security_groups() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .describe_stale_security_groups()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.stale_security_group_set().is_empty());
+}
+
+#[test_action("ec2", "DescribeSecurityGroupReferences", checksum = "a579bf47")]
+#[tokio::test]
+async fn ec2_describe_security_group_references() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .describe_security_group_references()
+        .group_id("sg-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.security_group_reference_set().is_empty());
+}
