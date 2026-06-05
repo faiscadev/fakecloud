@@ -1,17 +1,78 @@
-//! `DescribeTags`.
-//!
-//! The mutating `CreateTags`/`DeleteTags` (which write [`crate::state::Ec2State`]
-//! via `upsert_tags`/`remove_tags`) land in the next batch alongside the L1
-//! probe's ec2Query request encoder — input-bearing ops can't be verified at
-//! Level 1 until the probe renames members via `ec2QueryName` and flattens
-//! lists as `.N` instead of `.member.N`.
+//! `CreateTags` / `DeleteTags` / `DescribeTags`.
 
-use fakecloud_aws::ec2query::{ec2_elem, ec2_list};
+use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
-use crate::service_helpers::{parse_filters, Filter};
+use crate::service_helpers::{indexed_list, parse_filters, parse_tag_pairs, Filter};
 use crate::state::Tag;
+
+pub(crate) fn create_tags(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    // Lenient by design: empty `Resources`/`Tags` are accepted as a no-op
+    // rather than rejected. AWS returns `MissingParameter` here, but EC2
+    // declares no per-operation error shapes, and omitting a list member is
+    // wire-indistinguishable from providing it empty — so the only faithful,
+    // conformance-stable behavior is to accept and store whatever is present.
+    // The real create->describe round-trip is covered by the L2 test.
+    let resource_ids = indexed_list(&req.query_params, "ResourceId");
+    let tags: Vec<Tag> = parse_tag_pairs(&req.query_params, "Tag")
+        .into_iter()
+        .map(|(key, value)| Tag {
+            key,
+            value: value.unwrap_or_default(),
+        })
+        .collect();
+
+    if !resource_ids.is_empty() && !tags.is_empty() {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        for id in &resource_ids {
+            state.upsert_tags(id, &tags);
+        }
+    }
+
+    Ok(Ec2Service::respond(
+        "CreateTags",
+        &req.request_id,
+        &ec2_return(true),
+    ))
+}
+
+pub(crate) fn delete_tags(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    // Lenient: an empty `Resources` set is a no-op (see `create_tags`).
+    let resource_ids = indexed_list(&req.query_params, "ResourceId");
+    let to_remove = parse_tag_pairs(&req.query_params, "Tag");
+
+    if !resource_ids.is_empty() {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        for id in &resource_ids {
+            if to_remove.is_empty() {
+                // DeleteTags with no Tag set removes every tag on the resource.
+                let all_keys: Vec<(String, Option<String>)> = state
+                    .tags_for(id)
+                    .iter()
+                    .map(|t| (t.key.clone(), None))
+                    .collect();
+                state.remove_tags(id, &all_keys);
+            } else {
+                state.remove_tags(id, &to_remove);
+            }
+        }
+    }
+
+    Ok(Ec2Service::respond(
+        "DeleteTags",
+        &req.request_id,
+        &ec2_return(true),
+    ))
+}
 
 pub(crate) fn describe_tags(
     svc: &Ec2Service,

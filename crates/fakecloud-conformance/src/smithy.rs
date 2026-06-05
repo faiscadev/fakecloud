@@ -131,6 +131,15 @@ pub struct ShapeTraits {
     /// strict matcher reads this when deriving the per-shape wire code so we
     /// don't need a suffix-stripping heuristic.
     pub aws_query_error_code: Option<String>,
+    /// `aws.protocols#ec2QueryName` — the request wire name for a member under
+    /// the `ec2Query` protocol. Highest-precedence name source. E.g. EC2's
+    /// `DryRun` member carries `ec2QueryName: "DryRun"`.
+    pub ec2_query_name: Option<String>,
+    /// `smithy.api#xmlName` — the XML element name. Under `ec2Query` it is the
+    /// request wire name when `ec2QueryName` is absent (e.g. CreateTags's
+    /// `Resources` member has `xmlName: "ResourceId"`, so the wire param is
+    /// `ResourceId.N`).
+    pub xml_name: Option<String>,
 }
 
 /// An example from `smithy.api#examples` trait on operations.
@@ -536,6 +545,17 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
         .and_then(|v| v.as_str())
     {
         traits.aws_query_error_code = Some(code.to_string());
+    }
+
+    if let Some(name) = raw
+        .get("aws.protocols#ec2QueryName")
+        .and_then(|v| v.as_str())
+    {
+        traits.ec2_query_name = Some(name.to_string());
+    }
+
+    if let Some(name) = raw.get("smithy.api#xmlName").and_then(|v| v.as_str()) {
+        traits.xml_name = Some(name.to_string());
     }
 
     if let Some(default) = raw.get("smithy.api#default") {

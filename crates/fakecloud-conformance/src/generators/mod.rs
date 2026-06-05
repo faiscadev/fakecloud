@@ -134,7 +134,19 @@ fn default_value_for_shape_def(model: &ServiceModel, shape: &Shape, depth: usize
             let mut obj = serde_json::Map::new();
             for member in members {
                 if member.required {
-                    let val = default_value_for_shape(model, &member.target, depth + 1);
+                    let mut val = default_value_for_shape(model, &member.target, depth + 1);
+                    // A required collection must carry at least one element to
+                    // count as "provided". An empty required list/map is
+                    // rejected by AWS, so a positive variant built with one
+                    // would spuriously fail against services whose operations
+                    // declare no error shapes (e.g. EC2, where every validation
+                    // 400 is "undeclared").
+                    ensure_required_collection_non_empty(
+                        model,
+                        &member.target,
+                        &mut val,
+                        depth + 1,
+                    );
                     obj.insert(member.name.clone(), val);
                 }
             }
@@ -207,6 +219,50 @@ fn default_value_for_shape_def(model: &ServiceModel, shape: &Shape, depth: usize
     }
 }
 
+/// If `target` resolves to a list/map shape and `val` is the empty collection,
+/// replace it with a single generated element so a required collection member
+/// is meaningfully "provided". No-op for scalars and already-populated
+/// collections.
+fn ensure_required_collection_non_empty(
+    model: &ServiceModel,
+    target: &str,
+    val: &mut Value,
+    depth: usize,
+) {
+    if depth > 6 {
+        return;
+    }
+    let Some(shape) = model.shapes.get(target) else {
+        return;
+    };
+    match &shape.shape_type {
+        ShapeType::List { member_target } => {
+            if matches!(val, Value::Array(a) if a.is_empty()) {
+                let elem = default_value_for_shape(model, member_target, depth + 1);
+                *val = Value::Array(vec![elem]);
+            }
+        }
+        ShapeType::Map {
+            key_target,
+            value_target,
+        } => {
+            if matches!(val, Value::Object(o) if o.is_empty()) {
+                // Derive the key from the key shape so enum/`@pattern`/`@length`
+                // constraints are respected — a hardcoded "key" produces an
+                // invalid positive variant for constrained map keys.
+                let key = match default_value_for_shape(model, key_target, depth + 1) {
+                    Value::String(s) if !s.is_empty() => s,
+                    _ => "key".to_string(),
+                };
+                let mut m = serde_json::Map::new();
+                m.insert(key, default_value_for_shape(model, value_target, depth + 1));
+                *val = Value::Object(m);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn default_for_prelude(shape_id: &str) -> Value {
     match shape_id {
         "smithy.api#String" | "smithy.api#Document" => Value::String("test".to_string()),
@@ -249,7 +305,8 @@ pub fn build_required_input(
                     if let Some(override_val) = overrides.get(&member.name) {
                         obj.insert(member.name.clone(), override_val.clone());
                     } else {
-                        let val = default_value_for_shape(model, &member.target, 0);
+                        let mut val = default_value_for_shape(model, &member.target, 0);
+                        ensure_required_collection_non_empty(model, &member.target, &mut val, 1);
                         obj.insert(member.name.clone(), val);
                     }
                 }

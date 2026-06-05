@@ -76,9 +76,13 @@ pub fn parse_filters(params: &HashMap<String, String>) -> Vec<Filter> {
 }
 
 /// Parse `{prefix}.N.Key` + `{prefix}.N.Value` tag pairs (the request shape for
-/// `CreateTags`/`DeleteTags` and `TagSpecification.N.Tag.M`). The value is
-/// optional — DeleteTags allows a key-only entry meaning "remove regardless of
-/// value".
+/// `CreateTags`/`DeleteTags` and `TagSpecification.N.Tag.M`).
+///
+/// The value is `None` only when the `Value` parameter is *absent* — for
+/// `DeleteTags` that means "remove this key regardless of value". A *present*
+/// `Value` (including an explicit empty string `Value=`) is preserved as
+/// `Some(value)` so DeleteTags can match the empty-value tag specifically
+/// rather than collapsing it into a key-only delete.
 pub fn parse_tag_pairs(
     params: &HashMap<String, String>,
     prefix: &str,
@@ -90,10 +94,7 @@ pub fn parse_tag_pairs(
         let Some(key) = params.get(&key_param).filter(|v| !v.is_empty()) else {
             break;
         };
-        let value = params
-            .get(&format!("{prefix}.{i}.Value"))
-            .filter(|v| !v.is_empty())
-            .cloned();
+        let value = params.get(&format!("{prefix}.{i}.Value")).cloned();
         out.push((key.clone(), value));
         i += 1;
     }
@@ -161,6 +162,19 @@ mod tests {
         assert_eq!(
             tags,
             vec![("Name".into(), Some("web".into())), ("env".into(), None)]
+        );
+    }
+
+    #[test]
+    fn parse_tag_pairs_distinguishes_empty_value_from_absent() {
+        // Present-but-empty `Value=` -> Some(""), absent `Value` -> None.
+        // DeleteTags relies on this: `Value=` deletes only the empty-value tag,
+        // while an absent value deletes the key regardless of value.
+        let params = p(&[("Tag.1.Key", "a"), ("Tag.1.Value", ""), ("Tag.2.Key", "b")]);
+        let tags = parse_tag_pairs(&params, "Tag");
+        assert_eq!(
+            tags,
+            vec![("a".into(), Some("".into())), ("b".into(), None)]
         );
     }
 }
