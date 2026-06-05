@@ -740,6 +740,10 @@ impl TestServer {
         aws_sdk_rds::Client::new(&self.aws_config().await)
     }
 
+    pub async fn ec2_client(&self) -> aws_sdk_ec2::Client {
+        aws_sdk_ec2::Client::new(&self.aws_config().await)
+    }
+
     pub async fn elasticache_client(&self) -> aws_sdk_elasticache::Client {
         aws_sdk_elasticache::Client::new(&self.aws_config().await)
     }

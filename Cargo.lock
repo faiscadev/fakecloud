@@ -746,6 +746,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-ec2"
+version = "1.226.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27ef215366676d2392accd5a5f964e891f7a97d210b34ccabe775510ccfd0302"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-ecr"
 version = "1.114.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2994,6 +3019,7 @@ dependencies = [
  "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dynamodb",
+ "fakecloud-ec2",
  "fakecloud-ecr",
  "fakecloud-ecs",
  "fakecloud-elasticache",
@@ -3386,6 +3412,7 @@ dependencies = [
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
+ "aws-sdk-ec2",
  "aws-sdk-ecr",
  "aws-sdk-ecs",
  "aws-sdk-elasticache",
@@ -3558,6 +3585,25 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "x509-cert",
  "zip",
+]
+
+[[package]]
+name = "fakecloud-ec2"
+version = "0.17.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4220,6 +4266,7 @@ dependencies = [
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",
+ "aws-sdk-ec2",
  "aws-sdk-ecr",
  "aws-sdk-ecs",
  "aws-sdk-elasticache",

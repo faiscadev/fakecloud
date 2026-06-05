@@ -54,6 +54,7 @@ sdk-clients = [
     "dep:aws-sdk-glue",
     "dep:aws-sdk-cloudwatch",
     "dep:aws-sdk-organizations",
+    "dep:aws-sdk-ec2",
 ]
 
 [dependencies]
@@ -80,6 +81,7 @@ aws-sdk-cloudwatchlogs = { version = "1", optional = true }
 aws-sdk-kms = { version = "1", optional = true }
 aws-sdk-kinesis = { version = "1", optional = true }
 aws-sdk-rds = { version = "1", optional = true }
+aws-sdk-ec2 = { version = "1", optional = true }
 aws-sdk-elasticache = { version = "1", optional = true }
 aws-sdk-cloudformation = { version = "1", optional = true }
 aws-sdk-ses = { version = "1", optional = true }

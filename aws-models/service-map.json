@@ -158,5 +158,9 @@
     "organizations": {
         "repo_dir": "organizations",
         "service_name": "organizations"
+    },
+    "ec2": {
+        "repo_dir": "ec2",
+        "service_name": "ec2"
     }
 }

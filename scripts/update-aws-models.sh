@@ -57,6 +57,7 @@ SERVICES=(
     "firehose:firehose"
     "glue:glue"
     "organizations:organizations"
+    "ec2:ec2"
 )
 
 # Sparse checkout only the models we need

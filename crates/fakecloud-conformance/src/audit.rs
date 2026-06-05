@@ -86,6 +86,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["cognito-identity"],
         ),
         ("rds", "rds", &["service.rs"], &["rds"]),
+        ("ec2", "ec2", &["service/mod.rs", "service.rs"], &["ec2"]),
         ("glue", "glue", &["service.rs"], &["glue"]),
         ("kinesis", "kinesis", &["service.rs"], &["kinesis"]),
         ("firehose", "firehose", &["service.rs"], &["firehose"]),
