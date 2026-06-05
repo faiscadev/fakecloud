@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod meta;
+mod subnet;
 mod tags;
 mod vpc;
 
@@ -43,6 +44,20 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteDhcpOptions",
     "DescribeDhcpOptions",
     "AssociateDhcpOptions",
+    // Subnets
+    "CreateSubnet",
+    "CreateDefaultSubnet",
+    "CreateSecondarySubnet",
+    "DeleteSubnet",
+    "DeleteSecondarySubnet",
+    "DescribeSubnets",
+    "DescribeSecondarySubnets",
+    "ModifySubnetAttribute",
+    "AssociateSubnetCidrBlock",
+    "DisassociateSubnetCidrBlock",
+    "CreateSubnetCidrReservation",
+    "DeleteSubnetCidrReservation",
+    "GetSubnetCidrReservations",
 ];
 
 /// Amazon EC2 service.
@@ -106,6 +121,19 @@ impl AwsService for Ec2Service {
             "DeleteDhcpOptions" => dhcp::delete_dhcp_options(self, &request),
             "DescribeDhcpOptions" => dhcp::describe_dhcp_options(self, &request),
             "AssociateDhcpOptions" => dhcp::associate_dhcp_options(self, &request),
+            "CreateSubnet" => subnet::create_subnet(self, &request),
+            "CreateDefaultSubnet" => subnet::create_default_subnet(self, &request),
+            "CreateSecondarySubnet" => subnet::create_secondary_subnet(self, &request),
+            "DeleteSubnet" => subnet::delete_subnet(self, &request),
+            "DeleteSecondarySubnet" => subnet::delete_secondary_subnet(self, &request),
+            "DescribeSubnets" => subnet::describe_subnets(self, &request),
+            "DescribeSecondarySubnets" => subnet::describe_secondary_subnets(self, &request),
+            "ModifySubnetAttribute" => subnet::modify_subnet_attribute(self, &request),
+            "AssociateSubnetCidrBlock" => subnet::associate_subnet_cidr_block(self, &request),
+            "DisassociateSubnetCidrBlock" => subnet::disassociate_subnet_cidr_block(self, &request),
+            "CreateSubnetCidrReservation" => subnet::create_subnet_cidr_reservation(self, &request),
+            "DeleteSubnetCidrReservation" => subnet::delete_subnet_cidr_reservation(self, &request),
+            "GetSubnetCidrReservations" => subnet::get_subnet_cidr_reservations(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

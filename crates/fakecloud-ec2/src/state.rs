@@ -67,6 +67,37 @@ pub struct DhcpOptions {
     pub configurations: Vec<DhcpConfig>,
 }
 
+/// A subnet within a VPC.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Subnet {
+    pub subnet_id: String,
+    pub vpc_id: String,
+    pub cidr_block: String,
+    pub availability_zone: String,
+    pub availability_zone_id: String,
+    /// `pending` | `available`.
+    pub state: String,
+    pub available_ip_address_count: i32,
+    pub default_for_az: bool,
+    pub map_public_ip_on_launch: bool,
+    pub assign_ipv6_address_on_creation: bool,
+    pub map_customer_owned_ip_on_launch: bool,
+    pub enable_dns64: bool,
+    /// `ip-name` | `resource-name`.
+    pub private_dns_hostname_type: String,
+}
+
+/// A CIDR reservation within a subnet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubnetCidrReservation {
+    pub subnet_cidr_reservation_id: String,
+    pub subnet_id: String,
+    pub cidr: String,
+    /// `prefix` | `explicit`.
+    pub reservation_type: String,
+    pub description: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -80,6 +111,10 @@ pub struct Ec2State {
     pub vpcs: HashMap<String, Vpc>,
     #[serde(default)]
     pub dhcp_options: HashMap<String, DhcpOptions>,
+    #[serde(default)]
+    pub subnets: HashMap<String, Subnet>,
+    #[serde(default)]
+    pub subnet_cidr_reservations: HashMap<String, SubnetCidrReservation>,
 }
 
 impl Ec2State {
@@ -87,9 +122,7 @@ impl Ec2State {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            tags: HashMap::new(),
-            vpcs: HashMap::new(),
-            dhcp_options: HashMap::new(),
+            ..Default::default()
         }
     }
 
