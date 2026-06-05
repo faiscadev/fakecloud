@@ -243,15 +243,19 @@ fn ensure_required_collection_non_empty(
             }
         }
         ShapeType::Map {
-            key_target: _,
+            key_target,
             value_target,
         } => {
             if matches!(val, Value::Object(o) if o.is_empty()) {
+                // Derive the key from the key shape so enum/`@pattern`/`@length`
+                // constraints are respected — a hardcoded "key" produces an
+                // invalid positive variant for constrained map keys.
+                let key = match default_value_for_shape(model, key_target, depth + 1) {
+                    Value::String(s) if !s.is_empty() => s,
+                    _ => "key".to_string(),
+                };
                 let mut m = serde_json::Map::new();
-                m.insert(
-                    "key".to_string(),
-                    default_value_for_shape(model, value_target, depth + 1),
-                );
+                m.insert(key, default_value_for_shape(model, value_target, depth + 1));
                 *val = Value::Object(m);
             }
         }
