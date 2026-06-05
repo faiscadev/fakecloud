@@ -98,6 +98,33 @@ pub struct SubnetCidrReservation {
     pub description: String,
 }
 
+/// A security-group rule (ingress or egress), stored flat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecurityGroupRule {
+    pub rule_id: String,
+    pub group_id: String,
+    pub is_egress: bool,
+    pub ip_protocol: String,
+    pub from_port: i64,
+    pub to_port: i64,
+    pub cidr_ipv4: Option<String>,
+    pub cidr_ipv6: Option<String>,
+    pub prefix_list_id: Option<String>,
+    pub referenced_group_id: Option<String>,
+    pub description: String,
+}
+
+/// A security group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecurityGroup {
+    pub group_id: String,
+    pub group_name: String,
+    pub description: String,
+    pub vpc_id: String,
+    #[serde(default)]
+    pub rules: Vec<SecurityGroupRule>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -115,6 +142,8 @@ pub struct Ec2State {
     pub subnets: HashMap<String, Subnet>,
     #[serde(default)]
     pub subnet_cidr_reservations: HashMap<String, SubnetCidrReservation>,
+    #[serde(default)]
+    pub security_groups: HashMap<String, SecurityGroup>,
 }
 
 impl Ec2State {

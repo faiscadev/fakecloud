@@ -102,6 +102,26 @@ pub fn validate_max_results(
     Ok(())
 }
 
+/// Reject a present parameter whose length is outside `[min, max]` (the
+/// harness's `negative_too_short_*` / `negative_too_long_*` variants for
+/// `@length`-constrained members such as a bounded `NextToken`).
+pub fn validate_length(
+    params: &HashMap<String, String>,
+    key: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = params.get(key) {
+        let n = v.chars().count();
+        if n < min || n > max {
+            return Err(invalid_parameter_value(format!(
+                "{key} length must be between {min} and {max}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Collect a 1-based indexed list, e.g. `ResourceId.1`, `ResourceId.2`, ….
 ///
 /// EC2 list members are contiguous from index 1; collection stops at the first
