@@ -8,13 +8,36 @@ pub(super) fn probe_query(
     service_name: &str,
     operation_name: &str,
     variant: &TestVariant,
+    model: Option<&crate::smithy::ServiceModel>,
 ) -> Result<(u16, String), String> {
     // Build form-encoded body with Action parameter
     let mut params = vec![("Action".to_string(), operation_name.to_string())];
 
-    // Flatten JSON input into form params
-    if let Value::Object(ref map) = variant.input {
-        flatten_to_form_params(map, "", &mut params);
+    // EC2 speaks `ec2Query`, whose request encoding differs from awsQuery:
+    // lists flatten as `Name.N` (not `Name.member.N`) and member wire names
+    // come from `ec2QueryName`/`xmlName` (e.g. CreateTags's `Resources` member
+    // is sent as `ResourceId.N`). This needs the model to resolve names, so we
+    // walk the input shape tree when it is available; otherwise we fall back to
+    // the generic awsQuery flattener.
+    let ec2_encoded = if service_name == "ec2" {
+        model
+            .and_then(|m| m.operations.iter().find(|o| o.name == operation_name))
+            .and_then(|op| op.input_shape.as_deref())
+            .map(|input_shape| {
+                if let Value::Object(_) = variant.input {
+                    encode_ec2_query(&variant.input, input_shape, "", model.unwrap(), &mut params);
+                }
+            })
+            .is_some()
+    } else {
+        false
+    };
+
+    // Flatten JSON input into form params (awsQuery default path)
+    if !ec2_encoded {
+        if let Value::Object(ref map) = variant.input {
+            flatten_to_form_params(map, "", &mut params);
+        }
     }
 
     let body = params
@@ -34,6 +57,92 @@ pub(super) fn probe_query(
     let status = resp.status().as_u16();
     let body = resp.text().map_err(|e| e.to_string())?;
     Ok((status, body))
+}
+
+/// Encode a value into `ec2Query` form params by walking the Smithy input shape
+/// alongside the generated JSON. Lists flatten as `{prefix}.{N}` (1-based, no
+/// `.member`); structure members use their `ec2QueryName` / `xmlName` / capitalized
+/// member name as the wire segment. Scalars push `(prefix, value)`.
+fn encode_ec2_query(
+    value: &Value,
+    shape_id: &str,
+    prefix: &str,
+    model: &crate::smithy::ServiceModel,
+    params: &mut Vec<(String, String)>,
+) {
+    use crate::smithy::ShapeType;
+
+    match model.shapes.get(shape_id).map(|s| &s.shape_type) {
+        Some(ShapeType::Structure { members }) | Some(ShapeType::Union { members }) => {
+            let Value::Object(map) = value else { return };
+            for (key, child) in map {
+                let Some(member) = members.iter().find(|m| &m.name == key) else {
+                    continue;
+                };
+                let wire = ec2_member_wire_name(member);
+                let child_prefix = if prefix.is_empty() {
+                    wire
+                } else {
+                    format!("{prefix}.{wire}")
+                };
+                encode_ec2_query(child, &member.target, &child_prefix, model, params);
+            }
+        }
+        Some(ShapeType::List { member_target }) => {
+            let Value::Array(items) = value else { return };
+            for (i, item) in items.iter().enumerate() {
+                let child_prefix = format!("{prefix}.{}", i + 1);
+                encode_ec2_query(item, member_target, &child_prefix, model, params);
+            }
+        }
+        Some(ShapeType::Map {
+            key_target,
+            value_target,
+        }) => {
+            // EC2 maps serialize as `{prefix}.N.key` / `{prefix}.N.value`.
+            let Value::Object(map) = value else { return };
+            for (i, (k, v)) in map.iter().enumerate() {
+                let entry = format!("{prefix}.{}", i + 1);
+                params.push((format!("{entry}.key"), k.clone()));
+                let _ = key_target;
+                encode_ec2_query(v, value_target, &format!("{entry}.value"), model, params);
+            }
+        }
+        // Scalars, prelude primitives (not in the shapes map), and enums all
+        // serialize as a single leaf param.
+        _ => {
+            if let Some(s) = scalar_to_string(value) {
+                params.push((prefix.to_string(), s));
+            }
+        }
+    }
+}
+
+/// Resolve a member's `ec2Query` request wire name: `ec2QueryName`, else
+/// `xmlName`, else the member name with its first letter capitalized.
+fn ec2_member_wire_name(member: &crate::smithy::Member) -> String {
+    if let Some(n) = &member.traits.ec2_query_name {
+        return n.clone();
+    }
+    if let Some(n) = &member.traits.xml_name {
+        return n.clone();
+    }
+    let mut chars = member.name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Render a JSON scalar as its form-param string. Returns `None` for
+/// objects/arrays/null (handled structurally elsewhere).
+fn scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Build a minimally-well-formed SigV4 Authorization header for probing.

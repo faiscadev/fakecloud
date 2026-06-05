@@ -18,10 +18,9 @@ use crate::state::SharedEc2State;
 /// action added here without a test fails the build. Grows one resource-family
 /// batch at a time toward full 767-op parity.
 pub const SUPPORTED_ACTIONS: &[&str] = &[
-    // Tag introspection (the `tag:`/`resource-id` filter surface). The mutating
-    // CreateTags/DeleteTags land in the next batch together with the L1 probe's
-    // ec2Query request encoder (flattened `.N` lists + `ec2QueryName` member
-    // renaming), which is required to verify input-bearing ops at Level 1.
+    // Tagging subsystem (shared by every resource family)
+    "CreateTags",
+    "DeleteTags",
     "DescribeTags",
     // Region / AZ / account describe primitives
     "DescribeRegions",
@@ -71,6 +70,8 @@ impl AwsService for Ec2Service {
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         match request.action.as_str() {
+            "CreateTags" => tags::create_tags(self, &request),
+            "DeleteTags" => tags::delete_tags(self, &request),
             "DescribeTags" => tags::describe_tags(self, &request),
             "DescribeRegions" => meta::describe_regions(self, &request),
             "DescribeAvailabilityZones" => meta::describe_availability_zones(self, &request),

@@ -90,7 +90,14 @@ pub fn probe_variant_with_model(
     let start = std::time::Instant::now();
 
     let result = match protocol {
-        Protocol::Query => probe_query(client, endpoint, service_name, operation_name, variant),
+        Protocol::Query => probe_query(
+            client,
+            endpoint,
+            service_name,
+            operation_name,
+            variant,
+            model_info.map(|(m, _)| m),
+        ),
         Protocol::Json { target_prefix } => {
             probe_json(client, endpoint, target_prefix, operation_name, variant)
         }

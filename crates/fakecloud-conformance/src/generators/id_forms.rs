@@ -198,6 +198,11 @@ fn merged_traits(target: &ShapeTraits, member: &ShapeTraits) -> ShapeTraits {
             .aws_query_error_code
             .clone()
             .or_else(|| target.aws_query_error_code.clone()),
+        ec2_query_name: member
+            .ec2_query_name
+            .clone()
+            .or_else(|| target.ec2_query_name.clone()),
+        xml_name: member.xml_name.clone().or_else(|| target.xml_name.clone()),
     }
 }
 
