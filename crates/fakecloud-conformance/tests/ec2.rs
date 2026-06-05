@@ -208,7 +208,12 @@ async fn ec2_create_default_vpc() {
 async fn ec2_describe_vpcs() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.1.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.1.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
 
     let resp = client.describe_vpcs().vpc_ids(&id).send().await.unwrap();
@@ -222,7 +227,12 @@ async fn ec2_describe_vpcs() {
 async fn ec2_delete_vpc() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.2.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.2.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     client.delete_vpc().vpc_id(&id).send().await.unwrap();
     let resp = client.describe_vpcs().send().await.unwrap();
@@ -234,12 +244,21 @@ async fn ec2_delete_vpc() {
 async fn ec2_modify_vpc_attribute() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.3.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.3.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     client
         .modify_vpc_attribute()
         .vpc_id(&id)
-        .enable_dns_hostnames(aws_sdk_ec2::types::AttributeBooleanValue::builder().value(true).build())
+        .enable_dns_hostnames(
+            aws_sdk_ec2::types::AttributeBooleanValue::builder()
+                .value(true)
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -250,7 +269,10 @@ async fn ec2_modify_vpc_attribute() {
         .send()
         .await
         .unwrap();
-    assert_eq!(attr.enable_dns_hostnames().and_then(|v| v.value()), Some(true));
+    assert_eq!(
+        attr.enable_dns_hostnames().and_then(|v| v.value()),
+        Some(true)
+    );
 }
 
 #[test_action("ec2", "DescribeVpcAttribute", checksum = "ece38141")]
@@ -258,7 +280,12 @@ async fn ec2_modify_vpc_attribute() {
 async fn ec2_describe_vpc_attribute() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.4.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.4.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     let attr = client
         .describe_vpc_attribute()
@@ -267,7 +294,10 @@ async fn ec2_describe_vpc_attribute() {
         .send()
         .await
         .unwrap();
-    assert_eq!(attr.enable_dns_support().and_then(|v| v.value()), Some(true));
+    assert_eq!(
+        attr.enable_dns_support().and_then(|v| v.value()),
+        Some(true)
+    );
 }
 
 #[test_action("ec2", "ModifyVpcTenancy", checksum = "bbc0fe05")]
@@ -275,7 +305,12 @@ async fn ec2_describe_vpc_attribute() {
 async fn ec2_modify_vpc_tenancy() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.5.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.5.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     let resp = client
         .modify_vpc_tenancy()
@@ -292,7 +327,12 @@ async fn ec2_modify_vpc_tenancy() {
 async fn ec2_associate_vpc_cidr_block() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.6.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.6.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     let resp = client
         .associate_vpc_cidr_block()
@@ -302,7 +342,12 @@ async fn ec2_associate_vpc_cidr_block() {
         .await
         .unwrap();
     assert_eq!(resp.vpc_id(), Some(id.as_str()));
-    assert!(resp.cidr_block_association().unwrap().association_id().unwrap().starts_with("vpc-cidr-assoc-"));
+    assert!(resp
+        .cidr_block_association()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .starts_with("vpc-cidr-assoc-"));
 }
 
 #[test_action("ec2", "DisassociateVpcCidrBlock", checksum = "056b5875")]
@@ -310,7 +355,12 @@ async fn ec2_associate_vpc_cidr_block() {
 async fn ec2_disassociate_vpc_cidr_block() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let created = client.create_vpc().cidr_block("10.8.0.0/16").send().await.unwrap();
+    let created = client
+        .create_vpc()
+        .cidr_block("10.8.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let id = created.vpc().unwrap().vpc_id().unwrap().to_string();
     let assoc = client
         .associate_vpc_cidr_block()
@@ -319,14 +369,22 @@ async fn ec2_disassociate_vpc_cidr_block() {
         .send()
         .await
         .unwrap();
-    let assoc_id = assoc.cidr_block_association().unwrap().association_id().unwrap().to_string();
+    let assoc_id = assoc
+        .cidr_block_association()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
     let resp = client
         .disassociate_vpc_cidr_block()
         .association_id(&assoc_id)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.cidr_block_association().unwrap().association_id(), Some(assoc_id.as_str()));
+    assert_eq!(
+        resp.cidr_block_association().unwrap().association_id(),
+        Some(assoc_id.as_str())
+    );
 }
 
 // ---- DHCP options ----
@@ -371,8 +429,18 @@ async fn ec2_describe_dhcp_options() {
         .send()
         .await
         .unwrap();
-    let id = created.dhcp_options().unwrap().dhcp_options_id().unwrap().to_string();
-    let resp = client.describe_dhcp_options().dhcp_options_ids(&id).send().await.unwrap();
+    let id = created
+        .dhcp_options()
+        .unwrap()
+        .dhcp_options_id()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .describe_dhcp_options()
+        .dhcp_options_ids(&id)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.dhcp_options().len(), 1);
 }
 
@@ -384,15 +452,31 @@ async fn ec2_delete_dhcp_options() {
     let created = client
         .create_dhcp_options()
         .dhcp_configurations(
-            aws_sdk_ec2::types::NewDhcpConfiguration::builder().key("domain-name").values("x.com").build(),
+            aws_sdk_ec2::types::NewDhcpConfiguration::builder()
+                .key("domain-name")
+                .values("x.com")
+                .build(),
         )
         .send()
         .await
         .unwrap();
-    let id = created.dhcp_options().unwrap().dhcp_options_id().unwrap().to_string();
-    client.delete_dhcp_options().dhcp_options_id(&id).send().await.unwrap();
+    let id = created
+        .dhcp_options()
+        .unwrap()
+        .dhcp_options_id()
+        .unwrap()
+        .to_string();
+    client
+        .delete_dhcp_options()
+        .dhcp_options_id(&id)
+        .send()
+        .await
+        .unwrap();
     let resp = client.describe_dhcp_options().send().await.unwrap();
-    assert!(!resp.dhcp_options().iter().any(|o| o.dhcp_options_id() == Some(id.as_str())));
+    assert!(!resp
+        .dhcp_options()
+        .iter()
+        .any(|o| o.dhcp_options_id() == Some(id.as_str())));
 }
 
 #[test_action("ec2", "AssociateDhcpOptions", checksum = "90fad717")]
@@ -400,17 +484,30 @@ async fn ec2_delete_dhcp_options() {
 async fn ec2_associate_dhcp_options() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
-    let vpc = client.create_vpc().cidr_block("10.10.0.0/16").send().await.unwrap();
+    let vpc = client
+        .create_vpc()
+        .cidr_block("10.10.0.0/16")
+        .send()
+        .await
+        .unwrap();
     let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap().to_string();
     let dopt = client
         .create_dhcp_options()
         .dhcp_configurations(
-            aws_sdk_ec2::types::NewDhcpConfiguration::builder().key("domain-name").values("y.com").build(),
+            aws_sdk_ec2::types::NewDhcpConfiguration::builder()
+                .key("domain-name")
+                .values("y.com")
+                .build(),
         )
         .send()
         .await
         .unwrap();
-    let dopt_id = dopt.dhcp_options().unwrap().dhcp_options_id().unwrap().to_string();
+    let dopt_id = dopt
+        .dhcp_options()
+        .unwrap()
+        .dhcp_options_id()
+        .unwrap()
+        .to_string();
     client
         .associate_dhcp_options()
         .dhcp_options_id(&dopt_id)
@@ -418,6 +515,11 @@ async fn ec2_associate_dhcp_options() {
         .send()
         .await
         .unwrap();
-    let resp = client.describe_vpcs().vpc_ids(&vpc_id).send().await.unwrap();
+    let resp = client
+        .describe_vpcs()
+        .vpc_ids(&vpc_id)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.vpcs()[0].dhcp_options_id(), Some(dopt_id.as_str()));
 }
