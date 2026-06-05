@@ -1,7 +1,9 @@
 //! EC2 service entrypoint: `ec2Query` dispatch over the per-account state.
 
+mod dhcp;
 mod meta;
 mod tags;
+mod vpc;
 
 use async_trait::async_trait;
 use http::StatusCode;
@@ -26,6 +28,21 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeRegions",
     "DescribeAvailabilityZones",
     "DescribeAccountAttributes",
+    // VPCs
+    "CreateVpc",
+    "CreateDefaultVpc",
+    "DeleteVpc",
+    "DescribeVpcs",
+    "ModifyVpcAttribute",
+    "DescribeVpcAttribute",
+    "ModifyVpcTenancy",
+    "AssociateVpcCidrBlock",
+    "DisassociateVpcCidrBlock",
+    // DHCP options
+    "CreateDhcpOptions",
+    "DeleteDhcpOptions",
+    "DescribeDhcpOptions",
+    "AssociateDhcpOptions",
 ];
 
 /// Amazon EC2 service.
@@ -76,6 +93,19 @@ impl AwsService for Ec2Service {
             "DescribeRegions" => meta::describe_regions(self, &request),
             "DescribeAvailabilityZones" => meta::describe_availability_zones(self, &request),
             "DescribeAccountAttributes" => meta::describe_account_attributes(self, &request),
+            "CreateVpc" => vpc::create_vpc(self, &request),
+            "CreateDefaultVpc" => vpc::create_default_vpc(self, &request),
+            "DeleteVpc" => vpc::delete_vpc(self, &request),
+            "DescribeVpcs" => vpc::describe_vpcs(self, &request),
+            "ModifyVpcAttribute" => vpc::modify_vpc_attribute(self, &request),
+            "DescribeVpcAttribute" => vpc::describe_vpc_attribute(self, &request),
+            "ModifyVpcTenancy" => vpc::modify_vpc_tenancy(self, &request),
+            "AssociateVpcCidrBlock" => vpc::associate_vpc_cidr_block(self, &request),
+            "DisassociateVpcCidrBlock" => vpc::disassociate_vpc_cidr_block(self, &request),
+            "CreateDhcpOptions" => dhcp::create_dhcp_options(self, &request),
+            "DeleteDhcpOptions" => dhcp::delete_dhcp_options(self, &request),
+            "DescribeDhcpOptions" => dhcp::describe_dhcp_options(self, &request),
+            "AssociateDhcpOptions" => dhcp::associate_dhcp_options(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

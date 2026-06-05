@@ -19,6 +19,13 @@ pub struct Filter {
     pub values: Vec<String>,
 }
 
+/// Generate an EC2 resource id: `<prefix>-<17 lowercase hex>`, matching the
+/// modern long-id format (e.g. `vpc-0a1b2c3d4e5f67890`).
+pub fn gen_id(prefix: &str) -> String {
+    let hex = uuid::Uuid::new_v4().simple().to_string();
+    format!("{prefix}-{}", &hex[..17])
+}
+
 /// `InvalidParameterValue` — the catch-all 400 for bad EC2 input.
 pub fn invalid_parameter_value(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -35,6 +42,64 @@ pub fn missing_parameter(name: &str) -> AwsServiceError {
         "MissingParameter",
         format!("The request must contain the parameter {name}"),
     )
+}
+
+/// An EC2 `Invalid<Resource>.NotFound`-style error (HTTP 400, matching AWS).
+pub fn not_found(code: &str, id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        code,
+        format!("The ID '{id}' does not exist"),
+    )
+}
+
+/// Require a non-empty scalar parameter, else `MissingParameter`. Omitting a
+/// required scalar is wire-observable, so the conformance harness generates a
+/// negative variant for it — handlers must reject it.
+pub fn require(params: &HashMap<String, String>, key: &str) -> Result<String, AwsServiceError> {
+    params
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or_else(|| missing_parameter(key))
+}
+
+/// Reject a present-but-invalid enum value (the harness's
+/// `negative_invalid_enum_*` variant). Absent is allowed here — required-ness
+/// is enforced separately via [`require`].
+pub fn validate_enum(
+    params: &HashMap<String, String>,
+    key: &str,
+    allowed: &[&str],
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = params.get(key).filter(|v| !v.is_empty()) {
+        if !allowed.contains(&v.as_str()) {
+            return Err(invalid_parameter_value(format!(
+                "Invalid value '{v}' for {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject an out-of-range `MaxResults` (the harness's `negative_below_min` /
+/// `negative_above_max` variants). EC2 describe pages bound MaxResults to
+/// [5, 1000] unless documented otherwise.
+pub fn validate_max_results(
+    params: &HashMap<String, String>,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = params.get("MaxResults").filter(|v| !v.is_empty()) {
+        if let Ok(n) = v.parse::<i64>() {
+            if n < min || n > max {
+                return Err(invalid_parameter_value(format!(
+                    "MaxResults must be between {min} and {max}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Collect a 1-based indexed list, e.g. `ResourceId.1`, `ResourceId.2`, ….

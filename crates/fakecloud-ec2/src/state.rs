@@ -27,9 +27,48 @@ pub struct Tag {
     pub value: String,
 }
 
+/// A secondary CIDR-block association on a VPC.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpcCidrAssoc {
+    pub association_id: String,
+    pub cidr_block: String,
+    /// `associated` | `disassociated`.
+    pub state: String,
+}
+
+/// A Virtual Private Cloud.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Vpc {
+    pub vpc_id: String,
+    pub cidr_block: String,
+    /// `pending` | `available`.
+    pub state: String,
+    pub dhcp_options_id: String,
+    /// `default` | `dedicated` | `host`.
+    pub instance_tenancy: String,
+    pub is_default: bool,
+    pub enable_dns_support: bool,
+    pub enable_dns_hostnames: bool,
+    #[serde(default)]
+    pub cidr_associations: Vec<VpcCidrAssoc>,
+}
+
+/// One `key -> values` entry in a DHCP options set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DhcpConfig {
+    pub key: String,
+    pub values: Vec<String>,
+}
+
+/// A DHCP options set.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DhcpOptions {
+    pub dhcp_options_id: String,
+    pub configurations: Vec<DhcpConfig>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
-/// struct as their batches land; the foundation carries only the cross-cutting
-/// tag store.
+/// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Ec2State {
     pub account_id: String,
@@ -37,6 +76,10 @@ pub struct Ec2State {
     /// resource-id -> tags. Shared by every Describe* `tag:` filter.
     #[serde(default)]
     pub tags: HashMap<String, Vec<Tag>>,
+    #[serde(default)]
+    pub vpcs: HashMap<String, Vpc>,
+    #[serde(default)]
+    pub dhcp_options: HashMap<String, DhcpOptions>,
 }
 
 impl Ec2State {
@@ -45,6 +88,8 @@ impl Ec2State {
             account_id: account_id.to_string(),
             region: region.to_string(),
             tags: HashMap::new(),
+            vpcs: HashMap::new(),
+            dhcp_options: HashMap::new(),
         }
     }
 

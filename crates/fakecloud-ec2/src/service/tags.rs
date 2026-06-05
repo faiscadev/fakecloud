@@ -1,11 +1,57 @@
-//! `CreateTags` / `DeleteTags` / `DescribeTags`.
+//! `CreateTags` / `DeleteTags` / `DescribeTags`, plus the shared `tagSet`
+//! renderer and `TagSpecification.N` on-create parser reused by every
+//! resource-family create handler.
+
+use std::collections::HashMap;
 
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{indexed_list, parse_filters, parse_tag_pairs, Filter};
-use crate::state::Tag;
+use crate::state::{Ec2State, Tag};
+
+/// Render a `<tagSet>` from a resource's stored tags (lowerCamel wire shape).
+pub(crate) fn tag_set_xml(tags: &[Tag]) -> String {
+    let pairs: Vec<(String, String)> = tags
+        .iter()
+        .map(|t| (t.key.clone(), t.value.clone()))
+        .collect();
+    fakecloud_aws::ec2query::ec2_tag_set(&pairs)
+}
+
+/// Apply `TagSpecification.N` entries whose `ResourceType` matches
+/// `resource_type` to `resource_id` in the shared tag store. EC2 create
+/// operations carry tags this way (e.g.
+/// `TagSpecification.1.ResourceType=vpc&TagSpecification.1.Tag.1.Key=Name`).
+pub(crate) fn apply_tag_specifications(
+    state: &mut Ec2State,
+    params: &HashMap<String, String>,
+    resource_id: &str,
+    resource_type: &str,
+) {
+    let mut i = 1usize;
+    loop {
+        let rt_key = format!("TagSpecification.{i}.ResourceType");
+        let Some(rt) = params.get(&rt_key) else {
+            break;
+        };
+        if rt == resource_type {
+            let pairs = parse_tag_pairs(params, &format!("TagSpecification.{i}.Tag"));
+            let tags: Vec<Tag> = pairs
+                .into_iter()
+                .map(|(key, value)| Tag {
+                    key,
+                    value: value.unwrap_or_default(),
+                })
+                .collect();
+            if !tags.is_empty() {
+                state.upsert_tags(resource_id, &tags);
+            }
+        }
+        i += 1;
+    }
+}
 
 pub(crate) fn create_tags(
     svc: &Ec2Service,
