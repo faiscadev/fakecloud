@@ -523,3 +523,264 @@ async fn ec2_associate_dhcp_options() {
         .unwrap();
     assert_eq!(resp.vpcs()[0].dhcp_options_id(), Some(dopt_id.as_str()));
 }
+
+// ---- Subnets ----
+
+#[test_action("ec2", "CreateSubnet", checksum = "1be65903")]
+#[tokio::test]
+async fn ec2_create_subnet() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .create_subnet()
+        .vpc_id("vpc-0123456789abcdef0")
+        .cidr_block("10.0.1.0/24")
+        .send()
+        .await
+        .unwrap();
+    let s = r.subnet().unwrap();
+    assert!(s.subnet_id().unwrap().starts_with("subnet-"));
+    assert_eq!(s.cidr_block(), Some("10.0.1.0/24"));
+}
+
+#[test_action("ec2", "CreateDefaultSubnet", checksum = "5c6a7212")]
+#[tokio::test]
+async fn ec2_create_default_subnet() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .create_default_subnet()
+        .availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.subnet().unwrap().default_for_az(), Some(true));
+}
+
+#[test_action("ec2", "CreateSecondarySubnet", checksum = "22b49aff")]
+#[tokio::test]
+async fn ec2_create_secondary_subnet() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .create_secondary_subnet()
+        .ipv4_cidr_block("10.5.0.0/24")
+        .secondary_network_id("sn-net-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .secondary_subnet()
+        .unwrap()
+        .secondary_subnet_id()
+        .unwrap()
+        .starts_with("subnet-"));
+}
+
+#[test_action("ec2", "DescribeSubnets", checksum = "3fb46cf3")]
+#[tokio::test]
+async fn ec2_describe_subnets() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let c = client
+        .create_subnet()
+        .vpc_id("vpc-1")
+        .cidr_block("10.0.2.0/24")
+        .send()
+        .await
+        .unwrap();
+    let id = c.subnet().unwrap().subnet_id().unwrap().to_string();
+    let r = client
+        .describe_subnets()
+        .subnet_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.subnets().len(), 1);
+}
+
+#[test_action("ec2", "DescribeSecondarySubnets", checksum = "23a04947")]
+#[tokio::test]
+async fn ec2_describe_secondary_subnets() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client.describe_secondary_subnets().send().await.unwrap();
+    assert!(r.secondary_subnets().is_empty());
+}
+
+#[test_action("ec2", "DeleteSubnet", checksum = "eb39b3b7")]
+#[tokio::test]
+async fn ec2_delete_subnet() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let c = client
+        .create_subnet()
+        .vpc_id("vpc-1")
+        .cidr_block("10.0.3.0/24")
+        .send()
+        .await
+        .unwrap();
+    let id = c.subnet().unwrap().subnet_id().unwrap().to_string();
+    client.delete_subnet().subnet_id(&id).send().await.unwrap();
+    let r = client.describe_subnets().send().await.unwrap();
+    assert!(!r
+        .subnets()
+        .iter()
+        .any(|s| s.subnet_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "DeleteSecondarySubnet", checksum = "304e6ef5")]
+#[tokio::test]
+async fn ec2_delete_secondary_subnet() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    client
+        .delete_secondary_subnet()
+        .secondary_subnet_id("subnet-sec-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifySubnetAttribute", checksum = "c60b1a50")]
+#[tokio::test]
+async fn ec2_modify_subnet_attribute() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let c = client
+        .create_subnet()
+        .vpc_id("vpc-1")
+        .cidr_block("10.0.4.0/24")
+        .send()
+        .await
+        .unwrap();
+    let id = c.subnet().unwrap().subnet_id().unwrap().to_string();
+    client
+        .modify_subnet_attribute()
+        .subnet_id(&id)
+        .map_public_ip_on_launch(
+            aws_sdk_ec2::types::AttributeBooleanValue::builder()
+                .value(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let r = client
+        .describe_subnets()
+        .subnet_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.subnets()[0].map_public_ip_on_launch(), Some(true));
+}
+
+#[test_action("ec2", "AssociateSubnetCidrBlock", checksum = "b03e421a")]
+#[tokio::test]
+async fn ec2_associate_subnet_cidr_block() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .associate_subnet_cidr_block()
+        .subnet_id("subnet-0123456789abcdef0")
+        .ipv6_cidr_block("2600:1f00:1::/64")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .ipv6_cidr_block_association()
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .starts_with("subnet-cidr-assoc-"));
+}
+
+#[test_action("ec2", "DisassociateSubnetCidrBlock", checksum = "f4423888")]
+#[tokio::test]
+async fn ec2_disassociate_subnet_cidr_block() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .disassociate_subnet_cidr_block()
+        .association_id("subnet-cidr-assoc-0123456789abcdef0")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipv6_cidr_block_association().is_some());
+}
+
+#[test_action("ec2", "CreateSubnetCidrReservation", checksum = "ab036383")]
+#[tokio::test]
+async fn ec2_create_subnet_cidr_reservation() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let r = client
+        .create_subnet_cidr_reservation()
+        .subnet_id("subnet-0123456789abcdef0")
+        .cidr("10.0.1.16/28")
+        .reservation_type(aws_sdk_ec2::types::SubnetCidrReservationType::Prefix)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .subnet_cidr_reservation()
+        .unwrap()
+        .subnet_cidr_reservation_id()
+        .unwrap()
+        .starts_with("scr-"));
+}
+
+#[test_action("ec2", "GetSubnetCidrReservations", checksum = "5bae7cff")]
+#[tokio::test]
+async fn ec2_get_subnet_cidr_reservations() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    client
+        .create_subnet_cidr_reservation()
+        .subnet_id("subnet-aaaa")
+        .cidr("10.0.2.16/28")
+        .reservation_type(aws_sdk_ec2::types::SubnetCidrReservationType::Explicit)
+        .send()
+        .await
+        .unwrap();
+    let r = client
+        .get_subnet_cidr_reservations()
+        .subnet_id("subnet-aaaa")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.subnet_ipv4_cidr_reservations().len(), 1);
+}
+
+#[test_action("ec2", "DeleteSubnetCidrReservation", checksum = "06145f84")]
+#[tokio::test]
+async fn ec2_delete_subnet_cidr_reservation() {
+    let server = TestServer::start().await;
+    let client = server.ec2_client().await;
+    let c = client
+        .create_subnet_cidr_reservation()
+        .subnet_id("subnet-bbbb")
+        .cidr("10.0.3.16/28")
+        .reservation_type(aws_sdk_ec2::types::SubnetCidrReservationType::Prefix)
+        .send()
+        .await
+        .unwrap();
+    let id = c
+        .subnet_cidr_reservation()
+        .unwrap()
+        .subnet_cidr_reservation_id()
+        .unwrap()
+        .to_string();
+    let r = client
+        .delete_subnet_cidr_reservation()
+        .subnet_cidr_reservation_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.deleted_subnet_cidr_reservation()
+            .unwrap()
+            .subnet_cidr_reservation_id(),
+        Some(id.as_str())
+    );
+}
