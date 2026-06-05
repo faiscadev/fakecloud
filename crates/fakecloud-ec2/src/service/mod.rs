@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod meta;
+mod routing;
 mod sg;
 mod subnet;
 mod tags;
@@ -77,6 +78,34 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetSecurityGroupsForVpc",
     "DescribeStaleSecurityGroups",
     "DescribeSecurityGroupReferences",
+    // Route tables
+    "CreateRouteTable",
+    "DeleteRouteTable",
+    "DescribeRouteTables",
+    "CreateRoute",
+    "DeleteRoute",
+    "ReplaceRoute",
+    "AssociateRouteTable",
+    "DisassociateRouteTable",
+    "ReplaceRouteTableAssociation",
+    // Internet gateways
+    "CreateInternetGateway",
+    "DeleteInternetGateway",
+    "DescribeInternetGateways",
+    "AttachInternetGateway",
+    "DetachInternetGateway",
+    // Egress-only internet gateways
+    "CreateEgressOnlyInternetGateway",
+    "DeleteEgressOnlyInternetGateway",
+    "DescribeEgressOnlyInternetGateways",
+    // NAT gateways
+    "CreateNatGateway",
+    "DeleteNatGateway",
+    "DescribeNatGateways",
+    "AssignPrivateNatGatewayAddress",
+    "AssociateNatGatewayAddress",
+    "DisassociateNatGatewayAddress",
+    "UnassignPrivateNatGatewayAddress",
 ];
 
 /// Amazon EC2 service.
@@ -177,6 +206,40 @@ impl AwsService for Ec2Service {
             "DescribeStaleSecurityGroups" => sg::describe_stale_security_groups(self, &request),
             "DescribeSecurityGroupReferences" => {
                 sg::describe_security_group_references(self, &request)
+            }
+            "CreateRouteTable" => routing::create_route_table(self, &request),
+            "DeleteRouteTable" => routing::delete_route_table(self, &request),
+            "DescribeRouteTables" => routing::describe_route_tables(self, &request),
+            "CreateRoute" => routing::create_route(self, &request),
+            "DeleteRoute" => routing::delete_route(self, &request),
+            "ReplaceRoute" => routing::replace_route(self, &request),
+            "AssociateRouteTable" => routing::associate_route_table(self, &request),
+            "DisassociateRouteTable" => routing::disassociate_route_table(self, &request),
+            "ReplaceRouteTableAssociation" => {
+                routing::replace_route_table_association(self, &request)
+            }
+            "CreateInternetGateway" => routing::create_internet_gateway(self, &request),
+            "DeleteInternetGateway" => routing::delete_internet_gateway(self, &request),
+            "DescribeInternetGateways" => routing::describe_internet_gateways(self, &request),
+            "AttachInternetGateway" => routing::attach_internet_gateway(self, &request),
+            "DetachInternetGateway" => routing::detach_internet_gateway(self, &request),
+            "CreateEgressOnlyInternetGateway" => routing::create_egress_only_igw(self, &request),
+            "DeleteEgressOnlyInternetGateway" => routing::delete_egress_only_igw(self, &request),
+            "DescribeEgressOnlyInternetGateways" => {
+                routing::describe_egress_only_igws(self, &request)
+            }
+            "CreateNatGateway" => routing::create_nat_gateway(self, &request),
+            "DeleteNatGateway" => routing::delete_nat_gateway(self, &request),
+            "DescribeNatGateways" => routing::describe_nat_gateways(self, &request),
+            "AssignPrivateNatGatewayAddress" => {
+                routing::assign_private_nat_gateway_address(self, &request)
+            }
+            "AssociateNatGatewayAddress" => routing::associate_nat_gateway_address(self, &request),
+            "DisassociateNatGatewayAddress" => {
+                routing::disassociate_nat_gateway_address(self, &request)
+            }
+            "UnassignPrivateNatGatewayAddress" => {
+                routing::unassign_private_nat_gateway_address(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
