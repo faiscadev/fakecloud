@@ -312,6 +312,7 @@ mod tests {
             ("sts", Protocol::Query),
             ("cloudformation", Protocol::Query),
             ("rds", Protocol::Query),
+            ("ec2", Protocol::Query),
             ("elasticache", Protocol::Query),
             ("elasticloadbalancing", Protocol::Query),
             (

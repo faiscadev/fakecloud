@@ -49,6 +49,7 @@ use fakecloud_cloudformation::CloudFormationService;
 use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::CognitoService;
 use fakecloud_dynamodb::DynamoDbService;
+use fakecloud_ec2::Ec2Service;
 use fakecloud_ecr::EcrService;
 use fakecloud_ecs::EcsService;
 use fakecloud_elasticache::ElastiCacheService;
@@ -1509,6 +1510,9 @@ async fn main() {
     registry.register(Arc::new(OrganizationsService::new(
         organizations_state.clone(),
     )));
+    // EC2 (ec2Query protocol). State is self-contained for now; persistence
+    // and the Docker-backed instance runtime are wired in later batches.
+    registry.register(Arc::new(Ec2Service::new()));
     let mut shared_body_cache: Option<Arc<fakecloud_persistence::cache::BodyCache>> = None;
     let s3_store: Arc<dyn fakecloud_persistence::S3Store> = match persistence_config.mode {
         fakecloud_persistence::StorageMode::Persistent => {

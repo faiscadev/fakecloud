@@ -74,6 +74,7 @@ SERVICES=(
     "firehose|Firehose|firehose"
     "glue|Glue|glue"
     "organizations|Organizations|organizations"
+    "ec2|EC2|ec2"
 )
 
 # Services parity.md tracks but aws-models does NOT include. Listed at the
