@@ -323,6 +323,25 @@ pub struct Volume {
     pub in_recycle_bin: bool,
 }
 
+/// An EBS snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub snapshot_id: String,
+    pub volume_id: String,
+    /// `pending` | `completed` | `error`.
+    pub state: String,
+    pub volume_size: i64,
+    pub description: String,
+    pub encrypted: bool,
+    /// `standard` | `archive`.
+    pub storage_tier: String,
+    #[serde(default)]
+    pub in_recycle_bin: bool,
+    #[serde(default)]
+    pub locked: bool,
+    pub lock_mode: Option<String>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -374,6 +393,11 @@ pub struct Ec2State {
     /// Account-level EBS default KMS key (None = `alias/aws/ebs`).
     #[serde(default)]
     pub ebs_default_kms_key_id: Option<String>,
+    #[serde(default)]
+    pub snapshots: HashMap<String, Snapshot>,
+    /// Account-level snapshot block-public-access state.
+    #[serde(default)]
+    pub snapshot_block_public_access: String,
 }
 
 impl Ec2State {

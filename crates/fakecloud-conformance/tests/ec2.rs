@@ -3154,3 +3154,326 @@ async fn ec2_reset_ebs_default_kms_key_id() {
     let r = c.reset_ebs_default_kms_key_id().send().await.unwrap();
     assert!(r.kms_key_id().is_some());
 }
+
+// ---- EBS snapshots ----
+
+async fn make_snap(c: &aws_sdk_ec2::Client) -> String {
+    c.create_snapshot()
+        .volume_id("vol-0123456789abcdef0")
+        .send()
+        .await
+        .unwrap()
+        .snapshot_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateSnapshot", checksum = "1b208998")]
+#[tokio::test]
+async fn ec2_create_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_snapshot()
+        .volume_id("vol-1")
+        .description("snap")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.snapshot_id().unwrap().starts_with("snap-"));
+}
+
+#[test_action("ec2", "CreateSnapshots", checksum = "530f0177")]
+#[tokio::test]
+async fn ec2_create_snapshots() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_snapshots()
+        .instance_specification(
+            aws_sdk_ec2::types::InstanceSpecification::builder()
+                .instance_id("i-1")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.snapshots().is_empty());
+}
+
+#[test_action("ec2", "DescribeSnapshots", checksum = "9e5404cd")]
+#[tokio::test]
+async fn ec2_describe_snapshots() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    let r = c
+        .describe_snapshots()
+        .snapshot_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.snapshots().len(), 1);
+}
+
+#[test_action("ec2", "DeleteSnapshot", checksum = "6d8abe5b")]
+#[tokio::test]
+async fn ec2_delete_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    c.delete_snapshot().snapshot_id(&id).send().await.unwrap();
+    assert!(c
+        .describe_snapshots()
+        .send()
+        .await
+        .unwrap()
+        .snapshots()
+        .is_empty());
+}
+
+#[test_action("ec2", "CopySnapshot", checksum = "d0ffe09e")]
+#[tokio::test]
+async fn ec2_copy_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .copy_snapshot()
+        .source_region("us-west-2")
+        .source_snapshot_id("snap-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.snapshot_id().unwrap().starts_with("snap-"));
+}
+
+#[test_action("ec2", "DescribeSnapshotAttribute", checksum = "1d9eec7e")]
+#[tokio::test]
+async fn ec2_describe_snapshot_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    let r = c
+        .describe_snapshot_attribute()
+        .snapshot_id(&id)
+        .attribute(aws_sdk_ec2::types::SnapshotAttributeName::CreateVolumePermission)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.snapshot_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifySnapshotAttribute", checksum = "01263a58")]
+#[tokio::test]
+async fn ec2_modify_snapshot_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    c.modify_snapshot_attribute()
+        .snapshot_id(&id)
+        .attribute(aws_sdk_ec2::types::SnapshotAttributeName::CreateVolumePermission)
+        .operation_type(aws_sdk_ec2::types::OperationType::Add)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ResetSnapshotAttribute", checksum = "8815b07b")]
+#[tokio::test]
+async fn ec2_reset_snapshot_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    c.reset_snapshot_attribute()
+        .snapshot_id(&id)
+        .attribute(aws_sdk_ec2::types::SnapshotAttributeName::CreateVolumePermission)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifySnapshotTier", checksum = "90f04b23")]
+#[tokio::test]
+async fn ec2_modify_snapshot_tier() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    let r = c
+        .modify_snapshot_tier()
+        .snapshot_id(&id)
+        .storage_tier(aws_sdk_ec2::types::TargetStorageTier::Archive)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.snapshot_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DescribeSnapshotTierStatus", checksum = "36947df9")]
+#[tokio::test]
+async fn ec2_describe_snapshot_tier_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_snap(&c).await;
+    let r = c.describe_snapshot_tier_status().send().await.unwrap();
+    assert!(!r.snapshot_tier_statuses().is_empty());
+}
+
+#[test_action("ec2", "RestoreSnapshotTier", checksum = "eb57ff4e")]
+#[tokio::test]
+async fn ec2_restore_snapshot_tier() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    let r = c
+        .restore_snapshot_tier()
+        .snapshot_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.snapshot_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ListSnapshotsInRecycleBin", checksum = "b5671c23")]
+#[tokio::test]
+async fn ec2_list_snapshots_in_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.list_snapshots_in_recycle_bin().send().await.unwrap();
+    assert!(r.snapshots().is_empty());
+}
+
+#[test_action("ec2", "RestoreSnapshotFromRecycleBin", checksum = "6c5d93bf")]
+#[tokio::test]
+async fn ec2_restore_snapshot_from_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    c.restore_snapshot_from_recycle_bin()
+        .snapshot_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "LockSnapshot", checksum = "66fee00e")]
+#[tokio::test]
+async fn ec2_lock_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    let r = c
+        .lock_snapshot()
+        .snapshot_id(&id)
+        .lock_mode(aws_sdk_ec2::types::LockMode::Governance)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.snapshot_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "UnlockSnapshot", checksum = "a3352f4f")]
+#[tokio::test]
+async fn ec2_unlock_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_snap(&c).await;
+    c.lock_snapshot()
+        .snapshot_id(&id)
+        .lock_mode(aws_sdk_ec2::types::LockMode::Governance)
+        .send()
+        .await
+        .unwrap();
+    let r = c.unlock_snapshot().snapshot_id(&id).send().await.unwrap();
+    assert_eq!(r.snapshot_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DescribeLockedSnapshots", checksum = "d1c98335")]
+#[tokio::test]
+async fn ec2_describe_locked_snapshots() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_locked_snapshots().send().await.unwrap();
+    assert!(r.snapshots().is_empty());
+}
+
+#[test_action("ec2", "GetSnapshotBlockPublicAccessState", checksum = "507d9bcf")]
+#[tokio::test]
+async fn ec2_get_snapshot_bpa_state() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_snapshot_block_public_access_state()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.state().is_some());
+}
+
+#[test_action("ec2", "EnableSnapshotBlockPublicAccess", checksum = "0a5b93f4")]
+#[tokio::test]
+async fn ec2_enable_snapshot_bpa() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_snapshot_block_public_access()
+        .state(aws_sdk_ec2::types::SnapshotBlockPublicAccessState::BlockAllSharing)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.state(),
+        Some(&aws_sdk_ec2::types::SnapshotBlockPublicAccessState::BlockAllSharing)
+    );
+}
+
+#[test_action("ec2", "DisableSnapshotBlockPublicAccess", checksum = "03130acb")]
+#[tokio::test]
+async fn ec2_disable_snapshot_bpa() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disable_snapshot_block_public_access()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.state().is_some());
+}
+
+#[test_action("ec2", "EnableFastSnapshotRestores", checksum = "3bd2a3e8")]
+#[tokio::test]
+async fn ec2_enable_fast_snapshot_restores() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_fast_snapshot_restores()
+        .source_snapshot_ids("snap-1")
+        .availability_zones("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful().is_empty());
+}
+
+#[test_action("ec2", "DisableFastSnapshotRestores", checksum = "b54a5341")]
+#[tokio::test]
+async fn ec2_disable_fast_snapshot_restores() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disable_fast_snapshot_restores()
+        .source_snapshot_ids("snap-1")
+        .availability_zones("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful().is_empty());
+}
+
+#[test_action("ec2", "DescribeFastSnapshotRestores", checksum = "57fc68c7")]
+#[tokio::test]
+async fn ec2_describe_fast_snapshot_restores() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_fast_snapshot_restores().send().await.unwrap();
+    assert!(r.fast_snapshot_restores().is_empty());
+}
