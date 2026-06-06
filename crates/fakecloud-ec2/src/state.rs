@@ -266,6 +266,30 @@ pub struct NetworkInterfacePermission {
     pub permission: String,
 }
 
+/// An EC2 instance (metadata-faithful; a Docker-backed runtime layers on top).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Instance {
+    pub instance_id: String,
+    pub image_id: String,
+    pub instance_type: String,
+    /// EC2 state code: 0 pending, 16 running, 32 shutting-down, 48 terminated,
+    /// 64 stopping, 80 stopped.
+    pub state_code: i64,
+    pub state_name: String,
+    pub private_ip: String,
+    pub public_ip: Option<String>,
+    pub subnet_id: Option<String>,
+    pub vpc_id: Option<String>,
+    pub key_name: Option<String>,
+    #[serde(default)]
+    pub security_group_ids: Vec<String>,
+    pub reservation_id: String,
+    pub ami_launch_index: i64,
+    pub monitoring: bool,
+    pub az: String,
+    pub launch_time: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -307,6 +331,8 @@ pub struct Ec2State {
     /// keyed by permission id.
     #[serde(default)]
     pub eni_permissions: HashMap<String, NetworkInterfacePermission>,
+    #[serde(default)]
+    pub instances: HashMap<String, Instance>,
 }
 
 impl Ec2State {

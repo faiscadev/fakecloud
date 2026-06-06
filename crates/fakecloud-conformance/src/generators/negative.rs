@@ -17,15 +17,23 @@ use crate::smithy::{is_prelude_shape, ServiceModel, ShapeType};
 /// can't tell the difference, so the negative case can't observably fail.
 /// Skip emitting the variant rather than asking the server to do something
 /// impossible.
+///
+/// The same is true for a required *structure* whose members are all optional:
+/// an empty struct serialises to zero wire params, indistinguishable from
+/// omission. (A struct with at least one required member IS observable — the
+/// required sub-fields appear on the wire when present, vanish when omitted.)
 fn omission_is_wire_observable(model: &ServiceModel, member_target: &str) -> bool {
     if is_prelude_shape(member_target) {
         return true;
     }
     match model.shapes.get(member_target) {
-        Some(shape) => !matches!(
-            shape.shape_type,
-            ShapeType::List { .. } | ShapeType::Map { .. }
-        ),
+        Some(shape) => match &shape.shape_type {
+            ShapeType::List { .. } | ShapeType::Map { .. } => false,
+            ShapeType::Structure { members } | ShapeType::Union { members } => {
+                members.iter().any(|m| m.required)
+            }
+            _ => true,
+        },
         None => true,
     }
 }
