@@ -3482,7 +3482,7 @@ async fn ec2_describe_fast_snapshot_restores() {
 
 async fn make_ami(c: &aws_sdk_ec2::Client) -> String {
     c.register_image()
-        .name(format!("ami-test"))
+        .name("ami-test")
         .send()
         .await
         .unwrap()
