@@ -3477,3 +3477,376 @@ async fn ec2_describe_fast_snapshot_restores() {
     let r = c.describe_fast_snapshot_restores().send().await.unwrap();
     assert!(r.fast_snapshot_restores().is_empty());
 }
+
+// ---- AMIs / images ----
+
+async fn make_ami(c: &aws_sdk_ec2::Client) -> String {
+    c.register_image()
+        .name("ami-test")
+        .send()
+        .await
+        .unwrap()
+        .image_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateImage", checksum = "e8a35566")]
+#[tokio::test]
+async fn ec2_create_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_image()
+        .instance_id("i-1")
+        .name("my-ami")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_id().unwrap().starts_with("ami-"));
+}
+
+#[test_action("ec2", "RegisterImage", checksum = "034deb69")]
+#[tokio::test]
+async fn ec2_register_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .register_image()
+        .name("reg-ami")
+        .architecture(aws_sdk_ec2::types::ArchitectureValues::X8664)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_id().unwrap().starts_with("ami-"));
+}
+
+#[test_action("ec2", "DescribeImages", checksum = "5a0f040c")]
+#[tokio::test]
+async fn ec2_describe_images() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    let r = c.describe_images().image_ids(&id).send().await.unwrap();
+    assert_eq!(r.images().len(), 1);
+}
+
+#[test_action("ec2", "DeregisterImage", checksum = "30602ffb")]
+#[tokio::test]
+async fn ec2_deregister_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.deregister_image().image_id(&id).send().await.unwrap();
+    assert!(c
+        .describe_images()
+        .send()
+        .await
+        .unwrap()
+        .images()
+        .is_empty());
+}
+
+#[test_action("ec2", "CopyImage", checksum = "021e759a")]
+#[tokio::test]
+async fn ec2_copy_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .copy_image()
+        .name("copy")
+        .source_image_id("ami-1")
+        .source_region("us-west-2")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_id().unwrap().starts_with("ami-"));
+}
+
+#[test_action("ec2", "DescribeImageAttribute", checksum = "78760c11")]
+#[tokio::test]
+async fn ec2_describe_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    let r = c
+        .describe_image_attribute()
+        .image_id(&id)
+        .attribute(aws_sdk_ec2::types::ImageAttributeName::LaunchPermission)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.image_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyImageAttribute", checksum = "08749225")]
+#[tokio::test]
+async fn ec2_modify_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.modify_image_attribute()
+        .image_id(&id)
+        .operation_type(aws_sdk_ec2::types::OperationType::Add)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ResetImageAttribute", checksum = "1eb818d6")]
+#[tokio::test]
+async fn ec2_reset_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.reset_image_attribute()
+        .image_id(&id)
+        .attribute(aws_sdk_ec2::types::ResetImageAttributeName::LaunchPermission)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableImage", checksum = "75872386")]
+#[tokio::test]
+async fn ec2_enable_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    let r = c.enable_image().image_id(&id).send().await.unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "DisableImage", checksum = "29789b5d")]
+#[tokio::test]
+async fn ec2_disable_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    let r = c.disable_image().image_id(&id).send().await.unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "EnableImageDeprecation", checksum = "f22f3a28")]
+#[tokio::test]
+async fn ec2_enable_image_deprecation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.enable_image_deprecation()
+        .image_id(&id)
+        .deprecate_at(aws_sdk_ec2::primitives::DateTime::from_secs(1893456000))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableImageDeprecation", checksum = "c494e658")]
+#[tokio::test]
+async fn ec2_disable_image_deprecation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.disable_image_deprecation()
+        .image_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableImageDeregistrationProtection", checksum = "bc98cae8")]
+#[tokio::test]
+async fn ec2_enable_image_deregistration_protection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.enable_image_deregistration_protection()
+        .image_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableImageDeregistrationProtection", checksum = "2ad10899")]
+#[tokio::test]
+async fn ec2_disable_image_deregistration_protection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.disable_image_deregistration_protection()
+        .image_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CancelImageLaunchPermission", checksum = "33a8e901")]
+#[tokio::test]
+async fn ec2_cancel_image_launch_permission() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.cancel_image_launch_permission()
+        .image_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "RestoreImageFromRecycleBin", checksum = "e9b377e7")]
+#[tokio::test]
+async fn ec2_restore_image_from_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    c.restore_image_from_recycle_bin()
+        .image_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableImageBlockPublicAccess", checksum = "cf19eba9")]
+#[tokio::test]
+async fn ec2_enable_image_bpa() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_image_block_public_access()
+        .image_block_public_access_state(
+            aws_sdk_ec2::types::ImageBlockPublicAccessEnabledState::BlockNewSharing,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_block_public_access_state().is_some());
+}
+
+#[test_action("ec2", "DisableImageBlockPublicAccess", checksum = "e89c624a")]
+#[tokio::test]
+async fn ec2_disable_image_bpa() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.disable_image_block_public_access().send().await.unwrap();
+    assert!(r.image_block_public_access_state().is_some());
+}
+
+#[test_action("ec2", "GetImageBlockPublicAccessState", checksum = "d3b3b93f")]
+#[tokio::test]
+async fn ec2_get_image_bpa_state() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_image_block_public_access_state()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_block_public_access_state().is_some());
+}
+
+#[test_action("ec2", "EnableAllowedImagesSettings", checksum = "d9532acd")]
+#[tokio::test]
+async fn ec2_enable_allowed_images_settings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_allowed_images_settings()
+        .allowed_images_settings_state(
+            aws_sdk_ec2::types::AllowedImagesSettingsEnabledState::Enabled,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.allowed_images_settings_state().is_some());
+}
+
+#[test_action("ec2", "DisableAllowedImagesSettings", checksum = "d7b64e84")]
+#[tokio::test]
+async fn ec2_disable_allowed_images_settings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.disable_allowed_images_settings().send().await.unwrap();
+    assert!(r.allowed_images_settings_state().is_some());
+}
+
+#[test_action("ec2", "GetAllowedImagesSettings", checksum = "5412ccbd")]
+#[tokio::test]
+async fn ec2_get_allowed_images_settings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_allowed_images_settings().send().await.unwrap();
+    assert!(r.state().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "ReplaceImageCriteriaInAllowedImagesSettings",
+    checksum = "3cecaf96"
+)]
+#[tokio::test]
+async fn ec2_replace_image_criteria() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.replace_image_criteria_in_allowed_images_settings()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ListImagesInRecycleBin", checksum = "f7d00dab")]
+#[tokio::test]
+async fn ec2_list_images_in_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.list_images_in_recycle_bin().send().await.unwrap();
+    assert!(r.images().is_empty());
+}
+
+#[test_action("ec2", "CreateStoreImageTask", checksum = "9a801eaf")]
+#[tokio::test]
+async fn ec2_create_store_image_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ami(&c).await;
+    let r = c
+        .create_store_image_task()
+        .image_id(&id)
+        .bucket("my-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.object_key().is_some());
+}
+
+#[test_action("ec2", "DescribeStoreImageTasks", checksum = "5289475e")]
+#[tokio::test]
+async fn ec2_describe_store_image_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_store_image_tasks().send().await.unwrap();
+    assert!(r.store_image_task_results().is_empty());
+}
+
+#[test_action("ec2", "CreateRestoreImageTask", checksum = "61e48f5a")]
+#[tokio::test]
+async fn ec2_create_restore_image_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_restore_image_task()
+        .bucket("my-bucket")
+        .object_key("ami.bin")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.image_id().unwrap().starts_with("ami-"));
+}
+
+#[test_action("ec2", "DescribeFastLaunchImages", checksum = "375419a1")]
+#[tokio::test]
+async fn ec2_describe_fast_launch_images() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_fast_launch_images().send().await.unwrap();
+    assert!(r.fast_launch_images().is_empty());
+}

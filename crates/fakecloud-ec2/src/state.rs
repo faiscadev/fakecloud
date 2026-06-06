@@ -342,6 +342,24 @@ pub struct Snapshot {
     pub lock_mode: Option<String>,
 }
 
+/// An AMI (machine image).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Image {
+    pub image_id: String,
+    pub name: String,
+    pub description: String,
+    /// `pending` | `available` | `disabled` | `deregistered`.
+    pub state: String,
+    pub architecture: String,
+    pub public: bool,
+    pub source_instance_id: Option<String>,
+    #[serde(default)]
+    pub in_recycle_bin: bool,
+    pub deprecation_time: Option<String>,
+    #[serde(default)]
+    pub deregistration_protection: bool,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -398,6 +416,14 @@ pub struct Ec2State {
     /// Account-level snapshot block-public-access state.
     #[serde(default)]
     pub snapshot_block_public_access: String,
+    #[serde(default)]
+    pub images: HashMap<String, Image>,
+    /// Account-level image block-public-access state.
+    #[serde(default)]
+    pub image_block_public_access: String,
+    /// Account-level allowed-images settings state.
+    #[serde(default)]
+    pub allowed_images_settings: String,
 }
 
 impl Ec2State {
