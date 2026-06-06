@@ -7,6 +7,7 @@ mod instance;
 mod meta;
 mod routing;
 mod sg;
+mod snapshot;
 mod subnet;
 mod tags;
 mod volume;
@@ -203,6 +204,29 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetEbsDefaultKmsKeyId",
     "ModifyEbsDefaultKmsKeyId",
     "ResetEbsDefaultKmsKeyId",
+    // EBS snapshots
+    "CreateSnapshot",
+    "CreateSnapshots",
+    "DeleteSnapshot",
+    "DescribeSnapshots",
+    "CopySnapshot",
+    "DescribeSnapshotAttribute",
+    "ModifySnapshotAttribute",
+    "ResetSnapshotAttribute",
+    "ModifySnapshotTier",
+    "DescribeSnapshotTierStatus",
+    "RestoreSnapshotTier",
+    "ListSnapshotsInRecycleBin",
+    "RestoreSnapshotFromRecycleBin",
+    "LockSnapshot",
+    "UnlockSnapshot",
+    "DescribeLockedSnapshots",
+    "GetSnapshotBlockPublicAccessState",
+    "EnableSnapshotBlockPublicAccess",
+    "DisableSnapshotBlockPublicAccess",
+    "EnableFastSnapshotRestores",
+    "DisableFastSnapshotRestores",
+    "DescribeFastSnapshotRestores",
 ];
 
 /// Amazon EC2 service.
@@ -470,6 +494,40 @@ impl AwsService for Ec2Service {
             "GetEbsDefaultKmsKeyId" => volume::get_ebs_default_kms_key_id(self, &request),
             "ModifyEbsDefaultKmsKeyId" => volume::modify_ebs_default_kms_key_id(self, &request),
             "ResetEbsDefaultKmsKeyId" => volume::reset_ebs_default_kms_key_id(self, &request),
+            "CreateSnapshot" => snapshot::create_snapshot(self, &request),
+            "CreateSnapshots" => snapshot::create_snapshots(self, &request),
+            "DeleteSnapshot" => snapshot::delete_snapshot(self, &request),
+            "DescribeSnapshots" => snapshot::describe_snapshots(self, &request),
+            "CopySnapshot" => snapshot::copy_snapshot(self, &request),
+            "DescribeSnapshotAttribute" => snapshot::describe_snapshot_attribute(self, &request),
+            "ModifySnapshotAttribute" => snapshot::modify_snapshot_attribute(self, &request),
+            "ResetSnapshotAttribute" => snapshot::reset_snapshot_attribute(self, &request),
+            "ModifySnapshotTier" => snapshot::modify_snapshot_tier(self, &request),
+            "DescribeSnapshotTierStatus" => snapshot::describe_snapshot_tier_status(self, &request),
+            "RestoreSnapshotTier" => snapshot::restore_snapshot_tier(self, &request),
+            "ListSnapshotsInRecycleBin" => snapshot::list_snapshots_in_recycle_bin(self, &request),
+            "RestoreSnapshotFromRecycleBin" => {
+                snapshot::restore_snapshot_from_recycle_bin(self, &request)
+            }
+            "LockSnapshot" => snapshot::lock_snapshot(self, &request),
+            "UnlockSnapshot" => snapshot::unlock_snapshot(self, &request),
+            "DescribeLockedSnapshots" => snapshot::describe_locked_snapshots(self, &request),
+            "GetSnapshotBlockPublicAccessState" => {
+                snapshot::get_snapshot_block_public_access_state(self, &request)
+            }
+            "EnableSnapshotBlockPublicAccess" => {
+                snapshot::enable_snapshot_block_public_access(self, &request)
+            }
+            "DisableSnapshotBlockPublicAccess" => {
+                snapshot::disable_snapshot_block_public_access(self, &request)
+            }
+            "EnableFastSnapshotRestores" => snapshot::enable_fast_snapshot_restores(self, &request),
+            "DisableFastSnapshotRestores" => {
+                snapshot::disable_fast_snapshot_restores(self, &request)
+            }
+            "DescribeFastSnapshotRestores" => {
+                snapshot::describe_fast_snapshot_restores(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
