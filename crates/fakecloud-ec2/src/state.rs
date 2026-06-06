@@ -187,6 +187,42 @@ pub struct NatGateway {
     pub allocation_id: Option<String>,
 }
 
+/// An Elastic IP allocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ElasticIp {
+    pub allocation_id: String,
+    pub public_ip: String,
+    /// `vpc` | `standard`.
+    pub domain: String,
+    pub association_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub network_interface_id: Option<String>,
+    pub private_ip_address: Option<String>,
+}
+
+/// An EC2 key pair (public-key metadata only).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyPair {
+    pub key_pair_id: String,
+    pub key_name: String,
+    /// `rsa` | `ed25519`.
+    pub key_type: String,
+    pub key_fingerprint: String,
+}
+
+/// A placement group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlacementGroup {
+    pub group_id: String,
+    pub group_name: String,
+    /// `cluster` | `spread` | `partition`.
+    pub strategy: String,
+    /// `available`.
+    pub state: String,
+    pub partition_count: Option<i64>,
+    pub spread_level: Option<String>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -214,6 +250,15 @@ pub struct Ec2State {
     pub egress_only_igws: HashMap<String, InternetGateway>,
     #[serde(default)]
     pub nat_gateways: HashMap<String, NatGateway>,
+    /// keyed by allocation id.
+    #[serde(default)]
+    pub elastic_ips: HashMap<String, ElasticIp>,
+    /// keyed by key name.
+    #[serde(default)]
+    pub key_pairs: HashMap<String, KeyPair>,
+    /// keyed by group name.
+    #[serde(default)]
+    pub placement_groups: HashMap<String, PlacementGroup>,
 }
 
 impl Ec2State {

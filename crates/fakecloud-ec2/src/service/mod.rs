@@ -1,6 +1,7 @@
 //! EC2 service entrypoint: `ec2Query` dispatch over the per-account state.
 
 mod dhcp;
+mod eip;
 mod meta;
 mod routing;
 mod sg;
@@ -106,6 +107,32 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "AssociateNatGatewayAddress",
     "DisassociateNatGatewayAddress",
     "UnassignPrivateNatGatewayAddress",
+    // Elastic IPs
+    "AllocateAddress",
+    "ReleaseAddress",
+    "DescribeAddresses",
+    "AssociateAddress",
+    "DisassociateAddress",
+    "DescribeAddressesAttribute",
+    "ModifyAddressAttribute",
+    "ResetAddressAttribute",
+    "MoveAddressToVpc",
+    "RestoreAddressToClassic",
+    "AcceptAddressTransfer",
+    "EnableAddressTransfer",
+    "DisableAddressTransfer",
+    "DescribeAddressTransfers",
+    "DescribeMovingAddresses",
+    // Key pairs
+    "CreateKeyPair",
+    "ImportKeyPair",
+    "DeleteKeyPair",
+    "DescribeKeyPairs",
+    // Placement groups
+    "CreatePlacementGroup",
+    "DeletePlacementGroup",
+    "DescribePlacementGroups",
+    "GetGroupsForCapacityReservation",
 ];
 
 /// Amazon EC2 service.
@@ -240,6 +267,31 @@ impl AwsService for Ec2Service {
             }
             "UnassignPrivateNatGatewayAddress" => {
                 routing::unassign_private_nat_gateway_address(self, &request)
+            }
+            "AllocateAddress" => eip::allocate_address(self, &request),
+            "ReleaseAddress" => eip::release_address(self, &request),
+            "DescribeAddresses" => eip::describe_addresses(self, &request),
+            "AssociateAddress" => eip::associate_address(self, &request),
+            "DisassociateAddress" => eip::disassociate_address(self, &request),
+            "DescribeAddressesAttribute" => eip::describe_addresses_attribute(self, &request),
+            "ModifyAddressAttribute" => eip::modify_address_attribute(self, &request),
+            "ResetAddressAttribute" => eip::reset_address_attribute(self, &request),
+            "MoveAddressToVpc" => eip::move_address_to_vpc(self, &request),
+            "RestoreAddressToClassic" => eip::restore_address_to_classic(self, &request),
+            "AcceptAddressTransfer" => eip::accept_address_transfer(self, &request),
+            "EnableAddressTransfer" => eip::enable_address_transfer(self, &request),
+            "DisableAddressTransfer" => eip::disable_address_transfer(self, &request),
+            "DescribeAddressTransfers" => eip::describe_address_transfers(self, &request),
+            "DescribeMovingAddresses" => eip::describe_moving_addresses(self, &request),
+            "CreateKeyPair" => eip::create_key_pair(self, &request),
+            "ImportKeyPair" => eip::import_key_pair(self, &request),
+            "DeleteKeyPair" => eip::delete_key_pair(self, &request),
+            "DescribeKeyPairs" => eip::describe_key_pairs(self, &request),
+            "CreatePlacementGroup" => eip::create_placement_group(self, &request),
+            "DeletePlacementGroup" => eip::delete_placement_group(self, &request),
+            "DescribePlacementGroups" => eip::describe_placement_groups(self, &request),
+            "GetGroupsForCapacityReservation" => {
+                eip::get_groups_for_capacity_reservation(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
