@@ -102,6 +102,27 @@ pub fn validate_max_results(
     Ok(())
 }
 
+/// Reject a present integer parameter outside `[min, max]` (the harness's
+/// `negative_below_min_*` / `negative_above_max_*` variants for `@range`
+/// members like `PrivateIpAddressCount` or `MaxDrainDurationSeconds`).
+pub fn validate_int_range(
+    params: &HashMap<String, String>,
+    key: &str,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    if let Some(v) = params.get(key).filter(|v| !v.is_empty()) {
+        if let Ok(n) = v.parse::<i64>() {
+            if n < min || n > max {
+                return Err(invalid_parameter_value(format!(
+                    "{key} must be between {min} and {max}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reject a present parameter whose length is outside `[min, max]` (the
 /// harness's `negative_too_short_*` / `negative_too_long_*` variants for
 /// `@length`-constrained members such as a bounded `NextToken`).

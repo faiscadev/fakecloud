@@ -125,6 +125,68 @@ pub struct SecurityGroup {
     pub rules: Vec<SecurityGroupRule>,
 }
 
+/// A route within a route table.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Route {
+    pub destination_cidr_block: Option<String>,
+    pub destination_ipv6_cidr_block: Option<String>,
+    pub destination_prefix_list_id: Option<String>,
+    pub gateway_id: Option<String>,
+    pub nat_gateway_id: Option<String>,
+    pub network_interface_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub vpc_peering_connection_id: Option<String>,
+    pub transit_gateway_id: Option<String>,
+    pub egress_only_internet_gateway_id: Option<String>,
+    /// `active` | `blackhole`.
+    pub state: String,
+    /// `CreateRouteTable` | `CreateRoute`.
+    pub origin: String,
+}
+
+/// A route-table association (to a subnet or gateway, or the VPC main table).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteTableAssociation {
+    pub association_id: String,
+    pub route_table_id: String,
+    pub subnet_id: Option<String>,
+    pub gateway_id: Option<String>,
+    pub main: bool,
+}
+
+/// A route table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteTable {
+    pub route_table_id: String,
+    pub vpc_id: String,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    #[serde(default)]
+    pub associations: Vec<RouteTableAssociation>,
+}
+
+/// An internet gateway (or egress-only IGW) with its VPC attachments.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InternetGateway {
+    pub internet_gateway_id: String,
+    /// (vpc_id, state) pairs.
+    #[serde(default)]
+    pub attachments: Vec<(String, String)>,
+}
+
+/// A NAT gateway.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NatGateway {
+    pub nat_gateway_id: String,
+    pub subnet_id: String,
+    pub vpc_id: String,
+    /// `pending` | `available` | `deleting` | `deleted`.
+    pub state: String,
+    /// `public` | `private`.
+    pub connectivity_type: String,
+    pub allocation_id: Option<String>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -144,6 +206,14 @@ pub struct Ec2State {
     pub subnet_cidr_reservations: HashMap<String, SubnetCidrReservation>,
     #[serde(default)]
     pub security_groups: HashMap<String, SecurityGroup>,
+    #[serde(default)]
+    pub route_tables: HashMap<String, RouteTable>,
+    #[serde(default)]
+    pub internet_gateways: HashMap<String, InternetGateway>,
+    #[serde(default)]
+    pub egress_only_igws: HashMap<String, InternetGateway>,
+    #[serde(default)]
+    pub nat_gateways: HashMap<String, NatGateway>,
 }
 
 impl Ec2State {

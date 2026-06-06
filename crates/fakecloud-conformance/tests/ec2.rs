@@ -1112,3 +1112,578 @@ async fn ec2_describe_security_group_references() {
         .unwrap();
     assert!(r.security_group_reference_set().is_empty());
 }
+
+// ---- Route tables / gateways ----
+
+#[test_action("ec2", "CreateRouteTable", checksum = "bc2d13d4")]
+#[tokio::test]
+async fn ec2_create_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.create_route_table().vpc_id("vpc-1").send().await.unwrap();
+    assert!(r
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .starts_with("rtb-"));
+}
+
+#[test_action("ec2", "DescribeRouteTables", checksum = "52a4f78c")]
+#[tokio::test]
+async fn ec2_describe_route_tables() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .describe_route_tables()
+        .route_table_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.route_tables().len(), 1);
+}
+
+#[test_action("ec2", "DeleteRouteTable", checksum = "0c1e822d")]
+#[tokio::test]
+async fn ec2_delete_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    c.delete_route_table()
+        .route_table_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!c
+        .describe_route_tables()
+        .send()
+        .await
+        .unwrap()
+        .route_tables()
+        .iter()
+        .any(|t| t.route_table_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "CreateRoute", checksum = "8bcd436f")]
+#[tokio::test]
+async fn ec2_create_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .create_route()
+        .route_table_id(&id)
+        .destination_cidr_block("0.0.0.0/0")
+        .gateway_id("igw-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "ReplaceRoute", checksum = "fa0d2693")]
+#[tokio::test]
+async fn ec2_replace_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    c.create_route()
+        .route_table_id(&id)
+        .destination_cidr_block("0.0.0.0/0")
+        .gateway_id("igw-1")
+        .send()
+        .await
+        .unwrap();
+    c.replace_route()
+        .route_table_id(&id)
+        .destination_cidr_block("0.0.0.0/0")
+        .gateway_id("igw-2")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteRoute", checksum = "86ac2fb5")]
+#[tokio::test]
+async fn ec2_delete_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    c.create_route()
+        .route_table_id(&id)
+        .destination_cidr_block("0.0.0.0/0")
+        .gateway_id("igw-1")
+        .send()
+        .await
+        .unwrap();
+    c.delete_route()
+        .route_table_id(&id)
+        .destination_cidr_block("0.0.0.0/0")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateRouteTable", checksum = "feeb356d")]
+#[tokio::test]
+async fn ec2_associate_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .associate_route_table()
+        .route_table_id(&id)
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.association_id().unwrap().starts_with("rtbassoc-"));
+}
+
+#[test_action("ec2", "DisassociateRouteTable", checksum = "128016f1")]
+#[tokio::test]
+async fn ec2_disassociate_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    let a = c
+        .associate_route_table()
+        .route_table_id(&id)
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+    c.disassociate_route_table()
+        .association_id(&a)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ReplaceRouteTableAssociation", checksum = "18b61684")]
+#[tokio::test]
+async fn ec2_replace_route_table_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_route_table()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+    let a = c
+        .associate_route_table()
+        .route_table_id(&id)
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .replace_route_table_association()
+        .association_id(&a)
+        .route_table_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.new_association_id().unwrap().starts_with("rtbassoc-"));
+}
+
+#[test_action("ec2", "CreateInternetGateway", checksum = "88dcf2c8")]
+#[tokio::test]
+async fn ec2_create_internet_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.create_internet_gateway().send().await.unwrap();
+    assert!(r
+        .internet_gateway()
+        .unwrap()
+        .internet_gateway_id()
+        .unwrap()
+        .starts_with("igw-"));
+}
+
+#[test_action("ec2", "DescribeInternetGateways", checksum = "471f22f0")]
+#[tokio::test]
+async fn ec2_describe_internet_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_internet_gateway()
+        .send()
+        .await
+        .unwrap()
+        .internet_gateway()
+        .unwrap()
+        .internet_gateway_id()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        c.describe_internet_gateways()
+            .internet_gateway_ids(&id)
+            .send()
+            .await
+            .unwrap()
+            .internet_gateways()
+            .len(),
+        1
+    );
+}
+
+#[test_action("ec2", "AttachInternetGateway", checksum = "c4730d4f")]
+#[tokio::test]
+async fn ec2_attach_internet_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_internet_gateway()
+        .send()
+        .await
+        .unwrap()
+        .internet_gateway()
+        .unwrap()
+        .internet_gateway_id()
+        .unwrap()
+        .to_string();
+    c.attach_internet_gateway()
+        .internet_gateway_id(&id)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DetachInternetGateway", checksum = "34aed96e")]
+#[tokio::test]
+async fn ec2_detach_internet_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_internet_gateway()
+        .send()
+        .await
+        .unwrap()
+        .internet_gateway()
+        .unwrap()
+        .internet_gateway_id()
+        .unwrap()
+        .to_string();
+    c.attach_internet_gateway()
+        .internet_gateway_id(&id)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    c.detach_internet_gateway()
+        .internet_gateway_id(&id)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteInternetGateway", checksum = "603ad93b")]
+#[tokio::test]
+async fn ec2_delete_internet_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_internet_gateway()
+        .send()
+        .await
+        .unwrap()
+        .internet_gateway()
+        .unwrap()
+        .internet_gateway_id()
+        .unwrap()
+        .to_string();
+    c.delete_internet_gateway()
+        .internet_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateEgressOnlyInternetGateway", checksum = "d1592658")]
+#[tokio::test]
+async fn ec2_create_eigw() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_egress_only_internet_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .egress_only_internet_gateway()
+        .unwrap()
+        .egress_only_internet_gateway_id()
+        .unwrap()
+        .starts_with("eigw-"));
+}
+
+#[test_action("ec2", "DescribeEgressOnlyInternetGateways", checksum = "1956120d")]
+#[tokio::test]
+async fn ec2_describe_eigws() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_egress_only_internet_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .egress_only_internet_gateway()
+        .unwrap()
+        .egress_only_internet_gateway_id()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        c.describe_egress_only_internet_gateways()
+            .egress_only_internet_gateway_ids(&id)
+            .send()
+            .await
+            .unwrap()
+            .egress_only_internet_gateways()
+            .len(),
+        1
+    );
+}
+
+#[test_action("ec2", "DeleteEgressOnlyInternetGateway", checksum = "84415c8c")]
+#[tokio::test]
+async fn ec2_delete_eigw() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_egress_only_internet_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .egress_only_internet_gateway()
+        .unwrap()
+        .egress_only_internet_gateway_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_egress_only_internet_gateway()
+        .egress_only_internet_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.return_code(), Some(true));
+}
+
+#[test_action("ec2", "CreateNatGateway", checksum = "d0d28d06")]
+#[tokio::test]
+async fn ec2_create_nat_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_nat_gateway()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .nat_gateway()
+        .unwrap()
+        .nat_gateway_id()
+        .unwrap()
+        .starts_with("nat-"));
+}
+
+#[test_action("ec2", "DescribeNatGateways", checksum = "02910559")]
+#[tokio::test]
+async fn ec2_describe_nat_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_nat_gateway()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .nat_gateway()
+        .unwrap()
+        .nat_gateway_id()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        c.describe_nat_gateways()
+            .nat_gateway_ids(&id)
+            .send()
+            .await
+            .unwrap()
+            .nat_gateways()
+            .len(),
+        1
+    );
+}
+
+#[test_action("ec2", "DeleteNatGateway", checksum = "447b0c15")]
+#[tokio::test]
+async fn ec2_delete_nat_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_nat_gateway()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .nat_gateway()
+        .unwrap()
+        .nat_gateway_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_nat_gateway()
+        .nat_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.nat_gateway_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "AssignPrivateNatGatewayAddress", checksum = "69cb4f56")]
+#[tokio::test]
+async fn ec2_assign_private_nat_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .assign_private_nat_gateway_address()
+        .nat_gateway_id("nat-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.nat_gateway_id(), Some("nat-1"));
+}
+
+#[test_action("ec2", "AssociateNatGatewayAddress", checksum = "4d7961e4")]
+#[tokio::test]
+async fn ec2_associate_nat_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .associate_nat_gateway_address()
+        .nat_gateway_id("nat-1")
+        .allocation_ids("eipalloc-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.nat_gateway_id(), Some("nat-1"));
+}
+
+#[test_action("ec2", "DisassociateNatGatewayAddress", checksum = "11c57af5")]
+#[tokio::test]
+async fn ec2_disassociate_nat_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disassociate_nat_gateway_address()
+        .nat_gateway_id("nat-1")
+        .association_ids("eipassoc-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.nat_gateway_id(), Some("nat-1"));
+}
+
+#[test_action("ec2", "UnassignPrivateNatGatewayAddress", checksum = "eefaa86c")]
+#[tokio::test]
+async fn ec2_unassign_private_nat_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .unassign_private_nat_gateway_address()
+        .nat_gateway_id("nat-1")
+        .private_ip_addresses("10.0.0.5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.nat_gateway_id(), Some("nat-1"));
+}
