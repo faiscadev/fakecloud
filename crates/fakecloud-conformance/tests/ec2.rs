@@ -2397,3 +2397,490 @@ async fn ec2_unassign_ipv6() {
         .unwrap();
     assert_eq!(r.network_interface_id(), Some("eni-1"));
 }
+
+// ---- Instances ----
+
+async fn run_one(c: &aws_sdk_ec2::Client) -> String {
+    c.run_instances()
+        .min_count(1)
+        .max_count(1)
+        .image_id("ami-12345678")
+        .send()
+        .await
+        .unwrap()
+        .instances()[0]
+        .instance_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "RunInstances", checksum = "b21a67b4")]
+#[tokio::test]
+async fn ec2_run_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .run_instances()
+        .min_count(2)
+        .max_count(2)
+        .image_id("ami-1")
+        .instance_type(aws_sdk_ec2::types::InstanceType::T3Micro)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instances().len(), 2);
+    assert!(r.instances()[0].instance_id().unwrap().starts_with("i-"));
+    assert!(r.reservation_id().unwrap().starts_with("r-"));
+}
+
+#[test_action("ec2", "DescribeInstances", checksum = "94aa1152")]
+#[tokio::test]
+async fn ec2_describe_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .describe_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.reservations().len(), 1);
+    assert_eq!(
+        r.reservations()[0].instances()[0].instance_id(),
+        Some(id.as_str())
+    );
+}
+
+#[test_action("ec2", "StopInstances", checksum = "fe40d609")]
+#[tokio::test]
+async fn ec2_stop_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c.stop_instances().instance_ids(&id).send().await.unwrap();
+    assert_eq!(
+        r.stopping_instances()[0].current_state().unwrap().name(),
+        Some(&aws_sdk_ec2::types::InstanceStateName::Stopped)
+    );
+}
+
+#[test_action("ec2", "StartInstances", checksum = "6285e152")]
+#[tokio::test]
+async fn ec2_start_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.stop_instances().instance_ids(&id).send().await.unwrap();
+    let r = c.start_instances().instance_ids(&id).send().await.unwrap();
+    assert_eq!(
+        r.starting_instances()[0].current_state().unwrap().name(),
+        Some(&aws_sdk_ec2::types::InstanceStateName::Running)
+    );
+}
+
+#[test_action("ec2", "RebootInstances", checksum = "93386e10")]
+#[tokio::test]
+async fn ec2_reboot_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.reboot_instances().instance_ids(&id).send().await.unwrap();
+}
+
+#[test_action("ec2", "TerminateInstances", checksum = "9274b22b")]
+#[tokio::test]
+async fn ec2_terminate_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .terminate_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.terminating_instances()[0].current_state().unwrap().name(),
+        Some(&aws_sdk_ec2::types::InstanceStateName::Terminated)
+    );
+}
+
+#[test_action("ec2", "MonitorInstances", checksum = "49cc83aa")]
+#[tokio::test]
+async fn ec2_monitor_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .monitor_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_monitorings()[0].instance_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "UnmonitorInstances", checksum = "c0b0fd97")]
+#[tokio::test]
+async fn ec2_unmonitor_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.unmonitor_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceStatus", checksum = "b46a8879")]
+#[tokio::test]
+async fn ec2_describe_instance_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .describe_instance_status()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .instance_statuses()
+        .iter()
+        .any(|x| x.instance_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "DescribeInstanceTypes", checksum = "a9635bcd")]
+#[tokio::test]
+async fn ec2_describe_instance_types() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_instance_types()
+        .instance_types(aws_sdk_ec2::types::InstanceType::T3Micro)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.instance_types().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "GetInstanceTypesFromInstanceRequirements",
+    checksum = "f4b22cfc"
+)]
+#[tokio::test]
+async fn ec2_get_instance_types_from_requirements() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_instance_types_from_instance_requirements()
+        .architecture_types(aws_sdk_ec2::types::ArchitectureType::X8664)
+        .virtualization_types(aws_sdk_ec2::types::VirtualizationType::Hvm)
+        .instance_requirements(
+            aws_sdk_ec2::types::InstanceRequirementsRequest::builder()
+                .v_cpu_count(
+                    aws_sdk_ec2::types::VCpuCountRangeRequest::builder()
+                        .min(1)
+                        .build(),
+                )
+                .memory_mib(
+                    aws_sdk_ec2::types::MemoryMiBRequest::builder()
+                        .min(512)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.instance_types().is_empty());
+}
+
+#[test_action("ec2", "DescribeInstanceAttribute", checksum = "85432719")]
+#[tokio::test]
+async fn ec2_describe_instance_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .describe_instance_attribute()
+        .instance_id(&id)
+        .attribute(aws_sdk_ec2::types::InstanceAttributeName::InstanceType)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyInstanceAttribute", checksum = "fe95a738")]
+#[tokio::test]
+async fn ec2_modify_instance_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.modify_instance_attribute()
+        .instance_id(&id)
+        .source_dest_check(
+            aws_sdk_ec2::types::AttributeBooleanValue::builder()
+                .value(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ResetInstanceAttribute", checksum = "0c895dd4")]
+#[tokio::test]
+async fn ec2_reset_instance_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.reset_instance_attribute()
+        .instance_id(&id)
+        .attribute(aws_sdk_ec2::types::InstanceAttributeName::SourceDestCheck)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyInstancePlacement", checksum = "f39ce806")]
+#[tokio::test]
+async fn ec2_modify_instance_placement() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.modify_instance_placement()
+        .instance_id(&id)
+        .tenancy(aws_sdk_ec2::types::HostTenancy::Default)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyInstanceMetadataOptions", checksum = "50682246")]
+#[tokio::test]
+async fn ec2_modify_instance_metadata_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .modify_instance_metadata_options()
+        .instance_id(&id)
+        .http_tokens(aws_sdk_ec2::types::HttpTokensState::Required)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyInstanceMaintenanceOptions", checksum = "9e473aa4")]
+#[tokio::test]
+async fn ec2_modify_instance_maintenance_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .modify_instance_maintenance_options()
+        .instance_id(&id)
+        .auto_recovery(aws_sdk_ec2::types::InstanceAutoRecoveryState::Default)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyInstanceCpuOptions", checksum = "81502683")]
+#[tokio::test]
+async fn ec2_modify_instance_cpu_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .modify_instance_cpu_options()
+        .instance_id(&id)
+        .core_count(2)
+        .threads_per_core(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some(id.as_str()));
+}
+
+#[test_action(
+    "ec2",
+    "ModifyInstanceNetworkPerformanceOptions",
+    checksum = "e9023ce5"
+)]
+#[tokio::test]
+async fn ec2_modify_instance_network_performance_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.modify_instance_network_performance_options()
+        .instance_id(&id)
+        .bandwidth_weighting(aws_sdk_ec2::types::InstanceBandwidthWeighting::Default)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyInstanceEventStartTime", checksum = "c31aaff7")]
+#[tokio::test]
+async fn ec2_modify_instance_event_start_time() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .modify_instance_event_start_time()
+        .instance_id(&id)
+        .instance_event_id("instance-event-1")
+        .not_before(aws_sdk_ec2::primitives::DateTime::from_secs(1735689600))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.event().is_some());
+}
+
+#[test_action("ec2", "DescribeInstanceCreditSpecifications", checksum = "a1407717")]
+#[tokio::test]
+async fn ec2_describe_instance_credit_specifications() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    let r = c
+        .describe_instance_credit_specifications()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .instance_credit_specifications()
+        .iter()
+        .any(|x| x.instance_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "ModifyInstanceCreditSpecification", checksum = "fc50a3fd")]
+#[tokio::test]
+async fn ec2_modify_instance_credit_specification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.modify_instance_credit_specification()
+        .instance_credit_specifications(
+            aws_sdk_ec2::types::InstanceCreditSpecificationRequest::builder()
+                .instance_id(&id)
+                .cpu_credits("standard")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetInstanceMetadataDefaults", checksum = "698833f6")]
+#[tokio::test]
+async fn ec2_get_instance_metadata_defaults() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_instance_metadata_defaults().send().await.unwrap();
+    assert!(r.account_level().is_some());
+}
+
+#[test_action("ec2", "ModifyInstanceMetadataDefaults", checksum = "fc3530be")]
+#[tokio::test]
+async fn ec2_modify_instance_metadata_defaults() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_instance_metadata_defaults()
+        .http_tokens(aws_sdk_ec2::types::MetadataDefaultHttpTokensState::Required)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "RegisterInstanceEventNotificationAttributes",
+    checksum = "094fcc20"
+)]
+#[tokio::test]
+async fn ec2_register_event_notification_attributes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .register_instance_event_notification_attributes()
+        .instance_tag_attribute(
+            aws_sdk_ec2::types::RegisterInstanceTagAttributeRequest::builder()
+                .include_all_tags_of_instance(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.instance_tag_attribute().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DeregisterInstanceEventNotificationAttributes",
+    checksum = "4e4aa744"
+)]
+#[tokio::test]
+async fn ec2_deregister_event_notification_attributes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.deregister_instance_event_notification_attributes()
+        .instance_tag_attribute(
+            aws_sdk_ec2::types::DeregisterInstanceTagAttributeRequest::builder()
+                .include_all_tags_of_instance(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "DescribeInstanceEventNotificationAttributes",
+    checksum = "18c8e6c9"
+)]
+#[tokio::test]
+async fn ec2_describe_event_notification_attributes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_instance_event_notification_attributes()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.instance_tag_attribute().is_some());
+}
+
+#[test_action("ec2", "ReportInstanceStatus", checksum = "4e11dd5d")]
+#[tokio::test]
+async fn ec2_report_instance_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run_one(&c).await;
+    c.report_instance_status()
+        .instances(&id)
+        .status(aws_sdk_ec2::types::ReportStatusType::Ok)
+        .reason_codes(aws_sdk_ec2::types::ReportInstanceReasonCodes::Other)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceTopology", checksum = "ebb979fc")]
+#[tokio::test]
+async fn ec2_describe_instance_topology() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_instance_topology().send().await.unwrap();
+    assert!(r.instances().is_empty());
+}

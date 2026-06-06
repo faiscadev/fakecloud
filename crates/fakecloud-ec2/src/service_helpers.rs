@@ -64,6 +64,22 @@ pub fn require(params: &HashMap<String, String>, key: &str) -> Result<String, Aw
         .ok_or_else(|| missing_parameter(key))
 }
 
+/// Require a structure member to be present, identified by any wire param
+/// under `{prefix}.` (e.g. `InstanceTagAttribute.IncludeAllTagsOfInstance`).
+/// Omitting a required *structure* is wire-observable, so the harness emits a
+/// `negative_omit_<Struct>` variant — handlers must reject it.
+pub fn require_struct(
+    params: &HashMap<String, String>,
+    prefix: &str,
+) -> Result<(), AwsServiceError> {
+    let pat = format!("{prefix}.");
+    if params.keys().any(|k| k.starts_with(&pat)) {
+        Ok(())
+    } else {
+        Err(missing_parameter(prefix))
+    }
+}
+
 /// Reject a present-but-invalid enum value (the harness's
 /// `negative_invalid_enum_*` variant). Absent is allowed here — required-ness
 /// is enforced separately via [`require`].

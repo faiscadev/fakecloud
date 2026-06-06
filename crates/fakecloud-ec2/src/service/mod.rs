@@ -3,6 +3,7 @@
 mod dhcp;
 mod eip;
 mod eni;
+mod instance;
 mod meta;
 mod routing;
 mod sg;
@@ -150,6 +151,36 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "UnassignPrivateIpAddresses",
     "AssignIpv6Addresses",
     "UnassignIpv6Addresses",
+    // Instances
+    "RunInstances",
+    "StartInstances",
+    "StopInstances",
+    "RebootInstances",
+    "TerminateInstances",
+    "MonitorInstances",
+    "UnmonitorInstances",
+    "DescribeInstances",
+    "DescribeInstanceStatus",
+    "DescribeInstanceTypes",
+    "GetInstanceTypesFromInstanceRequirements",
+    "DescribeInstanceAttribute",
+    "ModifyInstanceAttribute",
+    "ResetInstanceAttribute",
+    "ModifyInstancePlacement",
+    "ModifyInstanceMetadataOptions",
+    "ModifyInstanceMaintenanceOptions",
+    "ModifyInstanceCpuOptions",
+    "ModifyInstanceNetworkPerformanceOptions",
+    "ModifyInstanceEventStartTime",
+    "DescribeInstanceCreditSpecifications",
+    "ModifyInstanceCreditSpecification",
+    "GetInstanceMetadataDefaults",
+    "ModifyInstanceMetadataDefaults",
+    "RegisterInstanceEventNotificationAttributes",
+    "DeregisterInstanceEventNotificationAttributes",
+    "DescribeInstanceEventNotificationAttributes",
+    "ReportInstanceStatus",
+    "DescribeInstanceTopology",
 ];
 
 /// Amazon EC2 service.
@@ -337,6 +368,59 @@ impl AwsService for Ec2Service {
             "UnassignPrivateIpAddresses" => eni::unassign_private_ip_addresses(self, &request),
             "AssignIpv6Addresses" => eni::assign_ipv6_addresses(self, &request),
             "UnassignIpv6Addresses" => eni::unassign_ipv6_addresses(self, &request),
+            "RunInstances" => instance::run_instances(self, &request),
+            "StartInstances" => instance::start_instances(self, &request),
+            "StopInstances" => instance::stop_instances(self, &request),
+            "RebootInstances" => instance::reboot_instances(self, &request),
+            "TerminateInstances" => instance::terminate_instances(self, &request),
+            "MonitorInstances" => instance::monitor_instances(self, &request),
+            "UnmonitorInstances" => instance::unmonitor_instances(self, &request),
+            "DescribeInstances" => instance::describe_instances(self, &request),
+            "DescribeInstanceStatus" => instance::describe_instance_status(self, &request),
+            "DescribeInstanceTypes" => instance::describe_instance_types(self, &request),
+            "GetInstanceTypesFromInstanceRequirements" => {
+                instance::get_instance_types_from_requirements(self, &request)
+            }
+            "DescribeInstanceAttribute" => instance::describe_instance_attribute(self, &request),
+            "ModifyInstanceAttribute" => instance::modify_instance_attribute(self, &request),
+            "ResetInstanceAttribute" => instance::reset_instance_attribute(self, &request),
+            "ModifyInstancePlacement" => instance::modify_instance_placement(self, &request),
+            "ModifyInstanceMetadataOptions" => {
+                instance::modify_instance_metadata_options(self, &request)
+            }
+            "ModifyInstanceMaintenanceOptions" => {
+                instance::modify_instance_maintenance_options(self, &request)
+            }
+            "ModifyInstanceCpuOptions" => instance::modify_instance_cpu_options(self, &request),
+            "ModifyInstanceNetworkPerformanceOptions" => {
+                instance::modify_instance_network_performance_options(self, &request)
+            }
+            "ModifyInstanceEventStartTime" => {
+                instance::modify_instance_event_start_time(self, &request)
+            }
+            "DescribeInstanceCreditSpecifications" => {
+                instance::describe_instance_credit_specifications(self, &request)
+            }
+            "ModifyInstanceCreditSpecification" => {
+                instance::modify_instance_credit_specification(self, &request)
+            }
+            "GetInstanceMetadataDefaults" => {
+                instance::get_instance_metadata_defaults(self, &request)
+            }
+            "ModifyInstanceMetadataDefaults" => {
+                instance::modify_instance_metadata_defaults(self, &request)
+            }
+            "RegisterInstanceEventNotificationAttributes" => {
+                instance::register_event_notification_attributes(self, &request)
+            }
+            "DeregisterInstanceEventNotificationAttributes" => {
+                instance::deregister_event_notification_attributes(self, &request)
+            }
+            "DescribeInstanceEventNotificationAttributes" => {
+                instance::describe_event_notification_attributes(self, &request)
+            }
+            "ReportInstanceStatus" => instance::report_instance_status(self, &request),
+            "DescribeInstanceTopology" => instance::describe_instance_topology(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
