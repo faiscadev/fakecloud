@@ -2058,3 +2058,342 @@ async fn ec2_get_groups_for_capacity_reservation() {
         .unwrap();
     assert!(r.capacity_reservation_groups().is_empty());
 }
+
+// ---- Network interfaces ----
+
+#[test_action("ec2", "CreateNetworkInterface", checksum = "fb8b07c5")]
+#[tokio::test]
+async fn ec2_create_network_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .description("eni")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .starts_with("eni-"));
+}
+
+#[test_action("ec2", "DescribeNetworkInterfaces", checksum = "a535ece3")]
+#[tokio::test]
+async fn ec2_describe_network_interfaces() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .describe_network_interfaces()
+        .network_interface_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interfaces().len(), 1);
+}
+
+#[test_action("ec2", "DeleteNetworkInterface", checksum = "2440679a")]
+#[tokio::test]
+async fn ec2_delete_network_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    c.delete_network_interface()
+        .network_interface_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(c
+        .describe_network_interfaces()
+        .send()
+        .await
+        .unwrap()
+        .network_interfaces()
+        .is_empty());
+}
+
+#[test_action("ec2", "AttachNetworkInterface", checksum = "50e5af9a")]
+#[tokio::test]
+async fn ec2_attach_network_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .attach_network_interface()
+        .network_interface_id(&id)
+        .instance_id("i-1")
+        .device_index(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.attachment_id().unwrap().starts_with("eni-attach-"));
+}
+
+#[test_action("ec2", "DetachNetworkInterface", checksum = "2a90588a")]
+#[tokio::test]
+async fn ec2_detach_network_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    let a = c
+        .attach_network_interface()
+        .network_interface_id(&id)
+        .instance_id("i-1")
+        .device_index(1)
+        .send()
+        .await
+        .unwrap()
+        .attachment_id()
+        .unwrap()
+        .to_string();
+    c.detach_network_interface()
+        .attachment_id(&a)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyNetworkInterfaceAttribute", checksum = "5295ba2f")]
+#[tokio::test]
+async fn ec2_modify_network_interface_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    c.modify_network_interface_attribute()
+        .network_interface_id(&id)
+        .description(
+            aws_sdk_ec2::types::AttributeValue::builder()
+                .value("x")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ResetNetworkInterfaceAttribute", checksum = "74b31afb")]
+#[tokio::test]
+async fn ec2_reset_network_interface_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    c.reset_network_interface_attribute()
+        .network_interface_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeNetworkInterfaceAttribute", checksum = "dd5cfed6")]
+#[tokio::test]
+async fn ec2_describe_network_interface_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .describe_network_interface_attribute()
+        .network_interface_id(&id)
+        .attribute(aws_sdk_ec2::types::NetworkInterfaceAttribute::SourceDestCheck)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interface_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "CreateNetworkInterfacePermission", checksum = "047e38ad")]
+#[tokio::test]
+async fn ec2_create_eni_permission() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_network_interface_permission()
+        .network_interface_id("eni-1")
+        .aws_account_id("123456789012")
+        .permission(aws_sdk_ec2::types::InterfacePermissionType::InstanceAttach)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .interface_permission()
+        .unwrap()
+        .network_interface_permission_id()
+        .unwrap()
+        .starts_with("eni-perm-"));
+}
+
+#[test_action("ec2", "DescribeNetworkInterfacePermissions", checksum = "e4c9ad17")]
+#[tokio::test]
+async fn ec2_describe_eni_permissions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_network_interface_permission()
+        .network_interface_id("eni-1")
+        .aws_account_id("123456789012")
+        .permission(aws_sdk_ec2::types::InterfacePermissionType::InstanceAttach)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_network_interface_permissions()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.network_interface_permissions().is_empty());
+}
+
+#[test_action("ec2", "DeleteNetworkInterfacePermission", checksum = "6ba0312c")]
+#[tokio::test]
+async fn ec2_delete_eni_permission() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_network_interface_permission()
+        .network_interface_id("eni-1")
+        .aws_account_id("123456789012")
+        .permission(aws_sdk_ec2::types::InterfacePermissionType::InstanceAttach)
+        .send()
+        .await
+        .unwrap()
+        .interface_permission()
+        .unwrap()
+        .network_interface_permission_id()
+        .unwrap()
+        .to_string();
+    c.delete_network_interface_permission()
+        .network_interface_permission_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssignPrivateIpAddresses", checksum = "b0fceb60")]
+#[tokio::test]
+async fn ec2_assign_private_ips() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .assign_private_ip_addresses()
+        .network_interface_id("eni-1")
+        .private_ip_addresses("10.0.0.31")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interface_id(), Some("eni-1"));
+}
+
+#[test_action("ec2", "UnassignPrivateIpAddresses", checksum = "65c70924")]
+#[tokio::test]
+async fn ec2_unassign_private_ips() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.unassign_private_ip_addresses()
+        .network_interface_id("eni-1")
+        .private_ip_addresses("10.0.0.31")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssignIpv6Addresses", checksum = "cac8c175")]
+#[tokio::test]
+async fn ec2_assign_ipv6() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .assign_ipv6_addresses()
+        .network_interface_id("eni-1")
+        .ipv6_addresses("2600:1f00::5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interface_id(), Some("eni-1"));
+}
+
+#[test_action("ec2", "UnassignIpv6Addresses", checksum = "0c460cb5")]
+#[tokio::test]
+async fn ec2_unassign_ipv6() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .unassign_ipv6_addresses()
+        .network_interface_id("eni-1")
+        .ipv6_addresses("2600:1f00::5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interface_id(), Some("eni-1"));
+}

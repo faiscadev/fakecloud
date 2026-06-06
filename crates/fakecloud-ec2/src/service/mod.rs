@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod eip;
+mod eni;
 mod meta;
 mod routing;
 mod sg;
@@ -133,6 +134,22 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeletePlacementGroup",
     "DescribePlacementGroups",
     "GetGroupsForCapacityReservation",
+    // Network interfaces
+    "CreateNetworkInterface",
+    "DeleteNetworkInterface",
+    "DescribeNetworkInterfaces",
+    "AttachNetworkInterface",
+    "DetachNetworkInterface",
+    "ModifyNetworkInterfaceAttribute",
+    "ResetNetworkInterfaceAttribute",
+    "DescribeNetworkInterfaceAttribute",
+    "CreateNetworkInterfacePermission",
+    "DeleteNetworkInterfacePermission",
+    "DescribeNetworkInterfacePermissions",
+    "AssignPrivateIpAddresses",
+    "UnassignPrivateIpAddresses",
+    "AssignIpv6Addresses",
+    "UnassignIpv6Addresses",
 ];
 
 /// Amazon EC2 service.
@@ -293,6 +310,33 @@ impl AwsService for Ec2Service {
             "GetGroupsForCapacityReservation" => {
                 eip::get_groups_for_capacity_reservation(self, &request)
             }
+            "CreateNetworkInterface" => eni::create_network_interface(self, &request),
+            "DeleteNetworkInterface" => eni::delete_network_interface(self, &request),
+            "DescribeNetworkInterfaces" => eni::describe_network_interfaces(self, &request),
+            "AttachNetworkInterface" => eni::attach_network_interface(self, &request),
+            "DetachNetworkInterface" => eni::detach_network_interface(self, &request),
+            "ModifyNetworkInterfaceAttribute" => {
+                eni::modify_network_interface_attribute(self, &request)
+            }
+            "ResetNetworkInterfaceAttribute" => {
+                eni::reset_network_interface_attribute(self, &request)
+            }
+            "DescribeNetworkInterfaceAttribute" => {
+                eni::describe_network_interface_attribute(self, &request)
+            }
+            "CreateNetworkInterfacePermission" => {
+                eni::create_network_interface_permission(self, &request)
+            }
+            "DeleteNetworkInterfacePermission" => {
+                eni::delete_network_interface_permission(self, &request)
+            }
+            "DescribeNetworkInterfacePermissions" => {
+                eni::describe_network_interface_permissions(self, &request)
+            }
+            "AssignPrivateIpAddresses" => eni::assign_private_ip_addresses(self, &request),
+            "UnassignPrivateIpAddresses" => eni::unassign_private_ip_addresses(self, &request),
+            "AssignIpv6Addresses" => eni::assign_ipv6_addresses(self, &request),
+            "UnassignIpv6Addresses" => eni::unassign_ipv6_addresses(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
