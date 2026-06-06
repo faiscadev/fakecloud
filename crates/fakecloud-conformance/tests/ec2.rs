@@ -1687,3 +1687,374 @@ async fn ec2_unassign_private_nat_address() {
         .unwrap();
     assert_eq!(r.nat_gateway_id(), Some("nat-1"));
 }
+
+// ---- Elastic IPs / key pairs / placement groups ----
+
+#[test_action("ec2", "AllocateAddress", checksum = "72e9819e")]
+#[tokio::test]
+async fn ec2_allocate_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.allocate_address().send().await.unwrap();
+    assert!(r.allocation_id().unwrap().starts_with("eipalloc-"));
+}
+
+#[test_action("ec2", "DescribeAddresses", checksum = "56b4e26b")]
+#[tokio::test]
+async fn ec2_describe_addresses() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .allocate_address()
+        .send()
+        .await
+        .unwrap()
+        .allocation_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .describe_addresses()
+        .allocation_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.addresses().len(), 1);
+}
+
+#[test_action("ec2", "ReleaseAddress", checksum = "ddf3c731")]
+#[tokio::test]
+async fn ec2_release_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .allocate_address()
+        .send()
+        .await
+        .unwrap()
+        .allocation_id()
+        .unwrap()
+        .to_string();
+    c.release_address().allocation_id(&id).send().await.unwrap();
+    assert!(c
+        .describe_addresses()
+        .send()
+        .await
+        .unwrap()
+        .addresses()
+        .is_empty());
+}
+
+#[test_action("ec2", "AssociateAddress", checksum = "f9d7114a")]
+#[tokio::test]
+async fn ec2_associate_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .allocate_address()
+        .send()
+        .await
+        .unwrap()
+        .allocation_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .associate_address()
+        .allocation_id(&id)
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.association_id().unwrap().starts_with("eipassoc-"));
+}
+
+#[test_action("ec2", "DisassociateAddress", checksum = "7ba65bc1")]
+#[tokio::test]
+async fn ec2_disassociate_address() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .allocate_address()
+        .send()
+        .await
+        .unwrap()
+        .allocation_id()
+        .unwrap()
+        .to_string();
+    let a = c
+        .associate_address()
+        .allocation_id(&id)
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap()
+        .association_id()
+        .unwrap()
+        .to_string();
+    c.disassociate_address()
+        .association_id(&a)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeAddressesAttribute", checksum = "de81c82d")]
+#[tokio::test]
+async fn ec2_describe_addresses_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_addresses_attribute().send().await.unwrap();
+    assert!(r.addresses().is_empty());
+}
+
+#[test_action("ec2", "ModifyAddressAttribute", checksum = "826d8f03")]
+#[tokio::test]
+async fn ec2_modify_address_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_address_attribute()
+        .allocation_id("eipalloc-1")
+        .domain_name("x.com")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.address().is_some());
+}
+
+#[test_action("ec2", "ResetAddressAttribute", checksum = "6d8e2e96")]
+#[tokio::test]
+async fn ec2_reset_address_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .reset_address_attribute()
+        .allocation_id("eipalloc-1")
+        .attribute(aws_sdk_ec2::types::AddressAttributeName::DomainName)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.address().is_some());
+}
+
+#[test_action("ec2", "MoveAddressToVpc", checksum = "504d8ee5")]
+#[tokio::test]
+async fn ec2_move_address_to_vpc() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .move_address_to_vpc()
+        .public_ip("52.1.2.3")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.allocation_id().is_some());
+}
+
+#[test_action("ec2", "RestoreAddressToClassic", checksum = "993eac2f")]
+#[tokio::test]
+async fn ec2_restore_address_to_classic() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .restore_address_to_classic()
+        .public_ip("52.1.2.3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.public_ip(), Some("52.1.2.3"));
+}
+
+#[test_action("ec2", "AcceptAddressTransfer", checksum = "2c5acb12")]
+#[tokio::test]
+async fn ec2_accept_address_transfer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_address_transfer()
+        .address("52.1.2.3")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.address_transfer().is_some());
+}
+
+#[test_action("ec2", "EnableAddressTransfer", checksum = "e7f63186")]
+#[tokio::test]
+async fn ec2_enable_address_transfer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_address_transfer()
+        .allocation_id("eipalloc-1")
+        .transfer_account_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.address_transfer().is_some());
+}
+
+#[test_action("ec2", "DisableAddressTransfer", checksum = "21ada00d")]
+#[tokio::test]
+async fn ec2_disable_address_transfer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disable_address_transfer()
+        .allocation_id("eipalloc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.address_transfer().is_some());
+}
+
+#[test_action("ec2", "DescribeAddressTransfers", checksum = "ac471d03")]
+#[tokio::test]
+async fn ec2_describe_address_transfers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    assert!(c
+        .describe_address_transfers()
+        .send()
+        .await
+        .unwrap()
+        .address_transfers()
+        .is_empty());
+}
+
+#[test_action("ec2", "DescribeMovingAddresses", checksum = "1bb88145")]
+#[tokio::test]
+async fn ec2_describe_moving_addresses() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    assert!(c
+        .describe_moving_addresses()
+        .send()
+        .await
+        .unwrap()
+        .moving_address_statuses()
+        .is_empty());
+}
+
+#[test_action("ec2", "CreateKeyPair", checksum = "fda0b5e7")]
+#[tokio::test]
+async fn ec2_create_key_pair() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.create_key_pair().key_name("kp1").send().await.unwrap();
+    assert!(r.key_pair_id().unwrap().starts_with("key-"));
+    assert!(r.key_material().is_some());
+}
+
+#[test_action("ec2", "ImportKeyPair", checksum = "dd40237e")]
+#[tokio::test]
+async fn ec2_import_key_pair() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .import_key_pair()
+        .key_name("kp2")
+        .public_key_material(aws_sdk_ec2::primitives::Blob::new(b"ssh-rsa AAAA"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.key_name(), Some("kp2"));
+}
+
+#[test_action("ec2", "DescribeKeyPairs", checksum = "0dc1eaa5")]
+#[tokio::test]
+async fn ec2_describe_key_pairs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_key_pair().key_name("kp3").send().await.unwrap();
+    let r = c
+        .describe_key_pairs()
+        .key_names("kp3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.key_pairs().len(), 1);
+}
+
+#[test_action("ec2", "DeleteKeyPair", checksum = "a77af389")]
+#[tokio::test]
+async fn ec2_delete_key_pair() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_key_pair().key_name("kp4").send().await.unwrap();
+    c.delete_key_pair().key_name("kp4").send().await.unwrap();
+    assert!(c
+        .describe_key_pairs()
+        .send()
+        .await
+        .unwrap()
+        .key_pairs()
+        .iter()
+        .all(|k| k.key_name() != Some("kp4")));
+}
+
+#[test_action("ec2", "CreatePlacementGroup", checksum = "66a063d2")]
+#[tokio::test]
+async fn ec2_create_placement_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_placement_group()
+        .group_name("pg1")
+        .strategy(aws_sdk_ec2::types::PlacementStrategy::Cluster)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.placement_group().unwrap().group_name(), Some("pg1"));
+}
+
+#[test_action("ec2", "DescribePlacementGroups", checksum = "a75a2b4a")]
+#[tokio::test]
+async fn ec2_describe_placement_groups() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_placement_group()
+        .group_name("pg2")
+        .strategy(aws_sdk_ec2::types::PlacementStrategy::Spread)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_placement_groups()
+        .group_names("pg2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.placement_groups().len(), 1);
+}
+
+#[test_action("ec2", "DeletePlacementGroup", checksum = "57a1ff80")]
+#[tokio::test]
+async fn ec2_delete_placement_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_placement_group()
+        .group_name("pg3")
+        .strategy(aws_sdk_ec2::types::PlacementStrategy::Cluster)
+        .send()
+        .await
+        .unwrap();
+    c.delete_placement_group()
+        .group_name("pg3")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetGroupsForCapacityReservation", checksum = "636a8af3")]
+#[tokio::test]
+async fn ec2_get_groups_for_capacity_reservation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_groups_for_capacity_reservation()
+        .capacity_reservation_id("cr-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_reservation_groups().is_empty());
+}
