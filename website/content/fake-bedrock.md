@@ -20,7 +20,7 @@ Point any AWS SDK at `http://localhost:4566`.
 - A mock fails to catch bugs in how your code assembles HTTP requests. It never sent a request.
 - A fake catches those bugs. Your code made a real HTTP call. The request body was parsed by a real JSON parser. The response traveled back through the real SDK response parser.
 
-fakecloud is a fake AWS — a complete server on port 4566 that speaks 40 AWS services' wire protocols at true 100% Smithy conformance (106,238/106,238 generated variants pass). Your code thinks it's talking to real AWS.
+fakecloud is a fake AWS — a complete server on port 4566 that speaks 40 AWS services' wire protocols at true 100% Smithy conformance (107,069/107,069 generated variants pass). Your code thinks it's talking to real AWS.
 
 And it is, as far as the protocol is concerned. The part that's fake is the response content — which is exactly the part you want to control in tests.
 

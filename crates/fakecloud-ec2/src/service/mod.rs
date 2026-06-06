@@ -3,6 +3,7 @@
 mod dhcp;
 mod eip;
 mod eni;
+mod image;
 mod instance;
 mod meta;
 mod routing;
@@ -227,6 +228,35 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "EnableFastSnapshotRestores",
     "DisableFastSnapshotRestores",
     "DescribeFastSnapshotRestores",
+    // AMIs (images)
+    "CreateImage",
+    "RegisterImage",
+    "DeregisterImage",
+    "DescribeImages",
+    "CopyImage",
+    "DescribeImageAttribute",
+    "ModifyImageAttribute",
+    "ResetImageAttribute",
+    "EnableImage",
+    "DisableImage",
+    "EnableImageDeprecation",
+    "DisableImageDeprecation",
+    "EnableImageDeregistrationProtection",
+    "DisableImageDeregistrationProtection",
+    "CancelImageLaunchPermission",
+    "RestoreImageFromRecycleBin",
+    "ListImagesInRecycleBin",
+    "EnableImageBlockPublicAccess",
+    "DisableImageBlockPublicAccess",
+    "GetImageBlockPublicAccessState",
+    "EnableAllowedImagesSettings",
+    "DisableAllowedImagesSettings",
+    "GetAllowedImagesSettings",
+    "ReplaceImageCriteriaInAllowedImagesSettings",
+    "CreateStoreImageTask",
+    "DescribeStoreImageTasks",
+    "CreateRestoreImageTask",
+    "DescribeFastLaunchImages",
 ];
 
 /// Amazon EC2 service.
@@ -528,6 +558,48 @@ impl AwsService for Ec2Service {
             "DescribeFastSnapshotRestores" => {
                 snapshot::describe_fast_snapshot_restores(self, &request)
             }
+            "CreateImage" => image::create_image(self, &request),
+            "RegisterImage" => image::register_image(self, &request),
+            "DeregisterImage" => image::deregister_image(self, &request),
+            "DescribeImages" => image::describe_images(self, &request),
+            "CopyImage" => image::copy_image(self, &request),
+            "DescribeImageAttribute" => image::describe_image_attribute(self, &request),
+            "ModifyImageAttribute" => image::modify_image_attribute(self, &request),
+            "ResetImageAttribute" => image::reset_image_attribute(self, &request),
+            "EnableImage" => image::enable_image(self, &request),
+            "DisableImage" => image::disable_image(self, &request),
+            "EnableImageDeprecation" => image::enable_image_deprecation(self, &request),
+            "DisableImageDeprecation" => image::disable_image_deprecation(self, &request),
+            "EnableImageDeregistrationProtection" => {
+                image::enable_image_deregistration_protection(self, &request)
+            }
+            "DisableImageDeregistrationProtection" => {
+                image::disable_image_deregistration_protection(self, &request)
+            }
+            "CancelImageLaunchPermission" => image::cancel_image_launch_permission(self, &request),
+            "RestoreImageFromRecycleBin" => image::restore_image_from_recycle_bin(self, &request),
+            "ListImagesInRecycleBin" => image::list_images_in_recycle_bin(self, &request),
+            "EnableImageBlockPublicAccess" => {
+                image::enable_image_block_public_access(self, &request)
+            }
+            "DisableImageBlockPublicAccess" => {
+                image::disable_image_block_public_access(self, &request)
+            }
+            "GetImageBlockPublicAccessState" => {
+                image::get_image_block_public_access_state(self, &request)
+            }
+            "EnableAllowedImagesSettings" => image::enable_allowed_images_settings(self, &request),
+            "DisableAllowedImagesSettings" => {
+                image::disable_allowed_images_settings(self, &request)
+            }
+            "GetAllowedImagesSettings" => image::get_allowed_images_settings(self, &request),
+            "ReplaceImageCriteriaInAllowedImagesSettings" => {
+                image::replace_image_criteria_in_allowed_images_settings(self, &request)
+            }
+            "CreateStoreImageTask" => image::create_store_image_task(self, &request),
+            "DescribeStoreImageTasks" => image::describe_store_image_tasks(self, &request),
+            "CreateRestoreImageTask" => image::create_restore_image_task(self, &request),
+            "DescribeFastLaunchImages" => image::describe_fast_launch_images(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
