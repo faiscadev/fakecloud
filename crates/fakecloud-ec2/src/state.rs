@@ -223,6 +223,49 @@ pub struct PlacementGroup {
     pub spread_level: Option<String>,
 }
 
+/// An ENI attachment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EniAttachment {
+    pub attachment_id: String,
+    pub instance_id: String,
+    pub device_index: i64,
+    /// `attaching` | `attached` | `detaching` | `detached`.
+    pub status: String,
+}
+
+/// An elastic network interface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInterface {
+    pub network_interface_id: String,
+    pub subnet_id: String,
+    pub vpc_id: String,
+    pub availability_zone: String,
+    pub description: String,
+    pub mac_address: String,
+    pub private_ip_address: String,
+    /// `available` | `in-use`.
+    pub status: String,
+    pub interface_type: String,
+    pub source_dest_check: bool,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
+    #[serde(default)]
+    pub private_ips: Vec<String>,
+    #[serde(default)]
+    pub ipv6_addresses: Vec<String>,
+    pub attachment: Option<EniAttachment>,
+}
+
+/// A network-interface permission grant.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInterfacePermission {
+    pub permission_id: String,
+    pub network_interface_id: String,
+    pub aws_account_id: String,
+    /// `INSTANCE-ATTACH` | `EIP-ASSOCIATE`.
+    pub permission: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -259,6 +302,11 @@ pub struct Ec2State {
     /// keyed by group name.
     #[serde(default)]
     pub placement_groups: HashMap<String, PlacementGroup>,
+    #[serde(default)]
+    pub network_interfaces: HashMap<String, NetworkInterface>,
+    /// keyed by permission id.
+    #[serde(default)]
+    pub eni_permissions: HashMap<String, NetworkInterfacePermission>,
 }
 
 impl Ec2State {
