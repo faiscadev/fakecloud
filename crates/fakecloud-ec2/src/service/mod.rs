@@ -9,6 +9,7 @@ mod routing;
 mod sg;
 mod subnet;
 mod tags;
+mod volume;
 mod vpc;
 
 use async_trait::async_trait;
@@ -181,6 +182,27 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeInstanceEventNotificationAttributes",
     "ReportInstanceStatus",
     "DescribeInstanceTopology",
+    // EBS volumes
+    "CreateVolume",
+    "DeleteVolume",
+    "DescribeVolumes",
+    "AttachVolume",
+    "DetachVolume",
+    "ModifyVolume",
+    "DescribeVolumesModifications",
+    "DescribeVolumeStatus",
+    "DescribeVolumeAttribute",
+    "ModifyVolumeAttribute",
+    "EnableVolumeIO",
+    "ListVolumesInRecycleBin",
+    "RestoreVolumeFromRecycleBin",
+    // EBS encryption defaults
+    "GetEbsEncryptionByDefault",
+    "EnableEbsEncryptionByDefault",
+    "DisableEbsEncryptionByDefault",
+    "GetEbsDefaultKmsKeyId",
+    "ModifyEbsDefaultKmsKeyId",
+    "ResetEbsDefaultKmsKeyId",
 ];
 
 /// Amazon EC2 service.
@@ -421,6 +443,33 @@ impl AwsService for Ec2Service {
             }
             "ReportInstanceStatus" => instance::report_instance_status(self, &request),
             "DescribeInstanceTopology" => instance::describe_instance_topology(self, &request),
+            "CreateVolume" => volume::create_volume(self, &request),
+            "DeleteVolume" => volume::delete_volume(self, &request),
+            "DescribeVolumes" => volume::describe_volumes(self, &request),
+            "AttachVolume" => volume::attach_volume(self, &request),
+            "DetachVolume" => volume::detach_volume(self, &request),
+            "ModifyVolume" => volume::modify_volume(self, &request),
+            "DescribeVolumesModifications" => {
+                volume::describe_volumes_modifications(self, &request)
+            }
+            "DescribeVolumeStatus" => volume::describe_volume_status(self, &request),
+            "DescribeVolumeAttribute" => volume::describe_volume_attribute(self, &request),
+            "ModifyVolumeAttribute" => volume::modify_volume_attribute(self, &request),
+            "EnableVolumeIO" => volume::enable_volume_io(self, &request),
+            "ListVolumesInRecycleBin" => volume::list_volumes_in_recycle_bin(self, &request),
+            "RestoreVolumeFromRecycleBin" => {
+                volume::restore_volume_from_recycle_bin(self, &request)
+            }
+            "GetEbsEncryptionByDefault" => volume::get_ebs_encryption_by_default(self, &request),
+            "EnableEbsEncryptionByDefault" => {
+                volume::enable_ebs_encryption_by_default(self, &request)
+            }
+            "DisableEbsEncryptionByDefault" => {
+                volume::disable_ebs_encryption_by_default(self, &request)
+            }
+            "GetEbsDefaultKmsKeyId" => volume::get_ebs_default_kms_key_id(self, &request),
+            "ModifyEbsDefaultKmsKeyId" => volume::modify_ebs_default_kms_key_id(self, &request),
+            "ResetEbsDefaultKmsKeyId" => volume::reset_ebs_default_kms_key_id(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
