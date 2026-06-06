@@ -290,6 +290,39 @@ pub struct Instance {
     pub launch_time: String,
 }
 
+/// An EBS volume attachment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolumeAttachment {
+    pub volume_id: String,
+    pub instance_id: String,
+    pub device: String,
+    /// `attaching` | `attached` | `detaching` | `detached`.
+    pub status: String,
+    pub delete_on_termination: bool,
+}
+
+/// An EBS volume.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Volume {
+    pub volume_id: String,
+    pub size: i64,
+    pub snapshot_id: Option<String>,
+    pub availability_zone: String,
+    /// `creating` | `available` | `in-use` | `deleting` | `deleted`.
+    pub state: String,
+    pub volume_type: String,
+    pub iops: Option<i64>,
+    pub throughput: Option<i64>,
+    pub encrypted: bool,
+    pub kms_key_id: Option<String>,
+    pub multi_attach_enabled: bool,
+    pub auto_enable_io: bool,
+    #[serde(default)]
+    pub attachments: Vec<VolumeAttachment>,
+    #[serde(default)]
+    pub in_recycle_bin: bool,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -333,6 +366,14 @@ pub struct Ec2State {
     pub eni_permissions: HashMap<String, NetworkInterfacePermission>,
     #[serde(default)]
     pub instances: HashMap<String, Instance>,
+    #[serde(default)]
+    pub volumes: HashMap<String, Volume>,
+    /// Account-level EBS default encryption toggle.
+    #[serde(default)]
+    pub ebs_encryption_default: bool,
+    /// Account-level EBS default KMS key (None = `alias/aws/ebs`).
+    #[serde(default)]
+    pub ebs_default_kms_key_id: Option<String>,
 }
 
 impl Ec2State {

@@ -2884,3 +2884,273 @@ async fn ec2_describe_instance_topology() {
     let r = c.describe_instance_topology().send().await.unwrap();
     assert!(r.instances().is_empty());
 }
+
+// ---- EBS volumes ----
+
+async fn make_vol(c: &aws_sdk_ec2::Client) -> String {
+    c.create_volume()
+        .availability_zone("us-east-1a")
+        .size(8)
+        .send()
+        .await
+        .unwrap()
+        .volume_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateVolume", checksum = "0e36827b")]
+#[tokio::test]
+async fn ec2_create_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_volume()
+        .availability_zone("us-east-1a")
+        .size(10)
+        .volume_type(aws_sdk_ec2::types::VolumeType::Gp3)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.volume_id().unwrap().starts_with("vol-"));
+    assert_eq!(r.size(), Some(10));
+}
+
+#[test_action("ec2", "DescribeVolumes", checksum = "9dfe1d7b")]
+#[tokio::test]
+async fn ec2_describe_volumes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c.describe_volumes().volume_ids(&id).send().await.unwrap();
+    assert_eq!(r.volumes().len(), 1);
+}
+
+#[test_action("ec2", "DeleteVolume", checksum = "bbaa86a2")]
+#[tokio::test]
+async fn ec2_delete_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    c.delete_volume().volume_id(&id).send().await.unwrap();
+    assert!(c
+        .describe_volumes()
+        .send()
+        .await
+        .unwrap()
+        .volumes()
+        .is_empty());
+}
+
+#[test_action("ec2", "AttachVolume", checksum = "2567d4b9")]
+#[tokio::test]
+async fn ec2_attach_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c
+        .attach_volume()
+        .volume_id(&id)
+        .instance_id("i-1")
+        .device("/dev/sdf")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.volume_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DetachVolume", checksum = "459f4614")]
+#[tokio::test]
+async fn ec2_detach_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    c.attach_volume()
+        .volume_id(&id)
+        .instance_id("i-1")
+        .device("/dev/sdf")
+        .send()
+        .await
+        .unwrap();
+    let r = c.detach_volume().volume_id(&id).send().await.unwrap();
+    assert_eq!(r.volume_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyVolume", checksum = "a66e5eb0")]
+#[tokio::test]
+async fn ec2_modify_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c
+        .modify_volume()
+        .volume_id(&id)
+        .size(16)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.volume_modification().unwrap().volume_id(),
+        Some(id.as_str())
+    );
+}
+
+#[test_action("ec2", "DescribeVolumesModifications", checksum = "9c511c39")]
+#[tokio::test]
+async fn ec2_describe_volumes_modifications() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c
+        .describe_volumes_modifications()
+        .volume_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .volumes_modifications()
+        .iter()
+        .any(|m| m.volume_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "DescribeVolumeStatus", checksum = "f77ed7db")]
+#[tokio::test]
+async fn ec2_describe_volume_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c
+        .describe_volume_status()
+        .volume_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .volume_statuses()
+        .iter()
+        .any(|x| x.volume_id() == Some(id.as_str())));
+}
+
+#[test_action("ec2", "DescribeVolumeAttribute", checksum = "3b62cb3d")]
+#[tokio::test]
+async fn ec2_describe_volume_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    let r = c
+        .describe_volume_attribute()
+        .volume_id(&id)
+        .attribute(aws_sdk_ec2::types::VolumeAttributeName::AutoEnableIo)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.volume_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "ModifyVolumeAttribute", checksum = "c35563ee")]
+#[tokio::test]
+async fn ec2_modify_volume_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    c.modify_volume_attribute()
+        .volume_id(&id)
+        .auto_enable_io(
+            aws_sdk_ec2::types::AttributeBooleanValue::builder()
+                .value(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableVolumeIO", checksum = "fd7c6596")]
+#[tokio::test]
+async fn ec2_enable_volume_io() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    c.enable_volume_io().volume_id(&id).send().await.unwrap();
+}
+
+#[test_action("ec2", "ListVolumesInRecycleBin", checksum = "ae137dee")]
+#[tokio::test]
+async fn ec2_list_volumes_in_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.list_volumes_in_recycle_bin().send().await.unwrap();
+    assert!(r.volumes().is_empty());
+}
+
+#[test_action("ec2", "RestoreVolumeFromRecycleBin", checksum = "3c097b95")]
+#[tokio::test]
+async fn ec2_restore_volume_from_recycle_bin() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vol(&c).await;
+    c.restore_volume_from_recycle_bin()
+        .volume_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetEbsEncryptionByDefault", checksum = "79f3757d")]
+#[tokio::test]
+async fn ec2_get_ebs_encryption_by_default() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_ebs_encryption_by_default().send().await.unwrap();
+    assert_eq!(r.ebs_encryption_by_default(), Some(false));
+}
+
+#[test_action("ec2", "EnableEbsEncryptionByDefault", checksum = "39c27fb0")]
+#[tokio::test]
+async fn ec2_enable_ebs_encryption_by_default() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.enable_ebs_encryption_by_default().send().await.unwrap();
+    assert_eq!(r.ebs_encryption_by_default(), Some(true));
+}
+
+#[test_action("ec2", "DisableEbsEncryptionByDefault", checksum = "7a73e9a7")]
+#[tokio::test]
+async fn ec2_disable_ebs_encryption_by_default() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.disable_ebs_encryption_by_default().send().await.unwrap();
+    assert_eq!(r.ebs_encryption_by_default(), Some(false));
+}
+
+#[test_action("ec2", "GetEbsDefaultKmsKeyId", checksum = "1f4cf06a")]
+#[tokio::test]
+async fn ec2_get_ebs_default_kms_key_id() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_ebs_default_kms_key_id().send().await.unwrap();
+    assert!(r.kms_key_id().is_some());
+}
+
+#[test_action("ec2", "ModifyEbsDefaultKmsKeyId", checksum = "fe8784cc")]
+#[tokio::test]
+async fn ec2_modify_ebs_default_kms_key_id() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_ebs_default_kms_key_id()
+        .kms_key_id("alias/my-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.kms_key_id(), Some("alias/my-key"));
+}
+
+#[test_action("ec2", "ResetEbsDefaultKmsKeyId", checksum = "176ef84e")]
+#[tokio::test]
+async fn ec2_reset_ebs_default_kms_key_id() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.reset_ebs_default_kms_key_id().send().await.unwrap();
+    assert!(r.kms_key_id().is_some());
+}
