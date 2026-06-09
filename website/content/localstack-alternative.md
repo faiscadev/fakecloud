@@ -1,6 +1,6 @@
 +++
 title = "Free, open-source LocalStack alternative"
-description = "fakecloud is a free, open-source local AWS emulator: 40 services, 2,937 operations, 109,906/109,906 Smithy variants pass (true 100% conformance), 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
+description = "fakecloud is a free, open-source local AWS emulator: 40 services, 2,937 operations, 111,594/111,594 Smithy variants pass (true 100% conformance), 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
 template = "page.html"
 aliases = [
     "/alternative/localstack/",
@@ -24,14 +24,14 @@ Point any AWS SDK or CLI at `http://localhost:4566` with dummy credentials. That
 
 ## Goal: 100% AWS, 100% conformance, 100% integrations
 
-fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 40 services are there today (see below), all at true 100% — 109,906/109,906 Smithy variants pass; the rest are on the roadmap, prioritized by real-project demand.
+fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 40 services are there today (see below), all at true 100% — 111,594/111,594 Smithy variants pass; the rest are on the roadmap, prioritized by real-project demand.
 
 This is why fakecloud runs real Lambda code in real runtime containers, runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 for RDS, runs real Redis/Valkey/Memcached for ElastiCache, fires real S3 -> Lambda and SES inbound -> S3/SNS/Lambda flows, and validates every operation against AWS's own Smithy models on every commit.
 
 ## What fakecloud gives you
 
 - **40 AWS services.** S3, SQS, SNS, EventBridge, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager, CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Agent, Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue.
-- **2,937 API operations. True 100% conformance** across every implemented service — 109,906/109,906 Smithy-model-generated test variants pass on every commit.
+- **2,937 API operations. True 100% conformance** across every implemented service — 111,594/111,594 Smithy-model-generated test variants pass on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 23 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached. Your Lambda talking to RDS is talking to a real Postgres (or Oracle, or SQL Server).
@@ -52,7 +52,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | Startup | ~300ms | ~3s |
 | Idle memory | ~10 MiB | ~150 MiB |
 | Install size | ~19 MB binary | ~1 GB image |
-| Conformance methodology | Smithy-model-validated, 109,906/109,906 variants pass | Not published |
+| Conformance methodology | Smithy-model-validated, 111,594/111,594 variants pass | Not published |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust | Python, Java |
 | Cognito User Pools | 122 operations | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | SES v2 | 110 operations, full send + templates + DKIM | [Paid only](https://docs.localstack.cloud/references/licensing/) |
@@ -119,7 +119,7 @@ Yes. Single binary, ~19 MB, ~300ms startup. Common patterns: install-and-run as 
 
 **What does "100% conformance" mean?**
 
-For every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 109,906 generated test variants — every single one passes, no flake margin and no skipped services — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites. This applies to every service listed above.
+For every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 111,594 generated test variants — every single one passes, no flake margin and no skipped services — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites. This applies to every service listed above.
 
 **What's fakecloud's coverage goal?**
 

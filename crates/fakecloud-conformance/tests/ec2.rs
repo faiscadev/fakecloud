@@ -5506,3 +5506,235 @@ async fn ec2_update_interruptible_capacity_reservation_allocation() {
         .await
         .unwrap();
 }
+
+// ---- reserved instances ----
+
+#[test_action("ec2", "DescribeReservedInstances", checksum = "e0393329")]
+#[tokio::test]
+async fn ec2_describe_reserved_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_reserved_instances().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeReservedInstancesOfferings", checksum = "46de9215")]
+#[tokio::test]
+async fn ec2_describe_reserved_instances_offerings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_reserved_instances_offerings()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.reserved_instances_offerings().is_empty());
+}
+
+#[test_action("ec2", "PurchaseReservedInstancesOffering", checksum = "ed565a4e")]
+#[tokio::test]
+async fn ec2_purchase_reserved_instances_offering() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .purchase_reserved_instances_offering()
+        .instance_count(1)
+        .reserved_instances_offering_id("offering-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.reserved_instances_id().unwrap().starts_with("ri-"));
+}
+
+#[test_action("ec2", "DescribeReservedInstancesListings", checksum = "3ef7be7d")]
+#[tokio::test]
+async fn ec2_describe_reserved_instances_listings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_reserved_instances_listings()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateReservedInstancesListing", checksum = "cbfdaa8c")]
+#[tokio::test]
+async fn ec2_create_reserved_instances_listing() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_reserved_instances_listing()
+        .reserved_instances_id("ri-1")
+        .instance_count(1)
+        .client_token("tok")
+        .price_schedules(
+            aws_sdk_ec2::types::PriceScheduleSpecification::builder()
+                .price(1.0)
+                .term(12)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.reserved_instances_listings().is_empty());
+}
+
+#[test_action("ec2", "CancelReservedInstancesListing", checksum = "529138f5")]
+#[tokio::test]
+async fn ec2_cancel_reserved_instances_listing() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .cancel_reserved_instances_listing()
+        .reserved_instances_listing_id("ril-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.reserved_instances_listings().is_empty());
+}
+
+#[test_action("ec2", "DescribeReservedInstancesModifications", checksum = "585ddb52")]
+#[tokio::test]
+async fn ec2_describe_reserved_instances_modifications() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_reserved_instances_modifications()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyReservedInstances", checksum = "7df70278")]
+#[tokio::test]
+async fn ec2_modify_reserved_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_reserved_instances()
+        .reserved_instances_ids("ri-1")
+        .target_configurations(
+            aws_sdk_ec2::types::ReservedInstancesConfiguration::builder()
+                .instance_count(1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.reserved_instances_modification_id().is_some());
+}
+
+#[test_action("ec2", "GetReservedInstancesExchangeQuote", checksum = "962e59d8")]
+#[tokio::test]
+async fn ec2_get_reserved_instances_exchange_quote() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_reserved_instances_exchange_quote()
+        .reserved_instance_ids("ri-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.is_valid_exchange(), Some(true));
+}
+
+#[test_action("ec2", "AcceptReservedInstancesExchangeQuote", checksum = "c0177fbd")]
+#[tokio::test]
+async fn ec2_accept_reserved_instances_exchange_quote() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_reserved_instances_exchange_quote()
+        .reserved_instance_ids("ri-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.exchange_id().is_some());
+}
+
+#[test_action("ec2", "DeleteQueuedReservedInstances", checksum = "a9cd4137")]
+#[tokio::test]
+async fn ec2_delete_queued_reserved_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .delete_queued_reserved_instances()
+        .reserved_instances_ids("ri-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful_queued_purchase_deletions().is_empty());
+}
+
+// ---- dedicated hosts ----
+
+async fn make_host(c: &aws_sdk_ec2::Client) -> String {
+    c.allocate_hosts()
+        .availability_zone("us-east-1a")
+        .instance_type("m5.large")
+        .quantity(1)
+        .send()
+        .await
+        .unwrap()
+        .host_ids()[0]
+        .clone()
+}
+
+#[test_action("ec2", "AllocateHosts", checksum = "d9e19054")]
+#[tokio::test]
+async fn ec2_allocate_hosts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .allocate_hosts()
+        .availability_zone("us-east-1a")
+        .instance_type("m5.large")
+        .quantity(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.host_ids().len(), 2);
+}
+
+#[test_action("ec2", "DescribeHosts", checksum = "5af4373d")]
+#[tokio::test]
+async fn ec2_describe_hosts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_host(&c).await;
+    let r = c.describe_hosts().host_ids(&id).send().await.unwrap();
+    assert_eq!(r.hosts().len(), 1);
+}
+
+#[test_action("ec2", "ModifyHosts", checksum = "bc52ab28")]
+#[tokio::test]
+async fn ec2_modify_hosts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_host(&c).await;
+    let r = c
+        .modify_hosts()
+        .host_ids(&id)
+        .auto_placement(aws_sdk_ec2::types::AutoPlacement::Off)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful().is_empty());
+}
+
+#[test_action("ec2", "ReleaseHosts", checksum = "f16cf851")]
+#[tokio::test]
+async fn ec2_release_hosts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_host(&c).await;
+    let r = c.release_hosts().host_ids(&id).send().await.unwrap();
+    assert!(!r.successful().is_empty());
+}
+
+#[test_action("ec2", "DescribeMacHosts", checksum = "71f0aafb")]
+#[tokio::test]
+async fn ec2_describe_mac_hosts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_mac_hosts().send().await.unwrap();
+    assert!(r.mac_hosts().is_empty());
+}

@@ -10,6 +10,7 @@ mod image;
 mod instance;
 mod meta;
 mod nacl;
+mod reserved;
 mod routing;
 mod sg;
 mod snapshot;
@@ -362,6 +363,24 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeCapacityReservationTopology",
     "CreateInterruptibleCapacityReservationAllocation",
     "UpdateInterruptibleCapacityReservationAllocation",
+    // Reserved instances
+    "DescribeReservedInstances",
+    "DescribeReservedInstancesOfferings",
+    "PurchaseReservedInstancesOffering",
+    "DescribeReservedInstancesListings",
+    "CreateReservedInstancesListing",
+    "CancelReservedInstancesListing",
+    "DescribeReservedInstancesModifications",
+    "ModifyReservedInstances",
+    "GetReservedInstancesExchangeQuote",
+    "AcceptReservedInstancesExchangeQuote",
+    "DeleteQueuedReservedInstances",
+    // Dedicated hosts
+    "AllocateHosts",
+    "DescribeHosts",
+    "ModifyHosts",
+    "ReleaseHosts",
+    "DescribeMacHosts",
 ];
 
 /// Amazon EC2 service.
@@ -896,6 +915,40 @@ impl AwsService for Ec2Service {
             "UpdateInterruptibleCapacityReservationAllocation" => {
                 capacity::update_interruptible_capacity_reservation_allocation(self, &request)
             }
+            "DescribeReservedInstances" => reserved::describe_reserved_instances(self, &request),
+            "DescribeReservedInstancesOfferings" => {
+                reserved::describe_reserved_instances_offerings(self, &request)
+            }
+            "PurchaseReservedInstancesOffering" => {
+                reserved::purchase_reserved_instances_offering(self, &request)
+            }
+            "DescribeReservedInstancesListings" => {
+                reserved::describe_reserved_instances_listings(self, &request)
+            }
+            "CreateReservedInstancesListing" => {
+                reserved::create_reserved_instances_listing(self, &request)
+            }
+            "CancelReservedInstancesListing" => {
+                reserved::cancel_reserved_instances_listing(self, &request)
+            }
+            "DescribeReservedInstancesModifications" => {
+                reserved::describe_reserved_instances_modifications(self, &request)
+            }
+            "ModifyReservedInstances" => reserved::modify_reserved_instances(self, &request),
+            "GetReservedInstancesExchangeQuote" => {
+                reserved::get_reserved_instances_exchange_quote(self, &request)
+            }
+            "AcceptReservedInstancesExchangeQuote" => {
+                reserved::accept_reserved_instances_exchange_quote(self, &request)
+            }
+            "DeleteQueuedReservedInstances" => {
+                reserved::delete_queued_reserved_instances(self, &request)
+            }
+            "AllocateHosts" => reserved::allocate_hosts(self, &request),
+            "DescribeHosts" => reserved::describe_hosts(self, &request),
+            "ModifyHosts" => reserved::modify_hosts(self, &request),
+            "ReleaseHosts" => reserved::release_hosts(self, &request),
+            "DescribeMacHosts" => reserved::describe_mac_hosts(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

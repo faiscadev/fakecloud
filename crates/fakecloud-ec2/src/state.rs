@@ -512,6 +512,32 @@ pub struct CapacityReservation {
     pub instance_match_criteria: String,
 }
 
+/// A Reserved Instance purchase.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReservedInstances {
+    pub id: String,
+    pub instance_type: String,
+    pub availability_zone: String,
+    pub instance_count: i64,
+    pub product_description: String,
+    pub state: String,
+    pub duration: i64,
+    pub fixed_price: String,
+    pub usage_price: String,
+}
+
+/// A Dedicated Host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DedicatedHost {
+    pub id: String,
+    pub auto_placement: String,
+    pub availability_zone: String,
+    pub instance_type: String,
+    pub state: String,
+    pub host_recovery: String,
+    pub host_maintenance: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -604,6 +630,10 @@ pub struct Ec2State {
     /// Capacity reservation fleet ids (metadata-only).
     #[serde(default)]
     pub capacity_reservation_fleets: HashMap<String, String>,
+    #[serde(default)]
+    pub reserved_instances: HashMap<String, ReservedInstances>,
+    #[serde(default)]
+    pub dedicated_hosts: HashMap<String, DedicatedHost>,
 }
 
 impl Ec2State {
