@@ -596,8 +596,7 @@ impl CloudFormationService {
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
                     if let Some(sid) = &found {
-                        if let Some(stack) =
-                            state.stacks.values_mut().find(|s| &s.stack_id == sid)
+                        if let Some(stack) = state.stacks.values_mut().find(|s| &s.stack_id == sid)
                         {
                             if stack.status == "REVIEW_IN_PROGRESS" {
                                 stack.status = "CREATE_COMPLETE".to_string();
