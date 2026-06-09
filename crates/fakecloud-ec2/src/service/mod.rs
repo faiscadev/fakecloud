@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod eip;
+mod endpoint;
 mod eni;
 mod image;
 mod instance;
@@ -273,6 +274,33 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "AcceptVpcPeeringConnection",
     "RejectVpcPeeringConnection",
     "ModifyVpcPeeringConnectionOptions",
+    // VPC endpoints
+    "CreateVpcEndpoint",
+    "DeleteVpcEndpoints",
+    "DescribeVpcEndpoints",
+    "ModifyVpcEndpoint",
+    "DescribeVpcEndpointServices",
+    "DescribeVpcEndpointConnections",
+    "AcceptVpcEndpointConnections",
+    "RejectVpcEndpointConnections",
+    "CreateVpcEndpointServiceConfiguration",
+    "DeleteVpcEndpointServiceConfigurations",
+    "DescribeVpcEndpointServiceConfigurations",
+    "ModifyVpcEndpointServiceConfiguration",
+    "DescribeVpcEndpointServicePermissions",
+    "ModifyVpcEndpointServicePermissions",
+    "ModifyVpcEndpointServicePayerResponsibility",
+    "StartVpcEndpointServicePrivateDnsVerification",
+    "CreateVpcEndpointConnectionNotification",
+    "DeleteVpcEndpointConnectionNotifications",
+    "DescribeVpcEndpointConnectionNotifications",
+    "ModifyVpcEndpointConnectionNotification",
+    "DescribeVpcEndpointAssociations",
+    // Flow logs
+    "CreateFlowLogs",
+    "DeleteFlowLogs",
+    "DescribeFlowLogs",
+    "GetFlowLogsIntegrationTemplate",
 ];
 
 /// Amazon EC2 service.
@@ -632,6 +660,67 @@ impl AwsService for Ec2Service {
             "RejectVpcPeeringConnection" => nacl::reject_vpc_peering_connection(self, &request),
             "ModifyVpcPeeringConnectionOptions" => {
                 nacl::modify_vpc_peering_connection_options(self, &request)
+            }
+            "CreateVpcEndpoint" => endpoint::create_vpc_endpoint(self, &request),
+            "DeleteVpcEndpoints" => endpoint::delete_vpc_endpoints(self, &request),
+            "DescribeVpcEndpoints" => endpoint::describe_vpc_endpoints(self, &request),
+            "ModifyVpcEndpoint" => endpoint::modify_vpc_endpoint(self, &request),
+            "DescribeVpcEndpointServices" => {
+                endpoint::describe_vpc_endpoint_services(self, &request)
+            }
+            "DescribeVpcEndpointConnections" => {
+                endpoint::describe_vpc_endpoint_connections(self, &request)
+            }
+            "AcceptVpcEndpointConnections" => {
+                endpoint::accept_vpc_endpoint_connections(self, &request)
+            }
+            "RejectVpcEndpointConnections" => {
+                endpoint::reject_vpc_endpoint_connections(self, &request)
+            }
+            "CreateVpcEndpointServiceConfiguration" => {
+                endpoint::create_vpc_endpoint_service_configuration(self, &request)
+            }
+            "DeleteVpcEndpointServiceConfigurations" => {
+                endpoint::delete_vpc_endpoint_service_configurations(self, &request)
+            }
+            "DescribeVpcEndpointServiceConfigurations" => {
+                endpoint::describe_vpc_endpoint_service_configurations(self, &request)
+            }
+            "ModifyVpcEndpointServiceConfiguration" => {
+                endpoint::modify_vpc_endpoint_service_configuration(self, &request)
+            }
+            "DescribeVpcEndpointServicePermissions" => {
+                endpoint::describe_vpc_endpoint_service_permissions(self, &request)
+            }
+            "ModifyVpcEndpointServicePermissions" => {
+                endpoint::modify_vpc_endpoint_service_permissions(self, &request)
+            }
+            "ModifyVpcEndpointServicePayerResponsibility" => {
+                endpoint::modify_vpc_endpoint_service_payer_responsibility(self, &request)
+            }
+            "StartVpcEndpointServicePrivateDnsVerification" => {
+                endpoint::start_vpc_endpoint_service_private_dns_verification(self, &request)
+            }
+            "CreateVpcEndpointConnectionNotification" => {
+                endpoint::create_vpc_endpoint_connection_notification(self, &request)
+            }
+            "DeleteVpcEndpointConnectionNotifications" => {
+                endpoint::delete_vpc_endpoint_connection_notifications(self, &request)
+            }
+            "DescribeVpcEndpointConnectionNotifications" => {
+                endpoint::describe_vpc_endpoint_connection_notifications(self, &request)
+            }
+            "ModifyVpcEndpointConnectionNotification" => {
+                endpoint::modify_vpc_endpoint_connection_notification(self, &request)
+            }
+            "DescribeVpcEndpointAssociations" => {
+                endpoint::describe_vpc_endpoint_associations(self, &request)
+            }
+            "CreateFlowLogs" => endpoint::create_flow_logs(self, &request),
+            "DeleteFlowLogs" => endpoint::delete_flow_logs(self, &request),
+            "DescribeFlowLogs" => endpoint::describe_flow_logs(self, &request),
+            "GetFlowLogsIntegrationTemplate" => {
+                endpoint::get_flow_logs_integration_template(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
