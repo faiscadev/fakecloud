@@ -50,6 +50,13 @@ pub struct WarmInstance {
 /// terminal `InvokeComplete` frame.
 pub struct StreamingInvocation {
     pub(crate) resp: reqwest::Response,
+    /// Holds the warm instance's per-instance busy lock for the lifetime
+    /// of the stream. The RIE handles exactly one event at a time, so the
+    /// slot must stay reserved until the caller finishes draining the
+    /// response; dropping this guard frees the instance for the next
+    /// invocation. `None` only in unit tests that build the wrapper
+    /// directly.
+    pub(crate) _slot_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl StreamingInvocation {
