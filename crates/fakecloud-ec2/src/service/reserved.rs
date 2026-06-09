@@ -334,8 +334,8 @@ fn host_xml(h: &DedicatedHost, tags: &[Tag], owner: &str) -> String {
         ec2_elem("hostMaintenance", &h.host_maintenance),
         ec2_elem("ownerId", owner),
         format_args!(
-            "<hostProperties><instanceType>{}</instanceType><cores>8</cores><sockets>1</sockets><totalVCpus>32</totalVCpus></hostProperties>",
-            h.instance_type
+            "<hostProperties>{}<cores>8</cores><sockets>1</sockets><totalVCpus>32</totalVCpus></hostProperties>",
+            ec2_elem("instanceType", &h.instance_type)
         ),
         ec2_list("instances", &[]),
         super::tags::tag_set_xml(tags),
@@ -458,6 +458,12 @@ pub(crate) fn modify_hosts(
             if let Some(h) = state.dedicated_hosts.get_mut(id) {
                 if let Some(v) = req.query_params.get("AutoPlacement") {
                     h.auto_placement = v.clone();
+                }
+                if let Some(v) = req.query_params.get("HostRecovery") {
+                    h.host_recovery = v.clone();
+                }
+                if let Some(v) = req.query_params.get("HostMaintenance") {
+                    h.host_maintenance = v.clone();
                 }
             }
         }
