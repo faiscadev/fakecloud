@@ -781,9 +781,10 @@ pub(crate) fn get_transit_gateway_attachment_propagations(
 ) -> Result<AwsResponse, AwsServiceError> {
     let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
     mr(req)?;
-    // Surface every route table that this attachment propagates into.
+    // Surface every route table that this attachment propagates into, sorted
+    // for deterministic output (the backing map iterates in arbitrary order).
     let accounts = svc.state.read();
-    let items: Vec<String> = accounts
+    let mut items: Vec<String> = accounts
         .get(&req.account_id)
         .map(|s| {
             s.tgw_rt_propagations
@@ -793,6 +794,7 @@ pub(crate) fn get_transit_gateway_attachment_propagations(
                 .collect()
         })
         .unwrap_or_default();
+    items.sort();
     Ok(Ec2Service::respond(
         "GetTransitGatewayAttachmentPropagations",
         &req.request_id,
