@@ -6678,3 +6678,409 @@ async fn ec2_delete_transit_gateway_route_table_announcement() {
         .unwrap();
     assert!(r.transit_gateway_route_table_announcement().is_some());
 }
+
+// ---- transit gateway multicast / metering / client-vpn-attach ----
+
+async fn make_tgw_mcast(c: &aws_sdk_ec2::Client) -> String {
+    c.create_transit_gateway_multicast_domain()
+        .transit_gateway_id("tgw-1")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_multicast_domain()
+        .unwrap()
+        .transit_gateway_multicast_domain_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateTransitGatewayMulticastDomain", checksum = "4557638b")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_multicast_domain() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_mcast(&c).await;
+    assert!(id.starts_with("tgw-mcast-domain-"));
+}
+
+#[test_action("ec2", "DescribeTransitGatewayMulticastDomains", checksum = "6bbc5746")]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_multicast_domains() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_tgw_mcast(&c).await;
+    let r = c
+        .describe_transit_gateway_multicast_domains()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_multicast_domains().is_empty());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayMulticastDomain", checksum = "51fe70c4")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_multicast_domain() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_mcast(&c).await;
+    let r = c
+        .delete_transit_gateway_multicast_domain()
+        .transit_gateway_multicast_domain_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_multicast_domain().is_some());
+}
+
+#[test_action("ec2", "AssociateTransitGatewayMulticastDomain", checksum = "0e802855")]
+#[tokio::test]
+async fn ec2_associate_transit_gateway_multicast_domain() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .associate_transit_gateway_multicast_domain()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .subnet_ids("subnet-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.associations().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DisassociateTransitGatewayMulticastDomain",
+    checksum = "d89205ec"
+)]
+#[tokio::test]
+async fn ec2_disassociate_transit_gateway_multicast_domain() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disassociate_transit_gateway_multicast_domain()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .subnet_ids("subnet-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.associations().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "AcceptTransitGatewayMulticastDomainAssociations",
+    checksum = "716c35a2"
+)]
+#[tokio::test]
+async fn ec2_accept_transit_gateway_multicast_domain_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_transit_gateway_multicast_domain_associations()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.associations().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "RejectTransitGatewayMulticastDomainAssociations",
+    checksum = "3a78cbd9"
+)]
+#[tokio::test]
+async fn ec2_reject_transit_gateway_multicast_domain_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .reject_transit_gateway_multicast_domain_associations()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.associations().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "GetTransitGatewayMulticastDomainAssociations",
+    checksum = "285c2663"
+)]
+#[tokio::test]
+async fn ec2_get_transit_gateway_multicast_domain_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_transit_gateway_multicast_domain_associations()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.multicast_domain_associations().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "RegisterTransitGatewayMulticastGroupMembers",
+    checksum = "40a25219"
+)]
+#[tokio::test]
+async fn ec2_register_transit_gateway_multicast_group_members() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .register_transit_gateway_multicast_group_members()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .network_interface_ids("eni-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.registered_multicast_group_members().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "RegisterTransitGatewayMulticastGroupSources",
+    checksum = "78a68388"
+)]
+#[tokio::test]
+async fn ec2_register_transit_gateway_multicast_group_sources() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .register_transit_gateway_multicast_group_sources()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .network_interface_ids("eni-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.registered_multicast_group_sources().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DeregisterTransitGatewayMulticastGroupMembers",
+    checksum = "0e43fb63"
+)]
+#[tokio::test]
+async fn ec2_deregister_transit_gateway_multicast_group_members() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .deregister_transit_gateway_multicast_group_members()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.deregistered_multicast_group_members().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DeregisterTransitGatewayMulticastGroupSources",
+    checksum = "47179207"
+)]
+#[tokio::test]
+async fn ec2_deregister_transit_gateway_multicast_group_sources() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .deregister_transit_gateway_multicast_group_sources()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.deregistered_multicast_group_sources().is_some());
+}
+
+#[test_action("ec2", "SearchTransitGatewayMulticastGroups", checksum = "81780859")]
+#[tokio::test]
+async fn ec2_search_transit_gateway_multicast_groups() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .search_transit_gateway_multicast_groups()
+        .transit_gateway_multicast_domain_id("tgw-mcast-domain-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.multicast_groups().is_empty());
+}
+
+async fn make_tgw_mp(c: &aws_sdk_ec2::Client) -> String {
+    c.create_transit_gateway_metering_policy()
+        .transit_gateway_id("tgw-1")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_metering_policy()
+        .unwrap()
+        .transit_gateway_metering_policy_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateTransitGatewayMeteringPolicy", checksum = "4b2d73d2")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_metering_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_mp(&c).await;
+    assert!(id.starts_with("tgw-mp-"));
+}
+
+#[test_action("ec2", "DescribeTransitGatewayMeteringPolicies", checksum = "694e42db")]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_metering_policies() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_tgw_mp(&c).await;
+    let r = c
+        .describe_transit_gateway_metering_policies()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_metering_policies().is_empty());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayMeteringPolicy", checksum = "3b4a3b96")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_metering_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_mp(&c).await;
+    let r = c
+        .delete_transit_gateway_metering_policy()
+        .transit_gateway_metering_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_metering_policy().is_some());
+}
+
+#[test_action("ec2", "ModifyTransitGatewayMeteringPolicy", checksum = "effc01c3")]
+#[tokio::test]
+async fn ec2_modify_transit_gateway_metering_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_mp(&c).await;
+    let r = c
+        .modify_transit_gateway_metering_policy()
+        .transit_gateway_metering_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_metering_policy().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "CreateTransitGatewayMeteringPolicyEntry",
+    checksum = "9d2f5e91"
+)]
+#[tokio::test]
+async fn ec2_create_transit_gateway_metering_policy_entry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_transit_gateway_metering_policy_entry()
+        .transit_gateway_metering_policy_id("tgw-mp-1")
+        .policy_rule_number(1)
+        .metered_account(aws_sdk_ec2::types::TransitGatewayMeteringPayerType::SourceAttachmentOwner)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_metering_policy_entry().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteTransitGatewayMeteringPolicyEntry",
+    checksum = "93f0f0c4"
+)]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_metering_policy_entry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .delete_transit_gateway_metering_policy_entry()
+        .transit_gateway_metering_policy_id("tgw-mp-1")
+        .policy_rule_number(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_metering_policy_entry().is_some());
+}
+
+#[test_action("ec2", "GetTransitGatewayMeteringPolicyEntries", checksum = "6fdbaa10")]
+#[tokio::test]
+async fn ec2_get_transit_gateway_metering_policy_entries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_transit_gateway_metering_policy_entries()
+        .transit_gateway_metering_policy_id("tgw-mp-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_metering_policy_entries().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "AcceptTransitGatewayClientVpnAttachment",
+    checksum = "e0ac13e1"
+)]
+#[tokio::test]
+async fn ec2_accept_transit_gateway_client_vpn_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_transit_gateway_client_vpn_attachment()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_client_vpn_attachment().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteTransitGatewayClientVpnAttachment",
+    checksum = "eb510237"
+)]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_client_vpn_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .delete_transit_gateway_client_vpn_attachment()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_client_vpn_attachment().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "RejectTransitGatewayClientVpnAttachment",
+    checksum = "d85fb8ab"
+)]
+#[tokio::test]
+async fn ec2_reject_transit_gateway_client_vpn_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .reject_transit_gateway_client_vpn_attachment()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_client_vpn_attachment().is_some());
+}
