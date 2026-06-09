@@ -118,17 +118,15 @@ pub(crate) fn create_launch_template_version(
             t.latest_version += 1;
             (t.clone(), t.latest_version)
         } else {
-            // Unknown template: persist a synthetic so the new version is
-            // consistently visible to later Describe* calls.
+            // Unknown template: synthesize a response-only record (do NOT
+            // persist — fabricating a template for a version request on a
+            // non-existent template would leave bogus state behind).
             let synthetic = LaunchTemplate {
                 id: id.unwrap_or_else(|| gen_id("lt")),
                 name: name.unwrap_or_default(),
                 default_version: 1,
                 latest_version: 2,
             };
-            state
-                .launch_templates
-                .insert(synthetic.id.clone(), synthetic.clone());
             (synthetic, 2)
         }
     };
@@ -771,6 +769,14 @@ pub(crate) fn create_fleet(
     Ok(Ec2Service::respond("CreateFleet", &req.request_id, &body))
 }
 
+/// Render an `UnsuccessfulFleetDeletionItem` (fleetId + error code/message).
+fn delete_fleet_error(id: &str, code: &str, message: &str) -> String {
+    format!(
+        "{}<error><code>{code}</code><message>{message}</message></error>",
+        ec2_elem("fleetId", id)
+    )
+}
+
 pub(crate) fn delete_fleets(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -782,31 +788,47 @@ pub(crate) fn delete_fleets(
         "deleted_running"
     };
     let ids = indexed_list(&req.query_params, "FleetId");
-    let mut items = Vec::new();
+    let mut successful = Vec::new();
+    let mut unsuccessful = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
+            let Some(fleet) = state.fleets.get(id).cloned() else {
+                // Unknown fleet id -> unsuccessful, not a phantom success.
+                unsuccessful.push(delete_fleet_error(
+                    id,
+                    "fleetIdDoesNotExist",
+                    "The fleet ID does not exist",
+                ));
+                continue;
+            };
+            // A non-terminating delete is invalid for `instant` fleets, which
+            // have no ongoing capacity to keep running.
+            if fleet.fleet_type == "instant" && !terminate {
+                unsuccessful.push(delete_fleet_error(
+                    id,
+                    "fleetNotInModifiableState",
+                    "instant fleets must be deleted with TerminateInstances",
+                ));
+                continue;
+            }
             // AWS keeps deleted fleets visible in a deleted_* state rather than
             // dropping them immediately, so transition instead of removing.
-            let prev = state
-                .fleets
-                .get(id)
-                .map(|f| f.state.clone())
-                .unwrap_or_else(|| "active".to_string());
             if let Some(f) = state.fleets.get_mut(id) {
                 f.state = new_state.to_string();
             }
-            items.push(format!(
-                "{}<currentFleetState>{new_state}</currentFleetState><previousFleetState>{prev}</previousFleetState>",
-                ec2_elem("fleetId", id)
+            successful.push(format!(
+                "{}<currentFleetState>{new_state}</currentFleetState><previousFleetState>{}</previousFleetState>",
+                ec2_elem("fleetId", id),
+                fleet.state,
             ));
         }
     }
     let body = format!(
         "{}{}",
-        ec2_list("successfulFleetDeletionSet", &items),
-        ec2_list("unsuccessfulFleetDeletionSet", &[])
+        ec2_list("successfulFleetDeletionSet", &successful),
+        ec2_list("unsuccessfulFleetDeletionSet", &unsuccessful)
     );
     Ok(Ec2Service::respond("DeleteFleets", &req.request_id, &body))
 }
