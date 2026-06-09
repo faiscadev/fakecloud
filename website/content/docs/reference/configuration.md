@@ -21,6 +21,7 @@ fakecloud is configured via CLI flags or environment variables. Flags take prece
 |                      | `FAKECLOUD_ECS_BACKEND`     | inherits global    | Per-service override for ECS task execution (`k8s` or `docker`). |
 |                      | `FAKECLOUD_RDS_BACKEND`     | inherits global    | Per-service override for RDS DB instances (`k8s` or `docker`). |
 |                      | `FAKECLOUD_ELASTICACHE_BACKEND` | inherits global| Per-service override for ElastiCache (`k8s` or `docker`). |
+|                      | `FAKECLOUD_LAMBDA_MAX_CONCURRENCY` | `10`        | Max warm instances kept per Lambda function. Each instance serves one invocation at a time (the runtime emulator can't handle concurrent events); the pool scales up to this cap under concurrent load, then queues. Raise for higher per-function concurrency. |
 |                      | `FAKECLOUD_K8S_NAMESPACE`   | `default`          | Namespace fakecloud creates Pods in. Only honored on the K8s backend. |
 |                      | `FAKECLOUD_K8S_SELF_URL`    | —                  | In-cluster URL of the fakecloud Service (e.g. `http://fakecloud.fakecloud.svc.cluster.local:4566`). Required for the K8s backend — Pods fetch artifacts from and call back to this URL. |
 |                      | `FAKECLOUD_K8S_ECR_URL`     | host of `_SELF_URL`| Override the host:port the K8s backend rewrites AWS private-ECR URIs to. Defaults to the host of `FAKECLOUD_K8S_SELF_URL`. |
