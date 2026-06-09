@@ -223,14 +223,18 @@ impl LambdaRuntime {
                     };
                 }
                 Err(e) => {
-                    // Transport-level failure: the request didn't reach a
-                    // live RIE (connection refused to a dead Pod, reset,
-                    // timeout). Evict the instance and cold-start a
-                    // replacement once.
+                    // Transport-level failure. Evict the suspect instance.
+                    // Only retry when the connection was never
+                    // established (`is_connect` — e.g. refused by a dead
+                    // Pod): then the request provably never reached the
+                    // function, so a cold-start retry can't double-execute
+                    // it. A reset/timeout mid-flight may have already run
+                    // the handler, so surface those instead of risking a
+                    // duplicate invoke.
                     let entry = slot.entry.clone();
                     drop(slot);
                     self.evict_entry(&func.function_name, &entry).await;
-                    if attempt < 2 {
+                    if attempt < 2 && e.is_connect() {
                         tracing::warn!(
                             function = %func.function_name,
                             error = %e,
@@ -288,10 +292,13 @@ impl LambdaRuntime {
                     });
                 }
                 Err(e) => {
+                    // Same connect-only retry policy as `invoke`: retry
+                    // only when the connection never established, so a
+                    // half-run handler isn't invoked twice.
                     let entry = slot.entry.clone();
                     drop(slot);
                     self.evict_entry(&func.function_name, &entry).await;
-                    if attempt < 2 {
+                    if attempt < 2 && e.is_connect() {
                         continue;
                     }
                     return Err(RuntimeError::InvocationFailed(e.to_string()));
@@ -378,23 +385,37 @@ impl LambdaRuntime {
             return Ok(Slot { entry, guard });
         }
 
-        // (3) At capacity: release the startup lock and queue on a busy
-        // instance — whichever frees up first serves this invocation.
+        // (3) At capacity: release the startup lock and wait for whichever
+        // current instance frees up *first*. Racing every instance's lock
+        // (rather than blocking on a fixed one) avoids convoying every
+        // queued caller onto pool[0] while a different instance goes idle.
         drop(startup_guard);
-        let entry = {
+        let candidates: Vec<Arc<WarmEntry>> = {
             let map = self.instances.read();
             map.get(&func.function_name)
-                .and_then(|pool| pool.iter().find(|e| e.deploy_id == deploy_id).cloned())
+                .map(|pool| {
+                    pool.iter()
+                        .filter(|e| e.deploy_id == deploy_id)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        let entry = entry.ok_or_else(|| {
-            RuntimeError::InvocationFailed(format!(
+        if candidates.is_empty() {
+            return Err(RuntimeError::InvocationFailed(format!(
                 "no warm instance available for {}",
                 func.function_name
-            ))
-        })?;
-        let guard = entry.busy.clone().lock_owned().await;
-        *entry.last_used.write() = Instant::now();
-        Ok(Slot { entry, guard })
+            )));
+        }
+        let waiters = candidates.into_iter().map(|entry| {
+            Box::pin(async move {
+                let guard = entry.busy.clone().lock_owned().await;
+                Slot { entry, guard }
+            })
+        });
+        let (slot, _idx, _rest) = futures_util::future::select_all(waiters).await;
+        *slot.entry.last_used.write() = Instant::now();
+        Ok(slot)
     }
 
     /// Try to reserve a free, current-deploy instance without launching.

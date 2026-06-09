@@ -3882,6 +3882,7 @@ dependencies = [
  "fakecloud-core",
  "fakecloud-k8s",
  "fakecloud-persistence",
+ "futures-util",
  "http 1.4.0",
  "k8s-openapi",
  "kube",
