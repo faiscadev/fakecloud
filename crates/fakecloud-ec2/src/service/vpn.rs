@@ -274,6 +274,9 @@ pub(crate) fn create_vpn_connection(
 ) -> Result<AwsResponse, AwsServiceError> {
     let cgw = require(&req.query_params, "CustomerGatewayId")?;
     require(&req.query_params, "Type")?;
+    // AWS only accepts `ipsec.1` even though the Smithy model types Type as a
+    // plain string, so enforce it here for fidelity.
+    validate_enum(&req.query_params, "Type", &["ipsec.1"])?;
     let id = gen_id("vpn");
     let c = VpnConnection {
         id: id.clone(),
