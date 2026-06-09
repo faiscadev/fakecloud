@@ -17,6 +17,7 @@ mod snapshot;
 mod subnet;
 mod tags;
 mod tgw;
+mod tgw_peering;
 mod volume;
 mod vpc;
 
@@ -413,6 +414,28 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteTransitGatewayPrefixListReference",
     "ModifyTransitGatewayPrefixListReference",
     "GetTransitGatewayPrefixListReferences",
+    // Transit gateway peering / connect / policy / announcements
+    "CreateTransitGatewayPeeringAttachment",
+    "DeleteTransitGatewayPeeringAttachment",
+    "DescribeTransitGatewayPeeringAttachments",
+    "AcceptTransitGatewayPeeringAttachment",
+    "RejectTransitGatewayPeeringAttachment",
+    "CreateTransitGatewayConnect",
+    "DeleteTransitGatewayConnect",
+    "DescribeTransitGatewayConnects",
+    "CreateTransitGatewayConnectPeer",
+    "DeleteTransitGatewayConnectPeer",
+    "DescribeTransitGatewayConnectPeers",
+    "CreateTransitGatewayPolicyTable",
+    "DeleteTransitGatewayPolicyTable",
+    "DescribeTransitGatewayPolicyTables",
+    "AssociateTransitGatewayPolicyTable",
+    "DisassociateTransitGatewayPolicyTable",
+    "GetTransitGatewayPolicyTableAssociations",
+    "GetTransitGatewayPolicyTableEntries",
+    "CreateTransitGatewayRouteTableAnnouncement",
+    "DeleteTransitGatewayRouteTableAnnouncement",
+    "DescribeTransitGatewayRouteTableAnnouncements",
 ];
 
 /// Amazon EC2 service.
@@ -1052,6 +1075,69 @@ impl AwsService for Ec2Service {
             }
             "GetTransitGatewayPrefixListReferences" => {
                 tgw::get_transit_gateway_prefix_list_references(self, &request)
+            }
+            "CreateTransitGatewayPeeringAttachment" => {
+                tgw_peering::create_transit_gateway_peering_attachment(self, &request)
+            }
+            "DeleteTransitGatewayPeeringAttachment" => {
+                tgw_peering::delete_transit_gateway_peering_attachment(self, &request)
+            }
+            "DescribeTransitGatewayPeeringAttachments" => {
+                tgw_peering::describe_transit_gateway_peering_attachments(self, &request)
+            }
+            "AcceptTransitGatewayPeeringAttachment" => {
+                tgw_peering::accept_transit_gateway_peering_attachment(self, &request)
+            }
+            "RejectTransitGatewayPeeringAttachment" => {
+                tgw_peering::reject_transit_gateway_peering_attachment(self, &request)
+            }
+            "CreateTransitGatewayConnect" => {
+                tgw_peering::create_transit_gateway_connect(self, &request)
+            }
+            "DeleteTransitGatewayConnect" => {
+                tgw_peering::delete_transit_gateway_connect(self, &request)
+            }
+            "DescribeTransitGatewayConnects" => {
+                tgw_peering::describe_transit_gateway_connects(self, &request)
+            }
+            "CreateTransitGatewayConnectPeer" => {
+                tgw_peering::create_transit_gateway_connect_peer(self, &request)
+            }
+            "DeleteTransitGatewayConnectPeer" => {
+                tgw_peering::delete_transit_gateway_connect_peer(self, &request)
+            }
+            "DescribeTransitGatewayConnectPeers" => {
+                tgw_peering::describe_transit_gateway_connect_peers(self, &request)
+            }
+            "CreateTransitGatewayPolicyTable" => {
+                tgw_peering::create_transit_gateway_policy_table(self, &request)
+            }
+            "DeleteTransitGatewayPolicyTable" => {
+                tgw_peering::delete_transit_gateway_policy_table(self, &request)
+            }
+            "DescribeTransitGatewayPolicyTables" => {
+                tgw_peering::describe_transit_gateway_policy_tables(self, &request)
+            }
+            "AssociateTransitGatewayPolicyTable" => {
+                tgw_peering::associate_transit_gateway_policy_table(self, &request)
+            }
+            "DisassociateTransitGatewayPolicyTable" => {
+                tgw_peering::disassociate_transit_gateway_policy_table(self, &request)
+            }
+            "GetTransitGatewayPolicyTableAssociations" => {
+                tgw_peering::get_transit_gateway_policy_table_associations(self, &request)
+            }
+            "GetTransitGatewayPolicyTableEntries" => {
+                tgw_peering::get_transit_gateway_policy_table_entries(self, &request)
+            }
+            "CreateTransitGatewayRouteTableAnnouncement" => {
+                tgw_peering::create_transit_gateway_route_table_announcement(self, &request)
+            }
+            "DeleteTransitGatewayRouteTableAnnouncement" => {
+                tgw_peering::delete_transit_gateway_route_table_announcement(self, &request)
+            }
+            "DescribeTransitGatewayRouteTableAnnouncements" => {
+                tgw_peering::describe_transit_gateway_route_table_announcements(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,

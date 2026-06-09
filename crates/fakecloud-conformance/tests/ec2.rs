@@ -6270,3 +6270,411 @@ async fn ec2_get_transit_gateway_prefix_list_references() {
         .unwrap();
     assert!(r.transit_gateway_prefix_list_references().is_empty());
 }
+
+// ---- transit gateway peering / connect / policy / announcements ----
+
+async fn make_tgw_peer(c: &aws_sdk_ec2::Client) -> String {
+    c.create_transit_gateway_peering_attachment()
+        .transit_gateway_id("tgw-1")
+        .peer_transit_gateway_id("tgw-2")
+        .peer_account_id("123456789012")
+        .peer_region("us-west-2")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_peering_attachment()
+        .unwrap()
+        .transit_gateway_attachment_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateTransitGatewayPeeringAttachment", checksum = "af9d51e6")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_peering_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_peer(&c).await;
+    assert!(id.starts_with("tgw-attach-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeTransitGatewayPeeringAttachments",
+    checksum = "397c4b40"
+)]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_peering_attachments() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_tgw_peer(&c).await;
+    let r = c
+        .describe_transit_gateway_peering_attachments()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_peering_attachments().is_empty());
+}
+
+#[test_action("ec2", "AcceptTransitGatewayPeeringAttachment", checksum = "2b168a56")]
+#[tokio::test]
+async fn ec2_accept_transit_gateway_peering_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_peer(&c).await;
+    let r = c
+        .accept_transit_gateway_peering_attachment()
+        .transit_gateway_attachment_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_peering_attachment().is_some());
+}
+
+#[test_action("ec2", "RejectTransitGatewayPeeringAttachment", checksum = "310d63ac")]
+#[tokio::test]
+async fn ec2_reject_transit_gateway_peering_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_peer(&c).await;
+    let r = c
+        .reject_transit_gateway_peering_attachment()
+        .transit_gateway_attachment_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_peering_attachment().is_some());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayPeeringAttachment", checksum = "dc92c124")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_peering_attachment() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_peer(&c).await;
+    let r = c
+        .delete_transit_gateway_peering_attachment()
+        .transit_gateway_attachment_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_peering_attachment().is_some());
+}
+
+#[test_action("ec2", "CreateTransitGatewayConnect", checksum = "2408f4f5")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_connect() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_transit_gateway_connect()
+        .transport_transit_gateway_attachment_id("tgw-attach-1")
+        .options(
+            aws_sdk_ec2::types::CreateTransitGatewayConnectRequestOptions::builder()
+                .protocol(aws_sdk_ec2::types::ProtocolValue::Gre)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .transit_gateway_connect()
+        .unwrap()
+        .transit_gateway_attachment_id()
+        .unwrap()
+        .starts_with("tgw-attach-"));
+}
+
+#[test_action("ec2", "DescribeTransitGatewayConnects", checksum = "2f471a0d")]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_connects() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_transit_gateway_connect()
+        .transport_transit_gateway_attachment_id("tgw-attach-1")
+        .options(
+            aws_sdk_ec2::types::CreateTransitGatewayConnectRequestOptions::builder()
+                .protocol(aws_sdk_ec2::types::ProtocolValue::Gre)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_transit_gateway_connects().send().await.unwrap();
+    assert!(!r.transit_gateway_connects().is_empty());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayConnect", checksum = "433d1af3")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_connect() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_transit_gateway_connect()
+        .transport_transit_gateway_attachment_id("tgw-attach-1")
+        .options(
+            aws_sdk_ec2::types::CreateTransitGatewayConnectRequestOptions::builder()
+                .protocol(aws_sdk_ec2::types::ProtocolValue::Gre)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_connect()
+        .unwrap()
+        .transit_gateway_attachment_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_transit_gateway_connect()
+        .transit_gateway_attachment_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_connect().is_some());
+}
+
+#[test_action("ec2", "CreateTransitGatewayConnectPeer", checksum = "cad18588")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_connect_peer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_transit_gateway_connect_peer()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .peer_address("10.0.0.1")
+        .inside_cidr_blocks("169.254.6.0/29")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .transit_gateway_connect_peer()
+        .unwrap()
+        .transit_gateway_connect_peer_id()
+        .unwrap()
+        .starts_with("tgw-connect-peer-"));
+}
+
+#[test_action("ec2", "DescribeTransitGatewayConnectPeers", checksum = "db3f1872")]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_connect_peers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_transit_gateway_connect_peer()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .peer_address("10.0.0.1")
+        .inside_cidr_blocks("169.254.6.0/29")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_transit_gateway_connect_peers()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_connect_peers().is_empty());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayConnectPeer", checksum = "5e56083e")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_connect_peer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_transit_gateway_connect_peer()
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .peer_address("10.0.0.1")
+        .inside_cidr_blocks("169.254.6.0/29")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_connect_peer()
+        .unwrap()
+        .transit_gateway_connect_peer_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_transit_gateway_connect_peer()
+        .transit_gateway_connect_peer_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_connect_peer().is_some());
+}
+
+async fn make_tgw_pt(c: &aws_sdk_ec2::Client) -> String {
+    c.create_transit_gateway_policy_table()
+        .transit_gateway_id("tgw-1")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_policy_table()
+        .unwrap()
+        .transit_gateway_policy_table_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateTransitGatewayPolicyTable", checksum = "2bd6ed75")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_policy_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_pt(&c).await;
+    assert!(id.starts_with("tgw-ptb-"));
+}
+
+#[test_action("ec2", "DescribeTransitGatewayPolicyTables", checksum = "64425b2c")]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_policy_tables() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_tgw_pt(&c).await;
+    let r = c
+        .describe_transit_gateway_policy_tables()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_policy_tables().is_empty());
+}
+
+#[test_action("ec2", "DeleteTransitGatewayPolicyTable", checksum = "bac39d61")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_policy_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_pt(&c).await;
+    let r = c
+        .delete_transit_gateway_policy_table()
+        .transit_gateway_policy_table_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_policy_table().is_some());
+}
+
+#[test_action("ec2", "AssociateTransitGatewayPolicyTable", checksum = "7518c1bf")]
+#[tokio::test]
+async fn ec2_associate_transit_gateway_policy_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .associate_transit_gateway_policy_table()
+        .transit_gateway_policy_table_id("tgw-ptb-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.association().is_some());
+}
+
+#[test_action("ec2", "DisassociateTransitGatewayPolicyTable", checksum = "33a05767")]
+#[tokio::test]
+async fn ec2_disassociate_transit_gateway_policy_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disassociate_transit_gateway_policy_table()
+        .transit_gateway_policy_table_id("tgw-ptb-1")
+        .transit_gateway_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.association().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "GetTransitGatewayPolicyTableAssociations",
+    checksum = "6a44702a"
+)]
+#[tokio::test]
+async fn ec2_get_transit_gateway_policy_table_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_transit_gateway_policy_table_associations()
+        .transit_gateway_policy_table_id("tgw-ptb-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.associations().is_empty());
+}
+
+#[test_action("ec2", "GetTransitGatewayPolicyTableEntries", checksum = "5cb16c6c")]
+#[tokio::test]
+async fn ec2_get_transit_gateway_policy_table_entries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_transit_gateway_policy_table_entries()
+        .transit_gateway_policy_table_id("tgw-ptb-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_policy_table_entries().is_empty());
+}
+
+async fn make_tgw_announce(c: &aws_sdk_ec2::Client) -> String {
+    c.create_transit_gateway_route_table_announcement()
+        .transit_gateway_route_table_id("tgw-rtb-1")
+        .peering_attachment_id("tgw-attach-1")
+        .send()
+        .await
+        .unwrap()
+        .transit_gateway_route_table_announcement()
+        .unwrap()
+        .transit_gateway_route_table_announcement_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action(
+    "ec2",
+    "CreateTransitGatewayRouteTableAnnouncement",
+    checksum = "edad2f14"
+)]
+#[tokio::test]
+async fn ec2_create_transit_gateway_route_table_announcement() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_announce(&c).await;
+    assert!(id.starts_with("tgw-rtb-announce-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeTransitGatewayRouteTableAnnouncements",
+    checksum = "f34518cd"
+)]
+#[tokio::test]
+async fn ec2_describe_transit_gateway_route_table_announcements() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_tgw_announce(&c).await;
+    let r = c
+        .describe_transit_gateway_route_table_announcements()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.transit_gateway_route_table_announcements().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteTransitGatewayRouteTableAnnouncement",
+    checksum = "e3f5a5c4"
+)]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_route_table_announcement() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_tgw_announce(&c).await;
+    let r = c
+        .delete_transit_gateway_route_table_announcement()
+        .transit_gateway_route_table_announcement_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.transit_gateway_route_table_announcement().is_some());
+}
