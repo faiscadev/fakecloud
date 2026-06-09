@@ -538,6 +538,40 @@ pub struct DedicatedHost {
     pub host_maintenance: String,
 }
 
+/// A Transit Gateway.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransitGateway {
+    pub id: String,
+    pub description: String,
+}
+
+/// A Transit Gateway attachment (VPC and others).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwAttachment {
+    pub id: String,
+    pub tgw_id: String,
+    pub resource_id: String,
+    pub resource_type: String,
+    #[serde(default)]
+    pub subnet_ids: Vec<String>,
+    pub state: String,
+}
+
+/// A Transit Gateway route table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwRouteTable {
+    pub id: String,
+    pub tgw_id: String,
+}
+
+/// A static Transit Gateway route within a route table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwRoute {
+    pub cidr: String,
+    pub attachment_id: String,
+    pub state: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -634,6 +668,15 @@ pub struct Ec2State {
     pub reserved_instances: HashMap<String, ReservedInstances>,
     #[serde(default)]
     pub dedicated_hosts: HashMap<String, DedicatedHost>,
+    #[serde(default)]
+    pub transit_gateways: HashMap<String, TransitGateway>,
+    #[serde(default)]
+    pub tgw_attachments: HashMap<String, TgwAttachment>,
+    #[serde(default)]
+    pub tgw_route_tables: HashMap<String, TgwRouteTable>,
+    /// route-table-id -> static routes.
+    #[serde(default)]
+    pub tgw_routes: HashMap<String, Vec<TgwRoute>>,
 }
 
 impl Ec2State {

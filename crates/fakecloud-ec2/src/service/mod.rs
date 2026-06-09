@@ -16,6 +16,7 @@ mod sg;
 mod snapshot;
 mod subnet;
 mod tags;
+mod tgw;
 mod volume;
 mod vpc;
 
@@ -381,6 +382,37 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "ModifyHosts",
     "ReleaseHosts",
     "DescribeMacHosts",
+    // Transit gateway core
+    "CreateTransitGateway",
+    "DeleteTransitGateway",
+    "DescribeTransitGateways",
+    "ModifyTransitGateway",
+    "CreateTransitGatewayVpcAttachment",
+    "DeleteTransitGatewayVpcAttachment",
+    "DescribeTransitGatewayVpcAttachments",
+    "ModifyTransitGatewayVpcAttachment",
+    "AcceptTransitGatewayVpcAttachment",
+    "RejectTransitGatewayVpcAttachment",
+    "DescribeTransitGatewayAttachments",
+    "CreateTransitGatewayRouteTable",
+    "DeleteTransitGatewayRouteTable",
+    "DescribeTransitGatewayRouteTables",
+    "AssociateTransitGatewayRouteTable",
+    "DisassociateTransitGatewayRouteTable",
+    "EnableTransitGatewayRouteTablePropagation",
+    "DisableTransitGatewayRouteTablePropagation",
+    "CreateTransitGatewayRoute",
+    "DeleteTransitGatewayRoute",
+    "ReplaceTransitGatewayRoute",
+    "SearchTransitGatewayRoutes",
+    "ExportTransitGatewayRoutes",
+    "GetTransitGatewayRouteTableAssociations",
+    "GetTransitGatewayRouteTablePropagations",
+    "GetTransitGatewayAttachmentPropagations",
+    "CreateTransitGatewayPrefixListReference",
+    "DeleteTransitGatewayPrefixListReference",
+    "ModifyTransitGatewayPrefixListReference",
+    "GetTransitGatewayPrefixListReferences",
 ];
 
 /// Amazon EC2 service.
@@ -949,6 +981,78 @@ impl AwsService for Ec2Service {
             "ModifyHosts" => reserved::modify_hosts(self, &request),
             "ReleaseHosts" => reserved::release_hosts(self, &request),
             "DescribeMacHosts" => reserved::describe_mac_hosts(self, &request),
+            "CreateTransitGateway" => tgw::create_transit_gateway(self, &request),
+            "DeleteTransitGateway" => tgw::delete_transit_gateway(self, &request),
+            "DescribeTransitGateways" => tgw::describe_transit_gateways(self, &request),
+            "ModifyTransitGateway" => tgw::modify_transit_gateway(self, &request),
+            "CreateTransitGatewayVpcAttachment" => {
+                tgw::create_transit_gateway_vpc_attachment(self, &request)
+            }
+            "DeleteTransitGatewayVpcAttachment" => {
+                tgw::delete_transit_gateway_vpc_attachment(self, &request)
+            }
+            "DescribeTransitGatewayVpcAttachments" => {
+                tgw::describe_transit_gateway_vpc_attachments(self, &request)
+            }
+            "ModifyTransitGatewayVpcAttachment" => {
+                tgw::modify_transit_gateway_vpc_attachment(self, &request)
+            }
+            "AcceptTransitGatewayVpcAttachment" => {
+                tgw::accept_transit_gateway_vpc_attachment(self, &request)
+            }
+            "RejectTransitGatewayVpcAttachment" => {
+                tgw::reject_transit_gateway_vpc_attachment(self, &request)
+            }
+            "DescribeTransitGatewayAttachments" => {
+                tgw::describe_transit_gateway_attachments(self, &request)
+            }
+            "CreateTransitGatewayRouteTable" => {
+                tgw::create_transit_gateway_route_table(self, &request)
+            }
+            "DeleteTransitGatewayRouteTable" => {
+                tgw::delete_transit_gateway_route_table(self, &request)
+            }
+            "DescribeTransitGatewayRouteTables" => {
+                tgw::describe_transit_gateway_route_tables(self, &request)
+            }
+            "AssociateTransitGatewayRouteTable" => {
+                tgw::associate_transit_gateway_route_table(self, &request)
+            }
+            "DisassociateTransitGatewayRouteTable" => {
+                tgw::disassociate_transit_gateway_route_table(self, &request)
+            }
+            "EnableTransitGatewayRouteTablePropagation" => {
+                tgw::enable_transit_gateway_route_table_propagation(self, &request)
+            }
+            "DisableTransitGatewayRouteTablePropagation" => {
+                tgw::disable_transit_gateway_route_table_propagation(self, &request)
+            }
+            "CreateTransitGatewayRoute" => tgw::create_transit_gateway_route(self, &request),
+            "DeleteTransitGatewayRoute" => tgw::delete_transit_gateway_route(self, &request),
+            "ReplaceTransitGatewayRoute" => tgw::replace_transit_gateway_route(self, &request),
+            "SearchTransitGatewayRoutes" => tgw::search_transit_gateway_routes(self, &request),
+            "ExportTransitGatewayRoutes" => tgw::export_transit_gateway_routes(self, &request),
+            "GetTransitGatewayRouteTableAssociations" => {
+                tgw::get_transit_gateway_route_table_associations(self, &request)
+            }
+            "GetTransitGatewayRouteTablePropagations" => {
+                tgw::get_transit_gateway_route_table_propagations(self, &request)
+            }
+            "GetTransitGatewayAttachmentPropagations" => {
+                tgw::get_transit_gateway_attachment_propagations(self, &request)
+            }
+            "CreateTransitGatewayPrefixListReference" => {
+                tgw::create_transit_gateway_prefix_list_reference(self, &request)
+            }
+            "DeleteTransitGatewayPrefixListReference" => {
+                tgw::delete_transit_gateway_prefix_list_reference(self, &request)
+            }
+            "ModifyTransitGatewayPrefixListReference" => {
+                tgw::modify_transit_gateway_prefix_list_reference(self, &request)
+            }
+            "GetTransitGatewayPrefixListReferences" => {
+                tgw::get_transit_gateway_prefix_list_references(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
