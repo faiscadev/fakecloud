@@ -25,6 +25,16 @@ fn entry_xml(e: &NetworkAclEntry) -> String {
     if let Some(c) = &e.ipv6_cidr_block {
         out.push_str(&ec2_elem("ipv6CidrBlock", c));
     }
+    if let Some((from, to)) = e.port_range {
+        out.push_str(&format!(
+            "<portRange><from>{from}</from><to>{to}</to></portRange>"
+        ));
+    }
+    if let Some((t, code)) = e.icmp_type_code {
+        out.push_str(&format!(
+            "<icmpTypeCode><type>{t}</type><code>{code}</code></icmpTypeCode>"
+        ));
+    }
     out
 }
 
@@ -54,25 +64,21 @@ fn nacl_xml(a: &NetworkAcl, tags: &[Tag], owner: &str) -> String {
     )
 }
 
+fn default_entry(egress: bool) -> NetworkAclEntry {
+    NetworkAclEntry {
+        rule_number: 32767,
+        protocol: "-1".to_string(),
+        rule_action: "deny".to_string(),
+        egress,
+        cidr_block: Some("0.0.0.0/0".to_string()),
+        ipv6_cidr_block: None,
+        port_range: None,
+        icmp_type_code: None,
+    }
+}
+
 fn default_entries() -> Vec<NetworkAclEntry> {
-    vec![
-        NetworkAclEntry {
-            rule_number: 32767,
-            protocol: "-1".to_string(),
-            rule_action: "deny".to_string(),
-            egress: false,
-            cidr_block: Some("0.0.0.0/0".to_string()),
-            ipv6_cidr_block: None,
-        },
-        NetworkAclEntry {
-            rule_number: 32767,
-            protocol: "-1".to_string(),
-            rule_action: "deny".to_string(),
-            egress: true,
-            cidr_block: Some("0.0.0.0/0".to_string()),
-            ipv6_cidr_block: None,
-        },
-    ]
+    vec![default_entry(false), default_entry(true)]
 }
 
 pub(crate) fn create_network_acl(
@@ -202,6 +208,19 @@ fn parse_entry(req: &AwsRequest) -> NetworkAclEntry {
             .unwrap_or(false),
         cidr_block: req.query_params.get("CidrBlock").cloned(),
         ipv6_cidr_block: req.query_params.get("Ipv6CidrBlock").cloned(),
+        port_range: parse_pair(req, "PortRange.From", "PortRange.To"),
+        icmp_type_code: parse_pair(req, "Icmp.Type", "Icmp.Code"),
+    }
+}
+
+/// Parse a paired `(from, to)` integer structure, present only when at least
+/// one half is supplied.
+fn parse_pair(req: &AwsRequest, lo: &str, hi: &str) -> Option<(i64, i64)> {
+    let a = req.query_params.get(lo).and_then(|v| v.parse().ok());
+    let b = req.query_params.get(hi).and_then(|v| v.parse().ok());
+    match (a, b) {
+        (None, None) => None,
+        _ => Some((a.unwrap_or(0), b.unwrap_or(0))),
     }
 }
 
@@ -304,29 +323,32 @@ pub(crate) fn replace_network_acl_association(
     let assoc_id = require(&req.query_params, "AssociationId")?;
     let acl_id = require(&req.query_params, "NetworkAclId")?;
     let new_id = gen_id("aclassoc");
-    let subnet = {
+    {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let mut subnet = String::new();
-        for acl in state.network_acls.values_mut() {
-            acl.associations.retain(|s| {
-                if s.association_id == assoc_id {
-                    subnet = s.subnet_id.clone();
-                    false
-                } else {
-                    true
-                }
-            });
+        // Resolve the source association's subnet read-only BEFORE mutating.
+        // Only move the association when both the source association and the
+        // destination ACL actually exist — otherwise leave state untouched
+        // (EC2 declares no error shapes here, so unknown ids stay lenient and
+        // never corrupt the store with an empty-subnet placeholder).
+        let subnet = state
+            .network_acls
+            .values()
+            .flat_map(|acl| acl.associations.iter())
+            .find(|s| s.association_id == assoc_id)
+            .map(|s| s.subnet_id.clone());
+        if let (Some(subnet), true) = (subnet, state.network_acls.contains_key(&acl_id)) {
+            for acl in state.network_acls.values_mut() {
+                acl.associations.retain(|s| s.association_id != assoc_id);
+            }
+            if let Some(acl) = state.network_acls.get_mut(&acl_id) {
+                acl.associations.push(NetworkAclAssoc {
+                    association_id: new_id.clone(),
+                    subnet_id: subnet,
+                });
+            }
         }
-        if let Some(acl) = state.network_acls.get_mut(&acl_id) {
-            acl.associations.push(NetworkAclAssoc {
-                association_id: new_id.clone(),
-                subnet_id: subnet.clone(),
-            });
-        }
-        subnet
-    };
-    let _ = subnet;
+    }
     Ok(Ec2Service::respond(
         "ReplaceNetworkAclAssociation",
         &req.request_id,
@@ -358,15 +380,22 @@ pub(crate) fn create_vpc_peering_connection(
 ) -> Result<AwsResponse, AwsServiceError> {
     let vpc_id = require(&req.query_params, "VpcId")?;
     let id = gen_id("pcx");
+    // PeerVpcId is optional in the EC2 model (self/same-account peering omits
+    // it), so it is not required here; default to the requester VPC when absent
+    // rather than leaving a silently-empty peer.
+    let peer_vpc_id = req
+        .query_params
+        .get("PeerVpcId")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| vpc_id.clone());
     let p = VpcPeering {
         id: id.clone(),
         requester_vpc_id: vpc_id,
-        accepter_vpc_id: req
-            .query_params
-            .get("PeerVpcId")
-            .cloned()
-            .unwrap_or_default(),
+        accepter_vpc_id: peer_vpc_id,
         status: "pending-acceptance".to_string(),
+        requester_allow_dns: false,
+        accepter_allow_dns: false,
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -399,10 +428,9 @@ pub(crate) fn delete_vpc_peering_connection(
     let id = require(&req.query_params, "VpcPeeringConnectionId")?;
     {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
-            .vpc_peerings
-            .remove(&id);
+        let state = accounts.get_or_create(&req.account_id);
+        state.vpc_peerings.remove(&id);
+        state.tags.remove(&id);
     }
     Ok(Ec2Service::respond(
         "DeleteVpcPeeringConnection",
@@ -452,6 +480,8 @@ pub(crate) fn accept_vpc_peering_connection(
             requester_vpc_id: String::new(),
             accepter_vpc_id: String::new(),
             status: "active".to_string(),
+            requester_allow_dns: false,
+            accepter_allow_dns: false,
         });
         let t = state.tags_for(&id).to_vec();
         (p, t)
@@ -489,14 +519,42 @@ pub(crate) fn reject_vpc_peering_connection(
 }
 
 pub(crate) fn modify_vpc_peering_connection_options(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "VpcPeeringConnectionId")?;
-    let opts = "<allowDnsResolutionFromRemoteVpc>false</allowDnsResolutionFromRemoteVpc>";
+    let id = require(&req.query_params, "VpcPeeringConnectionId")?;
+    let req_dns = req
+        .query_params
+        .get("RequesterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc")
+        .map(|v| v == "true");
+    let acc_dns = req
+        .query_params
+        .get("AccepterPeeringConnectionOptions.AllowDnsResolutionFromRemoteVpc")
+        .map(|v| v == "true");
+    // Persist whichever side was supplied; echo back the resulting options.
+    let (requester, accepter) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(p) = state.vpc_peerings.get_mut(&id) {
+            if let Some(v) = req_dns {
+                p.requester_allow_dns = v;
+            }
+            if let Some(v) = acc_dns {
+                p.accepter_allow_dns = v;
+            }
+            (p.requester_allow_dns, p.accepter_allow_dns)
+        } else {
+            (req_dns.unwrap_or(false), acc_dns.unwrap_or(false))
+        }
+    };
+    let opts = |allow: bool| {
+        format!("<allowDnsResolutionFromRemoteVpc>{allow}</allowDnsResolutionFromRemoteVpc>")
+    };
     let body = format!(
-        "<accepterPeeringConnectionOptions>{opts}</accepterPeeringConnectionOptions>\
-         <requesterPeeringConnectionOptions>{opts}</requesterPeeringConnectionOptions>"
+        "<accepterPeeringConnectionOptions>{}</accepterPeeringConnectionOptions>\
+         <requesterPeeringConnectionOptions>{}</requesterPeeringConnectionOptions>",
+        opts(accepter),
+        opts(requester),
     );
     Ok(Ec2Service::respond(
         "ModifyVpcPeeringConnectionOptions",

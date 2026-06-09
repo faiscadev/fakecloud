@@ -7,7 +7,7 @@ template = "page.html"
 fakecloud provides 100% API conformance across 2,937 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
-- **Total Services**: 39
+- **Total Services**: 40
 - **Total Operations**: 2,937
 - **Conformance Engine**: 107,434 Smithy-based test variants
 - **Startup Time**: ~300ms

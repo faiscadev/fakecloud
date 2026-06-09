@@ -370,6 +370,10 @@ pub struct NetworkAclEntry {
     pub egress: bool,
     pub cidr_block: Option<String>,
     pub ipv6_cidr_block: Option<String>,
+    /// TCP/UDP port range (from, to).
+    pub port_range: Option<(i64, i64)>,
+    /// ICMP (type, code).
+    pub icmp_type_code: Option<(i64, i64)>,
 }
 
 /// A network ACL <-> subnet association.
@@ -399,6 +403,12 @@ pub struct VpcPeering {
     pub accepter_vpc_id: String,
     /// `pending-acceptance` | `active` | `rejected` | `deleted`.
     pub status: String,
+    /// Requester-side DNS-resolution-from-remote-VPC option.
+    #[serde(default)]
+    pub requester_allow_dns: bool,
+    /// Accepter-side DNS-resolution-from-remote-VPC option.
+    #[serde(default)]
+    pub accepter_allow_dns: bool,
 }
 
 /// Per-account, per-region EC2 state. Resource families are added to this
