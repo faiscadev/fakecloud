@@ -4559,3 +4559,486 @@ async fn ec2_get_flow_logs_integration_template() {
         .unwrap();
     assert!(r.result().is_some());
 }
+
+// ---- launch templates ----
+
+async fn make_lt(c: &aws_sdk_ec2::Client) -> String {
+    c.create_launch_template()
+        .launch_template_name("tpl")
+        .launch_template_data(
+            aws_sdk_ec2::types::RequestLaunchTemplateData::builder()
+                .instance_type(aws_sdk_ec2::types::InstanceType::T3Micro)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .launch_template()
+        .unwrap()
+        .launch_template_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateLaunchTemplate", checksum = "d10d065a")]
+#[tokio::test]
+async fn ec2_create_launch_template() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_launch_template()
+        .launch_template_name("tpl")
+        .launch_template_data(
+            aws_sdk_ec2::types::RequestLaunchTemplateData::builder()
+                .instance_type(aws_sdk_ec2::types::InstanceType::T3Micro)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .launch_template()
+        .unwrap()
+        .launch_template_id()
+        .unwrap()
+        .starts_with("lt-"));
+}
+
+#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "1782f934")]
+#[tokio::test]
+async fn ec2_create_launch_template_version() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    let r = c
+        .create_launch_template_version()
+        .launch_template_id(&id)
+        .launch_template_data(
+            aws_sdk_ec2::types::RequestLaunchTemplateData::builder()
+                .instance_type(aws_sdk_ec2::types::InstanceType::T3Small)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.launch_template_version().unwrap().version_number(),
+        Some(2)
+    );
+}
+
+#[test_action("ec2", "DescribeLaunchTemplates", checksum = "5a101c40")]
+#[tokio::test]
+async fn ec2_describe_launch_templates() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    let r = c
+        .describe_launch_templates()
+        .launch_template_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.launch_templates().len(), 1);
+}
+
+#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "43bf8e26")]
+#[tokio::test]
+async fn ec2_describe_launch_template_versions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    let r = c
+        .describe_launch_template_versions()
+        .launch_template_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.launch_template_versions().is_empty());
+}
+
+#[test_action("ec2", "DeleteLaunchTemplate", checksum = "5ccc84b9")]
+#[tokio::test]
+async fn ec2_delete_launch_template() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    c.delete_launch_template()
+        .launch_template_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(c
+        .describe_launch_templates()
+        .send()
+        .await
+        .unwrap()
+        .launch_templates()
+        .is_empty());
+}
+
+#[test_action("ec2", "DeleteLaunchTemplateVersions", checksum = "9309e7fa")]
+#[tokio::test]
+async fn ec2_delete_launch_template_versions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    c.delete_launch_template_versions()
+        .launch_template_id(&id)
+        .versions("1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetLaunchTemplateData", checksum = "8427323a")]
+#[tokio::test]
+async fn ec2_get_launch_template_data() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_launch_template_data()
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.launch_template_data().is_some());
+}
+
+#[test_action("ec2", "ModifyLaunchTemplate", checksum = "eb1af25b")]
+#[tokio::test]
+async fn ec2_modify_launch_template() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lt(&c).await;
+    let r = c
+        .modify_launch_template()
+        .launch_template_id(&id)
+        .default_version("1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.launch_template().unwrap().launch_template_id(),
+        Some(id.as_str())
+    );
+}
+
+// ---- spot instance requests ----
+
+#[test_action("ec2", "RequestSpotInstances", checksum = "67f9936b")]
+#[tokio::test]
+async fn ec2_request_spot_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .request_spot_instances()
+        .spot_price("0.05")
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.spot_instance_requests().is_empty());
+}
+
+#[test_action("ec2", "DescribeSpotInstanceRequests", checksum = "d76b6440")]
+#[tokio::test]
+async fn ec2_describe_spot_instance_requests() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.request_spot_instances()
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_spot_instance_requests().send().await.unwrap();
+    assert!(!r.spot_instance_requests().is_empty());
+}
+
+#[test_action("ec2", "CancelSpotInstanceRequests", checksum = "5ee35720")]
+#[tokio::test]
+async fn ec2_cancel_spot_instance_requests() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .request_spot_instances()
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap()
+        .spot_instance_requests()[0]
+        .spot_instance_request_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .cancel_spot_instance_requests()
+        .spot_instance_request_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.cancelled_spot_instance_requests().is_empty());
+}
+
+// ---- spot fleet ----
+
+async fn make_sfr(c: &aws_sdk_ec2::Client) -> String {
+    c.request_spot_fleet()
+        .spot_fleet_request_config(
+            aws_sdk_ec2::types::SpotFleetRequestConfigData::builder()
+                .iam_fleet_role("arn:role")
+                .target_capacity(1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .spot_fleet_request_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "RequestSpotFleet", checksum = "ef198fa7")]
+#[tokio::test]
+async fn ec2_request_spot_fleet() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_sfr(&c).await;
+    assert!(id.starts_with("sfr-"));
+}
+
+#[test_action("ec2", "DescribeSpotFleetRequests", checksum = "c233fdb4")]
+#[tokio::test]
+async fn ec2_describe_spot_fleet_requests() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_sfr(&c).await;
+    let r = c.describe_spot_fleet_requests().send().await.unwrap();
+    assert!(!r.spot_fleet_request_configs().is_empty());
+}
+
+#[test_action("ec2", "CancelSpotFleetRequests", checksum = "041466d4")]
+#[tokio::test]
+async fn ec2_cancel_spot_fleet_requests() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_sfr(&c).await;
+    let r = c
+        .cancel_spot_fleet_requests()
+        .spot_fleet_request_ids(&id)
+        .terminate_instances(true)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful_fleet_requests().is_empty());
+}
+
+#[test_action("ec2", "ModifySpotFleetRequest", checksum = "2e883c1b")]
+#[tokio::test]
+async fn ec2_modify_spot_fleet_request() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_sfr(&c).await;
+    c.modify_spot_fleet_request()
+        .spot_fleet_request_id(&id)
+        .target_capacity(2)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeSpotFleetInstances", checksum = "d933444b")]
+#[tokio::test]
+async fn ec2_describe_spot_fleet_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_sfr(&c).await;
+    let r = c
+        .describe_spot_fleet_instances()
+        .spot_fleet_request_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.spot_fleet_request_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DescribeSpotFleetRequestHistory", checksum = "e9b44ba3")]
+#[tokio::test]
+async fn ec2_describe_spot_fleet_request_history() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_sfr(&c).await;
+    let r = c
+        .describe_spot_fleet_request_history()
+        .spot_fleet_request_id(&id)
+        .start_time(aws_sdk_ec2::primitives::DateTime::from_secs(1704067200))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.spot_fleet_request_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DescribeSpotPriceHistory", checksum = "4da11bc7")]
+#[tokio::test]
+async fn ec2_describe_spot_price_history() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_spot_price_history().send().await.unwrap();
+    assert!(!r.spot_price_history().is_empty());
+}
+
+#[test_action("ec2", "GetSpotPlacementScores", checksum = "87fe06d2")]
+#[tokio::test]
+async fn ec2_get_spot_placement_scores() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_spot_placement_scores()
+        .target_capacity(10)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.spot_placement_scores().is_empty());
+}
+
+// ---- spot datafeed ----
+
+#[test_action("ec2", "CreateSpotDatafeedSubscription", checksum = "d5529374")]
+#[tokio::test]
+async fn ec2_create_spot_datafeed_subscription() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_spot_datafeed_subscription()
+        .bucket("my-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.spot_datafeed_subscription().is_some());
+}
+
+#[test_action("ec2", "DescribeSpotDatafeedSubscription", checksum = "45fbe068")]
+#[tokio::test]
+async fn ec2_describe_spot_datafeed_subscription() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_spot_datafeed_subscription()
+        .bucket("my-bucket")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_spot_datafeed_subscription()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.spot_datafeed_subscription().is_some());
+}
+
+#[test_action("ec2", "DeleteSpotDatafeedSubscription", checksum = "aadba863")]
+#[tokio::test]
+async fn ec2_delete_spot_datafeed_subscription() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_spot_datafeed_subscription()
+        .bucket("my-bucket")
+        .send()
+        .await
+        .unwrap();
+    c.delete_spot_datafeed_subscription().send().await.unwrap();
+}
+
+// ---- EC2 fleets ----
+
+async fn make_fleet(c: &aws_sdk_ec2::Client) -> String {
+    c.create_fleet()
+        .launch_template_configs(
+            aws_sdk_ec2::types::FleetLaunchTemplateConfigRequest::builder().build(),
+        )
+        .target_capacity_specification(
+            aws_sdk_ec2::types::TargetCapacitySpecificationRequest::builder()
+                .total_target_capacity(1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .fleet_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateFleet", checksum = "2e02f576")]
+#[tokio::test]
+async fn ec2_create_fleet() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_fleet(&c).await;
+    assert!(id.starts_with("fleet-"));
+}
+
+#[test_action("ec2", "DescribeFleets", checksum = "e8367cfd")]
+#[tokio::test]
+async fn ec2_describe_fleets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_fleet(&c).await;
+    let r = c.describe_fleets().send().await.unwrap();
+    assert!(!r.fleets().is_empty());
+}
+
+#[test_action("ec2", "DeleteFleets", checksum = "17f71091")]
+#[tokio::test]
+async fn ec2_delete_fleets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_fleet(&c).await;
+    let r = c
+        .delete_fleets()
+        .fleet_ids(&id)
+        .terminate_instances(true)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful_fleet_deletions().is_empty());
+}
+
+#[test_action("ec2", "ModifyFleet", checksum = "15803ab1")]
+#[tokio::test]
+async fn ec2_modify_fleet() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_fleet(&c).await;
+    let r = c.modify_fleet().fleet_id(&id).send().await.unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "DescribeFleetHistory", checksum = "77bc863e")]
+#[tokio::test]
+async fn ec2_describe_fleet_history() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_fleet(&c).await;
+    let r = c
+        .describe_fleet_history()
+        .fleet_id(&id)
+        .start_time(aws_sdk_ec2::primitives::DateTime::from_secs(1704067200))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.fleet_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DescribeFleetInstances", checksum = "0a87acc3")]
+#[tokio::test]
+async fn ec2_describe_fleet_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_fleet(&c).await;
+    let r = c
+        .describe_fleet_instances()
+        .fleet_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.fleet_id(), Some(id.as_str()));
+}
