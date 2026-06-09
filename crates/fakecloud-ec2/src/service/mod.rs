@@ -4,6 +4,7 @@ mod dhcp;
 mod eip;
 mod endpoint;
 mod eni;
+mod fleet;
 mod image;
 mod instance;
 mod meta;
@@ -301,6 +302,37 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteFlowLogs",
     "DescribeFlowLogs",
     "GetFlowLogsIntegrationTemplate",
+    // Launch templates
+    "CreateLaunchTemplate",
+    "CreateLaunchTemplateVersion",
+    "DeleteLaunchTemplate",
+    "DeleteLaunchTemplateVersions",
+    "DescribeLaunchTemplates",
+    "DescribeLaunchTemplateVersions",
+    "GetLaunchTemplateData",
+    "ModifyLaunchTemplate",
+    // Spot instances + fleet
+    "RequestSpotInstances",
+    "DescribeSpotInstanceRequests",
+    "CancelSpotInstanceRequests",
+    "RequestSpotFleet",
+    "DescribeSpotFleetRequests",
+    "CancelSpotFleetRequests",
+    "ModifySpotFleetRequest",
+    "DescribeSpotFleetInstances",
+    "DescribeSpotFleetRequestHistory",
+    "DescribeSpotPriceHistory",
+    "GetSpotPlacementScores",
+    "CreateSpotDatafeedSubscription",
+    "DeleteSpotDatafeedSubscription",
+    "DescribeSpotDatafeedSubscription",
+    // EC2 fleets
+    "CreateFleet",
+    "DeleteFleets",
+    "DescribeFleets",
+    "ModifyFleet",
+    "DescribeFleetHistory",
+    "DescribeFleetInstances",
 ];
 
 /// Amazon EC2 service.
@@ -722,6 +754,48 @@ impl AwsService for Ec2Service {
             "GetFlowLogsIntegrationTemplate" => {
                 endpoint::get_flow_logs_integration_template(self, &request)
             }
+            "CreateLaunchTemplate" => fleet::create_launch_template(self, &request),
+            "CreateLaunchTemplateVersion" => fleet::create_launch_template_version(self, &request),
+            "DeleteLaunchTemplate" => fleet::delete_launch_template(self, &request),
+            "DeleteLaunchTemplateVersions" => {
+                fleet::delete_launch_template_versions(self, &request)
+            }
+            "DescribeLaunchTemplates" => fleet::describe_launch_templates(self, &request),
+            "DescribeLaunchTemplateVersions" => {
+                fleet::describe_launch_template_versions(self, &request)
+            }
+            "GetLaunchTemplateData" => fleet::get_launch_template_data(self, &request),
+            "ModifyLaunchTemplate" => fleet::modify_launch_template(self, &request),
+            "RequestSpotInstances" => fleet::request_spot_instances(self, &request),
+            "DescribeSpotInstanceRequests" => {
+                fleet::describe_spot_instance_requests(self, &request)
+            }
+            "CancelSpotInstanceRequests" => fleet::cancel_spot_instance_requests(self, &request),
+            "RequestSpotFleet" => fleet::request_spot_fleet(self, &request),
+            "DescribeSpotFleetRequests" => fleet::describe_spot_fleet_requests(self, &request),
+            "CancelSpotFleetRequests" => fleet::cancel_spot_fleet_requests(self, &request),
+            "ModifySpotFleetRequest" => fleet::modify_spot_fleet_request(self, &request),
+            "DescribeSpotFleetInstances" => fleet::describe_spot_fleet_instances(self, &request),
+            "DescribeSpotFleetRequestHistory" => {
+                fleet::describe_spot_fleet_request_history(self, &request)
+            }
+            "DescribeSpotPriceHistory" => fleet::describe_spot_price_history(self, &request),
+            "GetSpotPlacementScores" => fleet::get_spot_placement_scores(self, &request),
+            "CreateSpotDatafeedSubscription" => {
+                fleet::create_spot_datafeed_subscription(self, &request)
+            }
+            "DeleteSpotDatafeedSubscription" => {
+                fleet::delete_spot_datafeed_subscription(self, &request)
+            }
+            "DescribeSpotDatafeedSubscription" => {
+                fleet::describe_spot_datafeed_subscription(self, &request)
+            }
+            "CreateFleet" => fleet::create_fleet(self, &request),
+            "DeleteFleets" => fleet::delete_fleets(self, &request),
+            "DescribeFleets" => fleet::describe_fleets(self, &request),
+            "ModifyFleet" => fleet::modify_fleet(self, &request),
+            "DescribeFleetHistory" => fleet::describe_fleet_history(self, &request),
+            "DescribeFleetInstances" => fleet::describe_fleet_instances(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

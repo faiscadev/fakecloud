@@ -462,6 +462,40 @@ pub struct FlowLog {
     pub log_destination: Option<String>,
 }
 
+/// A launch template (versions tracked as monotonic counters).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LaunchTemplate {
+    pub id: String,
+    pub name: String,
+    pub default_version: i64,
+    pub latest_version: i64,
+}
+
+/// A Spot instance request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpotRequest {
+    pub id: String,
+    /// `open` | `active` | `cancelled` | `closed`.
+    pub state: String,
+    pub request_type: String,
+    pub spot_price: String,
+}
+
+/// A Spot fleet request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpotFleet {
+    pub id: String,
+    pub state: String,
+}
+
+/// An EC2 fleet.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Fleet {
+    pub id: String,
+    pub state: String,
+    pub fleet_type: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -538,6 +572,17 @@ pub struct Ec2State {
     pub connection_notifications: HashMap<String, ConnectionNotification>,
     #[serde(default)]
     pub flow_logs: HashMap<String, FlowLog>,
+    #[serde(default)]
+    pub launch_templates: HashMap<String, LaunchTemplate>,
+    #[serde(default)]
+    pub spot_requests: HashMap<String, SpotRequest>,
+    #[serde(default)]
+    pub spot_fleets: HashMap<String, SpotFleet>,
+    #[serde(default)]
+    pub fleets: HashMap<String, Fleet>,
+    /// Account-level spot datafeed subscription (bucket, prefix).
+    #[serde(default)]
+    pub spot_datafeed: Option<(String, String)>,
 }
 
 impl Ec2State {
