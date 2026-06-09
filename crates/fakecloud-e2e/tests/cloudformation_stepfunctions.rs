@@ -3,6 +3,7 @@
 mod helpers;
 
 use aws_sdk_cloudformation::types::{Capability, OnFailure};
+use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
 
 const TEMPLATE: &str = r#"{
@@ -102,4 +103,262 @@ async fn cfn_provisions_stepfunctions_resources() {
         .send()
         .await;
     assert!(sm_after.is_err(), "state machine should be gone");
+}
+
+/// Gap 2 (issue #1647): `DefinitionSubstitutions` must replace `${token}`
+/// placeholders in the definition. This is how SAM/CFN state machines
+/// reference sibling Lambda functions; leaving the literal `${...}` in
+/// place breaks executions later.
+#[tokio::test]
+async fn cfn_state_machine_applies_definition_substitutions() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let sfn = aws_sdk_sfn::Client::new(&server.aws_config().await);
+
+    let template = r#"{
+      "Resources": {
+        "SM": {
+          "Type": "AWS::StepFunctions::StateMachine",
+          "Properties": {
+            "StateMachineName": "subs-sm",
+            "RoleArn": "arn:aws:iam::000000000000:role/r",
+            "DefinitionString": "{\"StartAt\":\"T\",\"States\":{\"T\":{\"Type\":\"Task\",\"Resource\":\"arn:aws:states:::lambda:invoke\",\"Parameters\":{\"FunctionName\":\"${function_name}\"},\"End\":true}}}",
+            "DefinitionSubstitutions": {"function_name": "my-real-function"}
+          }
+        }
+      },
+      "Outputs": {"Arn": {"Value": {"Ref": "SM"}}}
+    }"#;
+
+    cfn.create_stack()
+        .stack_name("subs-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let sm = sfn
+        .describe_state_machine()
+        .state_machine_arn("arn:aws:states:us-east-1:123456789012:stateMachine:subs-sm")
+        .send()
+        .await
+        .expect("describe_state_machine");
+    assert!(
+        sm.definition().contains("my-real-function"),
+        "substitution not applied: {}",
+        sm.definition()
+    );
+    assert!(
+        !sm.definition().contains("${function_name}"),
+        "literal placeholder left behind: {}",
+        sm.definition()
+    );
+}
+
+/// Gap 1 (issue #1647): `DefinitionS3Location` must be fetched from S3 and
+/// used as the definition, like `sam package` produces.
+#[tokio::test]
+async fn cfn_state_machine_reads_definition_from_s3() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let s3 = server.s3_client().await;
+    let sfn = aws_sdk_sfn::Client::new(&server.aws_config().await);
+
+    let asl = r#"{"StartAt":"Done","States":{"Done":{"Type":"Succeed"}}}"#;
+    s3.create_bucket().bucket("asl-defs").send().await.unwrap();
+    s3.put_object()
+        .bucket("asl-defs")
+        .key("def.json")
+        .body(ByteStream::from(asl.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    let template = r#"{
+      "Resources": {
+        "SM": {
+          "Type": "AWS::StepFunctions::StateMachine",
+          "Properties": {
+            "StateMachineName": "s3-sm",
+            "RoleArn": "arn:aws:iam::000000000000:role/r",
+            "DefinitionS3Location": {"Bucket": "asl-defs", "Key": "def.json"}
+          }
+        }
+      }
+    }"#;
+
+    cfn.create_stack()
+        .stack_name("s3-def-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let sm = sfn
+        .describe_state_machine()
+        .state_machine_arn("arn:aws:states:us-east-1:123456789012:stateMachine:s3-sm")
+        .send()
+        .await
+        .expect("describe_state_machine");
+    assert!(
+        sm.definition().contains("\"Done\""),
+        "S3 definition not used: {}",
+        sm.definition()
+    );
+}
+
+/// Gap 3 (issue #1647): a stack update with a changed `DefinitionString`
+/// must propagate to the live state machine (UpdateStateMachine is now
+/// invoked on update), not silently keep executing the stale ASL.
+#[tokio::test]
+async fn cfn_state_machine_update_propagates_definition() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let sfn = aws_sdk_sfn::Client::new(&server.aws_config().await);
+
+    let template_a = r#"{
+      "Resources": {
+        "SM2": {
+          "Type": "AWS::StepFunctions::StateMachine",
+          "Properties": {
+            "StateMachineName": "upd-sm",
+            "RoleArn": "arn:aws:iam::000000000000:role/r",
+            "DefinitionString": "{\"StartAt\":\"A\",\"States\":{\"A\":{\"Type\":\"Succeed\"}}}"
+          }
+        }
+      }
+    }"#;
+    let template_b = r#"{
+      "Resources": {
+        "SM2": {
+          "Type": "AWS::StepFunctions::StateMachine",
+          "Properties": {
+            "StateMachineName": "upd-sm",
+            "RoleArn": "arn:aws:iam::000000000000:role/r",
+            "DefinitionString": "{\"StartAt\":\"B\",\"States\":{\"B\":{\"Type\":\"Succeed\"}}}"
+          }
+        }
+      }
+    }"#;
+
+    cfn.create_stack()
+        .stack_name("upd-stack")
+        .template_body(template_a)
+        .send()
+        .await
+        .expect("create_stack");
+
+    cfn.update_stack()
+        .stack_name("upd-stack")
+        .template_body(template_b)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let arn = "arn:aws:states:us-east-1:123456789012:stateMachine:upd-sm";
+    let sm = sfn
+        .describe_state_machine()
+        .state_machine_arn(arn)
+        .send()
+        .await
+        .expect("describe_state_machine");
+    assert!(
+        sm.definition().contains("\"StartAt\":\"B\""),
+        "stack update did not propagate the new definition: {}",
+        sm.definition()
+    );
+    assert!(
+        !sm.definition().contains("\"StartAt\":\"A\""),
+        "stale definition still present: {}",
+        sm.definition()
+    );
+}
+
+/// A pinned `DefinitionS3Location.Version` must load that exact object
+/// version, not whatever is current (issue #1647 review follow-up).
+#[tokio::test]
+async fn cfn_state_machine_reads_pinned_s3_definition_version() {
+    use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let s3 = server.s3_client().await;
+    let sfn = aws_sdk_sfn::Client::new(&server.aws_config().await);
+
+    s3.create_bucket()
+        .bucket("asl-versions")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_versioning()
+        .bucket("asl-versions")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // v1 is the definition we will pin; v2 becomes current.
+    let v1 = r#"{"StartAt":"V1","States":{"V1":{"Type":"Succeed"}}}"#;
+    let v2 = r#"{"StartAt":"V2","States":{"V2":{"Type":"Succeed"}}}"#;
+    let put1 = s3
+        .put_object()
+        .bucket("asl-versions")
+        .key("def.json")
+        .body(ByteStream::from(v1.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let version_id = put1
+        .version_id()
+        .expect("versioned put returns a version id");
+    s3.put_object()
+        .bucket("asl-versions")
+        .key("def.json")
+        .body(ByteStream::from(v2.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    let template = format!(
+        r#"{{
+          "Resources": {{
+            "SM": {{
+              "Type": "AWS::StepFunctions::StateMachine",
+              "Properties": {{
+                "StateMachineName": "ver-sm",
+                "RoleArn": "arn:aws:iam::000000000000:role/r",
+                "DefinitionS3Location": {{"Bucket": "asl-versions", "Key": "def.json", "Version": "{version_id}"}}
+              }}
+            }}
+          }}
+        }}"#
+    );
+
+    cfn.create_stack()
+        .stack_name("ver-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let sm = sfn
+        .describe_state_machine()
+        .state_machine_arn("arn:aws:states:us-east-1:123456789012:stateMachine:ver-sm")
+        .send()
+        .await
+        .expect("describe_state_machine");
+    assert!(
+        sm.definition().contains("\"V1\""),
+        "pinned version body not loaded: {}",
+        sm.definition()
+    );
+    assert!(
+        !sm.definition().contains("\"V2\""),
+        "current (unpinned) body was loaded instead of the pinned version: {}",
+        sm.definition()
+    );
 }
