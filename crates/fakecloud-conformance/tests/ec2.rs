@@ -5042,3 +5042,467 @@ async fn ec2_describe_fleet_instances() {
         .unwrap();
     assert_eq!(r.fleet_id(), Some(id.as_str()));
 }
+
+// ---- capacity reservations ----
+
+async fn make_cr(c: &aws_sdk_ec2::Client) -> String {
+    c.create_capacity_reservation()
+        .instance_type("t3.micro")
+        .instance_platform(aws_sdk_ec2::types::CapacityReservationInstancePlatform::LinuxUnix)
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap()
+        .capacity_reservation()
+        .unwrap()
+        .capacity_reservation_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateCapacityReservation", checksum = "109889e7")]
+#[tokio::test]
+async fn ec2_create_capacity_reservation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_capacity_reservation()
+        .instance_type("t3.micro")
+        .instance_platform(aws_sdk_ec2::types::CapacityReservationInstancePlatform::LinuxUnix)
+        .instance_count(2)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .capacity_reservation()
+        .unwrap()
+        .capacity_reservation_id()
+        .unwrap()
+        .starts_with("cr-"));
+}
+
+#[test_action("ec2", "DescribeCapacityReservations", checksum = "86846084")]
+#[tokio::test]
+async fn ec2_describe_capacity_reservations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cr(&c).await;
+    let r = c
+        .describe_capacity_reservations()
+        .capacity_reservation_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.capacity_reservations().len(), 1);
+}
+
+#[test_action("ec2", "CancelCapacityReservation", checksum = "72d1c5ef")]
+#[tokio::test]
+async fn ec2_cancel_capacity_reservation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cr(&c).await;
+    let r = c
+        .cancel_capacity_reservation()
+        .capacity_reservation_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "ModifyCapacityReservation", checksum = "2ca1d61c")]
+#[tokio::test]
+async fn ec2_modify_capacity_reservation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cr(&c).await;
+    let r = c
+        .modify_capacity_reservation()
+        .capacity_reservation_id(&id)
+        .instance_count(3)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "GetCapacityReservationUsage", checksum = "58a97958")]
+#[tokio::test]
+async fn ec2_get_capacity_reservation_usage() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cr(&c).await;
+    let r = c
+        .get_capacity_reservation_usage()
+        .capacity_reservation_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.capacity_reservation_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "e0539ad5")]
+#[tokio::test]
+async fn ec2_create_capacity_reservation_fleet() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_capacity_reservation_fleet()
+        .instance_type_specifications(
+            aws_sdk_ec2::types::ReservationFleetInstanceSpecification::builder()
+                .instance_type(aws_sdk_ec2::types::InstanceType::T3Micro)
+                .build(),
+        )
+        .total_target_capacity(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .capacity_reservation_fleet_id()
+        .unwrap()
+        .starts_with("crf-"));
+}
+
+#[test_action("ec2", "DescribeCapacityReservationFleets", checksum = "7e40b03a")]
+#[tokio::test]
+async fn ec2_describe_capacity_reservation_fleets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_capacity_reservation_fleet()
+        .total_target_capacity(1)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_capacity_reservation_fleets()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.capacity_reservation_fleets().is_empty());
+}
+
+#[test_action("ec2", "CancelCapacityReservationFleets", checksum = "1996c962")]
+#[tokio::test]
+async fn ec2_cancel_capacity_reservation_fleets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_capacity_reservation_fleet()
+        .total_target_capacity(1)
+        .send()
+        .await
+        .unwrap()
+        .capacity_reservation_fleet_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .cancel_capacity_reservation_fleets()
+        .capacity_reservation_fleet_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.successful_fleet_cancellations().is_empty());
+}
+
+#[test_action("ec2", "ModifyCapacityReservationFleet", checksum = "a873bc15")]
+#[tokio::test]
+async fn ec2_modify_capacity_reservation_fleet() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_capacity_reservation_fleet()
+        .capacity_reservation_fleet_id("crf-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action(
+    "ec2",
+    "ModifyInstanceCapacityReservationAttributes",
+    checksum = "cd67dbe2"
+)]
+#[tokio::test]
+async fn ec2_modify_instance_capacity_reservation_attributes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_instance_capacity_reservation_attributes()
+        .instance_id("i-1")
+        .capacity_reservation_specification(
+            aws_sdk_ec2::types::CapacityReservationSpecification::builder()
+                .capacity_reservation_preference(
+                    aws_sdk_ec2::types::CapacityReservationPreference::Open,
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "CreateCapacityReservationBySplitting", checksum = "de4f15b5")]
+#[tokio::test]
+async fn ec2_create_capacity_reservation_by_splitting() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cr(&c).await;
+    let r = c
+        .create_capacity_reservation_by_splitting()
+        .source_capacity_reservation_id(&id)
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.destination_capacity_reservation().is_some());
+}
+
+#[test_action("ec2", "MoveCapacityReservationInstances", checksum = "d3c04631")]
+#[tokio::test]
+async fn ec2_move_capacity_reservation_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .move_capacity_reservation_instances()
+        .source_capacity_reservation_id("cr-1")
+        .destination_capacity_reservation_id("cr-2")
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_count(), Some(1));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeCapacityReservationBillingRequests",
+    checksum = "c9ec72d0"
+)]
+#[tokio::test]
+async fn ec2_describe_capacity_reservation_billing_requests() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_capacity_reservation_billing_requests()
+        .role(aws_sdk_ec2::types::CallerRole::OdcrOwner)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_reservation_billing_requests().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "AssociateCapacityReservationBillingOwner",
+    checksum = "e1bc0790"
+)]
+#[tokio::test]
+async fn ec2_associate_capacity_reservation_billing_owner() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .associate_capacity_reservation_billing_owner()
+        .capacity_reservation_id("cr-1")
+        .unused_reservation_billing_owner_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action(
+    "ec2",
+    "DisassociateCapacityReservationBillingOwner",
+    checksum = "a18b20a8"
+)]
+#[tokio::test]
+async fn ec2_disassociate_capacity_reservation_billing_owner() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disassociate_capacity_reservation_billing_owner()
+        .capacity_reservation_id("cr-1")
+        .unused_reservation_billing_owner_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action(
+    "ec2",
+    "AcceptCapacityReservationBillingOwnership",
+    checksum = "80e3b60e"
+)]
+#[tokio::test]
+async fn ec2_accept_capacity_reservation_billing_ownership() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_capacity_reservation_billing_ownership()
+        .capacity_reservation_id("cr-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action(
+    "ec2",
+    "RejectCapacityReservationBillingOwnership",
+    checksum = "a8c692c0"
+)]
+#[tokio::test]
+async fn ec2_reject_capacity_reservation_billing_ownership() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .reject_capacity_reservation_billing_ownership()
+        .capacity_reservation_id("cr-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "DescribeCapacityBlockOfferings", checksum = "a83060bf")]
+#[tokio::test]
+async fn ec2_describe_capacity_block_offerings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_capacity_block_offerings()
+        .capacity_duration_hours(24)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_block_offerings().is_empty());
+}
+
+#[test_action("ec2", "DescribeCapacityBlocks", checksum = "0b57ee2c")]
+#[tokio::test]
+async fn ec2_describe_capacity_blocks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_capacity_blocks().send().await.unwrap();
+    assert!(r.capacity_blocks().is_empty());
+}
+
+#[test_action("ec2", "PurchaseCapacityBlock", checksum = "3794b5e7")]
+#[tokio::test]
+async fn ec2_purchase_capacity_block() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .purchase_capacity_block()
+        .capacity_block_offering_id("cbo-1")
+        .instance_platform(aws_sdk_ec2::types::CapacityReservationInstancePlatform::LinuxUnix)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_reservation().is_some());
+}
+
+#[test_action("ec2", "DescribeCapacityBlockStatus", checksum = "1fa80f6e")]
+#[tokio::test]
+async fn ec2_describe_capacity_block_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_capacity_block_status().send().await.unwrap();
+    assert!(r.capacity_block_statuses().is_empty());
+}
+
+#[test_action("ec2", "DescribeCapacityBlockExtensionHistory", checksum = "b580d0a1")]
+#[tokio::test]
+async fn ec2_describe_capacity_block_extension_history() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_capacity_block_extension_history()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_block_extensions().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeCapacityBlockExtensionOfferings",
+    checksum = "d06c73be"
+)]
+#[tokio::test]
+async fn ec2_describe_capacity_block_extension_offerings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_capacity_block_extension_offerings()
+        .capacity_block_extension_duration_hours(24)
+        .capacity_reservation_id("cr-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_block_extension_offerings().is_empty());
+}
+
+#[test_action("ec2", "PurchaseCapacityBlockExtension", checksum = "75eb37c1")]
+#[tokio::test]
+async fn ec2_purchase_capacity_block_extension() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .purchase_capacity_block_extension()
+        .capacity_block_extension_offering_id("cbeo-1")
+        .capacity_reservation_id("cr-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.capacity_block_extensions().is_empty());
+}
+
+#[test_action("ec2", "DescribeCapacityReservationTopology", checksum = "775ada1f")]
+#[tokio::test]
+async fn ec2_describe_capacity_reservation_topology() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_capacity_reservation_topology()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "CreateInterruptibleCapacityReservationAllocation",
+    checksum = "d116b139"
+)]
+#[tokio::test]
+async fn ec2_create_interruptible_capacity_reservation_allocation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_interruptible_capacity_reservation_allocation()
+        .capacity_reservation_id("cr-1")
+        .instance_count(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "UpdateInterruptibleCapacityReservationAllocation",
+    checksum = "645c8a4d"
+)]
+#[tokio::test]
+async fn ec2_update_interruptible_capacity_reservation_allocation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.update_interruptible_capacity_reservation_allocation()
+        .capacity_reservation_id("cr-1")
+        .target_instance_count(2)
+        .send()
+        .await
+        .unwrap();
+}
