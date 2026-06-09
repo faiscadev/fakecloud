@@ -432,28 +432,25 @@ impl LambdaService {
 
         // NOTE: We intentionally do not try to disambiguate URLs that
         // collapsed because an httpLabel was elided (e.g.
-        // `/functions/` vs `/functions`). Real AWS treats those as
-        // the same path — both hit `ListFunctions` — and we have
-        // e2e coverage that relies on the trailing-slash behaviour
-        // (`host_routing::unsigned_lambda_list_functions_via_host_header`).
-        // Synthetic conformance probes that elide a required path
-        // identifier are inherently un-faithful to the SDK; accept
-        // the small false-positive count rather than break a real
-        // SDK convention.
+        // `/functions/` vs `/functions`). Real AWS treats both as
+        // `ListFunctions`, and botocore actually *serialized*
+        // `ListFunctions` as `GET /2015-03-31/functions/` (trailing
+        // slash) until botocore 1.40 (mid-2025) — so the entire pre-1.40
+        // install base (pinned boto3, older CLI images) sends that form
+        // (issue #1645). Routing it to `GetFunction` broke
+        // `aws lambda list-functions` for those clients with a confusing
+        // "FunctionName is required". Synthetic conformance probes that
+        // elide a required path identifier are inherently un-faithful to
+        // the SDK; the elided-FunctionName probe is steered to a sentinel
+        // path in the conformance harness instead of relying on this
+        // route, so accept both `/functions` forms as `ListFunctions`.
 
         let action = match (&req.method, segs.len(), collection, third) {
             (&Method::POST, 2, Some("functions"), _) => "CreateFunction",
-            (&Method::GET, 2, Some("functions"), _) => {
-                // `GET .../functions` is `ListFunctions`. `GET .../functions/`
-                // (trailing slash) signals a `GetFunction` call whose
-                // `FunctionName` httpLabel was elided — route there so it
-                // can reject the missing identifier.
-                if req.raw_path.ends_with("/functions/") {
-                    "GetFunction"
-                } else {
-                    "ListFunctions"
-                }
-            }
+            // Both `GET .../functions` and `GET .../functions/` are
+            // `ListFunctions` — real AWS tolerates the trailing slash and
+            // pre-1.40 botocore always sent it.
+            (&Method::GET, 2, Some("functions"), _) => "ListFunctions",
             (&Method::GET, 3, Some("functions"), _) => "GetFunction",
             (&Method::DELETE, 3, Some("functions"), _) => "DeleteFunction",
             (&Method::POST, 4, Some("functions"), Some("invocations")) => "Invoke",

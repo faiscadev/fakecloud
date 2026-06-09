@@ -2924,3 +2924,36 @@ async fn create_function_succeeds_without_runtime_prepull_hook() {
     let resp = svc.handle(req).await.expect("create function");
     assert_eq!(resp.status, StatusCode::CREATED);
 }
+
+/// Both `GET /2015-03-31/functions` and the trailing-slash
+/// `GET /2015-03-31/functions/` are `ListFunctions`. botocore serialized
+/// `ListFunctions` with the trailing slash until 1.40 (mid-2025), so the
+/// whole pre-1.40 install base depends on the second form (issue #1645).
+#[test]
+fn resolve_action_list_functions_both_slash_forms() {
+    let bare = make_request(Method::GET, "/2015-03-31/functions", "");
+    assert_eq!(
+        LambdaService::resolve_action(&bare).map(|(a, _)| a),
+        Some("ListFunctions")
+    );
+
+    // `path_segments` drops the empty trailing segment, so the only
+    // signal of the trailing slash is `raw_path` — set it explicitly.
+    let mut trailing = make_request(Method::GET, "/2015-03-31/functions", "");
+    trailing.raw_path = "/2015-03-31/functions/".to_string();
+    assert_eq!(
+        LambdaService::resolve_action(&trailing).map(|(a, _)| a),
+        Some("ListFunctions"),
+        "trailing-slash ListFunctions (pre-1.40 botocore) must not route to GetFunction"
+    );
+}
+
+/// A real `GetFunction` (a function name in the path) still routes to
+/// `GetFunction` — the trailing-slash fix must not regress that.
+#[test]
+fn resolve_action_get_function_with_name() {
+    let req = make_request(Method::GET, "/2015-03-31/functions/my-fn", "");
+    let (action, resource) = LambdaService::resolve_action(&req).expect("routed");
+    assert_eq!(action, "GetFunction");
+    assert_eq!(resource.as_deref(), Some("my-fn"));
+}
