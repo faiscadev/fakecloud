@@ -176,18 +176,26 @@ pub(crate) fn create_transit_gateway_connect(
     let transport = require(&req.query_params, "TransportTransitGatewayAttachmentId")?;
     require_struct(&req.query_params, "Options")?;
     let id = gen_id("tgw-attach");
-    {
+    // Inherit the transit gateway from the transport attachment so the connect
+    // reports the real parent rather than a placeholder.
+    let tgw_id = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
+        let state = accounts.get_or_create(&req.account_id);
+        let tgw_id = state
+            .tgw_attachments
+            .get(&transport)
+            .map(|a| a.tgw_id.clone())
+            .unwrap_or_else(|| "tgw-0".to_string());
+        state
             .tgw_connects
-            .insert(id.clone(), (transport.clone(), "tgw-0".to_string()));
-    }
+            .insert(id.clone(), (transport.clone(), tgw_id.clone()));
+        tgw_id
+    };
     let body = format!(
         "{}{}{}<state>available</state><options><protocol>gre</protocol></options>{}",
         ec2_elem("transitGatewayAttachmentId", &id),
         ec2_elem("transportTransitGatewayAttachmentId", &transport),
-        ec2_elem("transitGatewayId", "tgw-0"),
+        ec2_elem("transitGatewayId", &tgw_id),
         ec2_elem("creationTime", FIXED_TIME),
     );
     Ok(Ec2Service::respond(
@@ -379,8 +387,9 @@ pub(crate) fn delete_transit_gateway_policy_table(
     let id = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     let tgw = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
+        let state = accounts.get_or_create(&req.account_id);
+        state.tgw_policy_table_associations.remove(&id);
+        state
             .tgw_policy_tables
             .remove(&id)
             .unwrap_or_else(|| "tgw-0".to_string())
@@ -417,11 +426,22 @@ pub(crate) fn describe_transit_gateway_policy_tables(
 }
 
 pub(crate) fn associate_transit_gateway_policy_table(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
+    {
+        let mut accounts = svc.state.write();
+        let assocs = accounts
+            .get_or_create(&req.account_id)
+            .tgw_policy_table_associations
+            .entry(pt.clone())
+            .or_default();
+        if !assocs.contains(&att) {
+            assocs.push(att.clone());
+        }
+    }
     let body = format!(
         "<association>{}{}<resourceId>vpc-0</resourceId><resourceType>vpc</resourceType><state>associated</state></association>",
         ec2_elem("transitGatewayPolicyTableId", &pt),
@@ -435,11 +455,21 @@ pub(crate) fn associate_transit_gateway_policy_table(
 }
 
 pub(crate) fn disassociate_transit_gateway_policy_table(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(assocs) = accounts
+            .get_or_create(&req.account_id)
+            .tgw_policy_table_associations
+            .get_mut(&pt)
+        {
+            assocs.retain(|a| a != &att);
+        }
+    }
     let body = format!(
         "<association>{}{}<resourceId>vpc-0</resourceId><resourceType>vpc</resourceType><state>disassociating</state></association>",
         ec2_elem("transitGatewayPolicyTableId", &pt),
@@ -453,15 +483,31 @@ pub(crate) fn disassociate_transit_gateway_policy_table(
 }
 
 pub(crate) fn get_transit_gateway_policy_table_associations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayPolicyTableId")?;
+    let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tgw_policy_table_associations.get(&pt))
+        .map(|atts| {
+            atts.iter()
+                .map(|att| {
+                    format!(
+                        "{}{}<resourceId>vpc-0</resourceId><resourceType>vpc</resourceType><state>associated</state>",
+                        ec2_elem("transitGatewayPolicyTableId", &pt),
+                        ec2_elem("transitGatewayAttachmentId", att),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayPolicyTableAssociations",
         &req.request_id,
-        &ec2_list("associations", &[]),
+        &ec2_list("associations", &items),
     ))
 }
 
@@ -480,15 +526,24 @@ pub(crate) fn get_transit_gateway_policy_table_entries(
 
 // ---- route table announcements ----
 
-fn announcement_xml(id: &str, rtb: &str, peering: &str) -> String {
+fn announcement_xml(id: &str, rtb: &str, peering: &str, tgw_id: &str) -> String {
     format!(
         "{}{}<peeringAttachmentId>{}</peeringAttachmentId><announcementDirection>outgoing</announcementDirection>{}<state>available</state>{}",
         ec2_elem("transitGatewayRouteTableAnnouncementId", id),
-        ec2_elem("transitGatewayId", "tgw-0"),
+        ec2_elem("transitGatewayId", tgw_id),
         peering,
         ec2_elem("transitGatewayRouteTableId", rtb),
         ec2_elem("creationTime", FIXED_TIME),
     )
+}
+
+/// Resolve the parent transit gateway of a route table (placeholder if absent).
+fn tgw_of_rtb(state: &Ec2State, rtb: &str) -> String {
+    state
+        .tgw_route_tables
+        .get(rtb)
+        .map(|r| r.tgw_id.clone())
+        .unwrap_or_else(|| "tgw-0".to_string())
 }
 
 pub(crate) fn create_transit_gateway_route_table_announcement(
@@ -498,19 +553,21 @@ pub(crate) fn create_transit_gateway_route_table_announcement(
     let rtb = require(&req.query_params, "TransitGatewayRouteTableId")?;
     let peering = require(&req.query_params, "PeeringAttachmentId")?;
     let id = gen_id("tgw-rtb-announce");
-    {
+    let tgw_id = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
+        let state = accounts.get_or_create(&req.account_id);
+        let tgw_id = tgw_of_rtb(state, &rtb);
+        state
             .tgw_announcements
             .insert(id.clone(), (rtb.clone(), peering.clone()));
-    }
+        tgw_id
+    };
     Ok(Ec2Service::respond(
         "CreateTransitGatewayRouteTableAnnouncement",
         &req.request_id,
         &format!(
             "<transitGatewayRouteTableAnnouncement>{}</transitGatewayRouteTableAnnouncement>",
-            announcement_xml(&id, &rtb, &peering)
+            announcement_xml(&id, &rtb, &peering, &tgw_id)
         ),
     ))
 }
@@ -520,20 +577,19 @@ pub(crate) fn delete_transit_gateway_route_table_announcement(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TransitGatewayRouteTableAnnouncementId")?;
-    let (rtb, peering) = {
+    let (rtb, peering, tgw_id) = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
-            .tgw_announcements
-            .remove(&id)
-            .unwrap_or_default()
+        let state = accounts.get_or_create(&req.account_id);
+        let (rtb, peering) = state.tgw_announcements.remove(&id).unwrap_or_default();
+        let tgw_id = tgw_of_rtb(state, &rtb);
+        (rtb, peering, tgw_id)
     };
     Ok(Ec2Service::respond(
         "DeleteTransitGatewayRouteTableAnnouncement",
         &req.request_id,
         &format!(
             "<transitGatewayRouteTableAnnouncement>{}</transitGatewayRouteTableAnnouncement>",
-            announcement_xml(&id, &rtb, &peering)
+            announcement_xml(&id, &rtb, &peering, &tgw_id)
         ),
     ))
 }
@@ -549,7 +605,7 @@ pub(crate) fn describe_transit_gateway_route_table_announcements(
     let mut items: Vec<String> = state
         .tgw_announcements
         .iter()
-        .map(|(id, (rtb, p))| announcement_xml(id, rtb, p))
+        .map(|(id, (rtb, p))| announcement_xml(id, rtb, p, &tgw_of_rtb(state, rtb)))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(

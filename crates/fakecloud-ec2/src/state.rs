@@ -715,6 +715,9 @@ pub struct Ec2State {
     /// policy-table-id -> tgw id.
     #[serde(default)]
     pub tgw_policy_tables: HashMap<String, String>,
+    /// policy-table-id -> associated attachment ids.
+    #[serde(default)]
+    pub tgw_policy_table_associations: HashMap<String, Vec<String>>,
     /// announcement-id -> (route-table id, peering-attachment id).
     #[serde(default)]
     pub tgw_announcements: HashMap<String, (String, String)>,
