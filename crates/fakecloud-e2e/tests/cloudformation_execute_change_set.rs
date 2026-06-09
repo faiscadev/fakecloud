@@ -1,5 +1,7 @@
 mod helpers;
 
+use aws_sdk_cloudformation::types::ChangeSetType;
+use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -330,5 +332,171 @@ async fn execute_change_set_emits_stack_events_and_lists_resources() {
         rows.iter()
             .any(|(l, s)| l == "cs-events-stack" && s == "UPDATE_IN_PROGRESS"),
         "expected stack UPDATE_IN_PROGRESS, got {rows:?}"
+    );
+}
+
+/// `aws cloudformation deploy`, SAM, and CDK create first-time stacks
+/// through a `ChangeSetType=CREATE` change set, not raw CreateStack. The
+/// stack must materialize in `REVIEW_IN_PROGRESS` and be created on
+/// execute (issue #1646, gap 1). DescribeStacks on the not-yet-created
+/// stack must return an error so the tools' existence probe works (gap 3).
+#[tokio::test]
+async fn create_type_change_set_creates_stack_on_execute() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+    let sqs = server.sqs_client().await;
+
+    // Gap 3: probing a stack that doesn't exist yet must error, not
+    // return an empty list (SAM/`deploy` catch this to branch create-vs-update).
+    let probe = cf
+        .describe_stacks()
+        .stack_name("cs-create-stack")
+        .send()
+        .await;
+    assert!(
+        probe.is_err(),
+        "DescribeStacks on a missing stack must error, got {probe:?}"
+    );
+
+    let template = r#"{
+        "Resources": {
+            "NewQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-create-queue"}
+            }
+        }
+    }"#;
+
+    cf.create_change_set()
+        .stack_name("cs-create-stack")
+        .change_set_name("create-cs")
+        .change_set_type(ChangeSetType::Create)
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    // The stack now exists in REVIEW_IN_PROGRESS (no resources yet).
+    let review = cf
+        .describe_stacks()
+        .stack_name("cs-create-stack")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        review.stacks()[0].stack_status().map(|s| s.as_str()),
+        Some("REVIEW_IN_PROGRESS"),
+    );
+    assert!(
+        !sqs.list_queues()
+            .send()
+            .await
+            .unwrap()
+            .queue_urls()
+            .iter()
+            .any(|u| u.contains("cs-create-queue")),
+        "queue must not exist before the change set executes"
+    );
+
+    cf.execute_change_set()
+        .stack_name("cs-create-stack")
+        .change_set_name("create-cs")
+        .send()
+        .await
+        .unwrap();
+
+    // Stack created; the queue is provisioned.
+    let created = cf
+        .describe_stacks()
+        .stack_name("cs-create-stack")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        created.stacks()[0].stack_status().map(|s| s.as_str()),
+        Some("CREATE_COMPLETE"),
+    );
+    assert!(
+        sqs.list_queues()
+            .send()
+            .await
+            .unwrap()
+            .queue_urls()
+            .iter()
+            .any(|u| u.contains("cs-create-queue")),
+        "queue should be created after executing the CREATE change set"
+    );
+}
+
+/// SAM always — and `aws cloudformation deploy`/CDK for large templates —
+/// pass the template by `TemplateURL` pointing at an object in S3. The
+/// change set must fetch it (issue #1646, gap 2) rather than store an
+/// empty template and silently no-op on execute.
+#[tokio::test]
+async fn create_change_set_resolves_template_url() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+    let s3 = server.s3_client().await;
+    let sns = server.sns_client().await;
+
+    let template = r#"{
+        "Resources": {
+            "UrlTopic": {
+                "Type": "AWS::SNS::Topic",
+                "Properties": {"TopicName": "cs-url-topic"}
+            }
+        }
+    }"#;
+
+    s3.create_bucket()
+        .bucket("cfn-templates")
+        .send()
+        .await
+        .unwrap();
+    s3.put_object()
+        .bucket("cfn-templates")
+        .key("deploy/template.json")
+        .body(ByteStream::from(template.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    let template_url = format!("{}/cfn-templates/deploy/template.json", server.endpoint());
+
+    cf.create_change_set()
+        .stack_name("cs-url-stack")
+        .change_set_name("url-cs")
+        .change_set_type(ChangeSetType::Create)
+        .template_url(&template_url)
+        .send()
+        .await
+        .unwrap();
+
+    cf.execute_change_set()
+        .stack_name("cs-url-stack")
+        .change_set_name("url-cs")
+        .send()
+        .await
+        .unwrap();
+
+    let stacks = cf
+        .describe_stacks()
+        .stack_name("cs-url-stack")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stacks.stacks()[0].stack_status().map(|s| s.as_str()),
+        Some("CREATE_COMPLETE"),
+    );
+    assert!(
+        sns.list_topics()
+            .send()
+            .await
+            .unwrap()
+            .topics()
+            .iter()
+            .any(|t| t.topic_arn().is_some_and(|a| a.contains("cs-url-topic"))),
+        "the TemplateURL-sourced topic should be provisioned"
     );
 }

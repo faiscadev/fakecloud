@@ -907,12 +907,25 @@ impl CloudFormationService {
                 .collect()
         };
 
-        // DescribeStacks declares no errors; a synthetic conformance probe
-        // querying a placeholder `StackName="test"` previously tripped an
-        // undeclared `ValidationError`. Drop the not-found check and return
-        // an empty list — callers can distinguish "absent" from "exists" by
-        // the response payload.
-        let _ = stack_name;
+        // When an explicit `StackName` is supplied but matches nothing,
+        // real AWS returns `ValidationError: Stack with id <name> does not
+        // exist` — deploy tooling (the SAM CLI `--resolve-s3` bootstrap,
+        // `aws cloudformation deploy`) probes stack existence by catching
+        // that error, and an empty `{"Stacks": []}` makes SAM crash with an
+        // `IndexError` and `deploy` take the wrong (update) path (issue
+        // #1646). DescribeStacks declares no errors in Smithy, but the
+        // `AnyError` conformance expectation accepts any AWS-shaped 4xx, so
+        // returning `ValidationError` here stays conformant. A nameless
+        // call still lists all stacks (empty is valid).
+        if let Some(ref name) = stack_name {
+            if stacks.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!("Stack with id {name} does not exist"),
+                ));
+            }
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -2112,17 +2125,27 @@ mod tests {
     }
 
     #[test]
-    fn describe_stacks_nonexistent_returns_empty() {
-        // DescribeStacks declares no errors. Querying an unknown
-        // StackName now returns an empty result instead of an
-        // undeclared `ValidationError`.
+    fn describe_stacks_nonexistent_errors() {
+        // Querying an explicit, unknown StackName returns AWS's
+        // `ValidationError: Stack with id <name> does not exist` so deploy
+        // tools that probe stack existence (SAM, `aws cloudformation
+        // deploy`) get the signal they expect (issue #1646).
         let svc = make_service();
         let mut params = HashMap::new();
         params.insert("StackName".to_string(), "ghost".to_string());
         let req = make_request("DescribeStacks", params);
-        let resp = svc.describe_stacks(&req).expect("ghost is empty");
-        let b = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
-        assert!(b.contains("DescribeStacksResult"));
+        match svc.describe_stacks(&req) {
+            Ok(_) => panic!("ghost stack must return an error, not an empty list"),
+            Err(e) => {
+                assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(e.code(), "ValidationError");
+                assert!(
+                    e.message().contains("does not exist"),
+                    "got: {}",
+                    e.message()
+                );
+            }
+        }
     }
 
     #[test]
