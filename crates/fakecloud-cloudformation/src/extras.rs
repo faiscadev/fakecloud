@@ -20,7 +20,7 @@ use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::CloudFormationService;
-use crate::state::StackResource;
+use crate::state::{Stack, StackResource};
 use crate::template;
 
 const NS: &str = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
@@ -127,7 +127,49 @@ fn require_collection(
     }
 }
 
+/// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles
+/// both path-style (`https://s3.us-east-1.amazonaws.com/bucket/key`, or a
+/// fakecloud endpoint `http://127.0.0.1:4566/bucket/key`) and
+/// virtual-hosted (`https://bucket.s3.amazonaws.com/key`) forms, and
+/// drops any query string. Returns `None` if the shape isn't recognized.
+fn parse_s3_url(url: &str) -> Option<(String, String)> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let (host, after) = rest.split_once('/')?;
+    let path = after.split(['?', '#']).next().unwrap_or(after);
+    // Virtual-hosted: `<bucket>.s3...`. The `.s3` guard avoids treating a
+    // path-style host like `s3.amazonaws.com` (no leading bucket) as one.
+    if let Some(idx) = host.find(".s3") {
+        let bucket = &host[..idx];
+        if !bucket.is_empty() {
+            return Some((bucket.to_string(), path.to_string()));
+        }
+    }
+    // Path-style: first path segment is the bucket, the rest is the key.
+    let (bucket, key) = path.split_once('/')?;
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((bucket.to_string(), key.to_string()))
+}
+
 impl CloudFormationService {
+    /// Resolve a CloudFormation `TemplateURL` against fakecloud's own S3.
+    /// `sam deploy`, `aws cloudformation deploy`, and CDK upload the
+    /// template to S3 and pass its URL; the object is in fakecloud's S3 by
+    /// the time the change set is created, so read it back. Returns `None`
+    /// if the URL can't be parsed or the object isn't present.
+    fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
+        let (bucket, key) = parse_s3_url(url)?;
+        let mut accounts = self.deps.s3.write();
+        let state = accounts.get_or_create(account_id);
+        let body_ref = {
+            let b = state.buckets.get(&bucket)?;
+            b.objects.get(&key)?.body.clone()
+        };
+        let bytes = state.read_body(&body_ref).ok()?;
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+
     pub(crate) fn handle_extra_action(
         &self,
         req: &AwsRequest,
@@ -148,7 +190,30 @@ impl CloudFormationService {
                     .get("ChangeSetName")
                     .ok_or_else(|| missing("ChangeSetName"))?
                     .clone();
-                let template_body = params.get("TemplateBody").cloned().unwrap_or_default();
+                // `aws cloudformation deploy`, SAM, and CDK pass the template
+                // by `TemplateURL` (always, once an S3 bucket is configured),
+                // not inline `TemplateBody`. The template is already in
+                // fakecloud's own S3 at this point, so fetch it back instead
+                // of storing an empty template and silently no-op'ing at
+                // execute time (issue #1646).
+                let template_body = {
+                    let inline = params.get("TemplateBody").cloned().unwrap_or_default();
+                    if inline.trim().is_empty() {
+                        params
+                            .get("TemplateURL")
+                            .and_then(|url| self.fetch_template_from_url(&aid, url))
+                            .unwrap_or(inline)
+                    } else {
+                        inline
+                    }
+                };
+                // `ChangeSetType` is `CREATE` for first-time deploys (the
+                // stack doesn't exist yet) and `UPDATE`/`IMPORT` otherwise.
+                // AWS defaults an unset value to `UPDATE`.
+                let change_set_type = params
+                    .get("ChangeSetType")
+                    .map(|s| s.to_ascii_uppercase())
+                    .unwrap_or_else(|| "UPDATE".to_string());
 
                 let cs_params = CloudFormationService::extract_parameters(&params);
                 let cs_tags = CloudFormationService::extract_tags(&params);
@@ -302,6 +367,62 @@ impl CloudFormationService {
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
+                // A `CREATE`-type change set leaves the stack in
+                // `REVIEW_IN_PROGRESS` on AWS; executing it is what actually
+                // creates the stack. Materialize that placeholder now so
+                // `ExecuteChangeSet` (and the existence probes that
+                // `aws cloudformation deploy` / SAM run) find it (issue #1646).
+                if change_set_type == "CREATE" {
+                    // Status of any non-deleted stack matching this StackName.
+                    // `StackName` may be a name *or* a stack id, so match both
+                    // (otherwise a CREATE against an existing stack referenced
+                    // by id slips past the AlreadyExists check). A
+                    // `DELETE_COMPLETE` leftover counts as absent.
+                    let live_status = state
+                        .stacks
+                        .values()
+                        .find(|s| {
+                            (s.name == stack_name || s.stack_id == stack_name)
+                                && s.status != "DELETE_COMPLETE"
+                        })
+                        .map(|s| s.status.clone());
+                    match live_status.as_deref() {
+                        // Fresh name, or a stale DELETE_COMPLETE entry to
+                        // replace: insert the placeholder.
+                        None => {
+                            state.stacks.insert(
+                                stack_name.clone(),
+                                Stack {
+                                    name: stack_name.clone(),
+                                    stack_id: stack_id_str.clone(),
+                                    template: String::new(),
+                                    status: "REVIEW_IN_PROGRESS".to_string(),
+                                    resources: Vec::new(),
+                                    parameters: BTreeMap::new(),
+                                    tags: BTreeMap::new(),
+                                    created_at: Utc::now(),
+                                    updated_at: None,
+                                    description: None,
+                                    notification_arns: Vec::new(),
+                                    outputs: Vec::new(),
+                                },
+                            );
+                        }
+                        // Already in review (an earlier CREATE change set):
+                        // additional CREATE change sets are allowed; keep the
+                        // existing placeholder.
+                        Some("REVIEW_IN_PROGRESS") => {}
+                        // A fully created stack exists — AWS rejects a CREATE
+                        // change set against it instead of silently updating.
+                        Some(_) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "AlreadyExistsException",
+                                format!("Stack [{stack_name}] already exists"),
+                            ));
+                        }
+                    }
+                }
                 store(&mut state.extras, "change_sets").insert(id.clone(), entry);
                 Ok(xml_response(
                     "CreateChangeSet",
@@ -458,18 +579,6 @@ impl CloudFormationService {
                 let stack_name = entry["StackName"].as_str().unwrap_or("").to_string();
                 let template_body = entry["TemplateBody"].as_str().unwrap_or("").to_string();
 
-                // No template stored: nothing to apply, just mark executed.
-                if template_body.trim().is_empty() {
-                    let mut accounts = self.state.write();
-                    let state = accounts.get_or_create(&aid);
-                    if let Some(m) = state.extras.get_mut("change_sets") {
-                        if let Some(e) = m.get_mut(&cs_id) {
-                            e["ExecutionStatus"] = json!("EXECUTE_COMPLETE");
-                        }
-                    }
-                    return Ok(xml_response("ExecuteChangeSet", String::new(), &rid));
-                }
-
                 let cs_tags: BTreeMap<String, String> = entry["Tags"]
                     .as_object()
                     .map(|m| {
@@ -495,7 +604,7 @@ impl CloudFormationService {
                     })
                     .unwrap_or_default();
 
-                let found_stack_id = {
+                let found: Option<String> = {
                     let accounts = self.state.read();
                     accounts.get(&aid).and_then(|s| {
                         s.stacks
@@ -506,8 +615,38 @@ impl CloudFormationService {
                             })
                             .map(|st| st.stack_id.clone())
                     })
+                };
+
+                // Empty change set: nothing to provision. Finalize a
+                // `REVIEW_IN_PROGRESS` stack (a CREATE change set with no
+                // resources still creates the — empty — stack) and mark the
+                // change set executed. This also covers synthetic route
+                // probes that execute a change set without ever creating a
+                // stack.
+                if template_body.trim().is_empty() {
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(sid) = &found {
+                        if let Some(stack) = state.stacks.values_mut().find(|s| &s.stack_id == sid)
+                        {
+                            if stack.status == "REVIEW_IN_PROGRESS" {
+                                stack.status = "CREATE_COMPLETE".to_string();
+                                stack.updated_at = Some(Utc::now());
+                            }
+                        }
+                    }
+                    if let Some(m) = state.extras.get_mut("change_sets") {
+                        if let Some(e) = m.get_mut(&cs_id) {
+                            e["ExecutionStatus"] = json!("EXECUTE_COMPLETE");
+                        }
+                    }
+                    return Ok(xml_response("ExecuteChangeSet", String::new(), &rid));
                 }
-                .ok_or_else(|| {
+
+                // A non-empty template needs a target stack: a
+                // `REVIEW_IN_PROGRESS` placeholder for CREATE, or a live
+                // stack for UPDATE. A missing stack is a real error.
+                let found_stack_id = found.ok_or_else(|| {
                     AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationError",
@@ -534,16 +673,33 @@ impl CloudFormationService {
                     .entry("AWS::URLSuffix".to_string())
                     .or_insert_with(|| "amazonaws.com".to_string());
 
-                let parsed = template::parse_template(&template_body, &cs_params).map_err(|e| {
-                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
-                })?;
+                // An empty body (a CREATE change set with no resources, or a
+                // probe with a placeholder template) parses to an empty
+                // template rather than erroring, mirroring CreateStack.
+                let parsed = if template_body.trim().is_empty() {
+                    template::ParsedTemplate {
+                        description: None,
+                        resources: Vec::new(),
+                        outputs: Vec::new(),
+                    }
+                } else {
+                    template::parse_template(&template_body, &cs_params).map_err(|e| {
+                        AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
+                    })?
+                };
 
                 let provisioner = self.provisioner(&found_stack_id, &aid, &req.region);
 
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
 
-                let (update_result, sid, stack_name_owned) = {
+                // A stack still in `REVIEW_IN_PROGRESS` was minted by a
+                // `CREATE` change set and has no resources yet — executing the
+                // change set creates it. `apply_resource_updates` provisions
+                // every resource as an Add when the stack starts empty, so the
+                // same code path serves both create and update; only the
+                // surfaced status differs (CREATE_* vs UPDATE_*).
+                let (update_result, sid, stack_name_owned, was_review) = {
                     let stack = state
                         .stacks
                         .values_mut()
@@ -555,7 +711,13 @@ impl CloudFormationService {
                                 format!("Stack [{stack_name}] does not exist"),
                             )
                         })?;
-                    stack.status = "UPDATE_IN_PROGRESS".to_string();
+                    let was_review = stack.status == "REVIEW_IN_PROGRESS";
+                    stack.status = if was_review {
+                        "CREATE_IN_PROGRESS"
+                    } else {
+                        "UPDATE_IN_PROGRESS"
+                    }
+                    .to_string();
                     let result = crate::service::apply_resource_updates(
                         stack,
                         &parsed.resources,
@@ -566,11 +728,13 @@ impl CloudFormationService {
                     let sid = stack.stack_id.clone();
                     let sname = stack.name.clone();
                     stack.template = template_body.clone();
-                    stack.status = if result.is_err() {
-                        "UPDATE_ROLLBACK_COMPLETE".to_string()
-                    } else {
-                        "UPDATE_COMPLETE".to_string()
-                    };
+                    stack.status = match (was_review, result.is_err()) {
+                        (true, false) => "CREATE_COMPLETE",
+                        (true, true) => "ROLLBACK_COMPLETE",
+                        (false, false) => "UPDATE_COMPLETE",
+                        (false, true) => "UPDATE_ROLLBACK_COMPLETE",
+                    }
+                    .to_string();
                     stack.parameters = cs_params.clone();
                     if !cs_tags.is_empty() {
                         stack.tags = cs_tags;
@@ -582,16 +746,25 @@ impl CloudFormationService {
                     if result.is_ok() {
                         stack.outputs.clear();
                     }
-                    (result, sid, sname)
+                    (result, sid, sname, was_review)
                 };
 
                 // Emit lifecycle events on the per-stack event log.
+                let (in_progress, complete, failed) = if was_review {
+                    ("CREATE_IN_PROGRESS", "CREATE_COMPLETE", "ROLLBACK_COMPLETE")
+                } else {
+                    (
+                        "UPDATE_IN_PROGRESS",
+                        "UPDATE_COMPLETE",
+                        "UPDATE_ROLLBACK_COMPLETE",
+                    )
+                };
                 crate::service::record_stack_status_event(
                     state,
                     &sid,
                     &stack_name_owned,
                     "AWS::CloudFormation::Stack",
-                    "UPDATE_IN_PROGRESS",
+                    in_progress,
                 );
                 let final_status = match &update_result {
                     Ok(changes) => {
@@ -601,9 +774,9 @@ impl CloudFormationService {
                             &stack_name_owned,
                             changes,
                         );
-                        "UPDATE_COMPLETE"
+                        complete
                     }
-                    Err(_) => "UPDATE_ROLLBACK_COMPLETE",
+                    Err(_) => failed,
                 };
                 crate::service::record_stack_status_event(
                     state,
@@ -1835,6 +2008,7 @@ impl CloudFormationService {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_s3_url;
     use crate::service::{CloudFormationDeps, CloudFormationService};
     use crate::state::{CloudFormationState, SharedCloudFormationState};
     use fakecloud_core::delivery::DeliveryBus;
@@ -1844,6 +2018,33 @@ mod tests {
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn parse_s3_url_handles_path_and_virtual_hosted() {
+        // Path-style against a fakecloud endpoint (what TemplateURL looks
+        // like locally) — key keeps its embedded slashes.
+        assert_eq!(
+            parse_s3_url("http://127.0.0.1:4566/bucket/deploy/template.json"),
+            Some(("bucket".to_string(), "deploy/template.json".to_string()))
+        );
+        // Path-style against real AWS S3 host.
+        assert_eq!(
+            parse_s3_url("https://s3.us-east-1.amazonaws.com/my-bucket/key.yaml"),
+            Some(("my-bucket".to_string(), "key.yaml".to_string()))
+        );
+        // Virtual-hosted style.
+        assert_eq!(
+            parse_s3_url("https://my-bucket.s3.amazonaws.com/key.yaml"),
+            Some(("my-bucket".to_string(), "key.yaml".to_string()))
+        );
+        // Query string (e.g. ?versionId=...) is dropped.
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/k.json?versionId=abc"),
+            Some(("b".to_string(), "k.json".to_string()))
+        );
+        // Not an object URL (no key).
+        assert_eq!(parse_s3_url("https://s3.amazonaws.com/bucket-only"), None);
+    }
 
     fn deps() -> CloudFormationDeps {
         use fakecloud_dynamodb::DynamoDbState;
