@@ -4117,3 +4117,445 @@ async fn ec2_modify_vpc_peering_connection_options() {
         .unwrap();
     assert!(r.requester_peering_connection_options().is_some());
 }
+
+// ---- VPC endpoints ----
+
+async fn make_vpce(c: &aws_sdk_ec2::Client) -> String {
+    c.create_vpc_endpoint()
+        .vpc_id("vpc-1")
+        .service_name("com.amazonaws.us-east-1.s3")
+        .send()
+        .await
+        .unwrap()
+        .vpc_endpoint()
+        .unwrap()
+        .vpc_endpoint_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateVpcEndpoint", checksum = "71acdc45")]
+#[tokio::test]
+async fn ec2_create_vpc_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_vpc_endpoint()
+        .vpc_id("vpc-1")
+        .service_name("com.amazonaws.us-east-1.s3")
+        .vpc_endpoint_type(aws_sdk_ec2::types::VpcEndpointType::Gateway)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .vpc_endpoint()
+        .unwrap()
+        .vpc_endpoint_id()
+        .unwrap()
+        .starts_with("vpce-"));
+}
+
+#[test_action("ec2", "DescribeVpcEndpoints", checksum = "9443c193")]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoints() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpce(&c).await;
+    let r = c
+        .describe_vpc_endpoints()
+        .vpc_endpoint_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.vpc_endpoints().len(), 1);
+}
+
+#[test_action("ec2", "DeleteVpcEndpoints", checksum = "ee333256")]
+#[tokio::test]
+async fn ec2_delete_vpc_endpoints() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpce(&c).await;
+    c.delete_vpc_endpoints()
+        .vpc_endpoint_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(c
+        .describe_vpc_endpoints()
+        .send()
+        .await
+        .unwrap()
+        .vpc_endpoints()
+        .is_empty());
+}
+
+#[test_action("ec2", "ModifyVpcEndpoint", checksum = "ccad418e")]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpce(&c).await;
+    let r = c
+        .modify_vpc_endpoint()
+        .vpc_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "DescribeVpcEndpointServices", checksum = "9a48aaa6")]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_services() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_vpc_endpoint_services().send().await.unwrap();
+    assert!(!r.service_names().is_empty());
+}
+
+#[test_action("ec2", "DescribeVpcEndpointConnections", checksum = "7ecaebfb")]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_connections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_vpc_endpoint_connections().send().await.unwrap();
+    assert!(r.vpc_endpoint_connections().is_empty());
+}
+
+#[test_action("ec2", "AcceptVpcEndpointConnections", checksum = "c0f5e44f")]
+#[tokio::test]
+async fn ec2_accept_vpc_endpoint_connections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .accept_vpc_endpoint_connections()
+        .service_id("vpce-svc-1")
+        .vpc_endpoint_ids("vpce-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.unsuccessful().is_empty());
+}
+
+#[test_action("ec2", "RejectVpcEndpointConnections", checksum = "9267e834")]
+#[tokio::test]
+async fn ec2_reject_vpc_endpoint_connections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .reject_vpc_endpoint_connections()
+        .service_id("vpce-svc-1")
+        .vpc_endpoint_ids("vpce-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.unsuccessful().is_empty());
+}
+
+#[test_action("ec2", "CreateVpcEndpointServiceConfiguration", checksum = "e7523b64")]
+#[tokio::test]
+async fn ec2_create_vpc_endpoint_service_configuration() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_vpc_endpoint_service_configuration()
+        .network_load_balancer_arns("arn:nlb")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .service_configuration()
+        .unwrap()
+        .service_id()
+        .unwrap()
+        .starts_with("vpce-svc-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeVpcEndpointServiceConfigurations",
+    checksum = "da49eaab"
+)]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_service_configurations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_vpc_endpoint_service_configuration()
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_vpc_endpoint_service_configurations()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.service_configurations().is_empty());
+}
+
+#[test_action("ec2", "DeleteVpcEndpointServiceConfigurations", checksum = "2ab9546c")]
+#[tokio::test]
+async fn ec2_delete_vpc_endpoint_service_configurations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_vpc_endpoint_service_configuration()
+        .send()
+        .await
+        .unwrap()
+        .service_configuration()
+        .unwrap()
+        .service_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_vpc_endpoint_service_configurations()
+        .service_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.unsuccessful().is_empty());
+}
+
+#[test_action("ec2", "ModifyVpcEndpointServiceConfiguration", checksum = "99fe7c86")]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint_service_configuration() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_vpc_endpoint_service_configuration()
+        .service_id("vpce-svc-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "DescribeVpcEndpointServicePermissions", checksum = "d427ceca")]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_service_permissions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_vpc_endpoint_service_permissions()
+        .service_id("vpce-svc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.allowed_principals().is_empty());
+}
+
+#[test_action("ec2", "ModifyVpcEndpointServicePermissions", checksum = "cd80a919")]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint_service_permissions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_endpoint_service_permissions()
+        .service_id("vpce-svc-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "ModifyVpcEndpointServicePayerResponsibility",
+    checksum = "602d6807"
+)]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint_service_payer_responsibility() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_endpoint_service_payer_responsibility()
+        .service_id("vpce-svc-1")
+        .payer_responsibility(aws_sdk_ec2::types::PayerResponsibility::ServiceOwner)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "StartVpcEndpointServicePrivateDnsVerification",
+    checksum = "4decf2c2"
+)]
+#[tokio::test]
+async fn ec2_start_vpc_endpoint_service_private_dns_verification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.start_vpc_endpoint_service_private_dns_verification()
+        .service_id("vpce-svc-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "CreateVpcEndpointConnectionNotification",
+    checksum = "4a635d6a"
+)]
+#[tokio::test]
+async fn ec2_create_vpc_endpoint_connection_notification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_vpc_endpoint_connection_notification()
+        .connection_notification_arn("arn:sns:topic")
+        .connection_events("Accept")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .connection_notification()
+        .unwrap()
+        .connection_notification_id()
+        .unwrap()
+        .starts_with("vpce-nfn-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeVpcEndpointConnectionNotifications",
+    checksum = "d11d1b46"
+)]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_connection_notifications() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_vpc_endpoint_connection_notification()
+        .connection_notification_arn("arn:sns:topic")
+        .connection_events("Accept")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_vpc_endpoint_connection_notifications()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.connection_notification_set().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteVpcEndpointConnectionNotifications",
+    checksum = "ed6fb014"
+)]
+#[tokio::test]
+async fn ec2_delete_vpc_endpoint_connection_notifications() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_vpc_endpoint_connection_notification()
+        .connection_notification_arn("arn:sns:topic")
+        .connection_events("Accept")
+        .send()
+        .await
+        .unwrap()
+        .connection_notification()
+        .unwrap()
+        .connection_notification_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_vpc_endpoint_connection_notifications()
+        .connection_notification_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.unsuccessful().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "ModifyVpcEndpointConnectionNotification",
+    checksum = "eafce495"
+)]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint_connection_notification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_endpoint_connection_notification()
+        .connection_notification_id("vpce-nfn-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcEndpointAssociations", checksum = "28569dd0")]
+#[tokio::test]
+async fn ec2_describe_vpc_endpoint_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_vpc_endpoint_associations().send().await.unwrap();
+    assert!(r.vpc_endpoint_associations().is_empty());
+}
+
+// ---- flow logs ----
+
+#[test_action("ec2", "CreateFlowLogs", checksum = "2d5b67e2")]
+#[tokio::test]
+async fn ec2_create_flow_logs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_flow_logs()
+        .resource_ids("vpc-1")
+        .resource_type(aws_sdk_ec2::types::FlowLogsResourceType::Vpc)
+        .traffic_type(aws_sdk_ec2::types::TrafficType::All)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.flow_log_ids().is_empty());
+}
+
+#[test_action("ec2", "DescribeFlowLogs", checksum = "579d9fb3")]
+#[tokio::test]
+async fn ec2_describe_flow_logs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_flow_logs()
+        .resource_ids("vpc-1")
+        .resource_type(aws_sdk_ec2::types::FlowLogsResourceType::Vpc)
+        .traffic_type(aws_sdk_ec2::types::TrafficType::All)
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_flow_logs().send().await.unwrap();
+    assert!(!r.flow_logs().is_empty());
+}
+
+#[test_action("ec2", "DeleteFlowLogs", checksum = "39f0a74d")]
+#[tokio::test]
+async fn ec2_delete_flow_logs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_flow_logs()
+        .resource_ids("vpc-1")
+        .resource_type(aws_sdk_ec2::types::FlowLogsResourceType::Vpc)
+        .traffic_type(aws_sdk_ec2::types::TrafficType::All)
+        .send()
+        .await
+        .unwrap();
+    let id = r.flow_log_ids()[0].clone();
+    let d = c.delete_flow_logs().flow_log_ids(&id).send().await.unwrap();
+    assert!(d.unsuccessful().is_empty());
+}
+
+#[test_action("ec2", "GetFlowLogsIntegrationTemplate", checksum = "eaca6b3d")]
+#[tokio::test]
+async fn ec2_get_flow_logs_integration_template() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_flow_logs_integration_template()
+        .flow_log_id("fl-1")
+        .config_delivery_s3_destination_arn("arn:s3:bucket")
+        .integrate_services(aws_sdk_ec2::types::IntegrateServices::builder().build())
+        .send()
+        .await
+        .unwrap();
+    assert!(r.result().is_some());
+}

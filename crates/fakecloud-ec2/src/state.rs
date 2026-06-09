@@ -411,6 +411,57 @@ pub struct VpcPeering {
     pub accepter_allow_dns: bool,
 }
 
+/// A VPC endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpcEndpoint {
+    pub id: String,
+    /// `Interface` | `Gateway` | `GatewayLoadBalancer` | ...
+    pub endpoint_type: String,
+    pub vpc_id: String,
+    pub service_name: String,
+    pub state: String,
+    #[serde(default)]
+    pub subnet_ids: Vec<String>,
+    #[serde(default)]
+    pub route_table_ids: Vec<String>,
+    #[serde(default)]
+    pub private_dns_enabled: bool,
+}
+
+/// A VPC endpoint service configuration (PrivateLink provider side).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EndpointService {
+    pub service_id: String,
+    pub service_name: String,
+    pub state: String,
+    pub acceptance_required: bool,
+    pub payer_responsibility: String,
+    #[serde(default)]
+    pub nlb_arns: Vec<String>,
+}
+
+/// A VPC endpoint connection notification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConnectionNotification {
+    pub id: String,
+    pub arn: String,
+    pub service_id: Option<String>,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+/// A VPC flow log.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlowLog {
+    pub id: String,
+    pub resource_id: String,
+    pub traffic_type: String,
+    pub log_destination_type: String,
+    pub log_group_name: Option<String>,
+    /// Destination ARN for `s3` / `kinesis-data-firehose` deliveries.
+    pub log_destination: Option<String>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -479,6 +530,14 @@ pub struct Ec2State {
     pub network_acls: HashMap<String, NetworkAcl>,
     #[serde(default)]
     pub vpc_peerings: HashMap<String, VpcPeering>,
+    #[serde(default)]
+    pub vpc_endpoints: HashMap<String, VpcEndpoint>,
+    #[serde(default)]
+    pub endpoint_services: HashMap<String, EndpointService>,
+    #[serde(default)]
+    pub connection_notifications: HashMap<String, ConnectionNotification>,
+    #[serde(default)]
+    pub flow_logs: HashMap<String, FlowLog>,
 }
 
 impl Ec2State {
