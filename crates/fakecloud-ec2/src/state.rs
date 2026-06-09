@@ -579,6 +579,17 @@ pub struct TgwRoute {
     pub state: String,
 }
 
+/// A Transit Gateway peering attachment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwPeering {
+    pub id: String,
+    pub tgw_id: String,
+    pub peer_tgw_id: String,
+    pub peer_account: String,
+    pub peer_region: String,
+    pub state: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -693,6 +704,20 @@ pub struct Ec2State {
     /// route-table-id -> prefix-list ids referenced.
     #[serde(default)]
     pub tgw_prefix_list_refs: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub tgw_peerings: HashMap<String, TgwPeering>,
+    /// connect-attachment-id -> (transport attachment id, tgw id).
+    #[serde(default)]
+    pub tgw_connects: HashMap<String, (String, String)>,
+    /// connect-peer-id -> attachment id.
+    #[serde(default)]
+    pub tgw_connect_peers: HashMap<String, String>,
+    /// policy-table-id -> tgw id.
+    #[serde(default)]
+    pub tgw_policy_tables: HashMap<String, String>,
+    /// announcement-id -> (route-table id, peering-attachment id).
+    #[serde(default)]
+    pub tgw_announcements: HashMap<String, (String, String)>,
 }
 
 impl Ec2State {
