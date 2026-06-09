@@ -1,6 +1,6 @@
 {
-  "variants_passed": 113614,
-  "total_variants": 113614,
+  "variants_passed": 114274,
+  "total_variants": 114274,
   "per_service": {
     "logs": {
       "passed": 3897,
@@ -163,8 +163,8 @@
       "total": 9275
     },
     "ec2": {
-      "passed": 13936,
-      "total": 13936
+      "passed": 14596,
+      "total": 14596
     }
   }
 }
