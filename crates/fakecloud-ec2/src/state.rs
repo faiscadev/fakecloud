@@ -496,6 +496,22 @@ pub struct Fleet {
     pub fleet_type: String,
 }
 
+/// An on-demand capacity reservation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapacityReservation {
+    pub id: String,
+    pub instance_type: String,
+    pub instance_platform: String,
+    pub availability_zone: String,
+    pub tenancy: String,
+    pub total_instance_count: i64,
+    pub available_instance_count: i64,
+    /// `active` | `expired` | `cancelled` | `pending` | `failed`.
+    pub state: String,
+    pub end_date_type: String,
+    pub instance_match_criteria: String,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -583,6 +599,11 @@ pub struct Ec2State {
     /// Account-level spot datafeed subscription (bucket, prefix).
     #[serde(default)]
     pub spot_datafeed: Option<(String, String)>,
+    #[serde(default)]
+    pub capacity_reservations: HashMap<String, CapacityReservation>,
+    /// Capacity reservation fleet ids (metadata-only).
+    #[serde(default)]
+    pub capacity_reservation_fleets: HashMap<String, String>,
 }
 
 impl Ec2State {

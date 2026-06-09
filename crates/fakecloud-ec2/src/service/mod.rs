@@ -1,5 +1,6 @@
 //! EC2 service entrypoint: `ec2Query` dispatch over the per-account state.
 
+mod capacity;
 mod dhcp;
 mod eip;
 mod endpoint;
@@ -333,6 +334,34 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "ModifyFleet",
     "DescribeFleetHistory",
     "DescribeFleetInstances",
+    // Capacity reservations
+    "CreateCapacityReservation",
+    "CancelCapacityReservation",
+    "DescribeCapacityReservations",
+    "ModifyCapacityReservation",
+    "GetCapacityReservationUsage",
+    "CreateCapacityReservationFleet",
+    "CancelCapacityReservationFleets",
+    "DescribeCapacityReservationFleets",
+    "ModifyCapacityReservationFleet",
+    "ModifyInstanceCapacityReservationAttributes",
+    "CreateCapacityReservationBySplitting",
+    "MoveCapacityReservationInstances",
+    "DescribeCapacityReservationBillingRequests",
+    "AssociateCapacityReservationBillingOwner",
+    "DisassociateCapacityReservationBillingOwner",
+    "AcceptCapacityReservationBillingOwnership",
+    "RejectCapacityReservationBillingOwnership",
+    "DescribeCapacityBlockOfferings",
+    "DescribeCapacityBlocks",
+    "PurchaseCapacityBlock",
+    "DescribeCapacityBlockStatus",
+    "DescribeCapacityBlockExtensionHistory",
+    "DescribeCapacityBlockExtensionOfferings",
+    "PurchaseCapacityBlockExtension",
+    "DescribeCapacityReservationTopology",
+    "CreateInterruptibleCapacityReservationAllocation",
+    "UpdateInterruptibleCapacityReservationAllocation",
 ];
 
 /// Amazon EC2 service.
@@ -796,6 +825,77 @@ impl AwsService for Ec2Service {
             "ModifyFleet" => fleet::modify_fleet(self, &request),
             "DescribeFleetHistory" => fleet::describe_fleet_history(self, &request),
             "DescribeFleetInstances" => fleet::describe_fleet_instances(self, &request),
+            "CreateCapacityReservation" => capacity::create_capacity_reservation(self, &request),
+            "CancelCapacityReservation" => capacity::cancel_capacity_reservation(self, &request),
+            "DescribeCapacityReservations" => {
+                capacity::describe_capacity_reservations(self, &request)
+            }
+            "ModifyCapacityReservation" => capacity::modify_capacity_reservation(self, &request),
+            "GetCapacityReservationUsage" => {
+                capacity::get_capacity_reservation_usage(self, &request)
+            }
+            "CreateCapacityReservationFleet" => {
+                capacity::create_capacity_reservation_fleet(self, &request)
+            }
+            "CancelCapacityReservationFleets" => {
+                capacity::cancel_capacity_reservation_fleets(self, &request)
+            }
+            "DescribeCapacityReservationFleets" => {
+                capacity::describe_capacity_reservation_fleets(self, &request)
+            }
+            "ModifyCapacityReservationFleet" => {
+                capacity::modify_capacity_reservation_fleet(self, &request)
+            }
+            "ModifyInstanceCapacityReservationAttributes" => {
+                capacity::modify_instance_capacity_reservation_attributes(self, &request)
+            }
+            "CreateCapacityReservationBySplitting" => {
+                capacity::create_capacity_reservation_by_splitting(self, &request)
+            }
+            "MoveCapacityReservationInstances" => {
+                capacity::move_capacity_reservation_instances(self, &request)
+            }
+            "DescribeCapacityReservationBillingRequests" => {
+                capacity::describe_capacity_reservation_billing_requests(self, &request)
+            }
+            "AssociateCapacityReservationBillingOwner" => {
+                capacity::associate_capacity_reservation_billing_owner(self, &request)
+            }
+            "DisassociateCapacityReservationBillingOwner" => {
+                capacity::disassociate_capacity_reservation_billing_owner(self, &request)
+            }
+            "AcceptCapacityReservationBillingOwnership" => {
+                capacity::accept_capacity_reservation_billing_ownership(self, &request)
+            }
+            "RejectCapacityReservationBillingOwnership" => {
+                capacity::reject_capacity_reservation_billing_ownership(self, &request)
+            }
+            "DescribeCapacityBlockOfferings" => {
+                capacity::describe_capacity_block_offerings(self, &request)
+            }
+            "DescribeCapacityBlocks" => capacity::describe_capacity_blocks(self, &request),
+            "PurchaseCapacityBlock" => capacity::purchase_capacity_block(self, &request),
+            "DescribeCapacityBlockStatus" => {
+                capacity::describe_capacity_block_status(self, &request)
+            }
+            "DescribeCapacityBlockExtensionHistory" => {
+                capacity::describe_capacity_block_extension_history(self, &request)
+            }
+            "DescribeCapacityBlockExtensionOfferings" => {
+                capacity::describe_capacity_block_extension_offerings(self, &request)
+            }
+            "PurchaseCapacityBlockExtension" => {
+                capacity::purchase_capacity_block_extension(self, &request)
+            }
+            "DescribeCapacityReservationTopology" => {
+                capacity::describe_capacity_reservation_topology(self, &request)
+            }
+            "CreateInterruptibleCapacityReservationAllocation" => {
+                capacity::create_interruptible_capacity_reservation_allocation(self, &request)
+            }
+            "UpdateInterruptibleCapacityReservationAllocation" => {
+                capacity::update_interruptible_capacity_reservation_allocation(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
