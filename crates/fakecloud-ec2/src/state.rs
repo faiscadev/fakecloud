@@ -543,6 +543,13 @@ pub struct DedicatedHost {
 pub struct TransitGateway {
     pub id: String,
     pub description: String,
+    /// `pending` | `available` | `modifying` | `deleting` | `deleted`.
+    #[serde(default = "tgw_default_state")]
+    pub state: String,
+}
+
+fn tgw_default_state() -> String {
+    "available".to_string()
 }
 
 /// A Transit Gateway attachment (VPC and others).
@@ -677,6 +684,15 @@ pub struct Ec2State {
     /// route-table-id -> static routes.
     #[serde(default)]
     pub tgw_routes: HashMap<String, Vec<TgwRoute>>,
+    /// route-table-id -> associated attachment ids.
+    #[serde(default)]
+    pub tgw_rt_associations: HashMap<String, Vec<String>>,
+    /// route-table-id -> propagated attachment ids.
+    #[serde(default)]
+    pub tgw_rt_propagations: HashMap<String, Vec<String>>,
+    /// route-table-id -> prefix-list ids referenced.
+    #[serde(default)]
+    pub tgw_prefix_list_refs: HashMap<String, Vec<String>>,
 }
 
 impl Ec2State {

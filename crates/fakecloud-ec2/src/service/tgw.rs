@@ -18,12 +18,13 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str) -> String {
     format!(
-        "{}{}<state>available</state>{}{}{}<options><amazonSideAsn>64512</amazonSideAsn>\
+        "{}{}{}{}{}{}<options><amazonSideAsn>64512</amazonSideAsn>\
          <autoAcceptSharedAttachments>disable</autoAcceptSharedAttachments>\
          <defaultRouteTableAssociation>enable</defaultRouteTableAssociation>\
          <defaultRouteTablePropagation>enable</defaultRouteTablePropagation>\
          <dnsSupport>enable</dnsSupport><vpnEcmpSupport>enable</vpnEcmpSupport></options>{}",
         ec2_elem("transitGatewayId", &t.id),
+        ec2_elem("state", &t.state),
         ec2_elem(
             "transitGatewayArn",
             &format!("arn:aws:ec2:us-east-1:{owner}:transit-gateway/{}", t.id)
@@ -47,6 +48,7 @@ pub(crate) fn create_transit_gateway(
             .get("Description")
             .cloned()
             .unwrap_or_default(),
+        state: "available".to_string(),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -86,6 +88,7 @@ pub(crate) fn delete_transit_gateway(
         .unwrap_or(TransitGateway {
             id: id.clone(),
             description: String::new(),
+            state: "available".to_string(),
         });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -143,6 +146,7 @@ pub(crate) fn modify_transit_gateway(
         .unwrap_or(TransitGateway {
             id: id.clone(),
             description: String::new(),
+            state: "available".to_string(),
         });
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
@@ -259,6 +263,15 @@ fn modify_accept_reject_vpc_att(
     let mut a = att_lookup(svc, req, &id);
     if !state_val.is_empty() {
         a.state = state_val.to_string();
+        // Persist the state transition so a later Describe* reflects it.
+        let mut accounts = svc.state.write();
+        if let Some(stored) = accounts
+            .get_or_create(&req.account_id)
+            .tgw_attachments
+            .get_mut(&id)
+        {
+            stored.state = state_val.to_string();
+        }
     }
     Ok(Ec2Service::respond(
         action,
@@ -407,6 +420,9 @@ pub(crate) fn delete_transit_gateway_route_table(
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
     state.tgw_routes.remove(&id);
+    state.tgw_rt_associations.remove(&id);
+    state.tgw_rt_propagations.remove(&id);
+    state.tgw_prefix_list_refs.remove(&id);
     Ok(Ec2Service::respond(
         "DeleteTransitGatewayRouteTable",
         &req.request_id,
@@ -449,11 +465,22 @@ fn association_xml(rt: &str, att: &str) -> String {
 }
 
 pub(crate) fn associate_transit_gateway_route_table(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
+    {
+        let mut accounts = svc.state.write();
+        let assocs = accounts
+            .get_or_create(&req.account_id)
+            .tgw_rt_associations
+            .entry(rt.clone())
+            .or_default();
+        if !assocs.contains(&att) {
+            assocs.push(att.clone());
+        }
+    }
     Ok(Ec2Service::respond(
         "AssociateTransitGatewayRouteTable",
         &req.request_id,
@@ -462,11 +489,21 @@ pub(crate) fn associate_transit_gateway_route_table(
 }
 
 pub(crate) fn disassociate_transit_gateway_route_table(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(assocs) = accounts
+            .get_or_create(&req.account_id)
+            .tgw_rt_associations
+            .get_mut(&rt)
+        {
+            assocs.retain(|a| a != &att);
+        }
+    }
     let body = format!(
         "<association>{}{}<resourceId>vpc-0</resourceId><resourceType>vpc</resourceType><state>disassociating</state></association>",
         ec2_elem("transitGatewayRouteTableId", &rt),
@@ -489,7 +526,7 @@ fn propagation_xml(rt: &str, att: &str, state_val: &str) -> String {
 }
 
 pub(crate) fn enable_transit_gateway_route_table_propagation(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
@@ -498,6 +535,17 @@ pub(crate) fn enable_transit_gateway_route_table_propagation(
         .get("TransitGatewayAttachmentId")
         .cloned()
         .unwrap_or_else(|| "tgw-attach-0".to_string());
+    {
+        let mut accounts = svc.state.write();
+        let props = accounts
+            .get_or_create(&req.account_id)
+            .tgw_rt_propagations
+            .entry(rt.clone())
+            .or_default();
+        if !props.contains(&att) {
+            props.push(att.clone());
+        }
+    }
     Ok(Ec2Service::respond(
         "EnableTransitGatewayRouteTablePropagation",
         &req.request_id,
@@ -509,7 +557,7 @@ pub(crate) fn enable_transit_gateway_route_table_propagation(
 }
 
 pub(crate) fn disable_transit_gateway_route_table_propagation(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
@@ -518,6 +566,16 @@ pub(crate) fn disable_transit_gateway_route_table_propagation(
         .get("TransitGatewayAttachmentId")
         .cloned()
         .unwrap_or_else(|| "tgw-attach-0".to_string());
+    {
+        let mut accounts = svc.state.write();
+        if let Some(props) = accounts
+            .get_or_create(&req.account_id)
+            .tgw_rt_propagations
+            .get_mut(&rt)
+        {
+            props.retain(|a| a != &att);
+        }
+    }
     Ok(Ec2Service::respond(
         "DisableTransitGatewayRouteTablePropagation",
         &req.request_id,
@@ -676,41 +734,69 @@ pub(crate) fn export_transit_gateway_routes(
 }
 
 pub(crate) fn get_transit_gateway_route_table_associations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayRouteTableId")?;
+    let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tgw_rt_associations.get(&rt))
+        .map(|atts| atts.iter().map(|att| association_xml(&rt, att)).collect())
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayRouteTableAssociations",
         &req.request_id,
-        &ec2_list("associations", &[]),
+        &ec2_list("associations", &items),
     ))
 }
 
 pub(crate) fn get_transit_gateway_route_table_propagations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayRouteTableId")?;
+    let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tgw_rt_propagations.get(&rt))
+        .map(|atts| {
+            atts.iter()
+                .map(|att| propagation_xml(&rt, att, "enabled"))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayRouteTablePropagations",
         &req.request_id,
-        &ec2_list("transitGatewayRouteTablePropagations", &[]),
+        &ec2_list("transitGatewayRouteTablePropagations", &items),
     ))
 }
 
 pub(crate) fn get_transit_gateway_attachment_propagations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayAttachmentId")?;
+    let att = require(&req.query_params, "TransitGatewayAttachmentId")?;
     mr(req)?;
+    // Surface every route table that this attachment propagates into.
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .map(|s| {
+            s.tgw_rt_propagations
+                .iter()
+                .filter(|(_, atts)| atts.contains(&att))
+                .map(|(rt, _)| propagation_xml(rt, &att, "enabled"))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayAttachmentPropagations",
         &req.request_id,
-        &ec2_list("transitGatewayAttachmentPropagations", &[]),
+        &ec2_list("transitGatewayAttachmentPropagations", &items),
     ))
 }
 
@@ -748,12 +834,26 @@ fn plr_cud(
     svc: &Ec2Service,
     req: &AwsRequest,
     action: &str,
-    _store: bool,
+    store: bool,
 ) -> Result<AwsResponse, AwsServiceError> {
     let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     let pl = require(&req.query_params, "PrefixListId")?;
     let owner = req.account_id.clone();
-    let _ = svc;
+    {
+        let mut accounts = svc.state.write();
+        let refs = accounts
+            .get_or_create(&req.account_id)
+            .tgw_prefix_list_refs
+            .entry(rt.clone())
+            .or_default();
+        if store {
+            if !refs.contains(&pl) {
+                refs.push(pl.clone());
+            }
+        } else {
+            refs.retain(|p| p != &pl);
+        }
+    }
     Ok(Ec2Service::respond(
         action,
         &req.request_id,
@@ -765,14 +865,21 @@ fn plr_cud(
 }
 
 pub(crate) fn get_transit_gateway_prefix_list_references(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayRouteTableId")?;
+    let rt = require(&req.query_params, "TransitGatewayRouteTableId")?;
     mr(req)?;
+    let owner = req.account_id.clone();
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tgw_prefix_list_refs.get(&rt))
+        .map(|pls| pls.iter().map(|pl| plr_xml(&rt, pl, &owner)).collect())
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayPrefixListReferences",
         &req.request_id,
-        &ec2_list("transitGatewayPrefixListReferenceSet", &[]),
+        &ec2_list("transitGatewayPrefixListReferenceSet", &items),
     ))
 }
