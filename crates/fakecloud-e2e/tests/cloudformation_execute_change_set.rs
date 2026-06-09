@@ -500,3 +500,38 @@ async fn create_change_set_resolves_template_url() {
         "the TemplateURL-sourced topic should be provisioned"
     );
 }
+
+/// A `ChangeSetType=CREATE` change set against a stack that already exists
+/// must be rejected (AWS: AlreadyExistsException), not silently executed
+/// as an UPDATE.
+#[tokio::test]
+async fn create_type_change_set_rejected_for_existing_stack() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+
+    let template = r#"{
+        "Resources": {
+            "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cs-exists-q"}}
+        }
+    }"#;
+
+    cf.create_stack()
+        .stack_name("cs-exists-stack")
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    let err = cf
+        .create_change_set()
+        .stack_name("cs-exists-stack")
+        .change_set_name("dup-create")
+        .change_set_type(ChangeSetType::Create)
+        .template_body(template)
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "CREATE change set against an existing stack must be rejected, got {err:?}"
+    );
+}

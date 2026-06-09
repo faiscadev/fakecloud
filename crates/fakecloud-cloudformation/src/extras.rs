@@ -367,30 +367,55 @@ impl CloudFormationService {
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
-                // A `CREATE`-type change set against a not-yet-existing stack
-                // leaves the stack in `REVIEW_IN_PROGRESS` on AWS; executing
-                // the change set is what actually creates it. Materialize that
-                // placeholder stack now so `ExecuteChangeSet` (and the
-                // existence probes `aws cloudformation deploy` / SAM run) find
-                // it (issue #1646).
-                if change_set_type == "CREATE" && stack_lookup.is_none() {
-                    state
+                // A `CREATE`-type change set leaves the stack in
+                // `REVIEW_IN_PROGRESS` on AWS; executing it is what actually
+                // creates the stack. Materialize that placeholder now so
+                // `ExecuteChangeSet` (and the existence probes that
+                // `aws cloudformation deploy` / SAM run) find it (issue #1646).
+                if change_set_type == "CREATE" {
+                    // Status of any non-deleted stack already keyed by this
+                    // name. A `DELETE_COMPLETE` leftover counts as absent.
+                    let live_status = state
                         .stacks
-                        .entry(stack_name.clone())
-                        .or_insert_with(|| Stack {
-                            name: stack_name.clone(),
-                            stack_id: stack_id_str.clone(),
-                            template: String::new(),
-                            status: "REVIEW_IN_PROGRESS".to_string(),
-                            resources: Vec::new(),
-                            parameters: BTreeMap::new(),
-                            tags: BTreeMap::new(),
-                            created_at: Utc::now(),
-                            updated_at: None,
-                            description: None,
-                            notification_arns: Vec::new(),
-                            outputs: Vec::new(),
-                        });
+                        .get(&stack_name)
+                        .filter(|s| s.status != "DELETE_COMPLETE")
+                        .map(|s| s.status.clone());
+                    match live_status.as_deref() {
+                        // Fresh name, or a stale DELETE_COMPLETE entry to
+                        // replace: insert the placeholder.
+                        None => {
+                            state.stacks.insert(
+                                stack_name.clone(),
+                                Stack {
+                                    name: stack_name.clone(),
+                                    stack_id: stack_id_str.clone(),
+                                    template: String::new(),
+                                    status: "REVIEW_IN_PROGRESS".to_string(),
+                                    resources: Vec::new(),
+                                    parameters: BTreeMap::new(),
+                                    tags: BTreeMap::new(),
+                                    created_at: Utc::now(),
+                                    updated_at: None,
+                                    description: None,
+                                    notification_arns: Vec::new(),
+                                    outputs: Vec::new(),
+                                },
+                            );
+                        }
+                        // Already in review (an earlier CREATE change set):
+                        // additional CREATE change sets are allowed; keep the
+                        // existing placeholder.
+                        Some("REVIEW_IN_PROGRESS") => {}
+                        // A fully created stack exists — AWS rejects a CREATE
+                        // change set against it instead of silently updating.
+                        Some(_) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "AlreadyExistsException",
+                                format!("Stack [{stack_name}] already exists"),
+                            ));
+                        }
+                    }
                 }
                 store(&mut state.extras, "change_sets").insert(id.clone(), entry);
                 Ok(xml_response(
