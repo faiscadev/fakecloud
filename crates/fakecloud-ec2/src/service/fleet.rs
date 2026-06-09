@@ -53,6 +53,8 @@ pub(crate) fn create_launch_template(
 ) -> Result<AwsResponse, AwsServiceError> {
     // CreateLaunchTemplate's LaunchTemplateName is unconstrained (unlike the
     // other launch-template ops); only VersionDescription is length-bounded.
+    // LaunchTemplateData is a required struct with no required members, so an
+    // empty one is wire-invisible and can't be enforced (see require_struct).
     validate_length(&req.query_params, "VersionDescription", 0, 255)?;
     let name = require(&req.query_params, "LaunchTemplateName")?;
     let id = gen_id("lt");
@@ -91,7 +93,9 @@ pub(crate) fn create_launch_template_version(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_lt_strings(req)?;
-    require_struct(&req.query_params, "LaunchTemplateData").ok();
+    // LaunchTemplateData is a required struct, but RequestLaunchTemplateData has
+    // no required members, so an empty one is wire-invisible (indistinguishable
+    // from omission) and cannot be enforced here — see require_struct docs.
     let owner = req.account_id.clone();
     let id = req.query_params.get("LaunchTemplateId").cloned();
     let name = req.query_params.get("LaunchTemplateName").cloned();
@@ -114,12 +118,17 @@ pub(crate) fn create_launch_template_version(
             t.latest_version += 1;
             (t.clone(), t.latest_version)
         } else {
+            // Unknown template: persist a synthetic so the new version is
+            // consistently visible to later Describe* calls.
             let synthetic = LaunchTemplate {
                 id: id.unwrap_or_else(|| gen_id("lt")),
                 name: name.unwrap_or_default(),
                 default_version: 1,
                 latest_version: 2,
             };
+            state
+                .launch_templates
+                .insert(synthetic.id.clone(), synthetic.clone());
             (synthetic, 2)
         }
     };
@@ -482,26 +491,34 @@ pub(crate) fn cancel_spot_fleet_requests(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TerminateInstances")?;
+    let terminate = require(&req.query_params, "TerminateInstances")? == "true";
+    // TerminateInstances drives the resulting state: terminating tears down the
+    // running instances, otherwise the fleet keeps them but stops replacing.
+    let new_state = if terminate {
+        "cancelled_terminating"
+    } else {
+        "cancelled_running"
+    };
     let ids = indexed_list(&req.query_params, "SpotFleetRequestId");
+    let mut items = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
+            let prev = state
+                .spot_fleets
+                .get(id)
+                .map(|f| f.state.clone())
+                .unwrap_or_else(|| "active".to_string());
             if let Some(f) = state.spot_fleets.get_mut(id) {
-                f.state = "cancelled_running".to_string();
+                f.state = new_state.to_string();
             }
+            items.push(format!(
+                "{}<currentSpotFleetRequestState>{new_state}</currentSpotFleetRequestState><previousSpotFleetRequestState>{prev}</previousSpotFleetRequestState>",
+                ec2_elem("spotFleetRequestId", id)
+            ));
         }
     }
-    let items: Vec<String> = ids
-        .iter()
-        .map(|id| {
-            format!(
-                "{}<currentSpotFleetRequestState>cancelled_running</currentSpotFleetRequestState><previousSpotFleetRequestState>active</previousSpotFleetRequestState>",
-                ec2_elem("spotFleetRequestId", id)
-            )
-        })
-        .collect();
     let body = format!(
         "{}{}",
         ec2_list("successfulFleetRequestSet", &items),
@@ -695,14 +712,19 @@ pub(crate) fn describe_spot_datafeed_subscription(
     let sub = accounts
         .get(&req.account_id)
         .and_then(|s| s.spot_datafeed.clone());
-    let (bucket, prefix) = sub.unwrap_or_else(|| ("spot-datafeed".to_string(), String::new()));
-    Ok(Ec2Service::respond(
-        "DescribeSpotDatafeedSubscription",
-        &req.request_id,
-        &format!(
+    // Only emit the subscription element when one actually exists; don't
+    // fabricate a phantom subscription for an account that never created one.
+    let body = match sub {
+        Some((bucket, prefix)) => format!(
             "<spotDatafeedSubscription>{}</spotDatafeedSubscription>",
             datafeed_xml(&bucket, &prefix, &owner)
         ),
+        None => String::new(),
+    };
+    Ok(Ec2Service::respond(
+        "DescribeSpotDatafeedSubscription",
+        &req.request_id,
+        &body,
     ))
 }
 
@@ -753,19 +775,34 @@ pub(crate) fn delete_fleets(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TerminateInstances")?;
+    let terminate = require(&req.query_params, "TerminateInstances")? == "true";
+    let new_state = if terminate {
+        "deleted_terminating"
+    } else {
+        "deleted_running"
+    };
     let ids = indexed_list(&req.query_params, "FleetId");
+    let mut items = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
-            state.fleets.remove(id);
+            // AWS keeps deleted fleets visible in a deleted_* state rather than
+            // dropping them immediately, so transition instead of removing.
+            let prev = state
+                .fleets
+                .get(id)
+                .map(|f| f.state.clone())
+                .unwrap_or_else(|| "active".to_string());
+            if let Some(f) = state.fleets.get_mut(id) {
+                f.state = new_state.to_string();
+            }
+            items.push(format!(
+                "{}<currentFleetState>{new_state}</currentFleetState><previousFleetState>{prev}</previousFleetState>",
+                ec2_elem("fleetId", id)
+            ));
         }
     }
-    let items: Vec<String> = ids
-        .iter()
-        .map(|id| format!("{}<currentFleetState>deleted</currentFleetState><previousFleetState>active</previousFleetState>", ec2_elem("fleetId", id)))
-        .collect();
     let body = format!(
         "{}{}",
         ec2_list("successfulFleetDeletionSet", &items),

@@ -46,7 +46,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 
 **LocalStack's approach** is breadth-first — a very large catalog of AWS services at varying depth. Good for "tests need the call to resolve plausibly."
 
-**fakecloud's approach** is depth-first — fewer services today (24), each at 100% behavioral conformance with 100% of cross-service integrations. Good for "tests need the downstream actually to happen."
+**fakecloud's approach** is depth-first — fewer services today (40), each at 100% behavioral conformance with 100% of cross-service integrations. Good for "tests need the downstream actually to happen."
 
 Both are valid. Pick by whether your tests need real cross-service wiring, real Lambda execution, and real stateful backends, or whether you need surface-level plausibility across more services.
 
