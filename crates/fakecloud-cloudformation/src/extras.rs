@@ -373,12 +373,18 @@ impl CloudFormationService {
                 // `ExecuteChangeSet` (and the existence probes that
                 // `aws cloudformation deploy` / SAM run) find it (issue #1646).
                 if change_set_type == "CREATE" {
-                    // Status of any non-deleted stack already keyed by this
-                    // name. A `DELETE_COMPLETE` leftover counts as absent.
+                    // Status of any non-deleted stack matching this StackName.
+                    // `StackName` may be a name *or* a stack id, so match both
+                    // (otherwise a CREATE against an existing stack referenced
+                    // by id slips past the AlreadyExists check). A
+                    // `DELETE_COMPLETE` leftover counts as absent.
                     let live_status = state
                         .stacks
-                        .get(&stack_name)
-                        .filter(|s| s.status != "DELETE_COMPLETE")
+                        .values()
+                        .find(|s| {
+                            (s.name == stack_name || s.stack_id == stack_name)
+                                && s.status != "DELETE_COMPLETE"
+                        })
                         .map(|s| s.status.clone());
                     match live_status.as_deref() {
                         // Fresh name, or a stale DELETE_COMPLETE entry to
