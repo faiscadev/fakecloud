@@ -1260,6 +1260,9 @@ impl ResourceProvisioner {
             "AWS::CloudWatch::Dashboard" => {
                 Some(self.update_cloudwatch_dashboard(existing, new_def)?)
             }
+            "AWS::StepFunctions::StateMachine" => {
+                Some(self.update_sfn_state_machine(existing, new_def)?)
+            }
             _ => None,
         };
 

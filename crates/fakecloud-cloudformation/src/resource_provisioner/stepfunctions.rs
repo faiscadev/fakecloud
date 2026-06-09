@@ -32,16 +32,7 @@ impl ResourceProvisioner {
             .unwrap_or("STANDARD");
         let machine_type = StateMachineType::parse(machine_type_str)
             .ok_or_else(|| format!("Invalid StateMachineType: {machine_type_str}"))?;
-        let definition = props
-            .get("DefinitionString")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| {
-                props
-                    .get("Definition")
-                    .map(|v| serde_json::to_string(v).unwrap_or_default())
-            })
-            .ok_or("Definition or DefinitionString is required")?;
+        let definition = self.resolve_sfn_definition(props)?;
         let logging_configuration = props.get("LoggingConfiguration").cloned();
         let tracing_configuration = props.get("TracingConfiguration").cloned();
 
@@ -76,6 +67,100 @@ impl ResourceProvisioner {
             .with("Arn", arn.clone())
             .with("Name", name)
             .with("StateMachineRevisionId", "INITIAL"))
+    }
+
+    /// Resolve a state machine's ASL definition from any of the three
+    /// CloudFormation forms, then apply `DefinitionSubstitutions`.
+    ///
+    /// - `DefinitionString` — inline ASL string.
+    /// - `Definition` — inline ASL as a JSON object.
+    /// - `DefinitionS3Location` — `{Bucket, Key, Version}` pointing at an
+    ///   ASL document in S3 (what `sam package` and raw-CFN setups emit);
+    ///   the object lives in fakecloud's own S3, so fetch it back.
+    ///
+    /// `DefinitionSubstitutions` is a map whose `${key}` tokens are
+    /// replaced in the resolved definition — the conventional way SAM/CFN
+    /// state machines reference sibling resources (function names, ARNs).
+    fn resolve_sfn_definition(&self, props: &serde_json::Value) -> Result<String, String> {
+        let mut definition = if let Some(s) = props.get("DefinitionString").and_then(|v| v.as_str())
+        {
+            s.to_string()
+        } else if let Some(v) = props.get("Definition") {
+            serde_json::to_string(v).map_err(|e| format!("invalid Definition: {e}"))?
+        } else if let Some(loc) = props.get("DefinitionS3Location") {
+            let bucket = loc
+                .get("Bucket")
+                .and_then(|v| v.as_str())
+                .ok_or("DefinitionS3Location.Bucket is required")?;
+            let key = loc
+                .get("Key")
+                .and_then(|v| v.as_str())
+                .ok_or("DefinitionS3Location.Key is required")?;
+            let bytes = self.read_s3_object_bytes(bucket, key)?;
+            String::from_utf8(bytes)
+                .map_err(|e| format!("DefinitionS3Location body is not valid UTF-8: {e}"))?
+        } else {
+            return Err(
+                "Definition, DefinitionString, or DefinitionS3Location is required".to_string(),
+            );
+        };
+
+        if let Some(subs) = props
+            .get("DefinitionSubstitutions")
+            .and_then(|v| v.as_object())
+        {
+            for (key, value) in subs {
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                };
+                definition = definition.replace(&format!("${{{key}}}"), &replacement);
+            }
+        }
+
+        Ok(definition)
+    }
+
+    pub(super) fn update_sfn_state_machine(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let definition = self.resolve_sfn_definition(props)?;
+
+        let mut accounts = self.stepfunctions_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let sm = state
+            .state_machines
+            .get_mut(&arn)
+            .ok_or_else(|| format!("State machine {arn} not found"))?;
+
+        // CloudFormation propagates definition + the other mutable
+        // properties on stack update; the SDK's UpdateStateMachine does the
+        // same. Re-stamp the revision id so describe-state-machine reflects
+        // that the definition changed.
+        sm.definition = definition;
+        if let Some(role) = props.get("RoleArn").and_then(|v| v.as_str()) {
+            sm.role_arn = role.to_string();
+        }
+        if let Some(logging) = props.get("LoggingConfiguration") {
+            sm.logging_configuration = Some(logging.clone());
+        }
+        if let Some(tracing) = props.get("TracingConfiguration") {
+            sm.tracing_configuration = Some(tracing.clone());
+        }
+        sm.revision_id = Uuid::new_v4().to_string();
+        sm.update_date = Utc::now();
+        let name = sm.name.clone();
+
+        Ok(ProvisionResult::new(arn.clone())
+            .with("Arn", arn)
+            .with("Name", name)
+            .with("StateMachineRevisionId", "UPDATED"))
     }
 
     pub(super) fn delete_sfn_state_machine(&self, physical_id: &str) -> Result<(), String> {
