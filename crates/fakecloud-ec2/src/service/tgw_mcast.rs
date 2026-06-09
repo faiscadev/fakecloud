@@ -403,11 +403,12 @@ pub(crate) fn modify_transit_gateway_metering_policy(
     ))
 }
 
-fn metering_entry_xml(policy: &str, rule: &str) -> String {
+fn metering_entry_xml(policy: &str, rule: &str, metered_account: &str) -> String {
     format!(
-        "{}<policyRuleNumber>{}</policyRuleNumber><meteredAccount>123456789012</meteredAccount>",
+        "{}<policyRuleNumber>{}</policyRuleNumber>{}",
         ec2_elem("transitGatewayMeteringPolicyId", policy),
         rule,
+        ec2_elem("meteredAccount", metered_account),
     )
 }
 
@@ -448,12 +449,17 @@ pub(crate) fn create_transit_gateway_metering_policy_entry(
         "DestinationTransitGatewayAttachmentType",
         att_types,
     )?;
+    let metered = req
+        .query_params
+        .get("MeteredAccount")
+        .cloned()
+        .unwrap_or_else(|| "source-attachment-owner".to_string());
     Ok(Ec2Service::respond(
         "CreateTransitGatewayMeteringPolicyEntry",
         &req.request_id,
         &format!(
             "<transitGatewayMeteringPolicyEntry>{}</transitGatewayMeteringPolicyEntry>",
-            metering_entry_xml(&policy, &rule)
+            metering_entry_xml(&policy, &rule, &metered)
         ),
     ))
 }
@@ -469,7 +475,7 @@ pub(crate) fn delete_transit_gateway_metering_policy_entry(
         &req.request_id,
         &format!(
             "<transitGatewayMeteringPolicyEntry>{}</transitGatewayMeteringPolicyEntry>",
-            metering_entry_xml(&policy, &rule)
+            metering_entry_xml(&policy, &rule, "source-attachment-owner")
         ),
     ))
 }
