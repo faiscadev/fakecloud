@@ -67,23 +67,27 @@ async fn unsigned_lambda_list_functions_via_host_header() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
 
-    // Use the bare `/functions` path (no trailing slash) — the trailing-
-    // slash variant now intentionally routes to `GetFunction` with an
-    // elided `FunctionName` and returns 400 (matches AWS), per #1406.
-    let resp = http
-        .get(format!("{}/2015-03-31/functions", server.endpoint()))
-        .header("Host", localstack_host("lambda.us-east-1", server.port()))
-        .send()
-        .await
-        .unwrap();
+    // Both the bare `/functions` and the trailing-slash `/functions/`
+    // forms are `ListFunctions`. Real AWS tolerates both, and botocore
+    // serialized `ListFunctions` as `GET /2015-03-31/functions/` until
+    // botocore 1.40 (mid-2025), so the whole pre-1.40 install base sends
+    // the trailing slash (issue #1645). Assert both return the list.
+    for path in ["/2015-03-31/functions", "/2015-03-31/functions/"] {
+        let resp = http
+            .get(format!("{}{path}", server.endpoint()))
+            .header("Host", localstack_host("lambda.us-east-1", server.port()))
+            .send()
+            .await
+            .unwrap();
 
-    assert_eq!(resp.status(), 200);
-    let body = resp.text().await.unwrap();
-    // Lambda returns JSON with a Functions array.
-    assert!(
-        body.contains("Functions"),
-        "expected Lambda ListFunctions JSON, got: {body}"
-    );
+        assert_eq!(resp.status(), 200, "GET {path} should be ListFunctions");
+        let body = resp.text().await.unwrap();
+        // Lambda returns JSON with a Functions array.
+        assert!(
+            body.contains("Functions"),
+            "expected Lambda ListFunctions JSON for {path}, got: {body}"
+        );
+    }
 }
 
 #[tokio::test]

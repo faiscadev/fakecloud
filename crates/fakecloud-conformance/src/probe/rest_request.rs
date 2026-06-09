@@ -789,13 +789,20 @@ pub(super) fn legacy_substitute_identifiers(
                 // `GET /{Bucket}?prefix=...` doesn't collapse to `/` and
                 // hit ListBuckets (a 200 happy-path response). Uppercase
                 // + underscores violate S3's bucket naming rules, so the
-                // server reliably returns InvalidBucketName. Other
-                // services keep the empty-string collapse — their
-                // dispatchers reject empty path labels cleanly.
-                let sentinel = if service_name == "s3" {
-                    "INVALID_OMITTED_LABEL"
-                } else {
-                    ""
+                // server reliably returns InvalidBucketName.
+                //
+                // Lambda needs the same treatment: omitting `FunctionName`
+                // from `GET /functions/{FunctionName}` collapses to
+                // `GET /functions/`, which real AWS — and now fakecloud
+                // (issue #1645) — routes to `ListFunctions` (200), not a
+                // client error. A non-empty sentinel keeps the probe on
+                // the `GetFunction` route, where a nonexistent name yields
+                // the expected 4xx. Other services keep the empty-string
+                // collapse — their dispatchers reject empty path labels
+                // cleanly.
+                let sentinel = match service_name {
+                    "s3" | "lambda" => "INVALID_OMITTED_LABEL",
+                    _ => "",
                 };
                 out = out.replace(placeholder, sentinel);
             }
