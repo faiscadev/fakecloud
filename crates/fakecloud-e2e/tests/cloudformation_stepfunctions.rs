@@ -273,3 +273,92 @@ async fn cfn_state_machine_update_propagates_definition() {
         sm.definition()
     );
 }
+
+/// A pinned `DefinitionS3Location.Version` must load that exact object
+/// version, not whatever is current (issue #1647 review follow-up).
+#[tokio::test]
+async fn cfn_state_machine_reads_pinned_s3_definition_version() {
+    use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let s3 = server.s3_client().await;
+    let sfn = aws_sdk_sfn::Client::new(&server.aws_config().await);
+
+    s3.create_bucket()
+        .bucket("asl-versions")
+        .send()
+        .await
+        .unwrap();
+    s3.put_bucket_versioning()
+        .bucket("asl-versions")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // v1 is the definition we will pin; v2 becomes current.
+    let v1 = r#"{"StartAt":"V1","States":{"V1":{"Type":"Succeed"}}}"#;
+    let v2 = r#"{"StartAt":"V2","States":{"V2":{"Type":"Succeed"}}}"#;
+    let put1 = s3
+        .put_object()
+        .bucket("asl-versions")
+        .key("def.json")
+        .body(ByteStream::from(v1.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let version_id = put1
+        .version_id()
+        .expect("versioned put returns a version id");
+    s3.put_object()
+        .bucket("asl-versions")
+        .key("def.json")
+        .body(ByteStream::from(v2.as_bytes().to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    let template = format!(
+        r#"{{
+          "Resources": {{
+            "SM": {{
+              "Type": "AWS::StepFunctions::StateMachine",
+              "Properties": {{
+                "StateMachineName": "ver-sm",
+                "RoleArn": "arn:aws:iam::000000000000:role/r",
+                "DefinitionS3Location": {{"Bucket": "asl-versions", "Key": "def.json", "Version": "{version_id}"}}
+              }}
+            }}
+          }}
+        }}"#
+    );
+
+    cfn.create_stack()
+        .stack_name("ver-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let sm = sfn
+        .describe_state_machine()
+        .state_machine_arn("arn:aws:states:us-east-1:123456789012:stateMachine:ver-sm")
+        .send()
+        .await
+        .expect("describe_state_machine");
+    assert!(
+        sm.definition().contains("\"V1\""),
+        "pinned version body not loaded: {}",
+        sm.definition()
+    );
+    assert!(
+        !sm.definition().contains("\"V2\""),
+        "current (unpinned) body was loaded instead of the pinned version: {}",
+        sm.definition()
+    );
+}

@@ -96,7 +96,12 @@ impl ResourceProvisioner {
                 .get("Key")
                 .and_then(|v| v.as_str())
                 .ok_or("DefinitionS3Location.Key is required")?;
-            let bytes = self.read_s3_object_bytes(bucket, key)?;
+            // Honor a pinned object Version so a version-pinned template
+            // loads the exact body it referenced, not whatever is current.
+            let bytes = match loc.get("Version").and_then(|v| v.as_str()) {
+                Some(version) => self.read_s3_object_version_bytes(bucket, key, version)?,
+                None => self.read_s3_object_bytes(bucket, key)?,
+            };
             String::from_utf8(bytes)
                 .map_err(|e| format!("DefinitionS3Location body is not valid UTF-8: {e}"))?
         } else {
@@ -147,12 +152,10 @@ impl ResourceProvisioner {
         if let Some(role) = props.get("RoleArn").and_then(|v| v.as_str()) {
             sm.role_arn = role.to_string();
         }
-        if let Some(logging) = props.get("LoggingConfiguration") {
-            sm.logging_configuration = Some(logging.clone());
-        }
-        if let Some(tracing) = props.get("TracingConfiguration") {
-            sm.tracing_configuration = Some(tracing.clone());
-        }
+        // Set unconditionally so dropping a property in the updated template
+        // clears it, rather than leaving the previous value stale.
+        sm.logging_configuration = props.get("LoggingConfiguration").cloned();
+        sm.tracing_configuration = props.get("TracingConfiguration").cloned();
         sm.revision_id = Uuid::new_v4().to_string();
         sm.update_date = Utc::now();
         let name = sm.name.clone();

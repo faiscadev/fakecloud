@@ -1788,6 +1788,48 @@ impl ResourceProvisioner {
             .map_err(|e| format!("S3 read failed: {e}"))
     }
 
+    /// Read a specific object version's bytes. Used when a CFN property
+    /// pins an S3 object `Version` (e.g.
+    /// `DefinitionS3Location.Version`), so the exact referenced body is
+    /// loaded rather than whatever is current. Falls through the current
+    /// object and the version history.
+    fn read_s3_object_version_bytes(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> Result<Vec<u8>, String> {
+        let mut accounts = self.s3_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let body_ref = {
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| format!("S3 bucket {bucket} does not exist"))?;
+            let from_current = b
+                .objects
+                .get(key)
+                .filter(|o| o.version_id.as_deref() == Some(version_id))
+                .map(|o| o.body.clone());
+            from_current
+                .or_else(|| {
+                    b.object_versions.get(key).and_then(|versions| {
+                        versions
+                            .iter()
+                            .find(|o| o.version_id.as_deref() == Some(version_id))
+                            .map(|o| o.body.clone())
+                    })
+                })
+                .ok_or_else(|| {
+                    format!("S3 object s3://{bucket}/{key} version {version_id} does not exist")
+                })?
+        };
+        state
+            .read_body(&body_ref)
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("S3 read failed: {e}"))
+    }
+
     /// Build a canonical Lambda resource-policy statement from a CFN
     /// `AWS::Lambda::Permission` `Properties` map and append it to the
     /// function's stored policy. Shared by create + update so the same
