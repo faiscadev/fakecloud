@@ -3850,3 +3850,270 @@ async fn ec2_describe_fast_launch_images() {
     let r = c.describe_fast_launch_images().send().await.unwrap();
     assert!(r.fast_launch_images().is_empty());
 }
+
+// ---- network ACLs ----
+
+async fn make_nacl(c: &aws_sdk_ec2::Client) -> String {
+    c.create_network_acl()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .network_acl()
+        .unwrap()
+        .network_acl_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateNetworkAcl", checksum = "7ceb4c2d")]
+#[tokio::test]
+async fn ec2_create_network_acl() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.create_network_acl().vpc_id("vpc-1").send().await.unwrap();
+    assert!(r
+        .network_acl()
+        .unwrap()
+        .network_acl_id()
+        .unwrap()
+        .starts_with("acl-"));
+}
+
+#[test_action("ec2", "DescribeNetworkAcls", checksum = "990d0d1e")]
+#[tokio::test]
+async fn ec2_describe_network_acls() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    let r = c
+        .describe_network_acls()
+        .network_acl_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_acls().len(), 1);
+}
+
+#[test_action("ec2", "DeleteNetworkAcl", checksum = "58322c5e")]
+#[tokio::test]
+async fn ec2_delete_network_acl() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    c.delete_network_acl()
+        .network_acl_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(c
+        .describe_network_acls()
+        .send()
+        .await
+        .unwrap()
+        .network_acls()
+        .is_empty());
+}
+
+#[test_action("ec2", "CreateNetworkAclEntry", checksum = "084c817c")]
+#[tokio::test]
+async fn ec2_create_network_acl_entry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    c.create_network_acl_entry()
+        .network_acl_id(&id)
+        .rule_number(100)
+        .protocol("-1")
+        .rule_action(aws_sdk_ec2::types::RuleAction::Allow)
+        .egress(false)
+        .cidr_block("0.0.0.0/0")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ReplaceNetworkAclEntry", checksum = "598ce276")]
+#[tokio::test]
+async fn ec2_replace_network_acl_entry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    c.create_network_acl_entry()
+        .network_acl_id(&id)
+        .rule_number(100)
+        .protocol("-1")
+        .rule_action(aws_sdk_ec2::types::RuleAction::Allow)
+        .egress(false)
+        .cidr_block("0.0.0.0/0")
+        .send()
+        .await
+        .unwrap();
+    c.replace_network_acl_entry()
+        .network_acl_id(&id)
+        .rule_number(100)
+        .protocol("6")
+        .rule_action(aws_sdk_ec2::types::RuleAction::Deny)
+        .egress(false)
+        .cidr_block("0.0.0.0/0")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteNetworkAclEntry", checksum = "183877c6")]
+#[tokio::test]
+async fn ec2_delete_network_acl_entry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    c.create_network_acl_entry()
+        .network_acl_id(&id)
+        .rule_number(100)
+        .protocol("-1")
+        .rule_action(aws_sdk_ec2::types::RuleAction::Allow)
+        .egress(false)
+        .cidr_block("0.0.0.0/0")
+        .send()
+        .await
+        .unwrap();
+    c.delete_network_acl_entry()
+        .network_acl_id(&id)
+        .rule_number(100)
+        .egress(false)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ReplaceNetworkAclAssociation", checksum = "77edbfc0")]
+#[tokio::test]
+async fn ec2_replace_network_acl_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_nacl(&c).await;
+    let r = c
+        .replace_network_acl_association()
+        .association_id("aclassoc-1")
+        .network_acl_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.new_association_id().is_some());
+}
+
+// ---- VPC peering ----
+
+async fn make_pcx(c: &aws_sdk_ec2::Client) -> String {
+    c.create_vpc_peering_connection()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .vpc_peering_connection()
+        .unwrap()
+        .vpc_peering_connection_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateVpcPeeringConnection", checksum = "654dd690")]
+#[tokio::test]
+async fn ec2_create_vpc_peering_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_vpc_peering_connection()
+        .vpc_id("vpc-1")
+        .peer_vpc_id("vpc-2")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .vpc_peering_connection()
+        .unwrap()
+        .vpc_peering_connection_id()
+        .unwrap()
+        .starts_with("pcx-"));
+}
+
+#[test_action("ec2", "DescribeVpcPeeringConnections", checksum = "5e2969bd")]
+#[tokio::test]
+async fn ec2_describe_vpc_peering_connections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pcx(&c).await;
+    let r = c
+        .describe_vpc_peering_connections()
+        .vpc_peering_connection_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.vpc_peering_connections().len(), 1);
+}
+
+#[test_action("ec2", "AcceptVpcPeeringConnection", checksum = "5a22d8e9")]
+#[tokio::test]
+async fn ec2_accept_vpc_peering_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pcx(&c).await;
+    let r = c
+        .accept_vpc_peering_connection()
+        .vpc_peering_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.vpc_peering_connection()
+            .unwrap()
+            .vpc_peering_connection_id(),
+        Some(id.as_str())
+    );
+}
+
+#[test_action("ec2", "RejectVpcPeeringConnection", checksum = "f51d6b1e")]
+#[tokio::test]
+async fn ec2_reject_vpc_peering_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pcx(&c).await;
+    c.reject_vpc_peering_connection()
+        .vpc_peering_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteVpcPeeringConnection", checksum = "cbeea771")]
+#[tokio::test]
+async fn ec2_delete_vpc_peering_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pcx(&c).await;
+    c.delete_vpc_peering_connection()
+        .vpc_peering_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpcPeeringConnectionOptions", checksum = "e81c8d38")]
+#[tokio::test]
+async fn ec2_modify_vpc_peering_connection_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pcx(&c).await;
+    let r = c
+        .modify_vpc_peering_connection_options()
+        .vpc_peering_connection_id(&id)
+        .requester_peering_connection_options(
+            aws_sdk_ec2::types::PeeringConnectionOptionsRequest::builder()
+                .allow_dns_resolution_from_remote_vpc(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.requester_peering_connection_options().is_some());
+}
