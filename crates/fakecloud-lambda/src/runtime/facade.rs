@@ -32,16 +32,29 @@ struct WarmEntry {
 /// Compute the warm-instance key for a function with its current layer
 /// set. Stable across calls — layer ARNs are immutable in AWS, so the
 /// hash of their bytes is the right cache key.
+///
+/// Encoded with `URL_SAFE_NO_PAD` so the result never contains `/`, `+`,
+/// or `=`. The id is spliced raw into the init-container artifact URL
+/// (`.../_internal/code/{account}/{function}/{deploy}.zip`) and into the
+/// `fakecloud-deploy-id` Pod label; standard base64's `/` would grow an
+/// extra URL path segment, break the axum route match, and wedge the Pod
+/// in a cold-start loop for ~49% of deploys (issue #1643).
 fn deploy_id_for(func: &LambdaFunction, layers: &[Vec<u8>]) -> String {
+    deploy_id_from(&func.code_sha256, layers)
+}
+
+/// Pure core of [`deploy_id_for`], split out so the URL-path-safety
+/// invariant can be tested without constructing a full `LambdaFunction`.
+fn deploy_id_from(code_sha256: &str, layers: &[Vec<u8>]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(func.code_sha256.as_bytes());
+    hasher.update(code_sha256.as_bytes());
     for bytes in layers {
         let mut layer_hasher = Sha256::new();
         layer_hasher.update(bytes);
         hasher.update(b":");
         hasher.update(layer_hasher.finalize());
     }
-    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 pub struct LambdaRuntime {
@@ -363,5 +376,46 @@ impl LambdaRuntime {
             tracing::info!(function = %name, "stopping idle Lambda runtime instance");
             self.stop_container(&name).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deploy_id_from;
+
+    /// The deploy id is spliced raw into the init-container artifact URL
+    /// path and into a Pod label, so it must never contain characters
+    /// that standard base64 emits (`/`, `+`, `=`). Standard base64
+    /// produced `/` for ~49% of code hashes (issue #1643); sweep a wide
+    /// range of inputs to catch any regression back to a non-URL-safe
+    /// alphabet.
+    #[test]
+    fn deploy_id_is_url_path_safe() {
+        for i in 0..2_000u32 {
+            // Vary both the code hash and the layer set.
+            let code_sha256 = format!("sha256-seed-{i}-{}", i.wrapping_mul(2_654_435_761));
+            let layers: Vec<Vec<u8>> = if i % 3 == 0 {
+                vec![format!("layer-{i}").into_bytes()]
+            } else {
+                vec![]
+            };
+            let id = deploy_id_from(&code_sha256, &layers);
+            assert!(
+                !id.contains('/') && !id.contains('+') && !id.contains('='),
+                "deploy id {id:?} (seed {i}) is not URL-path-safe"
+            );
+        }
+    }
+
+    /// Same inputs must always map to the same deploy id — the value is a
+    /// warm-pool cache key, so instability would defeat reuse.
+    #[test]
+    fn deploy_id_is_stable() {
+        let layers = vec![b"layer-a".to_vec(), b"layer-b".to_vec()];
+        let a = deploy_id_from("abc123", &layers);
+        let b = deploy_id_from("abc123", &layers);
+        assert_eq!(a, b);
+        assert_ne!(a, deploy_id_from("abc124", &layers));
+        assert_ne!(a, deploy_id_from("abc123", &[]));
     }
 }
