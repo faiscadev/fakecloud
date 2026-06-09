@@ -360,6 +360,57 @@ pub struct Image {
     pub deregistration_protection: bool,
 }
 
+/// A network ACL entry (rule).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkAclEntry {
+    pub rule_number: i64,
+    pub protocol: String,
+    /// `allow` | `deny`.
+    pub rule_action: String,
+    pub egress: bool,
+    pub cidr_block: Option<String>,
+    pub ipv6_cidr_block: Option<String>,
+    /// TCP/UDP port range (from, to).
+    pub port_range: Option<(i64, i64)>,
+    /// ICMP (type, code).
+    pub icmp_type_code: Option<(i64, i64)>,
+}
+
+/// A network ACL <-> subnet association.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkAclAssoc {
+    pub association_id: String,
+    pub subnet_id: String,
+}
+
+/// A network ACL.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkAcl {
+    pub network_acl_id: String,
+    pub vpc_id: String,
+    pub is_default: bool,
+    #[serde(default)]
+    pub entries: Vec<NetworkAclEntry>,
+    #[serde(default)]
+    pub associations: Vec<NetworkAclAssoc>,
+}
+
+/// A VPC peering connection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpcPeering {
+    pub id: String,
+    pub requester_vpc_id: String,
+    pub accepter_vpc_id: String,
+    /// `pending-acceptance` | `active` | `rejected` | `deleted`.
+    pub status: String,
+    /// Requester-side DNS-resolution-from-remote-VPC option.
+    #[serde(default)]
+    pub requester_allow_dns: bool,
+    /// Accepter-side DNS-resolution-from-remote-VPC option.
+    #[serde(default)]
+    pub accepter_allow_dns: bool,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -424,6 +475,10 @@ pub struct Ec2State {
     /// Account-level allowed-images settings state.
     #[serde(default)]
     pub allowed_images_settings: String,
+    #[serde(default)]
+    pub network_acls: HashMap<String, NetworkAcl>,
+    #[serde(default)]
+    pub vpc_peerings: HashMap<String, VpcPeering>,
 }
 
 impl Ec2State {

@@ -6,6 +6,7 @@ mod eni;
 mod image;
 mod instance;
 mod meta;
+mod nacl;
 mod routing;
 mod sg;
 mod snapshot;
@@ -257,6 +258,21 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeStoreImageTasks",
     "CreateRestoreImageTask",
     "DescribeFastLaunchImages",
+    // Network ACLs
+    "CreateNetworkAcl",
+    "DeleteNetworkAcl",
+    "DescribeNetworkAcls",
+    "CreateNetworkAclEntry",
+    "DeleteNetworkAclEntry",
+    "ReplaceNetworkAclEntry",
+    "ReplaceNetworkAclAssociation",
+    // VPC peering
+    "CreateVpcPeeringConnection",
+    "DeleteVpcPeeringConnection",
+    "DescribeVpcPeeringConnections",
+    "AcceptVpcPeeringConnection",
+    "RejectVpcPeeringConnection",
+    "ModifyVpcPeeringConnectionOptions",
 ];
 
 /// Amazon EC2 service.
@@ -600,6 +616,23 @@ impl AwsService for Ec2Service {
             "DescribeStoreImageTasks" => image::describe_store_image_tasks(self, &request),
             "CreateRestoreImageTask" => image::create_restore_image_task(self, &request),
             "DescribeFastLaunchImages" => image::describe_fast_launch_images(self, &request),
+            "CreateNetworkAcl" => nacl::create_network_acl(self, &request),
+            "DeleteNetworkAcl" => nacl::delete_network_acl(self, &request),
+            "DescribeNetworkAcls" => nacl::describe_network_acls(self, &request),
+            "CreateNetworkAclEntry" => nacl::create_network_acl_entry(self, &request),
+            "DeleteNetworkAclEntry" => nacl::delete_network_acl_entry(self, &request),
+            "ReplaceNetworkAclEntry" => nacl::replace_network_acl_entry(self, &request),
+            "ReplaceNetworkAclAssociation" => nacl::replace_network_acl_association(self, &request),
+            "CreateVpcPeeringConnection" => nacl::create_vpc_peering_connection(self, &request),
+            "DeleteVpcPeeringConnection" => nacl::delete_vpc_peering_connection(self, &request),
+            "DescribeVpcPeeringConnections" => {
+                nacl::describe_vpc_peering_connections(self, &request)
+            }
+            "AcceptVpcPeeringConnection" => nacl::accept_vpc_peering_connection(self, &request),
+            "RejectVpcPeeringConnection" => nacl::reject_vpc_peering_connection(self, &request),
+            "ModifyVpcPeeringConnectionOptions" => {
+                nacl::modify_vpc_peering_connection_options(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
