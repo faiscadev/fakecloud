@@ -214,13 +214,16 @@ fn parse_entry(req: &AwsRequest) -> NetworkAclEntry {
 }
 
 /// Parse a paired `(from, to)` integer structure, present only when at least
-/// one half is supplied.
+/// one half parses. A missing or unparseable half mirrors the supplied one
+/// rather than silently coercing to `0` (which would fabricate rule `0`).
 fn parse_pair(req: &AwsRequest, lo: &str, hi: &str) -> Option<(i64, i64)> {
-    let a = req.query_params.get(lo).and_then(|v| v.parse().ok());
-    let b = req.query_params.get(hi).and_then(|v| v.parse().ok());
+    let a = req.query_params.get(lo).and_then(|v| v.parse::<i64>().ok());
+    let b = req.query_params.get(hi).and_then(|v| v.parse::<i64>().ok());
     match (a, b) {
         (None, None) => None,
-        _ => Some((a.unwrap_or(0), b.unwrap_or(0))),
+        (Some(x), Some(y)) => Some((x, y)),
+        (Some(x), None) => Some((x, x)),
+        (None, Some(y)) => Some((y, y)),
     }
 }
 
