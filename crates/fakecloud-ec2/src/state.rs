@@ -458,6 +458,8 @@ pub struct FlowLog {
     pub traffic_type: String,
     pub log_destination_type: String,
     pub log_group_name: Option<String>,
+    /// Destination ARN for `s3` / `kinesis-data-firehose` deliveries.
+    pub log_destination: Option<String>,
 }
 
 /// Per-account, per-region EC2 state. Resource families are added to this

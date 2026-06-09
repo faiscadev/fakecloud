@@ -1,7 +1,7 @@
 //! VPC endpoints, endpoint service configurations, connection notifications,
 //! and VPC flow logs.
 
-use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
+use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return, ec2_scalar_list};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
@@ -113,6 +113,7 @@ pub(crate) fn delete_vpc_endpoints(
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
             state.vpc_endpoints.remove(id);
+            state.tags.remove(id);
         }
     }
     Ok(Ec2Service::respond(
@@ -189,7 +190,7 @@ pub(crate) fn describe_vpc_endpoint_services(
         .collect();
     let body = format!(
         "{}{}",
-        ec2_scalar_or_list("serviceNameSet", &name_items),
+        ec2_scalar_list("serviceNameSet", &name_items),
         ec2_list("serviceDetailSet", &details)
     );
     Ok(Ec2Service::respond(
@@ -197,11 +198,6 @@ pub(crate) fn describe_vpc_endpoint_services(
         &req.request_id,
         &body,
     ))
-}
-
-fn ec2_scalar_or_list(wrapper: &str, items: &[String]) -> String {
-    let inner: String = items.iter().map(|v| ec2_elem("item", v)).collect();
-    format!("<{wrapper}>{inner}</{wrapper}>")
 }
 
 pub(crate) fn describe_vpc_endpoint_connections(
@@ -313,6 +309,7 @@ pub(crate) fn delete_vpc_endpoint_service_configurations(
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
             state.endpoint_services.remove(id);
+            state.tags.remove(id);
         }
     }
     Ok(Ec2Service::respond(
@@ -521,12 +518,13 @@ pub(crate) fn describe_vpc_endpoint_associations(
 
 fn flow_log_xml(f: &FlowLog, tags: &[Tag]) -> String {
     format!(
-        "{}{}{}{}<flowLogStatus>ACTIVE</flowLogStatus><deliverLogsStatus>SUCCESS</deliverLogsStatus>{}{}{}",
+        "{}{}{}{}<flowLogStatus>ACTIVE</flowLogStatus><deliverLogsStatus>SUCCESS</deliverLogsStatus>{}{}{}{}",
         ec2_elem("flowLogId", &f.id),
         ec2_elem("resourceId", &f.resource_id),
         ec2_elem("trafficType", &f.traffic_type),
         ec2_elem("logDestinationType", &f.log_destination_type),
         f.log_group_name.as_ref().map(|n| ec2_elem("logGroupName", n)).unwrap_or_default(),
+        f.log_destination.as_ref().map(|d| ec2_elem("logDestination", d)).unwrap_or_default(),
         ec2_elem("creationTime", FIXED_TIME),
         super::tags::tag_set_xml(tags),
     )
@@ -570,12 +568,20 @@ pub(crate) fn create_flow_logs(
         .get("LogDestinationType")
         .cloned()
         .unwrap_or_else(|| "cloud-watch-logs".to_string());
+    let log_destination = req.query_params.get("LogDestination").cloned();
     let mut ids = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         for r in &resources {
             let id = gen_id("fl");
+            // `vpc-flow-log` TagSpecifications apply to each created flow log.
+            crate::service::tags::apply_tag_specifications(
+                state,
+                &req.query_params,
+                &id,
+                "vpc-flow-log",
+            );
             state.flow_logs.insert(
                 id.clone(),
                 FlowLog {
@@ -584,6 +590,7 @@ pub(crate) fn create_flow_logs(
                     traffic_type: traffic.clone(),
                     log_destination_type: dest.clone(),
                     log_group_name: req.query_params.get("LogGroupName").cloned(),
+                    log_destination: log_destination.clone(),
                 },
             );
             ids.push(id);
@@ -612,6 +619,7 @@ pub(crate) fn delete_flow_logs(
         let state = accounts.get_or_create(&req.account_id);
         for id in &ids {
             state.flow_logs.remove(id);
+            state.tags.remove(id);
         }
     }
     Ok(Ec2Service::respond(
