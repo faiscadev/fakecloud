@@ -579,6 +579,20 @@ pub struct TgwRoute {
     pub state: String,
 }
 
+/// A Transit Gateway multicast domain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwMulticastDomain {
+    pub id: String,
+    pub tgw_id: String,
+}
+
+/// A Transit Gateway metering policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwMeteringPolicy {
+    pub id: String,
+    pub tgw_id: String,
+}
+
 /// A Transit Gateway peering attachment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgwPeering {
@@ -721,6 +735,10 @@ pub struct Ec2State {
     /// announcement-id -> (route-table id, peering-attachment id).
     #[serde(default)]
     pub tgw_announcements: HashMap<String, (String, String)>,
+    #[serde(default)]
+    pub tgw_multicast_domains: HashMap<String, TgwMulticastDomain>,
+    #[serde(default)]
+    pub tgw_metering_policies: HashMap<String, TgwMeteringPolicy>,
 }
 
 impl Ec2State {

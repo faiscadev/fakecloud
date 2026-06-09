@@ -17,6 +17,7 @@ mod snapshot;
 mod subnet;
 mod tags;
 mod tgw;
+mod tgw_mcast;
 mod tgw_peering;
 mod volume;
 mod vpc;
@@ -436,6 +437,30 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateTransitGatewayRouteTableAnnouncement",
     "DeleteTransitGatewayRouteTableAnnouncement",
     "DescribeTransitGatewayRouteTableAnnouncements",
+    // Transit gateway multicast / metering / client-vpn-attach
+    "CreateTransitGatewayMulticastDomain",
+    "DeleteTransitGatewayMulticastDomain",
+    "DescribeTransitGatewayMulticastDomains",
+    "AssociateTransitGatewayMulticastDomain",
+    "DisassociateTransitGatewayMulticastDomain",
+    "AcceptTransitGatewayMulticastDomainAssociations",
+    "RejectTransitGatewayMulticastDomainAssociations",
+    "GetTransitGatewayMulticastDomainAssociations",
+    "RegisterTransitGatewayMulticastGroupMembers",
+    "RegisterTransitGatewayMulticastGroupSources",
+    "DeregisterTransitGatewayMulticastGroupMembers",
+    "DeregisterTransitGatewayMulticastGroupSources",
+    "SearchTransitGatewayMulticastGroups",
+    "CreateTransitGatewayMeteringPolicy",
+    "DeleteTransitGatewayMeteringPolicy",
+    "DescribeTransitGatewayMeteringPolicies",
+    "ModifyTransitGatewayMeteringPolicy",
+    "CreateTransitGatewayMeteringPolicyEntry",
+    "DeleteTransitGatewayMeteringPolicyEntry",
+    "GetTransitGatewayMeteringPolicyEntries",
+    "AcceptTransitGatewayClientVpnAttachment",
+    "DeleteTransitGatewayClientVpnAttachment",
+    "RejectTransitGatewayClientVpnAttachment",
 ];
 
 /// Amazon EC2 service.
@@ -1138,6 +1163,75 @@ impl AwsService for Ec2Service {
             }
             "DescribeTransitGatewayRouteTableAnnouncements" => {
                 tgw_peering::describe_transit_gateway_route_table_announcements(self, &request)
+            }
+            "CreateTransitGatewayMulticastDomain" => {
+                tgw_mcast::create_transit_gateway_multicast_domain(self, &request)
+            }
+            "DeleteTransitGatewayMulticastDomain" => {
+                tgw_mcast::delete_transit_gateway_multicast_domain(self, &request)
+            }
+            "DescribeTransitGatewayMulticastDomains" => {
+                tgw_mcast::describe_transit_gateway_multicast_domains(self, &request)
+            }
+            "AssociateTransitGatewayMulticastDomain" => {
+                tgw_mcast::associate_transit_gateway_multicast_domain(self, &request)
+            }
+            "DisassociateTransitGatewayMulticastDomain" => {
+                tgw_mcast::disassociate_transit_gateway_multicast_domain(self, &request)
+            }
+            "AcceptTransitGatewayMulticastDomainAssociations" => {
+                tgw_mcast::accept_transit_gateway_multicast_domain_associations(self, &request)
+            }
+            "RejectTransitGatewayMulticastDomainAssociations" => {
+                tgw_mcast::reject_transit_gateway_multicast_domain_associations(self, &request)
+            }
+            "GetTransitGatewayMulticastDomainAssociations" => {
+                tgw_mcast::get_transit_gateway_multicast_domain_associations(self, &request)
+            }
+            "RegisterTransitGatewayMulticastGroupMembers" => {
+                tgw_mcast::register_transit_gateway_multicast_group_members(self, &request)
+            }
+            "RegisterTransitGatewayMulticastGroupSources" => {
+                tgw_mcast::register_transit_gateway_multicast_group_sources(self, &request)
+            }
+            "DeregisterTransitGatewayMulticastGroupMembers" => {
+                tgw_mcast::deregister_transit_gateway_multicast_group_members(self, &request)
+            }
+            "DeregisterTransitGatewayMulticastGroupSources" => {
+                tgw_mcast::deregister_transit_gateway_multicast_group_sources(self, &request)
+            }
+            "SearchTransitGatewayMulticastGroups" => {
+                tgw_mcast::search_transit_gateway_multicast_groups(self, &request)
+            }
+            "CreateTransitGatewayMeteringPolicy" => {
+                tgw_mcast::create_transit_gateway_metering_policy(self, &request)
+            }
+            "DeleteTransitGatewayMeteringPolicy" => {
+                tgw_mcast::delete_transit_gateway_metering_policy(self, &request)
+            }
+            "DescribeTransitGatewayMeteringPolicies" => {
+                tgw_mcast::describe_transit_gateway_metering_policies(self, &request)
+            }
+            "ModifyTransitGatewayMeteringPolicy" => {
+                tgw_mcast::modify_transit_gateway_metering_policy(self, &request)
+            }
+            "CreateTransitGatewayMeteringPolicyEntry" => {
+                tgw_mcast::create_transit_gateway_metering_policy_entry(self, &request)
+            }
+            "DeleteTransitGatewayMeteringPolicyEntry" => {
+                tgw_mcast::delete_transit_gateway_metering_policy_entry(self, &request)
+            }
+            "GetTransitGatewayMeteringPolicyEntries" => {
+                tgw_mcast::get_transit_gateway_metering_policy_entries(self, &request)
+            }
+            "AcceptTransitGatewayClientVpnAttachment" => {
+                tgw_mcast::accept_transit_gateway_client_vpn_attachment(self, &request)
+            }
+            "DeleteTransitGatewayClientVpnAttachment" => {
+                tgw_mcast::delete_transit_gateway_client_vpn_attachment(self, &request)
+            }
+            "RejectTransitGatewayClientVpnAttachment" => {
+                tgw_mcast::reject_transit_gateway_client_vpn_attachment(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
