@@ -129,6 +129,10 @@ impl FakeCloud {
         RdsClient { fc: self }
     }
 
+    pub fn ec2(&self) -> Ec2Client<'_> {
+        Ec2Client { fc: self }
+    }
+
     pub fn elasticache(&self) -> ElastiCacheClient<'_> {
         ElastiCacheClient { fc: self }
     }
@@ -234,6 +238,23 @@ impl FakeCloud {
 }
 
 // ── RDS ─────────────────────────────────────────────────────────────
+
+pub struct Ec2Client<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl Ec2Client<'_> {
+    /// List fakecloud-managed EC2 instances with control-plane metadata.
+    pub async fn get_instances(&self) -> Result<Ec2InstancesResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ec2/instances", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
 
 pub struct RdsClient<'a> {
     fc: &'a FakeCloud,

@@ -3,6 +3,7 @@ export {
   LambdaClient,
   LogsClient,
   RdsClient,
+  Ec2Client,
   ElastiCacheClient,
   EcrClient,
   SesClient,

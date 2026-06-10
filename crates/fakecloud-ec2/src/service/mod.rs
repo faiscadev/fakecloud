@@ -880,6 +880,12 @@ impl Ec2Service {
     pub fn with_state(state: SharedEc2State) -> Self {
         Self { state }
     }
+
+    /// Clone the shared state handle so the server can expose read-only
+    /// introspection endpoints (`GET /_fakecloud/ec2/instances`).
+    pub fn shared_state(&self) -> SharedEc2State {
+        self.state.clone()
+    }
 }
 
 impl Default for Ec2Service {

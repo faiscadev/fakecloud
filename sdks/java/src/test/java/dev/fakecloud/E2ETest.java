@@ -40,6 +40,8 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ScalarAttributeType;
 import software.amazon.awssdk.services.dynamodb.model.TimeToLiveSpecification;
 import software.amazon.awssdk.services.dynamodb.model.UpdateTimeToLiveRequest;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.RunInstancesRequest;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.CreateCacheClusterRequest;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
@@ -369,6 +371,27 @@ class E2ETest {
         assertEquals("postgres", instance.engine());
         assertEquals("appdb", instance.dbName());
         assertTrue(instance.hostPort() > 0);
+    }
+
+    // ── EC2 ────────────────────────────────────────────────────────
+    @Test
+    void ec2GetInstancesReturnsManagedInstances() {
+        Ec2Client ec2 = configure(Ec2Client.builder()).build();
+        var run = ec2.runInstances(RunInstancesRequest.builder()
+                .imageId("ami-12345678")
+                .instanceType("t3.micro")
+                .minCount(1)
+                .maxCount(1)
+                .build());
+        String instanceId = run.instances().get(0).instanceId();
+
+        var instance = fc.ec2().getInstances().instances().stream()
+                .filter(i -> instanceId.equals(i.instanceId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("ami-12345678", instance.imageId());
+        assertEquals("t3.micro", instance.instanceType());
+        assertNotNull(instance.state());
     }
 
     // ── ElastiCache ────────────────────────────────────────────────

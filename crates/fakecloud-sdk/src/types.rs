@@ -2333,3 +2333,35 @@ pub struct KmsUsageResponse {
 pub struct Elbv2WafCountsResponse {
     pub counts: serde_json::Value,
 }
+
+// ── EC2 instances (introspection) ───────────────────────────────────
+
+/// A single EC2 instance as surfaced by `GET /_fakecloud/ec2/instances`.
+/// Instances are metadata-faithful today (Docker-backed execution is a
+/// roadmap follow-up), so this mirrors the control-plane view without
+/// leaking runtime-internal fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ec2Instance {
+    pub instance_id: String,
+    pub image_id: String,
+    pub instance_type: String,
+    /// EC2 state name: `pending` | `running` | `shutting-down` |
+    /// `terminated` | `stopping` | `stopped`.
+    pub state: String,
+    pub private_ip: String,
+    pub public_ip: Option<String>,
+    pub subnet_id: Option<String>,
+    pub vpc_id: Option<String>,
+    pub key_name: Option<String>,
+    pub security_group_ids: Vec<String>,
+    pub availability_zone: String,
+    pub launch_time: String,
+}
+
+/// Response body for `GET /_fakecloud/ec2/instances`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ec2InstancesResponse {
+    pub instances: Vec<Ec2Instance>,
+}

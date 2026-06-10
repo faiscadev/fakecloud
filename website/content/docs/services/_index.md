@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 41 AWS services with 2,937 total operations. 124,255/124,255 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 41 AWS services with 3,704 total operations. 124,255/124,255 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |

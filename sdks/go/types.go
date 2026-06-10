@@ -53,6 +53,30 @@ type RDSInstancesResponse struct {
 	Instances []RDSInstance `json:"instances"`
 }
 
+// ── EC2 ────────────────────────────────────────────────────────────
+
+// EC2Instance describes a fakecloud-managed EC2 instance and its runtime
+// metadata. Optional fields are pointers so JSON decoding accepts both
+// absent and explicit `null` values from the server.
+type EC2Instance struct {
+	InstanceID       string   `json:"instanceId"`
+	ImageID          string   `json:"imageId"`
+	InstanceType     string   `json:"instanceType"`
+	State            string   `json:"state"`
+	PrivateIP        string   `json:"privateIp"`
+	PublicIP         *string  `json:"publicIp"`
+	SubnetID         *string  `json:"subnetId"`
+	VpcID            *string  `json:"vpcId"`
+	KeyName          *string  `json:"keyName"`
+	SecurityGroupIDs []string `json:"securityGroupIds"`
+	AvailabilityZone string   `json:"availabilityZone"`
+	LaunchTime       string   `json:"launchTime"`
+}
+
+type EC2InstancesResponse struct {
+	Instances []EC2Instance `json:"instances"`
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 type ElastiCacheCluster struct {

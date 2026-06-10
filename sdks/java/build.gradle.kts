@@ -37,6 +37,7 @@ dependencies {
     testImplementation("software.amazon.awssdk:dynamodb")
     testImplementation("software.amazon.awssdk:cognitoidentityprovider")
     testImplementation("software.amazon.awssdk:eventbridge")
+    testImplementation("software.amazon.awssdk:ec2")
     testImplementation("software.amazon.awssdk:rds")
     testImplementation("software.amazon.awssdk:elasticache")
 }

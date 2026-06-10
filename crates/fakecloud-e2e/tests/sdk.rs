@@ -149,6 +149,37 @@ async fn sdk_rds_get_instances() {
     assert!(instance.host_port > 0);
 }
 
+// ── EC2 ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn sdk_ec2_get_instances() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec2 = server.ec2_client().await;
+
+    let run = ec2
+        .run_instances()
+        .image_id("ami-abc123")
+        .instance_type(aws_sdk_ec2::types::InstanceType::T3Micro)
+        .min_count(1)
+        .max_count(1)
+        .send()
+        .await
+        .unwrap();
+    let id = run.instances()[0].instance_id().unwrap().to_string();
+
+    let instances = fc.ec2().get_instances().await.expect("get ec2 instances");
+    let inst = instances
+        .instances
+        .iter()
+        .find(|i| i.instance_id == id)
+        .expect("instance present in introspection");
+    assert_eq!(inst.image_id, "ami-abc123");
+    assert_eq!(inst.instance_type, "t3.micro");
+    assert!(inst.state == "running" || inst.state == "pending");
+    assert!(!inst.private_ip.is_empty());
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 #[tokio::test]

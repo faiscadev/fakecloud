@@ -56,6 +56,25 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record RdsInstancesResponse(List<RdsInstance> instances) {}
 
+    // ── EC2 ────────────────────────────────────────────────────────
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Ec2Instance(
+            String instanceId,
+            String imageId,
+            String instanceType,
+            String state,
+            String privateIp,
+            String publicIp,
+            String subnetId,
+            String vpcId,
+            String keyName,
+            List<String> securityGroupIds,
+            String availabilityZone,
+            String launchTime) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Ec2InstancesResponse(List<Ec2Instance> instances) {}
+
     // ── ElastiCache ────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ElastiCacheCluster(

@@ -3536,6 +3536,7 @@ dependencies = [
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",
+ "aws-sdk-ec2",
  "aws-sdk-ecr",
  "aws-sdk-ecs",
  "aws-sdk-elasticache",

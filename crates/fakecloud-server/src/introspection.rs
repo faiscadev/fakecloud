@@ -824,3 +824,22 @@ mod tests {
         assert_eq!(member.scp_attached, vec![policy_id]);
     }
 }
+
+pub(crate) fn ec2_instance_response(
+    instance: &fakecloud_ec2::state::Instance,
+) -> types::Ec2Instance {
+    types::Ec2Instance {
+        instance_id: instance.instance_id.clone(),
+        image_id: instance.image_id.clone(),
+        instance_type: instance.instance_type.clone(),
+        state: instance.state_name.clone(),
+        private_ip: instance.private_ip.clone(),
+        public_ip: instance.public_ip.clone(),
+        subnet_id: instance.subnet_id.clone(),
+        vpc_id: instance.vpc_id.clone(),
+        key_name: instance.key_name.clone(),
+        security_group_ids: instance.security_group_ids.clone(),
+        availability_zone: instance.az.clone(),
+        launch_time: instance.launch_time.clone(),
+    }
+}

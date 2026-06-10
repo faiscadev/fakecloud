@@ -46,6 +46,27 @@ export interface RdsInstancesResponse {
   instances: RdsInstance[];
 }
 
+// ── EC2 ────────────────────────────────────────────────────────────
+
+export interface Ec2Instance {
+  instanceId: string;
+  imageId: string;
+  instanceType: string;
+  state: string;
+  privateIp: string;
+  publicIp: string | null;
+  subnetId: string | null;
+  vpcId: string | null;
+  keyName: string | null;
+  securityGroupIds: string[];
+  availabilityZone: string;
+  launchTime: string;
+}
+
+export interface Ec2InstancesResponse {
+  instances: Ec2Instance[];
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 export interface ElastiCacheCluster {

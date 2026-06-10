@@ -143,6 +143,34 @@ final class E2ETest extends TestCase
         $this->assertTrue($found, 'Expected pending confirmation not found');
     }
 
+    // ── EC2 ────────────────────────────────────────────────────────
+
+    public function testEc2GetInstances(): void
+    {
+        $xml = $this->awsEc2('RunInstances', [
+            'ImageId' => 'ami-12345678',
+            'InstanceType' => 't3.micro',
+            'MinCount' => '1',
+            'MaxCount' => '1',
+        ]);
+        $instanceId = $this->extractXmlValue($xml, 'instanceId');
+        $this->assertNotEmpty($instanceId, 'RunInstances did not return an instanceId');
+
+        $result = $this->fc->ec2()->getInstances();
+        $this->assertNotEmpty($result->instances);
+        $found = null;
+        foreach ($result->instances as $instance) {
+            if ($instance->instanceId === $instanceId) {
+                $found = $instance;
+                break;
+            }
+        }
+        $this->assertNotNull($found, 'Expected EC2 instance not found');
+        $this->assertSame('ami-12345678', $found->imageId);
+        $this->assertSame('t3.micro', $found->instanceType);
+        $this->assertIsArray($found->securityGroupIds);
+    }
+
     // ── SES ────────────────────────────────────────────────────────
 
     public function testSesGetEmails(): void
@@ -297,6 +325,23 @@ final class E2ETest extends TestCase
         $result = curl_exec($ch);
         curl_close($ch);
         return json_decode($result, true) ?: [];
+    }
+
+    private function awsEc2(string $action, array $params): string
+    {
+        $params['Action'] = $action;
+        $params['Version'] = '2016-11-15';
+        $ch = curl_init($this->endpoint);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/x-www-form-urlencoded',
+            'Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/ec2/aws4_request, SignedHeaders=host, Signature=dummy',
+        ]);
+        $result = curl_exec($ch);
+        curl_close($ch);
+        return $result;
     }
 
     private function awsSns(string $action, array $params): string

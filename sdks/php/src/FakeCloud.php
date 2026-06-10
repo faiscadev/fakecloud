@@ -19,6 +19,7 @@ final class FakeCloud
 
     private HttpTransport $http;
     private LambdaClient $lambda;
+    private Ec2Client $ec2;
     private RdsClient $rds;
     private ElastiCacheClient $elasticache;
     private EcrClient $ecr;
@@ -56,6 +57,7 @@ final class FakeCloud
     {
         $this->http = new HttpTransport($baseUrl);
         $this->lambda = new LambdaClient($this->http);
+        $this->ec2 = new Ec2Client($this->http);
         $this->rds = new RdsClient($this->http);
         $this->elasticache = new ElastiCacheClient($this->http);
         $this->ecr = new EcrClient($this->http);
@@ -129,6 +131,7 @@ final class FakeCloud
     // ── Sub-client accessors ───────────────────────────────────────
 
     public function lambda(): LambdaClient { return $this->lambda; }
+    public function ec2(): Ec2Client { return $this->ec2; }
     public function rds(): RdsClient { return $this->rds; }
     public function elasticache(): ElastiCacheClient { return $this->elasticache; }
     public function ecr(): EcrClient { return $this->ecr; }
@@ -222,6 +225,18 @@ final class LambdaClient
                 . HttpTransport::encodePath($accountId) . '/'
                 . HttpTransport::encodePath($layerName) . '/'
                 . HttpTransport::encodePath($file)
+        );
+    }
+}
+
+final class Ec2Client
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getInstances(): Ec2InstancesResponse
+    {
+        return Ec2InstancesResponse::fromArray(
+            $this->http->get('/_fakecloud/ec2/instances')
         );
     }
 }
