@@ -698,6 +698,42 @@ pub struct IpamPrefixListResolverTarget {
     pub track_latest_version: bool,
 }
 
+/// A Verified Access instance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedAccessInstance {
+    pub id: String,
+    pub description: String,
+    #[serde(default)]
+    pub trust_providers: Vec<String>,
+}
+
+/// A Verified Access trust provider.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedAccessTrustProvider {
+    pub id: String,
+    pub trust_provider_type: String,
+    pub policy_reference_name: String,
+    pub description: String,
+}
+
+/// A Verified Access group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedAccessGroup {
+    pub id: String,
+    pub instance_id: String,
+    pub description: String,
+}
+
+/// A Verified Access endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedAccessEndpoint {
+    pub id: String,
+    pub group_id: String,
+    pub instance_id: String,
+    pub endpoint_type: String,
+    pub attachment_type: String,
+}
+
 /// A Client VPN endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientVpnEndpoint {
@@ -908,6 +944,20 @@ pub struct Ec2State {
     /// The single enabled IPAM policy id, if any.
     #[serde(default)]
     pub ipam_enabled_policy: Option<String>,
+    #[serde(default)]
+    pub va_instances: HashMap<String, VerifiedAccessInstance>,
+    #[serde(default)]
+    pub va_trust_providers: HashMap<String, VerifiedAccessTrustProvider>,
+    #[serde(default)]
+    pub va_groups: HashMap<String, VerifiedAccessGroup>,
+    #[serde(default)]
+    pub va_endpoints: HashMap<String, VerifiedAccessEndpoint>,
+    /// group-id -> policy document.
+    #[serde(default)]
+    pub va_group_policies: HashMap<String, String>,
+    /// endpoint-id -> policy document.
+    #[serde(default)]
+    pub va_endpoint_policies: HashMap<String, String>,
 }
 
 impl Ec2State {
