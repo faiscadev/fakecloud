@@ -56,6 +56,8 @@ jobs:
       - uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
         with:
           working-directory: sdks/go
+          args: --timeout=5m
       - uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
         with:
           working-directory: sdks/go/e2e
+          args: --timeout=5m
