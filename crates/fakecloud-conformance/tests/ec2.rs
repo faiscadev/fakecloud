@@ -8882,3 +8882,449 @@ async fn ec2_get_ipam_prefix_list_resolver_version_entries() {
         .unwrap();
     assert!(r.entries().is_empty());
 }
+
+// ---- Verified Access ----
+
+async fn make_vai(c: &aws_sdk_ec2::Client) -> String {
+    c.create_verified_access_instance()
+        .send()
+        .await
+        .unwrap()
+        .verified_access_instance()
+        .unwrap()
+        .verified_access_instance_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vatp(c: &aws_sdk_ec2::Client) -> String {
+    c.create_verified_access_trust_provider()
+        .trust_provider_type(aws_sdk_ec2::types::TrustProviderType::User)
+        .policy_reference_name("pol")
+        .send()
+        .await
+        .unwrap()
+        .verified_access_trust_provider()
+        .unwrap()
+        .verified_access_trust_provider_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vagr(c: &aws_sdk_ec2::Client) -> String {
+    let inst = make_vai(c).await;
+    c.create_verified_access_group()
+        .verified_access_instance_id(&inst)
+        .send()
+        .await
+        .unwrap()
+        .verified_access_group()
+        .unwrap()
+        .verified_access_group_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vae(c: &aws_sdk_ec2::Client) -> String {
+    let g = make_vagr(c).await;
+    c.create_verified_access_endpoint()
+        .verified_access_group_id(&g)
+        .endpoint_type(aws_sdk_ec2::types::VerifiedAccessEndpointType::LoadBalancer)
+        .attachment_type(aws_sdk_ec2::types::VerifiedAccessEndpointAttachmentType::Vpc)
+        .send()
+        .await
+        .unwrap()
+        .verified_access_endpoint()
+        .unwrap()
+        .verified_access_endpoint_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateVerifiedAccessInstance", checksum = "e83a8aae")]
+#[tokio::test]
+async fn ec2_create_verified_access_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vai(&c).await;
+    assert!(id.starts_with("vai-"));
+}
+
+#[test_action("ec2", "DescribeVerifiedAccessInstances", checksum = "b9ee58a7")]
+#[tokio::test]
+async fn ec2_describe_verified_access_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vai(&c).await;
+    let r = c.describe_verified_access_instances().send().await.unwrap();
+    assert!(!r.verified_access_instances().is_empty());
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessInstance", checksum = "11288d69")]
+#[tokio::test]
+async fn ec2_modify_verified_access_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vai(&c).await;
+    let r = c
+        .modify_verified_access_instance()
+        .verified_access_instance_id(&id)
+        .description("d")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_instance().is_some());
+}
+
+#[test_action("ec2", "DeleteVerifiedAccessInstance", checksum = "e5c130ed")]
+#[tokio::test]
+async fn ec2_delete_verified_access_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vai(&c).await;
+    c.delete_verified_access_instance()
+        .verified_access_instance_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateVerifiedAccessTrustProvider", checksum = "5efc2ca6")]
+#[tokio::test]
+async fn ec2_create_verified_access_trust_provider() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vatp(&c).await;
+    assert!(id.starts_with("vatp-"));
+}
+
+#[test_action("ec2", "DescribeVerifiedAccessTrustProviders", checksum = "a300c6bd")]
+#[tokio::test]
+async fn ec2_describe_verified_access_trust_providers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vatp(&c).await;
+    let r = c
+        .describe_verified_access_trust_providers()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.verified_access_trust_providers().is_empty());
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessTrustProvider", checksum = "295b8b17")]
+#[tokio::test]
+async fn ec2_modify_verified_access_trust_provider() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vatp(&c).await;
+    let r = c
+        .modify_verified_access_trust_provider()
+        .verified_access_trust_provider_id(&id)
+        .description("d")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_trust_provider().is_some());
+}
+
+#[test_action("ec2", "DeleteVerifiedAccessTrustProvider", checksum = "a257a90b")]
+#[tokio::test]
+async fn ec2_delete_verified_access_trust_provider() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vatp(&c).await;
+    c.delete_verified_access_trust_provider()
+        .verified_access_trust_provider_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AttachVerifiedAccessTrustProvider", checksum = "a8ee0768")]
+#[tokio::test]
+async fn ec2_attach_verified_access_trust_provider() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let inst = make_vai(&c).await;
+    let tp = make_vatp(&c).await;
+    let r = c
+        .attach_verified_access_trust_provider()
+        .verified_access_instance_id(&inst)
+        .verified_access_trust_provider_id(&tp)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_instance().is_some());
+}
+
+#[test_action("ec2", "DetachVerifiedAccessTrustProvider", checksum = "59cc2823")]
+#[tokio::test]
+async fn ec2_detach_verified_access_trust_provider() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let inst = make_vai(&c).await;
+    let tp = make_vatp(&c).await;
+    c.attach_verified_access_trust_provider()
+        .verified_access_instance_id(&inst)
+        .verified_access_trust_provider_id(&tp)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .detach_verified_access_trust_provider()
+        .verified_access_instance_id(&inst)
+        .verified_access_trust_provider_id(&tp)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_instance().is_some());
+}
+
+#[test_action("ec2", "CreateVerifiedAccessGroup", checksum = "ee1b40da")]
+#[tokio::test]
+async fn ec2_create_verified_access_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vagr(&c).await;
+    assert!(id.starts_with("vagr-"));
+}
+
+#[test_action("ec2", "DescribeVerifiedAccessGroups", checksum = "de91c56f")]
+#[tokio::test]
+async fn ec2_describe_verified_access_groups() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vagr(&c).await;
+    let r = c.describe_verified_access_groups().send().await.unwrap();
+    assert!(!r.verified_access_groups().is_empty());
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessGroup", checksum = "33ce27f4")]
+#[tokio::test]
+async fn ec2_modify_verified_access_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vagr(&c).await;
+    let r = c
+        .modify_verified_access_group()
+        .verified_access_group_id(&id)
+        .description("d")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_group().is_some());
+}
+
+#[test_action("ec2", "DeleteVerifiedAccessGroup", checksum = "f3b3ed0e")]
+#[tokio::test]
+async fn ec2_delete_verified_access_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vagr(&c).await;
+    c.delete_verified_access_group()
+        .verified_access_group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessGroupPolicy", checksum = "9c39f661")]
+#[tokio::test]
+async fn ec2_modify_verified_access_group_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vagr(&c).await;
+    let r = c
+        .modify_verified_access_group_policy()
+        .verified_access_group_id(&id)
+        .policy_enabled(true)
+        .policy_document("permit(principal,action,resource);")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.policy_enabled(), Some(true));
+}
+
+#[test_action("ec2", "GetVerifiedAccessGroupPolicy", checksum = "5a55cb57")]
+#[tokio::test]
+async fn ec2_get_verified_access_group_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vagr(&c).await;
+    c.modify_verified_access_group_policy()
+        .verified_access_group_id(&id)
+        .policy_enabled(true)
+        .policy_document("permit(principal,action,resource);")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .get_verified_access_group_policy()
+        .verified_access_group_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.policy_document(),
+        Some("permit(principal,action,resource);")
+    );
+}
+
+#[test_action("ec2", "CreateVerifiedAccessEndpoint", checksum = "e44490ec")]
+#[tokio::test]
+async fn ec2_create_verified_access_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    assert!(id.starts_with("vae-"));
+}
+
+#[test_action("ec2", "DescribeVerifiedAccessEndpoints", checksum = "38a4d17c")]
+#[tokio::test]
+async fn ec2_describe_verified_access_endpoints() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vae(&c).await;
+    let r = c.describe_verified_access_endpoints().send().await.unwrap();
+    assert!(!r.verified_access_endpoints().is_empty());
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessEndpoint", checksum = "be54b578")]
+#[tokio::test]
+async fn ec2_modify_verified_access_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    let r = c
+        .modify_verified_access_endpoint()
+        .verified_access_endpoint_id(&id)
+        .description("d")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_endpoint().is_some());
+}
+
+#[test_action("ec2", "DeleteVerifiedAccessEndpoint", checksum = "42d685b3")]
+#[tokio::test]
+async fn ec2_delete_verified_access_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    c.delete_verified_access_endpoint()
+        .verified_access_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVerifiedAccessEndpointPolicy", checksum = "546e40f8")]
+#[tokio::test]
+async fn ec2_modify_verified_access_endpoint_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    let r = c
+        .modify_verified_access_endpoint_policy()
+        .verified_access_endpoint_id(&id)
+        .policy_enabled(true)
+        .policy_document("permit(principal,action,resource);")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.policy_enabled(), Some(true));
+}
+
+#[test_action("ec2", "GetVerifiedAccessEndpointPolicy", checksum = "e018c6ce")]
+#[tokio::test]
+async fn ec2_get_verified_access_endpoint_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    c.modify_verified_access_endpoint_policy()
+        .verified_access_endpoint_id(&id)
+        .policy_enabled(true)
+        .policy_document("permit(principal,action,resource);")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .get_verified_access_endpoint_policy()
+        .verified_access_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.policy_document(),
+        Some("permit(principal,action,resource);")
+    );
+}
+
+#[test_action("ec2", "GetVerifiedAccessEndpointTargets", checksum = "3420c2d1")]
+#[tokio::test]
+async fn ec2_get_verified_access_endpoint_targets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vae(&c).await;
+    let r = c
+        .get_verified_access_endpoint_targets()
+        .verified_access_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.verified_access_endpoint_targets().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeVerifiedAccessInstanceLoggingConfigurations",
+    checksum = "95729583"
+)]
+#[tokio::test]
+async fn ec2_describe_verified_access_instance_logging_configurations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .describe_verified_access_instance_logging_configurations()
+        .send()
+        .await
+        .unwrap();
+    assert!(r.logging_configurations().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "ModifyVerifiedAccessInstanceLoggingConfiguration",
+    checksum = "2ca1bb40"
+)]
+#[tokio::test]
+async fn ec2_modify_verified_access_instance_logging_configuration() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vai(&c).await;
+    let r = c
+        .modify_verified_access_instance_logging_configuration()
+        .verified_access_instance_id(&id)
+        .access_logs(aws_sdk_ec2::types::VerifiedAccessLogOptions::builder().build())
+        .send()
+        .await
+        .unwrap();
+    assert!(r.logging_configuration().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "ExportVerifiedAccessInstanceClientConfiguration",
+    checksum = "71eb0af2"
+)]
+#[tokio::test]
+async fn ec2_export_verified_access_instance_client_configuration() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vai(&c).await;
+    let r = c
+        .export_verified_access_instance_client_configuration()
+        .verified_access_instance_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.verified_access_instance_id(), Some(id.as_str()));
+}

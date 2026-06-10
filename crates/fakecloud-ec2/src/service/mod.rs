@@ -23,6 +23,7 @@ mod tags;
 mod tgw;
 mod tgw_mcast;
 mod tgw_peering;
+mod va;
 mod volume;
 mod vpc;
 mod vpn;
@@ -577,6 +578,33 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetIpamPrefixListResolverRules",
     "GetIpamPrefixListResolverVersions",
     "GetIpamPrefixListResolverVersionEntries",
+    // Verified Access
+    "CreateVerifiedAccessInstance",
+    "DeleteVerifiedAccessInstance",
+    "DescribeVerifiedAccessInstances",
+    "ModifyVerifiedAccessInstance",
+    "CreateVerifiedAccessTrustProvider",
+    "DeleteVerifiedAccessTrustProvider",
+    "DescribeVerifiedAccessTrustProviders",
+    "ModifyVerifiedAccessTrustProvider",
+    "AttachVerifiedAccessTrustProvider",
+    "DetachVerifiedAccessTrustProvider",
+    "CreateVerifiedAccessGroup",
+    "DeleteVerifiedAccessGroup",
+    "DescribeVerifiedAccessGroups",
+    "ModifyVerifiedAccessGroup",
+    "GetVerifiedAccessGroupPolicy",
+    "ModifyVerifiedAccessGroupPolicy",
+    "CreateVerifiedAccessEndpoint",
+    "DeleteVerifiedAccessEndpoint",
+    "DescribeVerifiedAccessEndpoints",
+    "ModifyVerifiedAccessEndpoint",
+    "GetVerifiedAccessEndpointPolicy",
+    "ModifyVerifiedAccessEndpointPolicy",
+    "GetVerifiedAccessEndpointTargets",
+    "DescribeVerifiedAccessInstanceLoggingConfigurations",
+    "ModifyVerifiedAccessInstanceLoggingConfiguration",
+    "ExportVerifiedAccessInstanceClientConfiguration",
 ];
 
 /// Amazon EC2 service.
@@ -1534,6 +1562,62 @@ impl AwsService for Ec2Service {
             }
             "GetIpamPrefixListResolverVersionEntries" => {
                 ipam_policy::get_ipam_prefix_list_resolver_version_entries(self, &request)
+            }
+            "CreateVerifiedAccessInstance" => va::create_verified_access_instance(self, &request),
+            "DeleteVerifiedAccessInstance" => va::delete_verified_access_instance(self, &request),
+            "DescribeVerifiedAccessInstances" => {
+                va::describe_verified_access_instances(self, &request)
+            }
+            "ModifyVerifiedAccessInstance" => va::modify_verified_access_instance(self, &request),
+            "CreateVerifiedAccessTrustProvider" => {
+                va::create_verified_access_trust_provider(self, &request)
+            }
+            "DeleteVerifiedAccessTrustProvider" => {
+                va::delete_verified_access_trust_provider(self, &request)
+            }
+            "DescribeVerifiedAccessTrustProviders" => {
+                va::describe_verified_access_trust_providers(self, &request)
+            }
+            "ModifyVerifiedAccessTrustProvider" => {
+                va::modify_verified_access_trust_provider(self, &request)
+            }
+            "AttachVerifiedAccessTrustProvider" => {
+                va::attach_verified_access_trust_provider(self, &request)
+            }
+            "DetachVerifiedAccessTrustProvider" => {
+                va::detach_verified_access_trust_provider(self, &request)
+            }
+            "CreateVerifiedAccessGroup" => va::create_verified_access_group(self, &request),
+            "DeleteVerifiedAccessGroup" => va::delete_verified_access_group(self, &request),
+            "DescribeVerifiedAccessGroups" => va::describe_verified_access_groups(self, &request),
+            "ModifyVerifiedAccessGroup" => va::modify_verified_access_group(self, &request),
+            "GetVerifiedAccessGroupPolicy" => va::get_verified_access_group_policy(self, &request),
+            "ModifyVerifiedAccessGroupPolicy" => {
+                va::modify_verified_access_group_policy(self, &request)
+            }
+            "CreateVerifiedAccessEndpoint" => va::create_verified_access_endpoint(self, &request),
+            "DeleteVerifiedAccessEndpoint" => va::delete_verified_access_endpoint(self, &request),
+            "DescribeVerifiedAccessEndpoints" => {
+                va::describe_verified_access_endpoints(self, &request)
+            }
+            "ModifyVerifiedAccessEndpoint" => va::modify_verified_access_endpoint(self, &request),
+            "GetVerifiedAccessEndpointPolicy" => {
+                va::get_verified_access_endpoint_policy(self, &request)
+            }
+            "ModifyVerifiedAccessEndpointPolicy" => {
+                va::modify_verified_access_endpoint_policy(self, &request)
+            }
+            "GetVerifiedAccessEndpointTargets" => {
+                va::get_verified_access_endpoint_targets(self, &request)
+            }
+            "DescribeVerifiedAccessInstanceLoggingConfigurations" => {
+                va::describe_verified_access_instance_logging_configurations(self, &request)
+            }
+            "ModifyVerifiedAccessInstanceLoggingConfiguration" => {
+                va::modify_verified_access_instance_logging_configuration(self, &request)
+            }
+            "ExportVerifiedAccessInstanceClientConfiguration" => {
+                va::export_verified_access_instance_client_configuration(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
