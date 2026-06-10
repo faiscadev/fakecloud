@@ -10206,3 +10206,171 @@ async fn ec2_describe_local_gateways() {
     let r = c.describe_local_gateways().send().await.unwrap();
     assert!(r.local_gateways().is_empty());
 }
+
+// ---- instance connect / fast launch / serial console ----
+
+async fn make_ice(c: &aws_sdk_ec2::Client) -> String {
+    c.create_instance_connect_endpoint()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .instance_connect_endpoint()
+        .unwrap()
+        .instance_connect_endpoint_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateInstanceConnectEndpoint", checksum = "8d75bdcd")]
+#[tokio::test]
+async fn ec2_create_instance_connect_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ice(&c).await;
+    assert!(id.starts_with("eice-"));
+}
+
+#[test_action("ec2", "DescribeInstanceConnectEndpoints", checksum = "0739217e")]
+#[tokio::test]
+async fn ec2_describe_instance_connect_endpoints() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_ice(&c).await;
+    let r = c
+        .describe_instance_connect_endpoints()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.instance_connect_endpoints().is_empty());
+}
+
+#[test_action("ec2", "ModifyInstanceConnectEndpoint", checksum = "d396bb49")]
+#[tokio::test]
+async fn ec2_modify_instance_connect_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ice(&c).await;
+    // Response carries only a <return> boolean.
+    c.modify_instance_connect_endpoint()
+        .instance_connect_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteInstanceConnectEndpoint", checksum = "c439d3c1")]
+#[tokio::test]
+async fn ec2_delete_instance_connect_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ice(&c).await;
+    c.delete_instance_connect_endpoint()
+        .instance_connect_endpoint_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableFastLaunch", checksum = "f4018703")]
+#[tokio::test]
+async fn ec2_enable_fast_launch() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_fast_launch()
+        .image_id("ami-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.image_id(), Some("ami-1"));
+}
+
+#[test_action("ec2", "DisableFastLaunch", checksum = "0b6d25a1")]
+#[tokio::test]
+async fn ec2_disable_fast_launch() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_fast_launch()
+        .image_id("ami-1")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .disable_fast_launch()
+        .image_id("ami-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.image_id(), Some("ami-1"));
+}
+
+#[test_action("ec2", "EnableSerialConsoleAccess", checksum = "9f87f3ee")]
+#[tokio::test]
+async fn ec2_enable_serial_console_access() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.enable_serial_console_access().send().await.unwrap();
+    assert_eq!(r.serial_console_access_enabled(), Some(true));
+}
+
+#[test_action("ec2", "DisableSerialConsoleAccess", checksum = "cf2f876d")]
+#[tokio::test]
+async fn ec2_disable_serial_console_access() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.disable_serial_console_access().send().await.unwrap();
+    assert_eq!(r.serial_console_access_enabled(), Some(false));
+}
+
+#[test_action("ec2", "GetSerialConsoleAccessStatus", checksum = "f6c43e91")]
+#[tokio::test]
+async fn ec2_get_serial_console_access_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_serial_console_access().send().await.unwrap();
+    let r = c.get_serial_console_access_status().send().await.unwrap();
+    assert_eq!(r.serial_console_access_enabled(), Some(true));
+}
+
+#[test_action("ec2", "GetConsoleOutput", checksum = "2d4ba879")]
+#[tokio::test]
+async fn ec2_get_console_output() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_console_output()
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some("i-1"));
+}
+
+#[test_action("ec2", "GetConsoleScreenshot", checksum = "d6fd7694")]
+#[tokio::test]
+async fn ec2_get_console_screenshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_console_screenshot()
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some("i-1"));
+}
+
+#[test_action("ec2", "GetPasswordData", checksum = "8352ee62")]
+#[tokio::test]
+async fn ec2_get_password_data() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_password_data()
+        .instance_id("i-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.instance_id(), Some("i-1"));
+}

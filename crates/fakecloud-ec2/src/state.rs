@@ -770,6 +770,13 @@ pub struct CarrierGateway {
     pub vpc_id: String,
 }
 
+/// An EC2 Instance Connect endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstanceConnectEndpoint {
+    pub id: String,
+    pub subnet_id: String,
+}
+
 /// A customer-owned IP (CoIP) pool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoipPool {
@@ -1070,6 +1077,13 @@ pub struct Ec2State {
     pub lg_vif_groups: HashMap<String, LocalGatewayVifGroup>,
     #[serde(default)]
     pub lg_rt_vifg_assocs: HashMap<String, LocalGatewayRouteTableVifgAssoc>,
+    #[serde(default)]
+    pub instance_connect_endpoints: HashMap<String, InstanceConnectEndpoint>,
+    /// Image ids with fast-launch enabled.
+    #[serde(default)]
+    pub fast_launch_images: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub serial_console_access: bool,
 }
 
 impl Ec2State {
