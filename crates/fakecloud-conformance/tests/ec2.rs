@@ -8207,3 +8207,334 @@ async fn ec2_disable_ipam_organization_admin_account() {
         .unwrap();
     assert_eq!(r.success(), Some(true));
 }
+
+// ---- IPAM resource discovery / BYOASN / BYOIP / external tokens ----
+
+async fn make_rd(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_resource_discovery()
+        .send()
+        .await
+        .unwrap()
+        .ipam_resource_discovery()
+        .unwrap()
+        .ipam_resource_discovery_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateIpamResourceDiscovery", checksum = "b6b75a20")]
+#[tokio::test]
+async fn ec2_create_ipam_resource_discovery() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    assert!(id.starts_with("ipam-res-disco-"));
+}
+
+#[test_action("ec2", "DescribeIpamResourceDiscoveries", checksum = "8bdfceb2")]
+#[tokio::test]
+async fn ec2_describe_ipam_resource_discoveries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_rd(&c).await;
+    let r = c.describe_ipam_resource_discoveries().send().await.unwrap();
+    assert!(!r.ipam_resource_discoveries().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamResourceDiscovery", checksum = "48f4900c")]
+#[tokio::test]
+async fn ec2_modify_ipam_resource_discovery() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    let r = c
+        .modify_ipam_resource_discovery()
+        .ipam_resource_discovery_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_resource_discovery().is_some());
+}
+
+#[test_action("ec2", "DeleteIpamResourceDiscovery", checksum = "a1e94d5d")]
+#[tokio::test]
+async fn ec2_delete_ipam_resource_discovery() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    c.delete_ipam_resource_discovery()
+        .ipam_resource_discovery_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateIpamResourceDiscovery", checksum = "0acbb307")]
+#[tokio::test]
+async fn ec2_associate_ipam_resource_discovery() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    let r = c
+        .associate_ipam_resource_discovery()
+        .ipam_id("ipam-1")
+        .ipam_resource_discovery_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_resource_discovery_association().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeIpamResourceDiscoveryAssociations",
+    checksum = "29bd1bbd"
+)]
+#[tokio::test]
+async fn ec2_describe_ipam_resource_discovery_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    c.associate_ipam_resource_discovery()
+        .ipam_id("ipam-1")
+        .ipam_resource_discovery_id(&id)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_ipam_resource_discovery_associations()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_resource_discovery_associations().is_empty());
+}
+
+#[test_action("ec2", "DisassociateIpamResourceDiscovery", checksum = "755dde2a")]
+#[tokio::test]
+async fn ec2_disassociate_ipam_resource_discovery() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_rd(&c).await;
+    let assoc = c
+        .associate_ipam_resource_discovery()
+        .ipam_id("ipam-1")
+        .ipam_resource_discovery_id(&id)
+        .send()
+        .await
+        .unwrap()
+        .ipam_resource_discovery_association()
+        .unwrap()
+        .ipam_resource_discovery_association_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .disassociate_ipam_resource_discovery()
+        .ipam_resource_discovery_association_id(&assoc)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_resource_discovery_association().is_some());
+}
+
+#[test_action("ec2", "GetIpamDiscoveredAccounts", checksum = "0ac6e259")]
+#[tokio::test]
+async fn ec2_get_ipam_discovered_accounts() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_ipam_discovered_accounts()
+        .ipam_resource_discovery_id("ipam-res-disco-1")
+        .discovery_region("us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_discovered_accounts().is_empty());
+}
+
+#[test_action("ec2", "GetIpamDiscoveredPublicAddresses", checksum = "e0549d32")]
+#[tokio::test]
+async fn ec2_get_ipam_discovered_public_addresses() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_ipam_discovered_public_addresses()
+        .ipam_resource_discovery_id("ipam-res-disco-1")
+        .address_region("us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_discovered_public_addresses().is_empty());
+}
+
+#[test_action("ec2", "GetIpamDiscoveredResourceCidrs", checksum = "6f4dd930")]
+#[tokio::test]
+async fn ec2_get_ipam_discovered_resource_cidrs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_ipam_discovered_resource_cidrs()
+        .ipam_resource_discovery_id("ipam-res-disco-1")
+        .resource_region("us-east-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_discovered_resource_cidrs().is_empty());
+}
+
+#[test_action("ec2", "AssociateIpamByoasn", checksum = "7af62e68")]
+#[tokio::test]
+async fn ec2_associate_ipam_byoasn() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .associate_ipam_byoasn()
+        .asn("64512")
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.asn_association().is_some());
+}
+
+#[test_action("ec2", "DisassociateIpamByoasn", checksum = "6a248997")]
+#[tokio::test]
+async fn ec2_disassociate_ipam_byoasn() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disassociate_ipam_byoasn()
+        .asn("64512")
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.asn_association().is_some());
+}
+
+#[test_action("ec2", "ProvisionIpamByoasn", checksum = "9da68566")]
+#[tokio::test]
+async fn ec2_provision_ipam_byoasn() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .provision_ipam_byoasn()
+        .ipam_id("ipam-1")
+        .asn("64512")
+        .asn_authorization_context(
+            aws_sdk_ec2::types::AsnAuthorizationContext::builder()
+                .message("m")
+                .signature("sig")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(r.byoasn().is_some());
+}
+
+#[test_action("ec2", "DeprovisionIpamByoasn", checksum = "d5d5c14d")]
+#[tokio::test]
+async fn ec2_deprovision_ipam_byoasn() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .deprovision_ipam_byoasn()
+        .ipam_id("ipam-1")
+        .asn("64512")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.byoasn().is_some());
+}
+
+#[test_action("ec2", "DescribeIpamByoasn", checksum = "c039e002")]
+#[tokio::test]
+async fn ec2_describe_ipam_byoasn() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_ipam_byoasn()
+        .asn("64512")
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_ipam_byoasn().send().await.unwrap();
+    assert!(!r.byoasns().is_empty());
+}
+
+#[test_action("ec2", "MoveByoipCidrToIpam", checksum = "666a0d06")]
+#[tokio::test]
+async fn ec2_move_byoip_cidr_to_ipam() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .move_byoip_cidr_to_ipam()
+        .cidr("10.0.0.0/24")
+        .ipam_pool_id("ipam-pool-1")
+        .ipam_pool_owner("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.byoip_cidr().is_some());
+}
+
+async fn make_token(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_external_resource_verification_token()
+        .ipam_id("ipam-1")
+        .send()
+        .await
+        .unwrap()
+        .ipam_external_resource_verification_token()
+        .unwrap()
+        .ipam_external_resource_verification_token_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action(
+    "ec2",
+    "CreateIpamExternalResourceVerificationToken",
+    checksum = "68eda0ae"
+)]
+#[tokio::test]
+async fn ec2_create_ipam_external_resource_verification_token() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_token(&c).await;
+    assert!(id.starts_with("ipam-ext-token-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeIpamExternalResourceVerificationTokens",
+    checksum = "bbd3bdc9"
+)]
+#[tokio::test]
+async fn ec2_describe_ipam_external_resource_verification_tokens() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_token(&c).await;
+    let r = c
+        .describe_ipam_external_resource_verification_tokens()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_external_resource_verification_tokens().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteIpamExternalResourceVerificationToken",
+    checksum = "f2173a16"
+)]
+#[tokio::test]
+async fn ec2_delete_ipam_external_resource_verification_token() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_token(&c).await;
+    c.delete_ipam_external_resource_verification_token()
+        .ipam_external_resource_verification_token_id(&id)
+        .send()
+        .await
+        .unwrap();
+}

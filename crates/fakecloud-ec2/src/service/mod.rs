@@ -10,6 +10,7 @@ mod fleet;
 mod image;
 mod instance;
 mod ipam;
+mod ipam_discovery;
 mod meta;
 mod nacl;
 mod reserved;
@@ -534,6 +535,26 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetIpamAddressHistory",
     "EnableIpamOrganizationAdminAccount",
     "DisableIpamOrganizationAdminAccount",
+    // IPAM resource discovery / BYOASN / BYOIP / external tokens
+    "CreateIpamResourceDiscovery",
+    "DeleteIpamResourceDiscovery",
+    "DescribeIpamResourceDiscoveries",
+    "ModifyIpamResourceDiscovery",
+    "AssociateIpamResourceDiscovery",
+    "DisassociateIpamResourceDiscovery",
+    "DescribeIpamResourceDiscoveryAssociations",
+    "GetIpamDiscoveredAccounts",
+    "GetIpamDiscoveredPublicAddresses",
+    "GetIpamDiscoveredResourceCidrs",
+    "AssociateIpamByoasn",
+    "DisassociateIpamByoasn",
+    "ProvisionIpamByoasn",
+    "DeprovisionIpamByoasn",
+    "DescribeIpamByoasn",
+    "MoveByoipCidrToIpam",
+    "CreateIpamExternalResourceVerificationToken",
+    "DeleteIpamExternalResourceVerificationToken",
+    "DescribeIpamExternalResourceVerificationTokens",
 ];
 
 /// Amazon EC2 service.
@@ -1398,6 +1419,51 @@ impl AwsService for Ec2Service {
             }
             "DisableIpamOrganizationAdminAccount" => {
                 ipam::disable_ipam_organization_admin_account(self, &request)
+            }
+            "CreateIpamResourceDiscovery" => {
+                ipam_discovery::create_ipam_resource_discovery(self, &request)
+            }
+            "DeleteIpamResourceDiscovery" => {
+                ipam_discovery::delete_ipam_resource_discovery(self, &request)
+            }
+            "DescribeIpamResourceDiscoveries" => {
+                ipam_discovery::describe_ipam_resource_discoveries(self, &request)
+            }
+            "ModifyIpamResourceDiscovery" => {
+                ipam_discovery::modify_ipam_resource_discovery(self, &request)
+            }
+            "AssociateIpamResourceDiscovery" => {
+                ipam_discovery::associate_ipam_resource_discovery(self, &request)
+            }
+            "DisassociateIpamResourceDiscovery" => {
+                ipam_discovery::disassociate_ipam_resource_discovery(self, &request)
+            }
+            "DescribeIpamResourceDiscoveryAssociations" => {
+                ipam_discovery::describe_ipam_resource_discovery_associations(self, &request)
+            }
+            "GetIpamDiscoveredAccounts" => {
+                ipam_discovery::get_ipam_discovered_accounts(self, &request)
+            }
+            "GetIpamDiscoveredPublicAddresses" => {
+                ipam_discovery::get_ipam_discovered_public_addresses(self, &request)
+            }
+            "GetIpamDiscoveredResourceCidrs" => {
+                ipam_discovery::get_ipam_discovered_resource_cidrs(self, &request)
+            }
+            "AssociateIpamByoasn" => ipam_discovery::associate_ipam_byoasn(self, &request),
+            "DisassociateIpamByoasn" => ipam_discovery::disassociate_ipam_byoasn(self, &request),
+            "ProvisionIpamByoasn" => ipam_discovery::provision_ipam_byoasn(self, &request),
+            "DeprovisionIpamByoasn" => ipam_discovery::deprovision_ipam_byoasn(self, &request),
+            "DescribeIpamByoasn" => ipam_discovery::describe_ipam_byoasn(self, &request),
+            "MoveByoipCidrToIpam" => ipam_discovery::move_byoip_cidr_to_ipam(self, &request),
+            "CreateIpamExternalResourceVerificationToken" => {
+                ipam_discovery::create_ipam_external_resource_verification_token(self, &request)
+            }
+            "DeleteIpamExternalResourceVerificationToken" => {
+                ipam_discovery::delete_ipam_external_resource_verification_token(self, &request)
+            }
+            "DescribeIpamExternalResourceVerificationTokens" => {
+                ipam_discovery::describe_ipam_external_resource_verification_tokens(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
