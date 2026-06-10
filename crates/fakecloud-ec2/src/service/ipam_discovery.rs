@@ -20,7 +20,7 @@ fn region_of(req: &AwsRequest) -> String {
 
 fn rd_xml(d: &IpamResourceDiscovery, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
-        "{}{}{}{}<isDefault>false</isDefault><state>create-complete</state>{}{}",
+        "{}{}{}{}{}<isDefault>false</isDefault><state>create-complete</state>{}{}",
         ec2_elem("ipamResourceDiscoveryId", &d.id),
         ec2_elem(
             "ipamResourceDiscoveryArn",
@@ -28,6 +28,7 @@ fn rd_xml(d: &IpamResourceDiscovery, tags: &[Tag], owner: &str, region: &str) ->
         ),
         ec2_elem("ipamResourceDiscoveryRegion", region),
         ec2_elem("ownerId", owner),
+        ec2_elem("description", &d.description),
         ec2_list(
             "operatingRegionSet",
             &[format!("<regionName>{region}</regionName>")]
@@ -41,7 +42,14 @@ pub(crate) fn create_ipam_resource_discovery(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = gen_id("ipam-res-disco");
-    let d = IpamResourceDiscovery { id: id.clone() };
+    let d = IpamResourceDiscovery {
+        id: id.clone(),
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
+    };
     let owner = req.account_id.clone();
     let region = region_of(req);
     let tags = {
@@ -81,7 +89,10 @@ pub(crate) fn delete_ipam_resource_discovery(
     let d = state
         .ipam_resource_discoveries
         .remove(&id)
-        .unwrap_or(IpamResourceDiscovery { id: id.clone() });
+        .unwrap_or(IpamResourceDiscovery {
+            id: id.clone(),
+            description: String::new(),
+        });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -124,15 +135,25 @@ pub(crate) fn modify_ipam_resource_discovery(
     let id = require(&req.query_params, "IpamResourceDiscoveryId")?;
     let owner = req.account_id.clone();
     let region = region_of(req);
-    let accounts = svc.state.read();
-    let d = accounts
-        .get(&req.account_id)
-        .and_then(|s| s.ipam_resource_discoveries.get(&id).cloned())
-        .unwrap_or(IpamResourceDiscovery { id: id.clone() });
-    let tags = accounts
-        .get(&req.account_id)
-        .map(|s| s.tags_for(&id).to_vec())
-        .unwrap_or_default();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let d = match state.ipam_resource_discoveries.get_mut(&id) {
+        Some(entry) => {
+            if let Some(desc) = req.query_params.get("Description") {
+                entry.description = desc.clone();
+            }
+            entry.clone()
+        }
+        None => IpamResourceDiscovery {
+            id: id.clone(),
+            description: req
+                .query_params
+                .get("Description")
+                .cloned()
+                .unwrap_or_default(),
+        },
+    };
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyIpamResourceDiscovery",
         &req.request_id,
@@ -324,10 +345,12 @@ pub(crate) fn disassociate_ipam_byoasn(
     let cidr = require(&req.query_params, "Cidr")?;
     {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
-            .ipam_byoasns
-            .remove(&asn);
+        let byoasns = &mut accounts.get_or_create(&req.account_id).ipam_byoasns;
+        // Only break the association when the stored CIDR matches the request,
+        // so a mismatched CIDR leaves the association intact.
+        if byoasns.get(&asn).is_some_and(|c| c == &cidr) {
+            byoasns.remove(&asn);
+        }
     }
     Ok(Ec2Service::respond(
         "DisassociateIpamByoasn",
@@ -475,11 +498,13 @@ pub(crate) fn delete_ipam_external_resource_verification_token(
     let region = region_of(req);
     let ipam = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
+        let state = accounts.get_or_create(&req.account_id);
+        let ipam = state
             .ipam_ext_tokens
             .remove(&id)
-            .unwrap_or_else(|| "ipam-0".to_string())
+            .unwrap_or_else(|| "ipam-0".to_string());
+        state.tags.remove(&id);
+        ipam
     };
     Ok(Ec2Service::respond(
         "DeleteIpamExternalResourceVerificationToken",

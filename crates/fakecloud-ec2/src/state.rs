@@ -666,6 +666,8 @@ pub struct IpamPool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IpamResourceDiscovery {
     pub id: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A Client VPN endpoint.
