@@ -35,13 +35,14 @@ fn region_of(req: &AwsRequest) -> String {
 
 fn ipam_xml(i: &Ipam, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
-        "{}{}{}{}{}{}<scopeCount>2</scopeCount><state>create-complete</state>{}{}{}",
+        "{}{}{}{}{}{}{}<scopeCount>2</scopeCount><state>create-complete</state>{}{}{}",
         ec2_elem("ipamId", &i.id),
         ec2_elem("ipamArn", &format!("arn:aws:ec2::{owner}:ipam/{}", i.id)),
         ec2_elem("ipamRegion", region),
         ec2_elem("ownerId", owner),
         ec2_elem("publicDefaultScopeId", &i.public_scope_id),
         ec2_elem("privateDefaultScopeId", &i.private_scope_id),
+        ec2_elem("description", &i.description),
         ec2_elem("tier", &i.tier),
         ec2_list(
             "operatingRegionSet",
@@ -71,6 +72,11 @@ pub(crate) fn create_ipam(
             .get("Tier")
             .cloned()
             .unwrap_or_else(|| "advanced".to_string()),
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
     };
     let owner = req.account_id.clone();
     let region = region_of(req);
@@ -103,6 +109,7 @@ pub(crate) fn delete_ipam(
         public_scope_id: gen_id("ipam-scope"),
         private_scope_id: gen_id("ipam-scope"),
         tier: "advanced".to_string(),
+        description: String::new(),
     });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -151,20 +158,25 @@ pub(crate) fn modify_ipam(
     )?;
     let owner = req.account_id.clone();
     let region = region_of(req);
-    let accounts = svc.state.read();
-    let i = accounts
-        .get(&req.account_id)
-        .and_then(|s| s.ipams.get(&id).cloned())
-        .unwrap_or(Ipam {
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let i = {
+        let entry = state.ipams.entry(id.clone()).or_insert_with(|| Ipam {
             id: id.clone(),
             public_scope_id: gen_id("ipam-scope"),
             private_scope_id: gen_id("ipam-scope"),
             tier: "advanced".to_string(),
+            description: String::new(),
         });
-    let tags = accounts
-        .get(&req.account_id)
-        .map(|s| s.tags_for(&id).to_vec())
-        .unwrap_or_default();
+        if let Some(t) = req.query_params.get("Tier") {
+            entry.tier = t.clone();
+        }
+        if let Some(d) = req.query_params.get("Description") {
+            entry.description = d.clone();
+        }
+        entry.clone()
+    };
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyIpam",
         &req.request_id,
@@ -175,11 +187,18 @@ pub(crate) fn modify_ipam(
 // ---- scopes ----
 
 fn scope_xml(sc: &IpamScope, tags: &[Tag], owner: &str) -> String {
+    let scope_type = if sc.scope_type.is_empty() {
+        "private"
+    } else {
+        &sc.scope_type
+    };
     format!(
-        "{}{}{}<ipamScopeType>private</ipamScopeType><isDefault>false</isDefault><poolCount>0</poolCount><state>create-complete</state>{}",
+        "{}{}{}{}<ipamScopeType>{}</ipamScopeType><isDefault>false</isDefault><poolCount>0</poolCount><state>create-complete</state>{}",
         ec2_elem("ipamScopeId", &sc.id),
         ec2_elem("ipamScopeArn", &format!("arn:aws:ec2::{owner}:ipam-scope/{}", sc.id)),
         ec2_elem("ipamArn", &format!("arn:aws:ec2::{owner}:ipam/{}", sc.ipam_id)),
+        ec2_elem("description", &sc.description),
+        scope_type,
         super::tags::tag_set_xml(tags),
     )
 }
@@ -193,6 +212,14 @@ pub(crate) fn create_ipam_scope(
     let sc = IpamScope {
         id: id.clone(),
         ipam_id,
+        // User-created scopes are always private; the public scope is the
+        // IPAM default scope synthesized at CreateIpam time.
+        scope_type: "private".to_string(),
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -221,6 +248,8 @@ pub(crate) fn delete_ipam_scope(
     let sc = state.ipam_scopes.remove(&id).unwrap_or(IpamScope {
         id: id.clone(),
         ipam_id: "ipam-0".to_string(),
+        scope_type: "private".to_string(),
+        description: String::new(),
     });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -259,18 +288,24 @@ pub(crate) fn modify_ipam_scope(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "IpamScopeId")?;
     let owner = req.account_id.clone();
-    let accounts = svc.state.read();
-    let sc = accounts
-        .get(&req.account_id)
-        .and_then(|s| s.ipam_scopes.get(&id).cloned())
-        .unwrap_or(IpamScope {
-            id: id.clone(),
-            ipam_id: "ipam-0".to_string(),
-        });
-    let tags = accounts
-        .get(&req.account_id)
-        .map(|s| s.tags_for(&id).to_vec())
-        .unwrap_or_default();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let sc = {
+        let entry = state
+            .ipam_scopes
+            .entry(id.clone())
+            .or_insert_with(|| IpamScope {
+                id: id.clone(),
+                ipam_id: "ipam-0".to_string(),
+                scope_type: "private".to_string(),
+                description: String::new(),
+            });
+        if let Some(d) = req.query_params.get("Description") {
+            entry.description = d.clone();
+        }
+        entry.clone()
+    };
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyIpamScope",
         &req.request_id,
@@ -282,10 +317,11 @@ pub(crate) fn modify_ipam_scope(
 
 fn pool_xml(p: &IpamPool, tags: &[Tag], owner: &str) -> String {
     format!(
-        "{}{}{}<ipamScopeType>private</ipamScopeType><poolDepth>1</poolDepth><state>create-complete</state><addressFamily>{}</addressFamily><autoImport>false</autoImport>{}",
+        "{}{}{}{}<ipamScopeType>private</ipamScopeType><poolDepth>1</poolDepth><state>create-complete</state><addressFamily>{}</addressFamily><autoImport>false</autoImport>{}",
         ec2_elem("ipamPoolId", &p.id),
         ec2_elem("ipamPoolArn", &format!("arn:aws:ec2::{owner}:ipam-pool/{}", p.id)),
         ec2_elem("ipamScopeArn", &format!("arn:aws:ec2::{owner}:ipam-scope/{}", p.scope_id)),
+        ec2_elem("description", &p.description),
         p.address_family,
         super::tags::tag_set_xml(tags),
     )
@@ -306,6 +342,11 @@ pub(crate) fn create_ipam_pool(
         id: id.clone(),
         scope_id: scope,
         address_family: af,
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -335,6 +376,7 @@ pub(crate) fn delete_ipam_pool(
         id: id.clone(),
         scope_id: "ipam-scope-0".to_string(),
         address_family: "ipv4".to_string(),
+        description: String::new(),
     });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -376,19 +418,24 @@ pub(crate) fn modify_ipam_pool(
     let id = require(&req.query_params, "IpamPoolId")?;
     validate_pool_netmasks(req)?;
     let owner = req.account_id.clone();
-    let accounts = svc.state.read();
-    let p = accounts
-        .get(&req.account_id)
-        .and_then(|s| s.ipam_pools.get(&id).cloned())
-        .unwrap_or(IpamPool {
-            id: id.clone(),
-            scope_id: "ipam-scope-0".to_string(),
-            address_family: "ipv4".to_string(),
-        });
-    let tags = accounts
-        .get(&req.account_id)
-        .map(|s| s.tags_for(&id).to_vec())
-        .unwrap_or_default();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let p = {
+        let entry = state
+            .ipam_pools
+            .entry(id.clone())
+            .or_insert_with(|| IpamPool {
+                id: id.clone(),
+                scope_id: "ipam-scope-0".to_string(),
+                address_family: "ipv4".to_string(),
+                description: String::new(),
+            });
+        if let Some(d) = req.query_params.get("Description") {
+            entry.description = d.clone();
+        }
+        entry.clone()
+    };
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyIpamPool",
         &req.request_id,

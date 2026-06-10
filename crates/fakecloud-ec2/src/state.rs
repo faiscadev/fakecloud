@@ -636,6 +636,8 @@ pub struct Ipam {
     pub public_scope_id: String,
     pub private_scope_id: String,
     pub tier: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// An IPAM scope.
@@ -643,6 +645,11 @@ pub struct Ipam {
 pub struct IpamScope {
     pub id: String,
     pub ipam_id: String,
+    /// "public" or "private".
+    #[serde(default)]
+    pub scope_type: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// An IPAM pool.
@@ -651,6 +658,8 @@ pub struct IpamPool {
     pub id: String,
     pub scope_id: String,
     pub address_family: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A Client VPN endpoint.
