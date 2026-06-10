@@ -11,6 +11,7 @@ mod image;
 mod instance;
 mod ipam;
 mod ipam_discovery;
+mod ipam_policy;
 mod meta;
 mod nacl;
 mod reserved;
@@ -555,6 +556,27 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateIpamExternalResourceVerificationToken",
     "DeleteIpamExternalResourceVerificationToken",
     "DescribeIpamExternalResourceVerificationTokens",
+    // IPAM policies + prefix-list resolvers
+    "CreateIpamPolicy",
+    "DeleteIpamPolicy",
+    "DescribeIpamPolicies",
+    "EnableIpamPolicy",
+    "DisableIpamPolicy",
+    "GetEnabledIpamPolicy",
+    "GetIpamPolicyAllocationRules",
+    "ModifyIpamPolicyAllocationRules",
+    "GetIpamPolicyOrganizationTargets",
+    "CreateIpamPrefixListResolver",
+    "DeleteIpamPrefixListResolver",
+    "DescribeIpamPrefixListResolvers",
+    "ModifyIpamPrefixListResolver",
+    "CreateIpamPrefixListResolverTarget",
+    "DeleteIpamPrefixListResolverTarget",
+    "DescribeIpamPrefixListResolverTargets",
+    "ModifyIpamPrefixListResolverTarget",
+    "GetIpamPrefixListResolverRules",
+    "GetIpamPrefixListResolverVersions",
+    "GetIpamPrefixListResolverVersionEntries",
 ];
 
 /// Amazon EC2 service.
@@ -1464,6 +1486,54 @@ impl AwsService for Ec2Service {
             }
             "DescribeIpamExternalResourceVerificationTokens" => {
                 ipam_discovery::describe_ipam_external_resource_verification_tokens(self, &request)
+            }
+            "CreateIpamPolicy" => ipam_policy::create_ipam_policy(self, &request),
+            "DeleteIpamPolicy" => ipam_policy::delete_ipam_policy(self, &request),
+            "DescribeIpamPolicies" => ipam_policy::describe_ipam_policies(self, &request),
+            "EnableIpamPolicy" => ipam_policy::enable_ipam_policy(self, &request),
+            "DisableIpamPolicy" => ipam_policy::disable_ipam_policy(self, &request),
+            "GetEnabledIpamPolicy" => ipam_policy::get_enabled_ipam_policy(self, &request),
+            "GetIpamPolicyAllocationRules" => {
+                ipam_policy::get_ipam_policy_allocation_rules(self, &request)
+            }
+            "ModifyIpamPolicyAllocationRules" => {
+                ipam_policy::modify_ipam_policy_allocation_rules(self, &request)
+            }
+            "GetIpamPolicyOrganizationTargets" => {
+                ipam_policy::get_ipam_policy_organization_targets(self, &request)
+            }
+            "CreateIpamPrefixListResolver" => {
+                ipam_policy::create_ipam_prefix_list_resolver(self, &request)
+            }
+            "DeleteIpamPrefixListResolver" => {
+                ipam_policy::delete_ipam_prefix_list_resolver(self, &request)
+            }
+            "DescribeIpamPrefixListResolvers" => {
+                ipam_policy::describe_ipam_prefix_list_resolvers(self, &request)
+            }
+            "ModifyIpamPrefixListResolver" => {
+                ipam_policy::modify_ipam_prefix_list_resolver(self, &request)
+            }
+            "CreateIpamPrefixListResolverTarget" => {
+                ipam_policy::create_ipam_prefix_list_resolver_target(self, &request)
+            }
+            "DeleteIpamPrefixListResolverTarget" => {
+                ipam_policy::delete_ipam_prefix_list_resolver_target(self, &request)
+            }
+            "DescribeIpamPrefixListResolverTargets" => {
+                ipam_policy::describe_ipam_prefix_list_resolver_targets(self, &request)
+            }
+            "ModifyIpamPrefixListResolverTarget" => {
+                ipam_policy::modify_ipam_prefix_list_resolver_target(self, &request)
+            }
+            "GetIpamPrefixListResolverRules" => {
+                ipam_policy::get_ipam_prefix_list_resolver_rules(self, &request)
+            }
+            "GetIpamPrefixListResolverVersions" => {
+                ipam_policy::get_ipam_prefix_list_resolver_versions(self, &request)
+            }
+            "GetIpamPrefixListResolverVersionEntries" => {
+                ipam_policy::get_ipam_prefix_list_resolver_version_entries(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
