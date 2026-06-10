@@ -593,6 +593,42 @@ pub struct TgwMeteringPolicy {
     pub tgw_id: String,
 }
 
+/// A customer gateway (on-prem side of a VPN).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustomerGateway {
+    pub id: String,
+    pub state: String,
+    pub ip_address: String,
+    pub bgp_asn: String,
+}
+
+/// A virtual private gateway.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpnGateway {
+    pub id: String,
+    pub state: String,
+    #[serde(default)]
+    pub attachments: Vec<String>,
+}
+
+/// A Site-to-Site VPN connection.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpnConnection {
+    pub id: String,
+    pub state: String,
+    pub customer_gateway_id: String,
+    pub vpn_gateway_id: Option<String>,
+    #[serde(default)]
+    pub routes: Vec<String>,
+}
+
+/// A VPN concentrator.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpnConcentrator {
+    pub id: String,
+    pub state: String,
+}
+
 /// A Transit Gateway peering attachment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgwPeering {
@@ -739,6 +775,14 @@ pub struct Ec2State {
     pub tgw_multicast_domains: HashMap<String, TgwMulticastDomain>,
     #[serde(default)]
     pub tgw_metering_policies: HashMap<String, TgwMeteringPolicy>,
+    #[serde(default)]
+    pub customer_gateways: HashMap<String, CustomerGateway>,
+    #[serde(default)]
+    pub vpn_gateways: HashMap<String, VpnGateway>,
+    #[serde(default)]
+    pub vpn_connections: HashMap<String, VpnConnection>,
+    #[serde(default)]
+    pub vpn_concentrators: HashMap<String, VpnConcentrator>,
 }
 
 impl Ec2State {

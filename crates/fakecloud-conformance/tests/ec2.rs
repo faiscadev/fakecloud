@@ -7084,3 +7084,404 @@ async fn ec2_reject_transit_gateway_client_vpn_attachment() {
         .unwrap();
     assert!(r.transit_gateway_client_vpn_attachment().is_some());
 }
+
+// ---- site-to-site VPN ----
+
+async fn make_cgw(c: &aws_sdk_ec2::Client) -> String {
+    c.create_customer_gateway()
+        .r#type(aws_sdk_ec2::types::GatewayType::Ipsec1)
+        .ip_address("203.0.113.1")
+        .send()
+        .await
+        .unwrap()
+        .customer_gateway()
+        .unwrap()
+        .customer_gateway_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vgw(c: &aws_sdk_ec2::Client) -> String {
+    c.create_vpn_gateway()
+        .r#type(aws_sdk_ec2::types::GatewayType::Ipsec1)
+        .send()
+        .await
+        .unwrap()
+        .vpn_gateway()
+        .unwrap()
+        .vpn_gateway_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vpn(c: &aws_sdk_ec2::Client) -> String {
+    let cgw = make_cgw(c).await;
+    c.create_vpn_connection()
+        .customer_gateway_id(&cgw)
+        .r#type("ipsec.1")
+        .send()
+        .await
+        .unwrap()
+        .vpn_connection()
+        .unwrap()
+        .vpn_connection_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateCustomerGateway", checksum = "d905541f")]
+#[tokio::test]
+async fn ec2_create_customer_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cgw(&c).await;
+    assert!(id.starts_with("cgw-"));
+}
+
+#[test_action("ec2", "DescribeCustomerGateways", checksum = "236ecaa5")]
+#[tokio::test]
+async fn ec2_describe_customer_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cgw(&c).await;
+    let r = c
+        .describe_customer_gateways()
+        .customer_gateway_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.customer_gateways().len(), 1);
+}
+
+#[test_action("ec2", "DeleteCustomerGateway", checksum = "80f713ea")]
+#[tokio::test]
+async fn ec2_delete_customer_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_cgw(&c).await;
+    c.delete_customer_gateway()
+        .customer_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateVpnGateway", checksum = "980342bd")]
+#[tokio::test]
+async fn ec2_create_vpn_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vgw(&c).await;
+    assert!(id.starts_with("vgw-"));
+}
+
+#[test_action("ec2", "DescribeVpnGateways", checksum = "814a790c")]
+#[tokio::test]
+async fn ec2_describe_vpn_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vgw(&c).await;
+    let r = c
+        .describe_vpn_gateways()
+        .vpn_gateway_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.vpn_gateways().len(), 1);
+}
+
+#[test_action("ec2", "DeleteVpnGateway", checksum = "774edd00")]
+#[tokio::test]
+async fn ec2_delete_vpn_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vgw(&c).await;
+    c.delete_vpn_gateway()
+        .vpn_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AttachVpnGateway", checksum = "5e83e0e9")]
+#[tokio::test]
+async fn ec2_attach_vpn_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vgw(&c).await;
+    let r = c
+        .attach_vpn_gateway()
+        .vpn_gateway_id(&id)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpc_attachment().is_some());
+}
+
+#[test_action("ec2", "DetachVpnGateway", checksum = "b430b510")]
+#[tokio::test]
+async fn ec2_detach_vpn_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vgw(&c).await;
+    c.detach_vpn_gateway()
+        .vpn_gateway_id(&id)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateVpnConnection", checksum = "b84874a8")]
+#[tokio::test]
+async fn ec2_create_vpn_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    assert!(id.starts_with("vpn-"));
+}
+
+#[test_action("ec2", "DescribeVpnConnections", checksum = "a2885e4c")]
+#[tokio::test]
+async fn ec2_describe_vpn_connections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .describe_vpn_connections()
+        .vpn_connection_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.vpn_connections().len(), 1);
+}
+
+#[test_action("ec2", "DeleteVpnConnection", checksum = "34a21588")]
+#[tokio::test]
+async fn ec2_delete_vpn_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    c.delete_vpn_connection()
+        .vpn_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpnConnection", checksum = "cf8776fd")]
+#[tokio::test]
+async fn ec2_modify_vpn_connection() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .modify_vpn_connection()
+        .vpn_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpn_connection().is_some());
+}
+
+#[test_action("ec2", "ModifyVpnConnectionOptions", checksum = "3df1ad70")]
+#[tokio::test]
+async fn ec2_modify_vpn_connection_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .modify_vpn_connection_options()
+        .vpn_connection_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpn_connection().is_some());
+}
+
+#[test_action("ec2", "CreateVpnConnectionRoute", checksum = "4507af0e")]
+#[tokio::test]
+async fn ec2_create_vpn_connection_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    c.create_vpn_connection_route()
+        .vpn_connection_id(&id)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteVpnConnectionRoute", checksum = "40bb1673")]
+#[tokio::test]
+async fn ec2_delete_vpn_connection_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    c.create_vpn_connection_route()
+        .vpn_connection_id(&id)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    c.delete_vpn_connection_route()
+        .vpn_connection_id(&id)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpnTunnelOptions", checksum = "03603e7d")]
+#[tokio::test]
+async fn ec2_modify_vpn_tunnel_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .modify_vpn_tunnel_options()
+        .vpn_connection_id(&id)
+        .vpn_tunnel_outside_ip_address("1.2.3.4")
+        .tunnel_options(aws_sdk_ec2::types::ModifyVpnTunnelOptionsSpecification::builder().build())
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpn_connection().is_some());
+}
+
+#[test_action("ec2", "ModifyVpnTunnelCertificate", checksum = "d74ba53a")]
+#[tokio::test]
+async fn ec2_modify_vpn_tunnel_certificate() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .modify_vpn_tunnel_certificate()
+        .vpn_connection_id(&id)
+        .vpn_tunnel_outside_ip_address("1.2.3.4")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpn_connection().is_some());
+}
+
+#[test_action("ec2", "ReplaceVpnTunnel", checksum = "1b04822a")]
+#[tokio::test]
+async fn ec2_replace_vpn_tunnel() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .replace_vpn_tunnel()
+        .vpn_connection_id(&id)
+        .vpn_tunnel_outside_ip_address("1.2.3.4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.r#return(), Some(true));
+}
+
+#[test_action("ec2", "GetActiveVpnTunnelStatus", checksum = "9de13f9c")]
+#[tokio::test]
+async fn ec2_get_active_vpn_tunnel_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .get_active_vpn_tunnel_status()
+        .vpn_connection_id(&id)
+        .vpn_tunnel_outside_ip_address("1.2.3.4")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.active_vpn_tunnel_status().is_some());
+}
+
+#[test_action("ec2", "GetVpnTunnelReplacementStatus", checksum = "09719f6f")]
+#[tokio::test]
+async fn ec2_get_vpn_tunnel_replacement_status() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpn(&c).await;
+    let r = c
+        .get_vpn_tunnel_replacement_status()
+        .vpn_connection_id(&id)
+        .vpn_tunnel_outside_ip_address("1.2.3.4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.vpn_connection_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "GetVpnConnectionDeviceTypes", checksum = "7f37d1e0")]
+#[tokio::test]
+async fn ec2_get_vpn_connection_device_types() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_vpn_connection_device_types().send().await.unwrap();
+    assert!(!r.vpn_connection_device_types().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "GetVpnConnectionDeviceSampleConfiguration",
+    checksum = "8631d8f7"
+)]
+#[tokio::test]
+async fn ec2_get_vpn_connection_device_sample_configuration() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_vpn_connection_device_sample_configuration()
+        .vpn_connection_id("vpn-1")
+        .vpn_connection_device_type_id("0123abcd")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.vpn_connection_device_sample_configuration().is_some());
+}
+
+async fn make_vpnc(c: &aws_sdk_ec2::Client) -> String {
+    c.create_vpn_concentrator()
+        .r#type(aws_sdk_ec2::types::VpnConcentratorType::Ipsec1)
+        .send()
+        .await
+        .unwrap()
+        .vpn_concentrator()
+        .unwrap()
+        .vpn_concentrator_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateVpnConcentrator", checksum = "fa1d1630")]
+#[tokio::test]
+async fn ec2_create_vpn_concentrator() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpnc(&c).await;
+    assert!(id.starts_with("vpnc-"));
+}
+
+#[test_action("ec2", "DescribeVpnConcentrators", checksum = "f81af537")]
+#[tokio::test]
+async fn ec2_describe_vpn_concentrators() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vpnc(&c).await;
+    let r = c.describe_vpn_concentrators().send().await.unwrap();
+    assert!(!r.vpn_concentrators().is_empty());
+}
+
+#[test_action("ec2", "DeleteVpnConcentrator", checksum = "573a9a28")]
+#[tokio::test]
+async fn ec2_delete_vpn_concentrator() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vpnc(&c).await;
+    c.delete_vpn_concentrator()
+        .vpn_concentrator_id(&id)
+        .send()
+        .await
+        .unwrap();
+}

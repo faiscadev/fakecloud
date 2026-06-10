@@ -21,6 +21,7 @@ mod tgw_mcast;
 mod tgw_peering;
 mod volume;
 mod vpc;
+mod vpn;
 
 use async_trait::async_trait;
 use http::StatusCode;
@@ -461,6 +462,32 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "AcceptTransitGatewayClientVpnAttachment",
     "DeleteTransitGatewayClientVpnAttachment",
     "RejectTransitGatewayClientVpnAttachment",
+    // Site-to-Site VPN
+    "CreateCustomerGateway",
+    "DeleteCustomerGateway",
+    "DescribeCustomerGateways",
+    "CreateVpnGateway",
+    "DeleteVpnGateway",
+    "DescribeVpnGateways",
+    "AttachVpnGateway",
+    "DetachVpnGateway",
+    "CreateVpnConnection",
+    "DeleteVpnConnection",
+    "DescribeVpnConnections",
+    "ModifyVpnConnection",
+    "ModifyVpnConnectionOptions",
+    "CreateVpnConnectionRoute",
+    "DeleteVpnConnectionRoute",
+    "ModifyVpnTunnelOptions",
+    "ModifyVpnTunnelCertificate",
+    "ReplaceVpnTunnel",
+    "GetActiveVpnTunnelStatus",
+    "GetVpnTunnelReplacementStatus",
+    "GetVpnConnectionDeviceTypes",
+    "GetVpnConnectionDeviceSampleConfiguration",
+    "CreateVpnConcentrator",
+    "DeleteVpnConcentrator",
+    "DescribeVpnConcentrators",
 ];
 
 /// Amazon EC2 service.
@@ -1233,6 +1260,35 @@ impl AwsService for Ec2Service {
             "RejectTransitGatewayClientVpnAttachment" => {
                 tgw_mcast::reject_transit_gateway_client_vpn_attachment(self, &request)
             }
+            "CreateCustomerGateway" => vpn::create_customer_gateway(self, &request),
+            "DeleteCustomerGateway" => vpn::delete_customer_gateway(self, &request),
+            "DescribeCustomerGateways" => vpn::describe_customer_gateways(self, &request),
+            "CreateVpnGateway" => vpn::create_vpn_gateway(self, &request),
+            "DeleteVpnGateway" => vpn::delete_vpn_gateway(self, &request),
+            "DescribeVpnGateways" => vpn::describe_vpn_gateways(self, &request),
+            "AttachVpnGateway" => vpn::attach_vpn_gateway(self, &request),
+            "DetachVpnGateway" => vpn::detach_vpn_gateway(self, &request),
+            "CreateVpnConnection" => vpn::create_vpn_connection(self, &request),
+            "DeleteVpnConnection" => vpn::delete_vpn_connection(self, &request),
+            "DescribeVpnConnections" => vpn::describe_vpn_connections(self, &request),
+            "ModifyVpnConnection" => vpn::modify_vpn_connection(self, &request),
+            "ModifyVpnConnectionOptions" => vpn::modify_vpn_connection_options(self, &request),
+            "CreateVpnConnectionRoute" => vpn::create_vpn_connection_route(self, &request),
+            "DeleteVpnConnectionRoute" => vpn::delete_vpn_connection_route(self, &request),
+            "ModifyVpnTunnelOptions" => vpn::modify_vpn_tunnel_options(self, &request),
+            "ModifyVpnTunnelCertificate" => vpn::modify_vpn_tunnel_certificate(self, &request),
+            "ReplaceVpnTunnel" => vpn::replace_vpn_tunnel(self, &request),
+            "GetActiveVpnTunnelStatus" => vpn::get_active_vpn_tunnel_status(self, &request),
+            "GetVpnTunnelReplacementStatus" => {
+                vpn::get_vpn_tunnel_replacement_status(self, &request)
+            }
+            "GetVpnConnectionDeviceTypes" => vpn::get_vpn_connection_device_types(self, &request),
+            "GetVpnConnectionDeviceSampleConfiguration" => {
+                vpn::get_vpn_connection_device_sample_configuration(self, &request)
+            }
+            "CreateVpnConcentrator" => vpn::create_vpn_concentrator(self, &request),
+            "DeleteVpnConcentrator" => vpn::delete_vpn_concentrator(self, &request),
+            "DescribeVpnConcentrators" => vpn::describe_vpn_concentrators(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
