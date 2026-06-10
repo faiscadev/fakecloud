@@ -8538,3 +8538,347 @@ async fn ec2_delete_ipam_external_resource_verification_token() {
         .await
         .unwrap();
 }
+
+// ---- IPAM policies + prefix-list resolvers ----
+
+async fn make_policy(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_policy()
+        .ipam_id("ipam-1")
+        .send()
+        .await
+        .unwrap()
+        .ipam_policy()
+        .unwrap()
+        .ipam_policy_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_resolver(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_prefix_list_resolver()
+        .ipam_id("ipam-1")
+        .address_family(aws_sdk_ec2::types::AddressFamily::Ipv4)
+        .send()
+        .await
+        .unwrap()
+        .ipam_prefix_list_resolver()
+        .unwrap()
+        .ipam_prefix_list_resolver_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateIpamPolicy", checksum = "15092a13")]
+#[tokio::test]
+async fn ec2_create_ipam_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    assert!(id.starts_with("ipam-policy-"));
+}
+
+#[test_action("ec2", "DescribeIpamPolicies", checksum = "bbe66478")]
+#[tokio::test]
+async fn ec2_describe_ipam_policies() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_policy(&c).await;
+    let r = c.describe_ipam_policies().send().await.unwrap();
+    assert!(!r.ipam_policies().is_empty());
+}
+
+#[test_action("ec2", "DeleteIpamPolicy", checksum = "63e733ca")]
+#[tokio::test]
+async fn ec2_delete_ipam_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    c.delete_ipam_policy()
+        .ipam_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableIpamPolicy", checksum = "1be5d705")]
+#[tokio::test]
+async fn ec2_enable_ipam_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    let r = c
+        .enable_ipam_policy()
+        .ipam_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.ipam_policy_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DisableIpamPolicy", checksum = "fdb0f04b")]
+#[tokio::test]
+async fn ec2_disable_ipam_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    // Response carries only a <return> boolean; send() succeeding proves the op
+    // routes and the response deserializes.
+    c.disable_ipam_policy()
+        .ipam_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetEnabledIpamPolicy", checksum = "78e1f24f")]
+#[tokio::test]
+async fn ec2_get_enabled_ipam_policy() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.get_enabled_ipam_policy().send().await.unwrap();
+    assert_eq!(r.ipam_policy_enabled(), Some(false));
+}
+
+#[test_action("ec2", "GetIpamPolicyAllocationRules", checksum = "e6b9b7de")]
+#[tokio::test]
+async fn ec2_get_ipam_policy_allocation_rules() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    let r = c
+        .get_ipam_policy_allocation_rules()
+        .ipam_policy_id(&id)
+        .resource_type(aws_sdk_ec2::types::IpamPolicyResourceType::Eip)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_policy_documents().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamPolicyAllocationRules", checksum = "6e206a4c")]
+#[tokio::test]
+async fn ec2_modify_ipam_policy_allocation_rules() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    let r = c
+        .modify_ipam_policy_allocation_rules()
+        .ipam_policy_id(&id)
+        .locale("us-east-1")
+        .resource_type(aws_sdk_ec2::types::IpamPolicyResourceType::Eip)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_policy_document().is_some());
+}
+
+#[test_action("ec2", "GetIpamPolicyOrganizationTargets", checksum = "1c19b6ef")]
+#[tokio::test]
+async fn ec2_get_ipam_policy_organization_targets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_policy(&c).await;
+    let r = c
+        .get_ipam_policy_organization_targets()
+        .ipam_policy_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.organization_targets().is_empty());
+}
+
+#[test_action("ec2", "CreateIpamPrefixListResolver", checksum = "a8163dc8")]
+#[tokio::test]
+async fn ec2_create_ipam_prefix_list_resolver() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_resolver(&c).await;
+    assert!(id.starts_with("ipam-pl-res-"));
+}
+
+#[test_action("ec2", "DescribeIpamPrefixListResolvers", checksum = "2e6cdacf")]
+#[tokio::test]
+async fn ec2_describe_ipam_prefix_list_resolvers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_resolver(&c).await;
+    let r = c
+        .describe_ipam_prefix_list_resolvers()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_prefix_list_resolvers().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamPrefixListResolver", checksum = "d6f970c6")]
+#[tokio::test]
+async fn ec2_modify_ipam_prefix_list_resolver() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_resolver(&c).await;
+    let r = c
+        .modify_ipam_prefix_list_resolver()
+        .ipam_prefix_list_resolver_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_prefix_list_resolver().is_some());
+}
+
+#[test_action("ec2", "DeleteIpamPrefixListResolver", checksum = "b2094029")]
+#[tokio::test]
+async fn ec2_delete_ipam_prefix_list_resolver() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_resolver(&c).await;
+    c.delete_ipam_prefix_list_resolver()
+        .ipam_prefix_list_resolver_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateIpamPrefixListResolverTarget", checksum = "564bc0d9")]
+#[tokio::test]
+async fn ec2_create_ipam_prefix_list_resolver_target() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let r = c
+        .create_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_id(&rid)
+        .prefix_list_id("pl-1")
+        .prefix_list_region("us-east-1")
+        .track_latest_version(true)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_prefix_list_resolver_target().is_some());
+}
+
+#[test_action("ec2", "DescribeIpamPrefixListResolverTargets", checksum = "1bd06910")]
+#[tokio::test]
+async fn ec2_describe_ipam_prefix_list_resolver_targets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    c.create_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_id(&rid)
+        .prefix_list_id("pl-1")
+        .prefix_list_region("us-east-1")
+        .track_latest_version(true)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_ipam_prefix_list_resolver_targets()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_prefix_list_resolver_targets().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamPrefixListResolverTarget", checksum = "012d41a3")]
+#[tokio::test]
+async fn ec2_modify_ipam_prefix_list_resolver_target() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let tid = c
+        .create_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_id(&rid)
+        .prefix_list_id("pl-1")
+        .prefix_list_region("us-east-1")
+        .track_latest_version(true)
+        .send()
+        .await
+        .unwrap()
+        .ipam_prefix_list_resolver_target()
+        .unwrap()
+        .ipam_prefix_list_resolver_target_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .modify_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_target_id(&tid)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_prefix_list_resolver_target().is_some());
+}
+
+#[test_action("ec2", "DeleteIpamPrefixListResolverTarget", checksum = "dfe0ad7a")]
+#[tokio::test]
+async fn ec2_delete_ipam_prefix_list_resolver_target() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let tid = c
+        .create_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_id(&rid)
+        .prefix_list_id("pl-1")
+        .prefix_list_region("us-east-1")
+        .track_latest_version(true)
+        .send()
+        .await
+        .unwrap()
+        .ipam_prefix_list_resolver_target()
+        .unwrap()
+        .ipam_prefix_list_resolver_target_id()
+        .unwrap()
+        .to_string();
+    c.delete_ipam_prefix_list_resolver_target()
+        .ipam_prefix_list_resolver_target_id(&tid)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetIpamPrefixListResolverRules", checksum = "7415750b")]
+#[tokio::test]
+async fn ec2_get_ipam_prefix_list_resolver_rules() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let r = c
+        .get_ipam_prefix_list_resolver_rules()
+        .ipam_prefix_list_resolver_id(&rid)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.rules().is_empty());
+}
+
+#[test_action("ec2", "GetIpamPrefixListResolverVersions", checksum = "0b06aea9")]
+#[tokio::test]
+async fn ec2_get_ipam_prefix_list_resolver_versions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let r = c
+        .get_ipam_prefix_list_resolver_versions()
+        .ipam_prefix_list_resolver_id(&rid)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_prefix_list_resolver_versions().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "GetIpamPrefixListResolverVersionEntries",
+    checksum = "d68bce61"
+)]
+#[tokio::test]
+async fn ec2_get_ipam_prefix_list_resolver_version_entries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rid = make_resolver(&c).await;
+    let r = c
+        .get_ipam_prefix_list_resolver_version_entries()
+        .ipam_prefix_list_resolver_id(&rid)
+        .ipam_prefix_list_resolver_version(1)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.entries().is_empty());
+}
