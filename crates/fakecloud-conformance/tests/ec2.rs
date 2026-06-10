@@ -7839,3 +7839,371 @@ async fn ec2_import_client_vpn_client_certificate_revocation_list() {
         .unwrap();
     assert_eq!(r.r#return(), Some(true));
 }
+
+// ---- IPAM core ----
+
+async fn make_ipam(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam()
+        .send()
+        .await
+        .unwrap()
+        .ipam()
+        .unwrap()
+        .ipam_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_scope(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_scope()
+        .ipam_id("ipam-1")
+        .send()
+        .await
+        .unwrap()
+        .ipam_scope()
+        .unwrap()
+        .ipam_scope_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_pool(c: &aws_sdk_ec2::Client) -> String {
+    c.create_ipam_pool()
+        .ipam_scope_id("ipam-scope-1")
+        .address_family(aws_sdk_ec2::types::AddressFamily::Ipv4)
+        .send()
+        .await
+        .unwrap()
+        .ipam_pool()
+        .unwrap()
+        .ipam_pool_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateIpam", checksum = "3485527d")]
+#[tokio::test]
+async fn ec2_create_ipam() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ipam(&c).await;
+    assert!(id.starts_with("ipam-"));
+}
+
+#[test_action("ec2", "DescribeIpams", checksum = "4c22ad7c")]
+#[tokio::test]
+async fn ec2_describe_ipams() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ipam(&c).await;
+    let r = c.describe_ipams().ipam_ids(&id).send().await.unwrap();
+    assert_eq!(r.ipams().len(), 1);
+}
+
+#[test_action("ec2", "ModifyIpam", checksum = "43870206")]
+#[tokio::test]
+async fn ec2_modify_ipam() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ipam(&c).await;
+    let r = c
+        .modify_ipam()
+        .ipam_id(&id)
+        .description("d")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.ipam().unwrap().ipam_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "DeleteIpam", checksum = "2dc73cb6")]
+#[tokio::test]
+async fn ec2_delete_ipam() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ipam(&c).await;
+    c.delete_ipam().ipam_id(&id).send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateIpamScope", checksum = "61270911")]
+#[tokio::test]
+async fn ec2_create_ipam_scope() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_scope(&c).await;
+    assert!(id.starts_with("ipam-scope-"));
+}
+
+#[test_action("ec2", "DescribeIpamScopes", checksum = "6acf9e38")]
+#[tokio::test]
+async fn ec2_describe_ipam_scopes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_scope(&c).await;
+    let r = c.describe_ipam_scopes().send().await.unwrap();
+    assert!(!r.ipam_scopes().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamScope", checksum = "1b880baa")]
+#[tokio::test]
+async fn ec2_modify_ipam_scope() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_scope(&c).await;
+    let r = c
+        .modify_ipam_scope()
+        .ipam_scope_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_scope().is_some());
+}
+
+#[test_action("ec2", "DeleteIpamScope", checksum = "dd96106c")]
+#[tokio::test]
+async fn ec2_delete_ipam_scope() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_scope(&c).await;
+    c.delete_ipam_scope()
+        .ipam_scope_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateIpamPool", checksum = "025e7679")]
+#[tokio::test]
+async fn ec2_create_ipam_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    assert!(id.starts_with("ipam-pool-"));
+}
+
+#[test_action("ec2", "DescribeIpamPools", checksum = "bba93e30")]
+#[tokio::test]
+async fn ec2_describe_ipam_pools() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_pool(&c).await;
+    let r = c.describe_ipam_pools().send().await.unwrap();
+    assert!(!r.ipam_pools().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamPool", checksum = "c674e6f4")]
+#[tokio::test]
+async fn ec2_modify_ipam_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    let r = c.modify_ipam_pool().ipam_pool_id(&id).send().await.unwrap();
+    assert!(r.ipam_pool().is_some());
+}
+
+#[test_action("ec2", "DeleteIpamPool", checksum = "bfa3df80")]
+#[tokio::test]
+async fn ec2_delete_ipam_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    c.delete_ipam_pool().ipam_pool_id(&id).send().await.unwrap();
+}
+
+#[test_action("ec2", "ProvisionIpamPoolCidr", checksum = "42fed347")]
+#[tokio::test]
+async fn ec2_provision_ipam_pool_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    let r = c
+        .provision_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_pool_cidr().is_some());
+}
+
+#[test_action("ec2", "GetIpamPoolCidrs", checksum = "7a3e0d1c")]
+#[tokio::test]
+async fn ec2_get_ipam_pool_cidrs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    c.provision_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .get_ipam_pool_cidrs()
+        .ipam_pool_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_pool_cidrs().is_empty());
+}
+
+#[test_action("ec2", "DeprovisionIpamPoolCidr", checksum = "0d4add91")]
+#[tokio::test]
+async fn ec2_deprovision_ipam_pool_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    c.provision_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .deprovision_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_pool_cidr().is_some());
+}
+
+#[test_action("ec2", "AllocateIpamPoolCidr", checksum = "6da44777")]
+#[tokio::test]
+async fn ec2_allocate_ipam_pool_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    let r = c
+        .allocate_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_pool_allocation().is_some());
+}
+
+#[test_action("ec2", "GetIpamPoolAllocations", checksum = "f83978dd")]
+#[tokio::test]
+async fn ec2_get_ipam_pool_allocations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    c.allocate_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .get_ipam_pool_allocations()
+        .ipam_pool_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.ipam_pool_allocations().is_empty());
+}
+
+#[test_action("ec2", "ReleaseIpamPoolAllocation", checksum = "3f9121a6")]
+#[tokio::test]
+async fn ec2_release_ipam_pool_allocation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_pool(&c).await;
+    let alloc = c
+        .allocate_ipam_pool_cidr()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/24")
+        .send()
+        .await
+        .unwrap()
+        .ipam_pool_allocation()
+        .unwrap()
+        .ipam_pool_allocation_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .release_ipam_pool_allocation()
+        .ipam_pool_id(&id)
+        .cidr("10.0.0.0/24")
+        .ipam_pool_allocation_id(&alloc)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.success(), Some(true));
+}
+
+#[test_action("ec2", "GetIpamResourceCidrs", checksum = "d06547a1")]
+#[tokio::test]
+async fn ec2_get_ipam_resource_cidrs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_ipam_resource_cidrs()
+        .ipam_scope_id("ipam-scope-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_resource_cidrs().is_empty());
+}
+
+#[test_action("ec2", "ModifyIpamResourceCidr", checksum = "bfdff1ed")]
+#[tokio::test]
+async fn ec2_modify_ipam_resource_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .modify_ipam_resource_cidr()
+        .resource_id("vpc-1")
+        .resource_cidr("10.0.0.0/16")
+        .resource_region("us-east-1")
+        .current_ipam_scope_id("ipam-scope-1")
+        .monitored(true)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.ipam_resource_cidr().is_some());
+}
+
+#[test_action("ec2", "GetIpamAddressHistory", checksum = "96d1874c")]
+#[tokio::test]
+async fn ec2_get_ipam_address_history() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_ipam_address_history()
+        .cidr("10.0.0.0/16")
+        .ipam_scope_id("ipam-scope-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.history_records().is_empty());
+}
+
+#[test_action("ec2", "EnableIpamOrganizationAdminAccount", checksum = "c7a70a45")]
+#[tokio::test]
+async fn ec2_enable_ipam_organization_admin_account() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .enable_ipam_organization_admin_account()
+        .delegated_admin_account_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.success(), Some(true));
+}
+
+#[test_action("ec2", "DisableIpamOrganizationAdminAccount", checksum = "b2beab46")]
+#[tokio::test]
+async fn ec2_disable_ipam_organization_admin_account() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .disable_ipam_organization_admin_account()
+        .delegated_admin_account_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.success(), Some(true));
+}
