@@ -160,21 +160,34 @@ pub(crate) fn modify_ipam(
     let region = region_of(req);
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let i = {
-        let entry = state.ipams.entry(id.clone()).or_insert_with(|| Ipam {
+    // Mutate in place when the IPAM exists; otherwise synthesize a response
+    // without polluting state (EC2 has no error shape, so unknown IDs still
+    // return 200, but we must not invent a persistent resource).
+    let i = match state.ipams.get_mut(&id) {
+        Some(entry) => {
+            if let Some(t) = req.query_params.get("Tier") {
+                entry.tier = t.clone();
+            }
+            if let Some(d) = req.query_params.get("Description") {
+                entry.description = d.clone();
+            }
+            entry.clone()
+        }
+        None => Ipam {
             id: id.clone(),
             public_scope_id: gen_id("ipam-scope"),
             private_scope_id: gen_id("ipam-scope"),
-            tier: "advanced".to_string(),
-            description: String::new(),
-        });
-        if let Some(t) = req.query_params.get("Tier") {
-            entry.tier = t.clone();
-        }
-        if let Some(d) = req.query_params.get("Description") {
-            entry.description = d.clone();
-        }
-        entry.clone()
+            tier: req
+                .query_params
+                .get("Tier")
+                .cloned()
+                .unwrap_or_else(|| "advanced".to_string()),
+            description: req
+                .query_params
+                .get("Description")
+                .cloned()
+                .unwrap_or_default(),
+        },
     };
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
@@ -290,20 +303,23 @@ pub(crate) fn modify_ipam_scope(
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let sc = {
-        let entry = state
-            .ipam_scopes
-            .entry(id.clone())
-            .or_insert_with(|| IpamScope {
-                id: id.clone(),
-                ipam_id: "ipam-0".to_string(),
-                scope_type: "private".to_string(),
-                description: String::new(),
-            });
-        if let Some(d) = req.query_params.get("Description") {
-            entry.description = d.clone();
+    let sc = match state.ipam_scopes.get_mut(&id) {
+        Some(entry) => {
+            if let Some(d) = req.query_params.get("Description") {
+                entry.description = d.clone();
+            }
+            entry.clone()
         }
-        entry.clone()
+        None => IpamScope {
+            id: id.clone(),
+            ipam_id: "ipam-0".to_string(),
+            scope_type: "private".to_string(),
+            description: req
+                .query_params
+                .get("Description")
+                .cloned()
+                .unwrap_or_default(),
+        },
     };
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
@@ -420,20 +436,23 @@ pub(crate) fn modify_ipam_pool(
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let p = {
-        let entry = state
-            .ipam_pools
-            .entry(id.clone())
-            .or_insert_with(|| IpamPool {
-                id: id.clone(),
-                scope_id: "ipam-scope-0".to_string(),
-                address_family: "ipv4".to_string(),
-                description: String::new(),
-            });
-        if let Some(d) = req.query_params.get("Description") {
-            entry.description = d.clone();
+    let p = match state.ipam_pools.get_mut(&id) {
+        Some(entry) => {
+            if let Some(d) = req.query_params.get("Description") {
+                entry.description = d.clone();
+            }
+            entry.clone()
         }
-        entry.clone()
+        None => IpamPool {
+            id: id.clone(),
+            scope_id: "ipam-scope-0".to_string(),
+            address_family: "ipv4".to_string(),
+            description: req
+                .query_params
+                .get("Description")
+                .cloned()
+                .unwrap_or_default(),
+        },
     };
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(

@@ -662,6 +662,14 @@ pub struct IpamPool {
     pub description: String,
 }
 
+/// An IPAM resource discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IpamResourceDiscovery {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// A Client VPN endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientVpnEndpoint {
@@ -849,6 +857,17 @@ pub struct Ec2State {
     /// pool-id -> allocations (cidr, allocation-id).
     #[serde(default)]
     pub ipam_pool_allocations: HashMap<String, Vec<(String, String)>>,
+    #[serde(default)]
+    pub ipam_resource_discoveries: HashMap<String, IpamResourceDiscovery>,
+    /// association-id -> (discovery-id, ipam-id).
+    #[serde(default)]
+    pub ipam_rd_associations: HashMap<String, (String, String)>,
+    /// asn -> associated cidr.
+    #[serde(default)]
+    pub ipam_byoasns: HashMap<String, String>,
+    /// external-token-id -> ipam-id.
+    #[serde(default)]
+    pub ipam_ext_tokens: HashMap<String, String>,
 }
 
 impl Ec2State {
