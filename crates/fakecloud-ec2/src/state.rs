@@ -640,8 +640,12 @@ pub struct ClientVpnEndpoint {
     pub client_cidr: String,
     #[serde(default)]
     pub routes: Vec<String>,
+    /// (association id, subnet id) for each associated target network.
     #[serde(default)]
-    pub target_networks: Vec<String>,
+    pub target_networks: Vec<(String, String)>,
+    /// Ingress authorization rule target CIDRs.
+    #[serde(default)]
+    pub auth_rules: Vec<String>,
 }
 
 /// A Transit Gateway peering attachment.

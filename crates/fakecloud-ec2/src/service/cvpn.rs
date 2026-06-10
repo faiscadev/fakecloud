@@ -79,6 +79,7 @@ pub(crate) fn create_client_vpn_endpoint(
             .unwrap_or_else(|| "10.0.0.0/22".to_string()),
         routes: Vec::new(),
         target_networks: Vec::new(),
+        auth_rules: Vec::new(),
     };
     {
         let mut accounts = svc.state.write();
@@ -257,11 +258,23 @@ pub(crate) fn describe_client_vpn_routes(
 }
 
 pub(crate) fn authorize_client_vpn_ingress(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ClientVpnEndpointId")?;
-    require(&req.query_params, "TargetNetworkCidr")?;
+    let id = require(&req.query_params, "ClientVpnEndpointId")?;
+    let cidr = require(&req.query_params, "TargetNetworkCidr")?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(e) = accounts
+            .get_or_create(&req.account_id)
+            .client_vpn_endpoints
+            .get_mut(&id)
+        {
+            if !e.auth_rules.contains(&cidr) {
+                e.auth_rules.push(cidr);
+            }
+        }
+    }
     Ok(Ec2Service::respond(
         "AuthorizeClientVpnIngress",
         &req.request_id,
@@ -270,11 +283,21 @@ pub(crate) fn authorize_client_vpn_ingress(
 }
 
 pub(crate) fn revoke_client_vpn_ingress(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ClientVpnEndpointId")?;
-    require(&req.query_params, "TargetNetworkCidr")?;
+    let id = require(&req.query_params, "ClientVpnEndpointId")?;
+    let cidr = require(&req.query_params, "TargetNetworkCidr")?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(e) = accounts
+            .get_or_create(&req.account_id)
+            .client_vpn_endpoints
+            .get_mut(&id)
+        {
+            e.auth_rules.retain(|c| c != &cidr);
+        }
+    }
     Ok(Ec2Service::respond(
         "RevokeClientVpnIngress",
         &req.request_id,
@@ -283,15 +306,33 @@ pub(crate) fn revoke_client_vpn_ingress(
 }
 
 pub(crate) fn describe_client_vpn_authorization_rules(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ClientVpnEndpointId")?;
+    let id = require(&req.query_params, "ClientVpnEndpointId")?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.client_vpn_endpoints.get(&id))
+        .map(|e| {
+            e.auth_rules
+                .iter()
+                .map(|cidr| {
+                    format!(
+                        "{}{}<groupId/><accessAll>true</accessAll>{}",
+                        ec2_elem("clientVpnEndpointId", &id),
+                        ec2_elem("destinationCidr", cidr),
+                        status_xml("status", "active"),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "DescribeClientVpnAuthorizationRules",
         &req.request_id,
-        &ec2_list("authorizationRule", &[]),
+        &ec2_list("authorizationRule", &items),
     ))
 }
 
@@ -300,6 +341,15 @@ pub(crate) fn associate_client_vpn_target_network(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ClientVpnEndpointId")?;
+    // SubnetId is optional in the Smithy model, so don't require it; store the
+    // supplied subnet (or a placeholder) so DescribeClientVpnTargetNetworks
+    // reflects the real target.
+    let subnet = req
+        .query_params
+        .get("SubnetId")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "subnet-0".to_string());
     let assoc = gen_id("cvpn-assoc");
     {
         let mut accounts = svc.state.write();
@@ -308,7 +358,7 @@ pub(crate) fn associate_client_vpn_target_network(
             .client_vpn_endpoints
             .get_mut(&id)
         {
-            e.target_networks.push(assoc.clone());
+            e.target_networks.push((assoc.clone(), subnet));
         }
     }
     let body = format!(
@@ -336,7 +386,7 @@ pub(crate) fn disassociate_client_vpn_target_network(
             .client_vpn_endpoints
             .get_mut(&id)
         {
-            e.target_networks.retain(|a| a != &assoc);
+            e.target_networks.retain(|(a, _)| a != &assoc);
         }
     }
     let body = format!(
@@ -364,11 +414,12 @@ pub(crate) fn describe_client_vpn_target_networks(
         .map(|e| {
             e.target_networks
                 .iter()
-                .map(|a| {
+                .map(|(a, subnet)| {
                     format!(
-                        "{}{}<targetNetworkId>subnet-0</targetNetworkId>{}",
+                        "{}{}{}{}",
                         ec2_elem("associationId", a),
                         ec2_elem("clientVpnEndpointId", &id),
+                        ec2_elem("targetNetworkId", subnet),
                         status_xml("status", "associated")
                     )
                 })
