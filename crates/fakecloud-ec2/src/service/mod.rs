@@ -14,6 +14,7 @@ mod ipam_discovery;
 mod ipam_policy;
 mod meta;
 mod nacl;
+mod ni;
 mod reserved;
 mod routing;
 mod sg;
@@ -605,6 +606,21 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeVerifiedAccessInstanceLoggingConfigurations",
     "ModifyVerifiedAccessInstanceLoggingConfiguration",
     "ExportVerifiedAccessInstanceClientConfiguration",
+    // Network Insights
+    "CreateNetworkInsightsPath",
+    "DeleteNetworkInsightsPath",
+    "DescribeNetworkInsightsPaths",
+    "StartNetworkInsightsAnalysis",
+    "DeleteNetworkInsightsAnalysis",
+    "DescribeNetworkInsightsAnalyses",
+    "CreateNetworkInsightsAccessScope",
+    "DeleteNetworkInsightsAccessScope",
+    "DescribeNetworkInsightsAccessScopes",
+    "GetNetworkInsightsAccessScopeContent",
+    "StartNetworkInsightsAccessScopeAnalysis",
+    "DeleteNetworkInsightsAccessScopeAnalysis",
+    "DescribeNetworkInsightsAccessScopeAnalyses",
+    "GetNetworkInsightsAccessScopeAnalysisFindings",
 ];
 
 /// Amazon EC2 service.
@@ -1618,6 +1634,38 @@ impl AwsService for Ec2Service {
             }
             "ExportVerifiedAccessInstanceClientConfiguration" => {
                 va::export_verified_access_instance_client_configuration(self, &request)
+            }
+            "CreateNetworkInsightsPath" => ni::create_network_insights_path(self, &request),
+            "DeleteNetworkInsightsPath" => ni::delete_network_insights_path(self, &request),
+            "DescribeNetworkInsightsPaths" => ni::describe_network_insights_paths(self, &request),
+            "StartNetworkInsightsAnalysis" => ni::start_network_insights_analysis(self, &request),
+            "DeleteNetworkInsightsAnalysis" => ni::delete_network_insights_analysis(self, &request),
+            "DescribeNetworkInsightsAnalyses" => {
+                ni::describe_network_insights_analyses(self, &request)
+            }
+            "CreateNetworkInsightsAccessScope" => {
+                ni::create_network_insights_access_scope(self, &request)
+            }
+            "DeleteNetworkInsightsAccessScope" => {
+                ni::delete_network_insights_access_scope(self, &request)
+            }
+            "DescribeNetworkInsightsAccessScopes" => {
+                ni::describe_network_insights_access_scopes(self, &request)
+            }
+            "GetNetworkInsightsAccessScopeContent" => {
+                ni::get_network_insights_access_scope_content(self, &request)
+            }
+            "StartNetworkInsightsAccessScopeAnalysis" => {
+                ni::start_network_insights_access_scope_analysis(self, &request)
+            }
+            "DeleteNetworkInsightsAccessScopeAnalysis" => {
+                ni::delete_network_insights_access_scope_analysis(self, &request)
+            }
+            "DescribeNetworkInsightsAccessScopeAnalyses" => {
+                ni::describe_network_insights_access_scope_analyses(self, &request)
+            }
+            "GetNetworkInsightsAccessScopeAnalysisFindings" => {
+                ni::get_network_insights_access_scope_analysis_findings(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,

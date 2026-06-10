@@ -734,6 +734,35 @@ pub struct VerifiedAccessEndpoint {
     pub attachment_type: String,
 }
 
+/// A Network Insights reachability path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInsightsPath {
+    pub id: String,
+    pub source: String,
+    pub destination: String,
+    pub protocol: String,
+}
+
+/// A Network Insights path analysis.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInsightsAnalysis {
+    pub id: String,
+    pub path_id: String,
+}
+
+/// A Network Insights access scope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInsightsAccessScope {
+    pub id: String,
+}
+
+/// A Network Insights access-scope analysis.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkInsightsAccessScopeAnalysis {
+    pub id: String,
+    pub scope_id: String,
+}
+
 /// A Client VPN endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientVpnEndpoint {
@@ -958,6 +987,14 @@ pub struct Ec2State {
     /// endpoint-id -> policy document.
     #[serde(default)]
     pub va_endpoint_policies: HashMap<String, String>,
+    #[serde(default)]
+    pub ni_paths: HashMap<String, NetworkInsightsPath>,
+    #[serde(default)]
+    pub ni_analyses: HashMap<String, NetworkInsightsAnalysis>,
+    #[serde(default)]
+    pub ni_access_scopes: HashMap<String, NetworkInsightsAccessScope>,
+    #[serde(default)]
+    pub ni_scope_analyses: HashMap<String, NetworkInsightsAccessScopeAnalysis>,
 }
 
 impl Ec2State {

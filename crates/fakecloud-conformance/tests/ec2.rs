@@ -9328,3 +9328,290 @@ async fn ec2_export_verified_access_instance_client_configuration() {
         .unwrap();
     assert_eq!(r.verified_access_instance_id(), Some(id.as_str()));
 }
+
+// ---- Network Insights ----
+
+async fn make_path(c: &aws_sdk_ec2::Client) -> String {
+    c.create_network_insights_path()
+        .source("eni-1")
+        .protocol(aws_sdk_ec2::types::Protocol::Tcp)
+        .client_token("tok")
+        .send()
+        .await
+        .unwrap()
+        .network_insights_path()
+        .unwrap()
+        .network_insights_path_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_ni_scope(c: &aws_sdk_ec2::Client) -> String {
+    c.create_network_insights_access_scope()
+        .client_token("tok")
+        .send()
+        .await
+        .unwrap()
+        .network_insights_access_scope()
+        .unwrap()
+        .network_insights_access_scope_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateNetworkInsightsPath", checksum = "dd7c97ff")]
+#[tokio::test]
+async fn ec2_create_network_insights_path() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_path(&c).await;
+    assert!(id.starts_with("nip-"));
+}
+
+#[test_action("ec2", "DescribeNetworkInsightsPaths", checksum = "0d34bc2f")]
+#[tokio::test]
+async fn ec2_describe_network_insights_paths() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_path(&c).await;
+    let r = c.describe_network_insights_paths().send().await.unwrap();
+    assert!(!r.network_insights_paths().is_empty());
+}
+
+#[test_action("ec2", "DeleteNetworkInsightsPath", checksum = "2416b2c7")]
+#[tokio::test]
+async fn ec2_delete_network_insights_path() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_path(&c).await;
+    let r = c
+        .delete_network_insights_path()
+        .network_insights_path_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_insights_path_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "StartNetworkInsightsAnalysis", checksum = "58d89237")]
+#[tokio::test]
+async fn ec2_start_network_insights_analysis() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let p = make_path(&c).await;
+    let r = c
+        .start_network_insights_analysis()
+        .network_insights_path_id(&p)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.network_insights_analysis().is_some());
+}
+
+#[test_action("ec2", "DescribeNetworkInsightsAnalyses", checksum = "d802e189")]
+#[tokio::test]
+async fn ec2_describe_network_insights_analyses() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let p = make_path(&c).await;
+    c.start_network_insights_analysis()
+        .network_insights_path_id(&p)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_network_insights_analyses().send().await.unwrap();
+    assert!(!r.network_insights_analyses().is_empty());
+}
+
+#[test_action("ec2", "DeleteNetworkInsightsAnalysis", checksum = "e9aeb3e1")]
+#[tokio::test]
+async fn ec2_delete_network_insights_analysis() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let p = make_path(&c).await;
+    let a = c
+        .start_network_insights_analysis()
+        .network_insights_path_id(&p)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap()
+        .network_insights_analysis()
+        .unwrap()
+        .network_insights_analysis_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_network_insights_analysis()
+        .network_insights_analysis_id(&a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_insights_analysis_id(), Some(a.as_str()));
+}
+
+#[test_action("ec2", "CreateNetworkInsightsAccessScope", checksum = "df8f0d0a")]
+#[tokio::test]
+async fn ec2_create_network_insights_access_scope() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ni_scope(&c).await;
+    assert!(id.starts_with("nis-"));
+}
+
+#[test_action("ec2", "DescribeNetworkInsightsAccessScopes", checksum = "61d6847c")]
+#[tokio::test]
+async fn ec2_describe_network_insights_access_scopes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_ni_scope(&c).await;
+    let r = c
+        .describe_network_insights_access_scopes()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.network_insights_access_scopes().is_empty());
+}
+
+#[test_action("ec2", "DeleteNetworkInsightsAccessScope", checksum = "17504ef3")]
+#[tokio::test]
+async fn ec2_delete_network_insights_access_scope() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ni_scope(&c).await;
+    let r = c
+        .delete_network_insights_access_scope()
+        .network_insights_access_scope_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_insights_access_scope_id(), Some(id.as_str()));
+}
+
+#[test_action("ec2", "GetNetworkInsightsAccessScopeContent", checksum = "d14b8dd2")]
+#[tokio::test]
+async fn ec2_get_network_insights_access_scope_content() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_ni_scope(&c).await;
+    let r = c
+        .get_network_insights_access_scope_content()
+        .network_insights_access_scope_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.network_insights_access_scope_content().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "StartNetworkInsightsAccessScopeAnalysis",
+    checksum = "81da18fe"
+)]
+#[tokio::test]
+async fn ec2_start_network_insights_access_scope_analysis() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let sc = make_ni_scope(&c).await;
+    let r = c
+        .start_network_insights_access_scope_analysis()
+        .network_insights_access_scope_id(&sc)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.network_insights_access_scope_analysis().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeNetworkInsightsAccessScopeAnalyses",
+    checksum = "627666bd"
+)]
+#[tokio::test]
+async fn ec2_describe_network_insights_access_scope_analyses() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let sc = make_ni_scope(&c).await;
+    c.start_network_insights_access_scope_analysis()
+        .network_insights_access_scope_id(&sc)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_network_insights_access_scope_analyses()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.network_insights_access_scope_analyses().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteNetworkInsightsAccessScopeAnalysis",
+    checksum = "32ba3b0a"
+)]
+#[tokio::test]
+async fn ec2_delete_network_insights_access_scope_analysis() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let sc = make_ni_scope(&c).await;
+    let a = c
+        .start_network_insights_access_scope_analysis()
+        .network_insights_access_scope_id(&sc)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap()
+        .network_insights_access_scope_analysis()
+        .unwrap()
+        .network_insights_access_scope_analysis_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .delete_network_insights_access_scope_analysis()
+        .network_insights_access_scope_analysis_id(&a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.network_insights_access_scope_analysis_id(),
+        Some(a.as_str())
+    );
+}
+
+#[test_action(
+    "ec2",
+    "GetNetworkInsightsAccessScopeAnalysisFindings",
+    checksum = "1e1b5203"
+)]
+#[tokio::test]
+async fn ec2_get_network_insights_access_scope_analysis_findings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let sc = make_ni_scope(&c).await;
+    let a = c
+        .start_network_insights_access_scope_analysis()
+        .network_insights_access_scope_id(&sc)
+        .client_token("tok2")
+        .send()
+        .await
+        .unwrap()
+        .network_insights_access_scope_analysis()
+        .unwrap()
+        .network_insights_access_scope_analysis_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .get_network_insights_access_scope_analysis_findings()
+        .network_insights_access_scope_analysis_id(&a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.network_insights_access_scope_analysis_id(),
+        Some(a.as_str())
+    );
+}
