@@ -90,6 +90,10 @@ pub(crate) fn delete_ipam_policy(
     });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
+    state.ipam_policy_alloc_rules.remove(&id);
+    if state.ipam_enabled_policy.as_deref() == Some(id.as_str()) {
+        state.ipam_enabled_policy = None;
+    }
     Ok(Ec2Service::respond(
         "DeleteIpamPolicy",
         &req.request_id,
@@ -123,11 +127,24 @@ pub(crate) fn describe_ipam_policies(
     ))
 }
 
+fn alloc_rule_xml(id: &str, locale: &str, rt: &str) -> String {
+    format!(
+        "<ipamPolicyDocument>{}{}{}</ipamPolicyDocument>",
+        ec2_elem("ipamPolicyId", id),
+        ec2_elem("locale", locale),
+        ec2_elem("resourceType", rt),
+    )
+}
+
 pub(crate) fn enable_ipam_policy(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "IpamPolicyId")?;
+    {
+        let mut accounts = svc.state.write();
+        accounts.get_or_create(&req.account_id).ipam_enabled_policy = Some(id.clone());
+    }
     Ok(Ec2Service::respond(
         "EnableIpamPolicy",
         &req.request_id,
@@ -136,10 +153,17 @@ pub(crate) fn enable_ipam_policy(
 }
 
 pub(crate) fn disable_ipam_policy(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "IpamPolicyId")?;
+    let id = require(&req.query_params, "IpamPolicyId")?;
+    {
+        let mut accounts = svc.state.write();
+        let enabled = &mut accounts.get_or_create(&req.account_id).ipam_enabled_policy;
+        if enabled.as_deref() == Some(id.as_str()) {
+            *enabled = None;
+        }
+    }
     Ok(Ec2Service::respond(
         "DisableIpamPolicy",
         &req.request_id,
@@ -148,48 +172,79 @@ pub(crate) fn disable_ipam_policy(
 }
 
 pub(crate) fn get_enabled_ipam_policy(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state.read();
+    let enabled = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.ipam_enabled_policy.clone());
+    let body = match enabled {
+        Some(id) => format!(
+            "<ipamPolicyEnabled>true</ipamPolicyEnabled>{}",
+            ec2_elem("ipamPolicyId", &id)
+        ),
+        None => "<ipamPolicyEnabled>false</ipamPolicyEnabled>".to_string(),
+    };
     Ok(Ec2Service::respond(
         "GetEnabledIpamPolicy",
         &req.request_id,
-        "<ipamPolicyEnabled>false</ipamPolicyEnabled>",
+        &body,
     ))
 }
 
 pub(crate) fn get_ipam_policy_allocation_rules(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "IpamPolicyId")?;
+    let id = require(&req.query_params, "IpamPolicyId")?;
     validate_enum(&req.query_params, "ResourceType", RESOURCE_TYPES)?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.ipam_policy_alloc_rules.get(&id))
+        .map(|rules| {
+            rules
+                .iter()
+                .map(|(locale, rt)| alloc_rule_xml(&id, locale, rt))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetIpamPolicyAllocationRules",
         &req.request_id,
-        &ec2_list("ipamPolicyDocumentSet", &[]),
+        &ec2_list("ipamPolicyDocumentSet", &items),
     ))
 }
 
 pub(crate) fn modify_ipam_policy_allocation_rules(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "IpamPolicyId")?;
     let locale = require(&req.query_params, "Locale")?;
     let rt = require(&req.query_params, "ResourceType")?;
     validate_enum(&req.query_params, "ResourceType", RESOURCE_TYPES)?;
-    let body = format!(
-        "<ipamPolicyDocument>{}{}{}</ipamPolicyDocument>",
-        ec2_elem("ipamPolicyId", &id),
-        ec2_elem("locale", &locale),
-        ec2_elem("resourceType", &rt),
-    );
+    {
+        let mut accounts = svc.state.write();
+        let rules = accounts
+            .get_or_create(&req.account_id)
+            .ipam_policy_alloc_rules
+            .entry(id.clone())
+            .or_default();
+        // Upsert the rule for this (locale, resource-type) pair.
+        if let Some(existing) = rules.iter_mut().find(|(l, r)| l == &locale && r == &rt) {
+            existing.0 = locale.clone();
+            existing.1 = rt.clone();
+        } else {
+            rules.push((locale.clone(), rt.clone()));
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyIpamPolicyAllocationRules",
         &req.request_id,
-        &body,
+        &alloc_rule_xml(&id, &locale, &rt),
     ))
 }
 
@@ -210,7 +265,7 @@ pub(crate) fn get_ipam_policy_organization_targets(
 
 fn resolver_xml(r: &IpamPrefixListResolver, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
-        "{}{}{}{}<addressFamily>{}</addressFamily><state>create-complete</state>{}",
+        "{}{}{}{}{}<addressFamily>{}</addressFamily><state>create-complete</state>{}",
         ec2_elem("ipamPrefixListResolverId", &r.id),
         ec2_elem(
             "ipamPrefixListResolverArn",
@@ -221,6 +276,7 @@ fn resolver_xml(r: &IpamPrefixListResolver, tags: &[Tag], owner: &str, region: &
             &format!("arn:aws:ec2::{owner}:ipam/{}", r.ipam_id)
         ),
         ec2_elem("ipamRegion", region) + &ec2_elem("ownerId", owner),
+        ec2_elem("description", &r.description),
         r.address_family,
         super::tags::tag_set_xml(tags),
     )
@@ -238,6 +294,11 @@ pub(crate) fn create_ipam_prefix_list_resolver(
         id: id.clone(),
         ipam_id: ipam,
         address_family: af,
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
     };
     let owner = req.account_id.clone();
     let region = region_of(req);
@@ -280,6 +341,7 @@ pub(crate) fn delete_ipam_prefix_list_resolver(
             id: id.clone(),
             ipam_id: "ipam-0".to_string(),
             address_family: "ipv4".to_string(),
+            description: String::new(),
         });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -323,19 +385,27 @@ pub(crate) fn modify_ipam_prefix_list_resolver(
     let id = require(&req.query_params, "IpamPrefixListResolverId")?;
     let owner = req.account_id.clone();
     let region = region_of(req);
-    let accounts = svc.state.read();
-    let r = accounts
-        .get(&req.account_id)
-        .and_then(|s| s.ipam_pl_resolvers.get(&id).cloned())
-        .unwrap_or(IpamPrefixListResolver {
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let r = match state.ipam_pl_resolvers.get_mut(&id) {
+        Some(e) => {
+            if let Some(d) = req.query_params.get("Description") {
+                e.description = d.clone();
+            }
+            e.clone()
+        }
+        None => IpamPrefixListResolver {
             id: id.clone(),
             ipam_id: "ipam-0".to_string(),
             address_family: "ipv4".to_string(),
-        });
-    let tags = accounts
-        .get(&req.account_id)
-        .map(|s| s.tags_for(&id).to_vec())
-        .unwrap_or_default();
+            description: req
+                .query_params
+                .get("Description")
+                .cloned()
+                .unwrap_or_default(),
+        },
+    };
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyIpamPrefixListResolver",
         &req.request_id,
@@ -379,7 +449,7 @@ pub(crate) fn create_ipam_prefix_list_resolver_target(
         resolver_id: resolver,
         prefix_list_id: pl,
         prefix_list_region: pl_region,
-        track_latest_version: track,
+        track_latest_version: track == "true",
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -421,7 +491,7 @@ pub(crate) fn delete_ipam_prefix_list_resolver_target(
             resolver_id: "ipam-pl-res-0".to_string(),
             prefix_list_id: "pl-0".to_string(),
             prefix_list_region: "us-east-1".to_string(),
-            track_latest_version: "true".to_string(),
+            track_latest_version: true,
         });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -472,7 +542,7 @@ pub(crate) fn modify_ipam_prefix_list_resolver_target(
             resolver_id: "ipam-pl-res-0".to_string(),
             prefix_list_id: "pl-0".to_string(),
             prefix_list_region: "us-east-1".to_string(),
-            track_latest_version: "true".to_string(),
+            track_latest_version: true,
         });
     let tags = accounts
         .get(&req.account_id)

@@ -683,6 +683,8 @@ pub struct IpamPrefixListResolver {
     pub id: String,
     pub ipam_id: String,
     pub address_family: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// An IPAM prefix-list resolver target.
@@ -692,7 +694,8 @@ pub struct IpamPrefixListResolverTarget {
     pub resolver_id: String,
     pub prefix_list_id: String,
     pub prefix_list_region: String,
-    pub track_latest_version: String,
+    #[serde(default)]
+    pub track_latest_version: bool,
 }
 
 /// A Client VPN endpoint.
@@ -899,6 +902,12 @@ pub struct Ec2State {
     pub ipam_pl_resolvers: HashMap<String, IpamPrefixListResolver>,
     #[serde(default)]
     pub ipam_pl_resolver_targets: HashMap<String, IpamPrefixListResolverTarget>,
+    /// policy-id -> (locale, resource-type) allocation-rule documents.
+    #[serde(default)]
+    pub ipam_policy_alloc_rules: HashMap<String, Vec<(String, String)>>,
+    /// The single enabled IPAM policy id, if any.
+    #[serde(default)]
+    pub ipam_enabled_policy: Option<String>,
 }
 
 impl Ec2State {
