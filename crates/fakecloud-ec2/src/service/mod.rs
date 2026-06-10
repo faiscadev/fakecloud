@@ -7,6 +7,7 @@ mod eip;
 mod endpoint;
 mod eni;
 mod fleet;
+mod ice;
 mod image;
 mod instance;
 mod ipam;
@@ -652,6 +653,19 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
     "DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations",
     "DescribeLocalGateways",
+    // Instance Connect / fast launch / serial console / console output
+    "CreateInstanceConnectEndpoint",
+    "DeleteInstanceConnectEndpoint",
+    "DescribeInstanceConnectEndpoints",
+    "ModifyInstanceConnectEndpoint",
+    "EnableFastLaunch",
+    "DisableFastLaunch",
+    "EnableSerialConsoleAccess",
+    "DisableSerialConsoleAccess",
+    "GetSerialConsoleAccessStatus",
+    "GetConsoleOutput",
+    "GetConsoleScreenshot",
+    "GetPasswordData",
 ];
 
 /// Amazon EC2 service.
@@ -1759,6 +1773,26 @@ impl AwsService for Ec2Service {
                 )
             }
             "DescribeLocalGateways" => lgw::describe_local_gateways(self, &request),
+            "CreateInstanceConnectEndpoint" => {
+                ice::create_instance_connect_endpoint(self, &request)
+            }
+            "DeleteInstanceConnectEndpoint" => {
+                ice::delete_instance_connect_endpoint(self, &request)
+            }
+            "DescribeInstanceConnectEndpoints" => {
+                ice::describe_instance_connect_endpoints(self, &request)
+            }
+            "ModifyInstanceConnectEndpoint" => {
+                ice::modify_instance_connect_endpoint(self, &request)
+            }
+            "EnableFastLaunch" => ice::enable_fast_launch(self, &request),
+            "DisableFastLaunch" => ice::disable_fast_launch(self, &request),
+            "EnableSerialConsoleAccess" => ice::enable_serial_console_access(self, &request),
+            "DisableSerialConsoleAccess" => ice::disable_serial_console_access(self, &request),
+            "GetSerialConsoleAccessStatus" => ice::get_serial_console_access_status(self, &request),
+            "GetConsoleOutput" => ice::get_console_output(self, &request),
+            "GetConsoleScreenshot" => ice::get_console_screenshot(self, &request),
+            "GetPasswordData" => ice::get_password_data(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
