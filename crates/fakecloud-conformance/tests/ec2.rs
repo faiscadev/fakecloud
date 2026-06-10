@@ -10374,3 +10374,2146 @@ async fn ec2_get_password_data() {
         .unwrap();
     assert_eq!(r.instance_id(), Some("i-1"));
 }
+
+// ---- remainder sweep ----
+#[test_action("ec2", "AdvertiseByoipCidr", checksum = "6182b651")]
+#[tokio::test]
+async fn ec2_advertise_byoip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.advertise_byoip_cidr().cidr("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "AssociateEnclaveCertificateIamRole", checksum = "25562e2e")]
+#[tokio::test]
+async fn ec2_associate_enclave_certificate_iam_role() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_enclave_certificate_iam_role()
+        .certificate_arn("x")
+        .role_arn("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateIamInstanceProfile", checksum = "c5a5d3c8")]
+#[tokio::test]
+async fn ec2_associate_iam_instance_profile() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_iam_instance_profile()
+        .instance_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateInstanceEventWindow", checksum = "3cf2dabd")]
+#[tokio::test]
+async fn ec2_associate_instance_event_window() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_instance_event_window()
+        .instance_event_window_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateRouteServer", checksum = "d453ae0e")]
+#[tokio::test]
+async fn ec2_associate_route_server() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_route_server()
+        .route_server_id("x")
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AssociateTrunkInterface", checksum = "66bd6437")]
+#[tokio::test]
+async fn ec2_associate_trunk_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.associate_trunk_interface()
+        .branch_interface_id("x")
+        .trunk_interface_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "AttachClassicLinkVpc", checksum = "def79306")]
+#[tokio::test]
+async fn ec2_attach_classic_link_vpc() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.attach_classic_link_vpc()
+        .instance_id("x")
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "BundleInstance", checksum = "769d9852")]
+#[tokio::test]
+async fn ec2_bundle_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.bundle_instance().instance_id("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "CancelBundleTask", checksum = "17e14890")]
+#[tokio::test]
+async fn ec2_cancel_bundle_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.cancel_bundle_task().bundle_id("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "CancelConversionTask", checksum = "f3946f87")]
+#[tokio::test]
+async fn ec2_cancel_conversion_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.cancel_conversion_task()
+        .conversion_task_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CancelDeclarativePoliciesReport", checksum = "806a63e2")]
+#[tokio::test]
+async fn ec2_cancel_declarative_policies_report() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.cancel_declarative_policies_report()
+        .report_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CancelExportTask", checksum = "ced63f63")]
+#[tokio::test]
+async fn ec2_cancel_export_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.cancel_export_task()
+        .export_task_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CancelImportTask", checksum = "e0deffdf")]
+#[tokio::test]
+async fn ec2_cancel_import_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.cancel_import_task().send().await.unwrap();
+}
+
+#[test_action("ec2", "ConfirmProductInstance", checksum = "ad04610f")]
+#[tokio::test]
+async fn ec2_confirm_product_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.confirm_product_instance()
+        .instance_id("x")
+        .product_code("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CopyFpgaImage", checksum = "892d8cf1")]
+#[tokio::test]
+async fn ec2_copy_fpga_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.copy_fpga_image()
+        .source_fpga_image_id("x")
+        .source_region("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CopyVolumes", checksum = "b7d12bb9")]
+#[tokio::test]
+async fn ec2_copy_volumes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.copy_volumes().source_volume_id("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateCapacityManagerDataExport", checksum = "5bc1d840")]
+#[tokio::test]
+async fn ec2_create_capacity_manager_data_export() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_capacity_manager_data_export()
+        .s3_bucket_name("x")
+        .schedule(aws_sdk_ec2::types::Schedule::Hourly)
+        .output_format(aws_sdk_ec2::types::OutputFormat::Csv)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateDelegateMacVolumeOwnershipTask", checksum = "bb874277")]
+#[tokio::test]
+async fn ec2_create_delegate_mac_volume_ownership_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_delegate_mac_volume_ownership_task()
+        .instance_id("x")
+        .mac_credentials("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateFpgaImage", checksum = "745b65b9")]
+#[tokio::test]
+async fn ec2_create_fpga_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_fpga_image().send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateImageUsageReport", checksum = "27fd3c86")]
+#[tokio::test]
+async fn ec2_create_image_usage_report() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_image_usage_report()
+        .image_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateInstanceEventWindow", checksum = "9153b568")]
+#[tokio::test]
+async fn ec2_create_instance_event_window() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_instance_event_window().send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateInstanceExportTask", checksum = "3dcf91ae")]
+#[tokio::test]
+async fn ec2_create_instance_export_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_instance_export_task()
+        .instance_id("x")
+        .target_environment(aws_sdk_ec2::types::ExportEnvironment::Citrix)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "CreateMacSystemIntegrityProtectionModificationTask",
+    checksum = "95b0a29c"
+)]
+#[tokio::test]
+async fn ec2_create_mac_system_integrity_protection_modification_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_mac_system_integrity_protection_modification_task()
+        .instance_id("x")
+        .mac_system_integrity_protection_status(
+            aws_sdk_ec2::types::MacSystemIntegrityProtectionSettingStatus::Enabled,
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateManagedPrefixList", checksum = "fcdd6c4a")]
+#[tokio::test]
+async fn ec2_create_managed_prefix_list() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_managed_prefix_list()
+        .prefix_list_name("x")
+        .max_entries(1)
+        .address_family("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreatePublicIpv4Pool", checksum = "102bce7b")]
+#[tokio::test]
+async fn ec2_create_public_ipv4_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_public_ipv4_pool().send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateReplaceRootVolumeTask", checksum = "b6653727")]
+#[tokio::test]
+async fn ec2_create_replace_root_volume_task() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_replace_root_volume_task()
+        .instance_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateRouteServer", checksum = "66197c80")]
+#[tokio::test]
+async fn ec2_create_route_server() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_route_server()
+        .amazon_side_asn(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateRouteServerEndpoint", checksum = "57e78f86")]
+#[tokio::test]
+async fn ec2_create_route_server_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_route_server_endpoint()
+        .route_server_id("x")
+        .subnet_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateRouteServerPeer", checksum = "58233885")]
+#[tokio::test]
+async fn ec2_create_route_server_peer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_route_server_peer()
+        .route_server_endpoint_id("x")
+        .peer_address("x")
+        .bgp_options(
+            aws_sdk_ec2::types::RouteServerBgpOptionsRequest::builder()
+                .peer_asn(1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateSecondaryNetwork", checksum = "28c1a44a")]
+#[tokio::test]
+async fn ec2_create_secondary_network() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_secondary_network()
+        .ipv4_cidr_block("x")
+        .network_type(aws_sdk_ec2::types::SecondaryNetworkType::Rdma)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateTrafficMirrorFilter", checksum = "29878f45")]
+#[tokio::test]
+async fn ec2_create_traffic_mirror_filter() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_traffic_mirror_filter().send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateTrafficMirrorFilterRule", checksum = "21144e98")]
+#[tokio::test]
+async fn ec2_create_traffic_mirror_filter_rule() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_traffic_mirror_filter_rule()
+        .traffic_mirror_filter_id("x")
+        .traffic_direction(aws_sdk_ec2::types::TrafficDirection::Ingress)
+        .rule_number(1)
+        .rule_action(aws_sdk_ec2::types::TrafficMirrorRuleAction::Accept)
+        .destination_cidr_block("x")
+        .source_cidr_block("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateTrafficMirrorSession", checksum = "95d18892")]
+#[tokio::test]
+async fn ec2_create_traffic_mirror_session() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_traffic_mirror_session()
+        .network_interface_id("x")
+        .traffic_mirror_target_id("x")
+        .traffic_mirror_filter_id("x")
+        .session_number(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateTrafficMirrorTarget", checksum = "abbf8faa")]
+#[tokio::test]
+async fn ec2_create_traffic_mirror_target() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_traffic_mirror_target().send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateVpcBlockPublicAccessExclusion", checksum = "09dff4a8")]
+#[tokio::test]
+async fn ec2_create_vpc_block_public_access_exclusion() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_vpc_block_public_access_exclusion()
+        .internet_gateway_exclusion_mode(
+            aws_sdk_ec2::types::InternetGatewayExclusionMode::AllowBidirectional,
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateVpcEncryptionControl", checksum = "b21408b9")]
+#[tokio::test]
+async fn ec2_create_vpc_encryption_control() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_vpc_encryption_control()
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteCapacityManagerDataExport", checksum = "cd77b480")]
+#[tokio::test]
+async fn ec2_delete_capacity_manager_data_export() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_capacity_manager_data_export()
+        .capacity_manager_data_export_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteFpgaImage", checksum = "66e2e3a7")]
+#[tokio::test]
+async fn ec2_delete_fpga_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_fpga_image()
+        .fpga_image_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteImageUsageReport", checksum = "5256f1cc")]
+#[tokio::test]
+async fn ec2_delete_image_usage_report() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_image_usage_report()
+        .report_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteInstanceEventWindow", checksum = "0d66407b")]
+#[tokio::test]
+async fn ec2_delete_instance_event_window() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_instance_event_window()
+        .instance_event_window_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteManagedPrefixList", checksum = "1fd8f360")]
+#[tokio::test]
+async fn ec2_delete_managed_prefix_list() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_managed_prefix_list()
+        .prefix_list_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeletePublicIpv4Pool", checksum = "b9bd4867")]
+#[tokio::test]
+async fn ec2_delete_public_ipv4_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_public_ipv4_pool()
+        .pool_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteRouteServer", checksum = "2b89acfb")]
+#[tokio::test]
+async fn ec2_delete_route_server() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_route_server()
+        .route_server_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteRouteServerEndpoint", checksum = "188ad9b2")]
+#[tokio::test]
+async fn ec2_delete_route_server_endpoint() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_route_server_endpoint()
+        .route_server_endpoint_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteRouteServerPeer", checksum = "f3f61607")]
+#[tokio::test]
+async fn ec2_delete_route_server_peer() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_route_server_peer()
+        .route_server_peer_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteSecondaryNetwork", checksum = "987d3c9b")]
+#[tokio::test]
+async fn ec2_delete_secondary_network() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_secondary_network()
+        .secondary_network_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteTrafficMirrorFilter", checksum = "93caac5b")]
+#[tokio::test]
+async fn ec2_delete_traffic_mirror_filter() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_traffic_mirror_filter()
+        .traffic_mirror_filter_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteTrafficMirrorFilterRule", checksum = "b776bcd3")]
+#[tokio::test]
+async fn ec2_delete_traffic_mirror_filter_rule() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_traffic_mirror_filter_rule()
+        .traffic_mirror_filter_rule_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteTrafficMirrorSession", checksum = "0b2a231c")]
+#[tokio::test]
+async fn ec2_delete_traffic_mirror_session() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_traffic_mirror_session()
+        .traffic_mirror_session_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteTrafficMirrorTarget", checksum = "78b64f5e")]
+#[tokio::test]
+async fn ec2_delete_traffic_mirror_target() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_traffic_mirror_target()
+        .traffic_mirror_target_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteVpcBlockPublicAccessExclusion", checksum = "af7d7573")]
+#[tokio::test]
+async fn ec2_delete_vpc_block_public_access_exclusion() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_vpc_block_public_access_exclusion()
+        .exclusion_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeleteVpcEncryptionControl", checksum = "da644903")]
+#[tokio::test]
+async fn ec2_delete_vpc_encryption_control() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.delete_vpc_encryption_control()
+        .vpc_encryption_control_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DeprovisionByoipCidr", checksum = "640626b7")]
+#[tokio::test]
+async fn ec2_deprovision_byoip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.deprovision_byoip_cidr().cidr("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "DeprovisionPublicIpv4PoolCidr", checksum = "533cf1e5")]
+#[tokio::test]
+async fn ec2_deprovision_public_ipv4_pool_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.deprovision_public_ipv4_pool_cidr()
+        .pool_id("x")
+        .cidr("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeAggregateIdFormat", checksum = "89cd5de7")]
+#[tokio::test]
+async fn ec2_describe_aggregate_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_aggregate_id_format().send().await.unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "DescribeAwsNetworkPerformanceMetricSubscriptions",
+    checksum = "de4aae1c"
+)]
+#[tokio::test]
+async fn ec2_describe_aws_network_performance_metric_subscriptions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_aws_network_performance_metric_subscriptions()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeBundleTasks", checksum = "7fe1331b")]
+#[tokio::test]
+async fn ec2_describe_bundle_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_bundle_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeByoipCidrs", checksum = "73b1d66d")]
+#[tokio::test]
+async fn ec2_describe_byoip_cidrs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_byoip_cidrs()
+        .max_results(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeCapacityManagerDataExports", checksum = "9bc62522")]
+#[tokio::test]
+async fn ec2_describe_capacity_manager_data_exports() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_capacity_manager_data_exports()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeClassicLinkInstances", checksum = "4bae0acb")]
+#[tokio::test]
+async fn ec2_describe_classic_link_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_classic_link_instances().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeConversionTasks", checksum = "aea0eaad")]
+#[tokio::test]
+async fn ec2_describe_conversion_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_conversion_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeDeclarativePoliciesReports", checksum = "1a6a09da")]
+#[tokio::test]
+async fn ec2_describe_declarative_policies_reports() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_declarative_policies_reports()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeElasticGpus", checksum = "97abf37d")]
+#[tokio::test]
+async fn ec2_describe_elastic_gpus() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_elastic_gpus().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeExportImageTasks", checksum = "fcd38203")]
+#[tokio::test]
+async fn ec2_describe_export_image_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_export_image_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeExportTasks", checksum = "3ae8becf")]
+#[tokio::test]
+async fn ec2_describe_export_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_export_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeFpgaImageAttribute", checksum = "25a324dc")]
+#[tokio::test]
+async fn ec2_describe_fpga_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_fpga_image_attribute()
+        .fpga_image_id("x")
+        .attribute(aws_sdk_ec2::types::FpgaImageAttributeName::Description)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeFpgaImages", checksum = "b3ad475b")]
+#[tokio::test]
+async fn ec2_describe_fpga_images() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_fpga_images().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeHostReservationOfferings", checksum = "9fa55bfb")]
+#[tokio::test]
+async fn ec2_describe_host_reservation_offerings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_host_reservation_offerings()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeHostReservations", checksum = "30515b05")]
+#[tokio::test]
+async fn ec2_describe_host_reservations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_host_reservations().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeIamInstanceProfileAssociations", checksum = "a724f322")]
+#[tokio::test]
+async fn ec2_describe_iam_instance_profile_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_iam_instance_profile_associations()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeIdFormat", checksum = "950cd01b")]
+#[tokio::test]
+async fn ec2_describe_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_id_format().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeIdentityIdFormat", checksum = "f7c930ad")]
+#[tokio::test]
+async fn ec2_describe_identity_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_identity_id_format()
+        .principal_arn("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeImageReferences", checksum = "19b97976")]
+#[tokio::test]
+async fn ec2_describe_image_references() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_image_references().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeImageUsageReportEntries", checksum = "d3a7bc8f")]
+#[tokio::test]
+async fn ec2_describe_image_usage_report_entries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_image_usage_report_entries()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeImageUsageReports", checksum = "cb9f3f0f")]
+#[tokio::test]
+async fn ec2_describe_image_usage_reports() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_image_usage_reports().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeImportImageTasks", checksum = "738035d7")]
+#[tokio::test]
+async fn ec2_describe_import_image_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_import_image_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeImportSnapshotTasks", checksum = "4fe30fd9")]
+#[tokio::test]
+async fn ec2_describe_import_snapshot_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_import_snapshot_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceEventWindows", checksum = "28630750")]
+#[tokio::test]
+async fn ec2_describe_instance_event_windows() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_instance_event_windows().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceImageMetadata", checksum = "ef67930c")]
+#[tokio::test]
+async fn ec2_describe_instance_image_metadata() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_instance_image_metadata().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceSqlHaHistoryStates", checksum = "36fb33bc")]
+#[tokio::test]
+async fn ec2_describe_instance_sql_ha_history_states() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_instance_sql_ha_history_states()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceSqlHaStates", checksum = "df7bd206")]
+#[tokio::test]
+async fn ec2_describe_instance_sql_ha_states() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_instance_sql_ha_states().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeInstanceTypeOfferings", checksum = "6b166aa7")]
+#[tokio::test]
+async fn ec2_describe_instance_type_offerings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_instance_type_offerings().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeIpv6Pools", checksum = "cc6019ce")]
+#[tokio::test]
+async fn ec2_describe_ipv6_pools() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_ipv6_pools().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeMacModificationTasks", checksum = "67c27a82")]
+#[tokio::test]
+async fn ec2_describe_mac_modification_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_mac_modification_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeManagedPrefixLists", checksum = "76f1804a")]
+#[tokio::test]
+async fn ec2_describe_managed_prefix_lists() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_managed_prefix_lists().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeOutpostLags", checksum = "b581387b")]
+#[tokio::test]
+async fn ec2_describe_outpost_lags() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_outpost_lags().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribePrefixLists", checksum = "ac5525ca")]
+#[tokio::test]
+async fn ec2_describe_prefix_lists() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_prefix_lists().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribePrincipalIdFormat", checksum = "9f0dd98f")]
+#[tokio::test]
+async fn ec2_describe_principal_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_principal_id_format().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribePublicIpv4Pools", checksum = "3afc4108")]
+#[tokio::test]
+async fn ec2_describe_public_ipv4_pools() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_public_ipv4_pools().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeReplaceRootVolumeTasks", checksum = "c4c0014b")]
+#[tokio::test]
+async fn ec2_describe_replace_root_volume_tasks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_replace_root_volume_tasks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeRouteServerEndpoints", checksum = "69b2ceb4")]
+#[tokio::test]
+async fn ec2_describe_route_server_endpoints() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_route_server_endpoints().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeRouteServerPeers", checksum = "33deecf1")]
+#[tokio::test]
+async fn ec2_describe_route_server_peers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_route_server_peers().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeRouteServers", checksum = "fa121dbe")]
+#[tokio::test]
+async fn ec2_describe_route_servers() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_route_servers().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeScheduledInstanceAvailability", checksum = "7946151a")]
+#[tokio::test]
+async fn ec2_describe_scheduled_instance_availability() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_scheduled_instance_availability()
+        .first_slot_start_time_range(
+            aws_sdk_ec2::types::SlotDateTimeRangeRequest::builder()
+                .earliest_time(aws_smithy_types::DateTime::from_secs(0))
+                .latest_time(aws_smithy_types::DateTime::from_secs(0))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeScheduledInstances", checksum = "c2ac7c78")]
+#[tokio::test]
+async fn ec2_describe_scheduled_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_scheduled_instances().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeSecondaryInterfaces", checksum = "34d4b385")]
+#[tokio::test]
+async fn ec2_describe_secondary_interfaces() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_secondary_interfaces().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeSecondaryNetworks", checksum = "0c80cba7")]
+#[tokio::test]
+async fn ec2_describe_secondary_networks() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_secondary_networks().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeServiceLinkVirtualInterfaces", checksum = "96722db9")]
+#[tokio::test]
+async fn ec2_describe_service_link_virtual_interfaces() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_service_link_virtual_interfaces()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeTrafficMirrorFilterRules", checksum = "80007238")]
+#[tokio::test]
+async fn ec2_describe_traffic_mirror_filter_rules() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_traffic_mirror_filter_rules()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeTrafficMirrorFilters", checksum = "7ea22a7c")]
+#[tokio::test]
+async fn ec2_describe_traffic_mirror_filters() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_traffic_mirror_filters().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeTrafficMirrorSessions", checksum = "b371615b")]
+#[tokio::test]
+async fn ec2_describe_traffic_mirror_sessions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_traffic_mirror_sessions().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeTrafficMirrorTargets", checksum = "ac39083a")]
+#[tokio::test]
+async fn ec2_describe_traffic_mirror_targets() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_traffic_mirror_targets().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeTrunkInterfaceAssociations", checksum = "6b6c852d")]
+#[tokio::test]
+async fn ec2_describe_trunk_interface_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_trunk_interface_associations()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcBlockPublicAccessExclusions", checksum = "46d6407c")]
+#[tokio::test]
+async fn ec2_describe_vpc_block_public_access_exclusions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_vpc_block_public_access_exclusions()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcBlockPublicAccessOptions", checksum = "b1bf4c7b")]
+#[tokio::test]
+async fn ec2_describe_vpc_block_public_access_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_vpc_block_public_access_options()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcClassicLink", checksum = "f7fb8639")]
+#[tokio::test]
+async fn ec2_describe_vpc_classic_link() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_vpc_classic_link().send().await.unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcClassicLinkDnsSupport", checksum = "eedb5253")]
+#[tokio::test]
+async fn ec2_describe_vpc_classic_link_dns_support() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_vpc_classic_link_dns_support()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeVpcEncryptionControls", checksum = "b81720a1")]
+#[tokio::test]
+async fn ec2_describe_vpc_encryption_controls() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.describe_vpc_encryption_controls().send().await.unwrap();
+}
+
+#[test_action("ec2", "DetachClassicLinkVpc", checksum = "20413b44")]
+#[tokio::test]
+async fn ec2_detach_classic_link_vpc() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.detach_classic_link_vpc()
+        .instance_id("x")
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "DisableAwsNetworkPerformanceMetricSubscription",
+    checksum = "7889a881"
+)]
+#[tokio::test]
+async fn ec2_disable_aws_network_performance_metric_subscription() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_aws_network_performance_metric_subscription()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableCapacityManager", checksum = "acc948cc")]
+#[tokio::test]
+async fn ec2_disable_capacity_manager() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_capacity_manager().send().await.unwrap();
+}
+
+#[test_action("ec2", "DisableInstanceSqlHaStandbyDetections", checksum = "c3e03d22")]
+#[tokio::test]
+async fn ec2_disable_instance_sql_ha_standby_detections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_instance_sql_ha_standby_detections()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableRouteServerPropagation", checksum = "f4c91c52")]
+#[tokio::test]
+async fn ec2_disable_route_server_propagation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_route_server_propagation()
+        .route_server_id("x")
+        .route_table_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableVgwRoutePropagation", checksum = "3bea74e1")]
+#[tokio::test]
+async fn ec2_disable_vgw_route_propagation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_vgw_route_propagation()
+        .gateway_id("x")
+        .route_table_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableVpcClassicLink", checksum = "bf93e7cf")]
+#[tokio::test]
+async fn ec2_disable_vpc_classic_link() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_vpc_classic_link()
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisableVpcClassicLinkDnsSupport", checksum = "05af5ce6")]
+#[tokio::test]
+async fn ec2_disable_vpc_classic_link_dns_support() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disable_vpc_classic_link_dns_support()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisassociateEnclaveCertificateIamRole", checksum = "9b7b551d")]
+#[tokio::test]
+async fn ec2_disassociate_enclave_certificate_iam_role() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disassociate_enclave_certificate_iam_role()
+        .certificate_arn("x")
+        .role_arn("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisassociateIamInstanceProfile", checksum = "865568f3")]
+#[tokio::test]
+async fn ec2_disassociate_iam_instance_profile() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disassociate_iam_instance_profile()
+        .association_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisassociateInstanceEventWindow", checksum = "03fcfa72")]
+#[tokio::test]
+async fn ec2_disassociate_instance_event_window() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disassociate_instance_event_window()
+        .instance_event_window_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisassociateRouteServer", checksum = "88af6294")]
+#[tokio::test]
+async fn ec2_disassociate_route_server() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disassociate_route_server()
+        .route_server_id("x")
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DisassociateTrunkInterface", checksum = "82efb571")]
+#[tokio::test]
+async fn ec2_disassociate_trunk_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.disassociate_trunk_interface()
+        .association_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "EnableAwsNetworkPerformanceMetricSubscription",
+    checksum = "6fcbc673"
+)]
+#[tokio::test]
+async fn ec2_enable_aws_network_performance_metric_subscription() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_aws_network_performance_metric_subscription()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableCapacityManager", checksum = "73d9094c")]
+#[tokio::test]
+async fn ec2_enable_capacity_manager() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_capacity_manager().send().await.unwrap();
+}
+
+#[test_action("ec2", "EnableInstanceSqlHaStandbyDetections", checksum = "a36f4cd5")]
+#[tokio::test]
+async fn ec2_enable_instance_sql_ha_standby_detections() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_instance_sql_ha_standby_detections()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "EnableReachabilityAnalyzerOrganizationSharing",
+    checksum = "b87aadf2"
+)]
+#[tokio::test]
+async fn ec2_enable_reachability_analyzer_organization_sharing() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_reachability_analyzer_organization_sharing()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableRouteServerPropagation", checksum = "c548fc1a")]
+#[tokio::test]
+async fn ec2_enable_route_server_propagation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_route_server_propagation()
+        .route_server_id("x")
+        .route_table_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableVgwRoutePropagation", checksum = "7bf8e692")]
+#[tokio::test]
+async fn ec2_enable_vgw_route_propagation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_vgw_route_propagation()
+        .gateway_id("x")
+        .route_table_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableVpcClassicLink", checksum = "cb70668b")]
+#[tokio::test]
+async fn ec2_enable_vpc_classic_link() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_vpc_classic_link()
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "EnableVpcClassicLinkDnsSupport", checksum = "733c6237")]
+#[tokio::test]
+async fn ec2_enable_vpc_classic_link_dns_support() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.enable_vpc_classic_link_dns_support()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ExportImage", checksum = "936219fd")]
+#[tokio::test]
+async fn ec2_export_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.export_image()
+        .disk_image_format(aws_sdk_ec2::types::DiskImageFormat::Vmdk)
+        .image_id("x")
+        .s3_export_location(
+            aws_sdk_ec2::types::ExportTaskS3LocationRequest::builder()
+                .s3_bucket("x")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "GetAssociatedEnclaveCertificateIamRoles",
+    checksum = "eaee8632"
+)]
+#[tokio::test]
+async fn ec2_get_associated_enclave_certificate_iam_roles() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_associated_enclave_certificate_iam_roles()
+        .certificate_arn("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetAssociatedIpv6PoolCidrs", checksum = "efd0a8b7")]
+#[tokio::test]
+async fn ec2_get_associated_ipv6_pool_cidrs() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_associated_ipv6_pool_cidrs()
+        .pool_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetAwsNetworkPerformanceData", checksum = "812cd275")]
+#[tokio::test]
+async fn ec2_get_aws_network_performance_data() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_aws_network_performance_data().send().await.unwrap();
+}
+
+#[test_action("ec2", "GetCapacityManagerAttributes", checksum = "d7bdbf51")]
+#[tokio::test]
+async fn ec2_get_capacity_manager_attributes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_capacity_manager_attributes().send().await.unwrap();
+}
+
+#[test_action("ec2", "GetCapacityManagerMetricData", checksum = "b1c1f09d")]
+#[tokio::test]
+async fn ec2_get_capacity_manager_metric_data() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_capacity_manager_metric_data()
+        .start_time(aws_smithy_types::DateTime::from_secs(0))
+        .end_time(aws_smithy_types::DateTime::from_secs(0))
+        .period(3600)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetCapacityManagerMetricDimensions", checksum = "c0952eea")]
+#[tokio::test]
+async fn ec2_get_capacity_manager_metric_dimensions() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_capacity_manager_metric_dimensions()
+        .start_time(aws_smithy_types::DateTime::from_secs(0))
+        .end_time(aws_smithy_types::DateTime::from_secs(0))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetCapacityManagerMonitoredTagKeys", checksum = "d2dcae42")]
+#[tokio::test]
+async fn ec2_get_capacity_manager_monitored_tag_keys() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_capacity_manager_monitored_tag_keys()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetDeclarativePoliciesReportSummary", checksum = "a98b4deb")]
+#[tokio::test]
+async fn ec2_get_declarative_policies_report_summary() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_declarative_policies_report_summary()
+        .report_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetDefaultCreditSpecification", checksum = "7001ff01")]
+#[tokio::test]
+async fn ec2_get_default_credit_specification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_default_credit_specification()
+        .instance_family(aws_sdk_ec2::types::UnlimitedSupportedInstanceFamily::T2)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetHostReservationPurchasePreview", checksum = "0aef6ee8")]
+#[tokio::test]
+async fn ec2_get_host_reservation_purchase_preview() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_host_reservation_purchase_preview()
+        .offering_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetImageAncestry", checksum = "8f1486e9")]
+#[tokio::test]
+async fn ec2_get_image_ancestry() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_image_ancestry().image_id("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "GetInstanceTpmEkPub", checksum = "2a263592")]
+#[tokio::test]
+async fn ec2_get_instance_tpm_ek_pub() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_instance_tpm_ek_pub()
+        .instance_id("x")
+        .key_type(aws_sdk_ec2::types::EkPubKeyType::Rsa2048)
+        .key_format(aws_sdk_ec2::types::EkPubKeyFormat::Der)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetInstanceUefiData", checksum = "320e3b0f")]
+#[tokio::test]
+async fn ec2_get_instance_uefi_data() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_instance_uefi_data()
+        .instance_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetManagedPrefixListAssociations", checksum = "5b1c2bec")]
+#[tokio::test]
+async fn ec2_get_managed_prefix_list_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_managed_prefix_list_associations()
+        .prefix_list_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetManagedPrefixListEntries", checksum = "b5cc54cf")]
+#[tokio::test]
+async fn ec2_get_managed_prefix_list_entries() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_managed_prefix_list_entries()
+        .prefix_list_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetManagedResourceVisibility", checksum = "f443c6e7")]
+#[tokio::test]
+async fn ec2_get_managed_resource_visibility() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_managed_resource_visibility().send().await.unwrap();
+}
+
+#[test_action("ec2", "GetRouteServerAssociations", checksum = "c6547aff")]
+#[tokio::test]
+async fn ec2_get_route_server_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_route_server_associations()
+        .route_server_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetRouteServerPropagations", checksum = "6be35948")]
+#[tokio::test]
+async fn ec2_get_route_server_propagations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_route_server_propagations()
+        .route_server_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetRouteServerRoutingDatabase", checksum = "ac68248a")]
+#[tokio::test]
+async fn ec2_get_route_server_routing_database() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_route_server_routing_database()
+        .route_server_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "GetVpcResourcesBlockingEncryptionEnforcement",
+    checksum = "33732a87"
+)]
+#[tokio::test]
+async fn ec2_get_vpc_resources_blocking_encryption_enforcement() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.get_vpc_resources_blocking_encryption_enforcement()
+        .vpc_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ImportImage", checksum = "5eb964dd")]
+#[tokio::test]
+async fn ec2_import_image() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.import_image().send().await.unwrap();
+}
+
+#[test_action("ec2", "ImportInstance", checksum = "ed6b6f7b")]
+#[tokio::test]
+async fn ec2_import_instance() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.import_instance()
+        .platform(aws_sdk_ec2::types::PlatformValues::Windows)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ImportSnapshot", checksum = "8f0efb29")]
+#[tokio::test]
+async fn ec2_import_snapshot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.import_snapshot().send().await.unwrap();
+}
+
+#[test_action("ec2", "ImportVolume", checksum = "3460627c")]
+#[tokio::test]
+async fn ec2_import_volume() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.import_volume()
+        .image(
+            aws_sdk_ec2::types::DiskImageDetail::builder()
+                .format(aws_sdk_ec2::types::DiskImageFormat::Vmdk)
+                .bytes(1)
+                .import_manifest_url("x")
+                .build(),
+        )
+        .volume(aws_sdk_ec2::types::VolumeDetail::builder().size(1).build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyAvailabilityZoneGroup", checksum = "2d21db89")]
+#[tokio::test]
+async fn ec2_modify_availability_zone_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_availability_zone_group()
+        .group_name("x")
+        .opt_in_status(aws_sdk_ec2::types::ModifyAvailabilityZoneOptInStatus::OptedIn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyDefaultCreditSpecification", checksum = "0fb628a0")]
+#[tokio::test]
+async fn ec2_modify_default_credit_specification() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_default_credit_specification()
+        .instance_family(aws_sdk_ec2::types::UnlimitedSupportedInstanceFamily::T2)
+        .cpu_credits("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyFpgaImageAttribute", checksum = "f79fdbf3")]
+#[tokio::test]
+async fn ec2_modify_fpga_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_fpga_image_attribute()
+        .fpga_image_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyIdFormat", checksum = "5e2c993c")]
+#[tokio::test]
+async fn ec2_modify_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_id_format()
+        .resource("x")
+        .use_long_ids(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyIdentityIdFormat", checksum = "d1063710")]
+#[tokio::test]
+async fn ec2_modify_identity_id_format() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_identity_id_format()
+        .resource("x")
+        .use_long_ids(true)
+        .principal_arn("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyInstanceEventWindow", checksum = "05564f87")]
+#[tokio::test]
+async fn ec2_modify_instance_event_window() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_instance_event_window()
+        .instance_event_window_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyManagedPrefixList", checksum = "10c810dd")]
+#[tokio::test]
+async fn ec2_modify_managed_prefix_list() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_managed_prefix_list()
+        .prefix_list_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyManagedResourceVisibility", checksum = "3a5a3655")]
+#[tokio::test]
+async fn ec2_modify_managed_resource_visibility() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_managed_resource_visibility()
+        .default_visibility(aws_sdk_ec2::types::ManagedResourceDefaultVisibility::Hidden)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyPrivateDnsNameOptions", checksum = "6bc02199")]
+#[tokio::test]
+async fn ec2_modify_private_dns_name_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_private_dns_name_options()
+        .instance_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyPublicIpDnsNameOptions", checksum = "b2b52fff")]
+#[tokio::test]
+async fn ec2_modify_public_ip_dns_name_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_public_ip_dns_name_options()
+        .network_interface_id("x")
+        .hostname_type(aws_sdk_ec2::types::PublicIpDnsOption::PublicDualStackDnsName)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyRouteServer", checksum = "294b7012")]
+#[tokio::test]
+async fn ec2_modify_route_server() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_route_server()
+        .route_server_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "ModifyTrafficMirrorFilterNetworkServices",
+    checksum = "407f3984"
+)]
+#[tokio::test]
+async fn ec2_modify_traffic_mirror_filter_network_services() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_traffic_mirror_filter_network_services()
+        .traffic_mirror_filter_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyTrafficMirrorFilterRule", checksum = "d6942d6a")]
+#[tokio::test]
+async fn ec2_modify_traffic_mirror_filter_rule() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_traffic_mirror_filter_rule()
+        .traffic_mirror_filter_rule_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyTrafficMirrorSession", checksum = "78777316")]
+#[tokio::test]
+async fn ec2_modify_traffic_mirror_session() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_traffic_mirror_session()
+        .traffic_mirror_session_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpcBlockPublicAccessExclusion", checksum = "97c686e0")]
+#[tokio::test]
+async fn ec2_modify_vpc_block_public_access_exclusion() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_block_public_access_exclusion()
+        .exclusion_id("x")
+        .internet_gateway_exclusion_mode(
+            aws_sdk_ec2::types::InternetGatewayExclusionMode::AllowBidirectional,
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpcBlockPublicAccessOptions", checksum = "2e39a9d0")]
+#[tokio::test]
+async fn ec2_modify_vpc_block_public_access_options() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_block_public_access_options()
+        .internet_gateway_block_mode(aws_sdk_ec2::types::InternetGatewayBlockMode::Off)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ModifyVpcEncryptionControl", checksum = "6b1c12e5")]
+#[tokio::test]
+async fn ec2_modify_vpc_encryption_control() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.modify_vpc_encryption_control()
+        .vpc_encryption_control_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ProvisionByoipCidr", checksum = "740650f7")]
+#[tokio::test]
+async fn ec2_provision_byoip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.provision_byoip_cidr().cidr("x").send().await.unwrap();
+}
+
+#[test_action("ec2", "ProvisionPublicIpv4PoolCidr", checksum = "b230f9ed")]
+#[tokio::test]
+async fn ec2_provision_public_ipv4_pool_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.provision_public_ipv4_pool_cidr()
+        .ipam_pool_id("x")
+        .pool_id("x")
+        .netmask_length(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "PurchaseHostReservation", checksum = "463a389d")]
+#[tokio::test]
+async fn ec2_purchase_host_reservation() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.purchase_host_reservation()
+        .offering_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "PurchaseScheduledInstances", checksum = "c75b873a")]
+#[tokio::test]
+async fn ec2_purchase_scheduled_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.purchase_scheduled_instances().send().await.unwrap();
+}
+
+#[test_action("ec2", "ReplaceIamInstanceProfileAssociation", checksum = "e7e7519e")]
+#[tokio::test]
+async fn ec2_replace_iam_instance_profile_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.replace_iam_instance_profile_association()
+        .association_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "ResetFpgaImageAttribute", checksum = "b3bf8066")]
+#[tokio::test]
+async fn ec2_reset_fpga_image_attribute() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.reset_fpga_image_attribute()
+        .fpga_image_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "RestoreManagedPrefixListVersion", checksum = "6d3ca4a6")]
+#[tokio::test]
+async fn ec2_restore_managed_prefix_list_version() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.restore_managed_prefix_list_version()
+        .prefix_list_id("x")
+        .previous_version(1)
+        .current_version(1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "RunScheduledInstances", checksum = "b1d413f4")]
+#[tokio::test]
+async fn ec2_run_scheduled_instances() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.run_scheduled_instances()
+        .scheduled_instance_id("x")
+        .launch_specification(
+            aws_sdk_ec2::types::ScheduledInstancesLaunchSpecification::builder()
+                .image_id("x")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "SendDiagnosticInterrupt", checksum = "13c7645c")]
+#[tokio::test]
+async fn ec2_send_diagnostic_interrupt() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.send_diagnostic_interrupt()
+        .instance_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "StartDeclarativePoliciesReport", checksum = "d130f2fd")]
+#[tokio::test]
+async fn ec2_start_declarative_policies_report() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.start_declarative_policies_report()
+        .s3_bucket("x")
+        .target_id("x")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "UpdateCapacityManagerMonitoredTagKeys", checksum = "41035efb")]
+#[tokio::test]
+async fn ec2_update_capacity_manager_monitored_tag_keys() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.update_capacity_manager_monitored_tag_keys()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "UpdateCapacityManagerOrganizationsAccess",
+    checksum = "2760ae77"
+)]
+#[tokio::test]
+async fn ec2_update_capacity_manager_organizations_access() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.update_capacity_manager_organizations_access()
+        .organizations_access(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "WithdrawByoipCidr", checksum = "63483baa")]
+#[tokio::test]
+async fn ec2_withdraw_byoip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.withdraw_byoip_cidr().cidr("x").send().await.unwrap();
+}
+
+// ---- ops absent from the vendored aws-sdk-ec2 client: exercised via a raw
+// ec2Query POST so the audit + L1 probe still cover them. They graduate to
+// typed SDK calls on the next SDK refresh. ----
+
+const EC2_RAW_AUTH: &str =
+    "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/ec2/aws4_request, SignedHeaders=host, Signature=0";
+
+async fn ec2_raw(server: &TestServer, body: &str) -> reqwest::Response {
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("Authorization", EC2_RAW_AUTH)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "raw ec2 query returned {}",
+        resp.status()
+    );
+    resp
+}
+
+#[test_action(
+    "ec2",
+    "CreateCapacityReservationCancellationQuote",
+    checksum = "be8ec5c8"
+)]
+#[tokio::test]
+async fn ec2_create_capacity_reservation_cancellation_quote() {
+    let server = TestServer::start().await;
+    ec2_raw(&server, "Action=CreateCapacityReservationCancellationQuote&Version=2016-11-15&CapacityReservationId=cr-1").await;
+}
+
+#[test_action(
+    "ec2",
+    "DescribeCapacityReservationCancellationQuotes",
+    checksum = "c59b3611"
+)]
+#[tokio::test]
+async fn ec2_describe_capacity_reservation_cancellation_quotes() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=DescribeCapacityReservationCancellationQuotes&Version=2016-11-15",
+    )
+    .await;
+}
+
+#[test_action("ec2", "DescribeIpamPoolAllocations", checksum = "74fcc825")]
+#[tokio::test]
+async fn ec2_describe_ipam_pool_allocations() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=DescribeIpamPoolAllocations&Version=2016-11-15",
+    )
+    .await;
+}
+
+#[test_action("ec2", "ModifyIpamPoolAllocation", checksum = "690cb39c")]
+#[tokio::test]
+async fn ec2_modify_ipam_pool_allocation() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=ModifyIpamPoolAllocation&Version=2016-11-15&IpamPoolAllocationId=ipam-pool-alloc-1",
+    )
+    .await;
+}

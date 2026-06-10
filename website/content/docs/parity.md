@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **40 AWS services** with **2,937 operations**. **118,994/118,994 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **41 AWS services** with **3,704 operations**. **124,255/124,255 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -48,6 +48,7 @@ fakecloud implements **40 AWS services** with **2,937 operations**. **118,994/11
 | [Firehose](@/docs/services/firehose.md) | 12 | JSON 1.1 | Full | Full | Real S3 destination delivery with buffering hints honored. Other destinations (Redshift, OpenSearch, Splunk, HTTP endpoint) round-trip configuration. Server-side encryption (`Start`/`StopDeliveryStreamEncryption`) persists and surfaces in `DescribeDeliveryStream`. |
 | [Glue](@/docs/services/glue.md) | 265 | JSON 1.1 | Full | Partial | Full control plane: Data Catalog (databases, tables, partitions with `GetPartitions` `Expression` pruning), jobs, crawlers, classifiers, connections, triggers, workflows, blueprints, dev endpoints, schema registry, interactive sessions, ML transforms, data quality, user-defined functions, usage profiles, column statistics, and tagging. Status transitions are real (crawler `READY`↔`RUNNING`, trigger/workflow/run lifecycles). Job/crawler/Spark *execution* itself is synthesized — fakecloud is not a Spark engine. |
 | [Organizations](@/docs/services/organizations.md) | 63 | JSON 1.1 | Full | Full | Full org tree (roots, OUs, accounts), policies with SCP enforcement, handshakes, delegated administrators, service access, tagging, and a resource policy. Billing responsibility transfers ride handshake-backed records. `CreateAccount` transitions `IN_PROGRESS` -> `SUCCEEDED` after a short synthetic delay. |
+| [EC2](@/docs/services/ec2.md) | 767 | ec2Query | Full | Partial | Full 767-op control plane: VPCs, subnets, security groups, route tables, gateways, ENIs, instances, EBS volumes/snapshots, AMIs, network ACLs, VPC peering/endpoints, flow logs, launch templates, spot/fleet, capacity/reserved/dedicated hosts, transit gateways (+ multicast/peering/metering), VPN + Client VPN, IPAM, Verified Access, Network Insights, Outpost/local-gateway/CoIP, and Instance Connect. Instance control plane is metadata-faithful; real Docker-backed instance execution is a roadmap follow-up. A few model ops absent from the vendored SDK are validated via raw ec2Query. |
 
 ## Reading the matrix
 
@@ -57,7 +58,7 @@ fakecloud implements **40 AWS services** with **2,937 operations**. **118,994/11
 
 ## What "100% conformance" means
 
-fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **118,994 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
+fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **124,255 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
 

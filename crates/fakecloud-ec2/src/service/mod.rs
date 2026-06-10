@@ -18,6 +18,7 @@ mod meta;
 mod nacl;
 mod ni;
 mod reserved;
+mod rest;
 mod routing;
 mod sg;
 mod snapshot;
@@ -666,6 +667,195 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetConsoleOutput",
     "GetConsoleScreenshot",
     "GetPasswordData",
+    // Remainder sweep (long tail -> full 767-op parity)
+    "CreateCapacityReservationCancellationQuote",
+    "DescribeCapacityReservationCancellationQuotes",
+    "DescribeIpamPoolAllocations",
+    "ModifyIpamPoolAllocation",
+    "AdvertiseByoipCidr",
+    "AssociateEnclaveCertificateIamRole",
+    "AssociateIamInstanceProfile",
+    "AssociateInstanceEventWindow",
+    "AssociateRouteServer",
+    "AssociateTrunkInterface",
+    "AttachClassicLinkVpc",
+    "BundleInstance",
+    "CancelBundleTask",
+    "CancelConversionTask",
+    "CancelDeclarativePoliciesReport",
+    "CancelExportTask",
+    "CancelImportTask",
+    "ConfirmProductInstance",
+    "CopyFpgaImage",
+    "CopyVolumes",
+    "CreateCapacityManagerDataExport",
+    "CreateDelegateMacVolumeOwnershipTask",
+    "CreateFpgaImage",
+    "CreateImageUsageReport",
+    "CreateInstanceEventWindow",
+    "CreateInstanceExportTask",
+    "CreateMacSystemIntegrityProtectionModificationTask",
+    "CreateManagedPrefixList",
+    "CreatePublicIpv4Pool",
+    "CreateReplaceRootVolumeTask",
+    "CreateRouteServer",
+    "CreateRouteServerEndpoint",
+    "CreateRouteServerPeer",
+    "CreateSecondaryNetwork",
+    "CreateTrafficMirrorFilter",
+    "CreateTrafficMirrorFilterRule",
+    "CreateTrafficMirrorSession",
+    "CreateTrafficMirrorTarget",
+    "CreateVpcBlockPublicAccessExclusion",
+    "CreateVpcEncryptionControl",
+    "DeleteCapacityManagerDataExport",
+    "DeleteFpgaImage",
+    "DeleteImageUsageReport",
+    "DeleteInstanceEventWindow",
+    "DeleteManagedPrefixList",
+    "DeletePublicIpv4Pool",
+    "DeleteRouteServer",
+    "DeleteRouteServerEndpoint",
+    "DeleteRouteServerPeer",
+    "DeleteSecondaryNetwork",
+    "DeleteTrafficMirrorFilter",
+    "DeleteTrafficMirrorFilterRule",
+    "DeleteTrafficMirrorSession",
+    "DeleteTrafficMirrorTarget",
+    "DeleteVpcBlockPublicAccessExclusion",
+    "DeleteVpcEncryptionControl",
+    "DeprovisionByoipCidr",
+    "DeprovisionPublicIpv4PoolCidr",
+    "DescribeAggregateIdFormat",
+    "DescribeAwsNetworkPerformanceMetricSubscriptions",
+    "DescribeBundleTasks",
+    "DescribeByoipCidrs",
+    "DescribeCapacityManagerDataExports",
+    "DescribeClassicLinkInstances",
+    "DescribeConversionTasks",
+    "DescribeDeclarativePoliciesReports",
+    "DescribeElasticGpus",
+    "DescribeExportImageTasks",
+    "DescribeExportTasks",
+    "DescribeFpgaImageAttribute",
+    "DescribeFpgaImages",
+    "DescribeHostReservationOfferings",
+    "DescribeHostReservations",
+    "DescribeIamInstanceProfileAssociations",
+    "DescribeIdFormat",
+    "DescribeIdentityIdFormat",
+    "DescribeImageReferences",
+    "DescribeImageUsageReportEntries",
+    "DescribeImageUsageReports",
+    "DescribeImportImageTasks",
+    "DescribeImportSnapshotTasks",
+    "DescribeInstanceEventWindows",
+    "DescribeInstanceImageMetadata",
+    "DescribeInstanceSqlHaHistoryStates",
+    "DescribeInstanceSqlHaStates",
+    "DescribeInstanceTypeOfferings",
+    "DescribeIpv6Pools",
+    "DescribeMacModificationTasks",
+    "DescribeManagedPrefixLists",
+    "DescribeOutpostLags",
+    "DescribePrefixLists",
+    "DescribePrincipalIdFormat",
+    "DescribePublicIpv4Pools",
+    "DescribeReplaceRootVolumeTasks",
+    "DescribeRouteServerEndpoints",
+    "DescribeRouteServerPeers",
+    "DescribeRouteServers",
+    "DescribeScheduledInstanceAvailability",
+    "DescribeScheduledInstances",
+    "DescribeSecondaryInterfaces",
+    "DescribeSecondaryNetworks",
+    "DescribeServiceLinkVirtualInterfaces",
+    "DescribeTrafficMirrorFilterRules",
+    "DescribeTrafficMirrorFilters",
+    "DescribeTrafficMirrorSessions",
+    "DescribeTrafficMirrorTargets",
+    "DescribeTrunkInterfaceAssociations",
+    "DescribeVpcBlockPublicAccessExclusions",
+    "DescribeVpcBlockPublicAccessOptions",
+    "DescribeVpcClassicLink",
+    "DescribeVpcClassicLinkDnsSupport",
+    "DescribeVpcEncryptionControls",
+    "DetachClassicLinkVpc",
+    "DisableAwsNetworkPerformanceMetricSubscription",
+    "DisableCapacityManager",
+    "DisableInstanceSqlHaStandbyDetections",
+    "DisableRouteServerPropagation",
+    "DisableVgwRoutePropagation",
+    "DisableVpcClassicLink",
+    "DisableVpcClassicLinkDnsSupport",
+    "DisassociateEnclaveCertificateIamRole",
+    "DisassociateIamInstanceProfile",
+    "DisassociateInstanceEventWindow",
+    "DisassociateRouteServer",
+    "DisassociateTrunkInterface",
+    "EnableAwsNetworkPerformanceMetricSubscription",
+    "EnableCapacityManager",
+    "EnableInstanceSqlHaStandbyDetections",
+    "EnableReachabilityAnalyzerOrganizationSharing",
+    "EnableRouteServerPropagation",
+    "EnableVgwRoutePropagation",
+    "EnableVpcClassicLink",
+    "EnableVpcClassicLinkDnsSupport",
+    "ExportImage",
+    "GetAssociatedEnclaveCertificateIamRoles",
+    "GetAssociatedIpv6PoolCidrs",
+    "GetAwsNetworkPerformanceData",
+    "GetCapacityManagerAttributes",
+    "GetCapacityManagerMetricData",
+    "GetCapacityManagerMetricDimensions",
+    "GetCapacityManagerMonitoredTagKeys",
+    "GetDeclarativePoliciesReportSummary",
+    "GetDefaultCreditSpecification",
+    "GetHostReservationPurchasePreview",
+    "GetImageAncestry",
+    "GetInstanceTpmEkPub",
+    "GetInstanceUefiData",
+    "GetManagedPrefixListAssociations",
+    "GetManagedPrefixListEntries",
+    "GetManagedResourceVisibility",
+    "GetRouteServerAssociations",
+    "GetRouteServerPropagations",
+    "GetRouteServerRoutingDatabase",
+    "GetVpcResourcesBlockingEncryptionEnforcement",
+    "ImportImage",
+    "ImportInstance",
+    "ImportSnapshot",
+    "ImportVolume",
+    "ModifyAvailabilityZoneGroup",
+    "ModifyDefaultCreditSpecification",
+    "ModifyFpgaImageAttribute",
+    "ModifyIdFormat",
+    "ModifyIdentityIdFormat",
+    "ModifyInstanceEventWindow",
+    "ModifyManagedPrefixList",
+    "ModifyManagedResourceVisibility",
+    "ModifyPrivateDnsNameOptions",
+    "ModifyPublicIpDnsNameOptions",
+    "ModifyRouteServer",
+    "ModifyTrafficMirrorFilterNetworkServices",
+    "ModifyTrafficMirrorFilterRule",
+    "ModifyTrafficMirrorSession",
+    "ModifyVpcBlockPublicAccessExclusion",
+    "ModifyVpcBlockPublicAccessOptions",
+    "ModifyVpcEncryptionControl",
+    "ProvisionByoipCidr",
+    "ProvisionPublicIpv4PoolCidr",
+    "PurchaseHostReservation",
+    "PurchaseScheduledInstances",
+    "ReplaceIamInstanceProfileAssociation",
+    "ResetFpgaImageAttribute",
+    "RestoreManagedPrefixListVersion",
+    "RunScheduledInstances",
+    "SendDiagnosticInterrupt",
+    "StartDeclarativePoliciesReport",
+    "UpdateCapacityManagerMonitoredTagKeys",
+    "UpdateCapacityManagerOrganizationsAccess",
+    "WithdrawByoipCidr",
 ];
 
 /// Amazon EC2 service.
@@ -1793,6 +1983,327 @@ impl AwsService for Ec2Service {
             "GetConsoleOutput" => ice::get_console_output(self, &request),
             "GetConsoleScreenshot" => ice::get_console_screenshot(self, &request),
             "GetPasswordData" => ice::get_password_data(self, &request),
+            "AdvertiseByoipCidr" => rest::advertise_byoip_cidr(self, &request),
+            "AssociateEnclaveCertificateIamRole" => {
+                rest::associate_enclave_certificate_iam_role(self, &request)
+            }
+            "AssociateIamInstanceProfile" => rest::associate_iam_instance_profile(self, &request),
+            "AssociateInstanceEventWindow" => rest::associate_instance_event_window(self, &request),
+            "AssociateRouteServer" => rest::associate_route_server(self, &request),
+            "AssociateTrunkInterface" => rest::associate_trunk_interface(self, &request),
+            "AttachClassicLinkVpc" => rest::attach_classic_link_vpc(self, &request),
+            "BundleInstance" => rest::bundle_instance(self, &request),
+            "CancelBundleTask" => rest::cancel_bundle_task(self, &request),
+            "CancelConversionTask" => rest::cancel_conversion_task(self, &request),
+            "CancelDeclarativePoliciesReport" => {
+                rest::cancel_declarative_policies_report(self, &request)
+            }
+            "CancelExportTask" => rest::cancel_export_task(self, &request),
+            "CancelImportTask" => rest::cancel_import_task(self, &request),
+            "ConfirmProductInstance" => rest::confirm_product_instance(self, &request),
+            "CopyFpgaImage" => rest::copy_fpga_image(self, &request),
+            "CopyVolumes" => rest::copy_volumes(self, &request),
+            "CreateCapacityManagerDataExport" => {
+                rest::create_capacity_manager_data_export(self, &request)
+            }
+            "CreateDelegateMacVolumeOwnershipTask" => {
+                rest::create_delegate_mac_volume_ownership_task(self, &request)
+            }
+            "CreateFpgaImage" => rest::create_fpga_image(self, &request),
+            "CreateImageUsageReport" => rest::create_image_usage_report(self, &request),
+            "CreateInstanceEventWindow" => rest::create_instance_event_window(self, &request),
+            "CreateInstanceExportTask" => rest::create_instance_export_task(self, &request),
+            "CreateMacSystemIntegrityProtectionModificationTask" => {
+                rest::create_mac_system_integrity_protection_modification_task(self, &request)
+            }
+            "CreateManagedPrefixList" => rest::create_managed_prefix_list(self, &request),
+            "CreatePublicIpv4Pool" => rest::create_public_ipv4_pool(self, &request),
+            "CreateReplaceRootVolumeTask" => rest::create_replace_root_volume_task(self, &request),
+            "CreateRouteServer" => rest::create_route_server(self, &request),
+            "CreateRouteServerEndpoint" => rest::create_route_server_endpoint(self, &request),
+            "CreateRouteServerPeer" => rest::create_route_server_peer(self, &request),
+            "CreateSecondaryNetwork" => rest::create_secondary_network(self, &request),
+            "CreateTrafficMirrorFilter" => rest::create_traffic_mirror_filter(self, &request),
+            "CreateTrafficMirrorFilterRule" => {
+                rest::create_traffic_mirror_filter_rule(self, &request)
+            }
+            "CreateTrafficMirrorSession" => rest::create_traffic_mirror_session(self, &request),
+            "CreateTrafficMirrorTarget" => rest::create_traffic_mirror_target(self, &request),
+            "CreateVpcBlockPublicAccessExclusion" => {
+                rest::create_vpc_block_public_access_exclusion(self, &request)
+            }
+            "CreateVpcEncryptionControl" => rest::create_vpc_encryption_control(self, &request),
+            "DeleteCapacityManagerDataExport" => {
+                rest::delete_capacity_manager_data_export(self, &request)
+            }
+            "DeleteFpgaImage" => rest::delete_fpga_image(self, &request),
+            "DeleteImageUsageReport" => rest::delete_image_usage_report(self, &request),
+            "DeleteInstanceEventWindow" => rest::delete_instance_event_window(self, &request),
+            "DeleteManagedPrefixList" => rest::delete_managed_prefix_list(self, &request),
+            "DeletePublicIpv4Pool" => rest::delete_public_ipv4_pool(self, &request),
+            "DeleteRouteServer" => rest::delete_route_server(self, &request),
+            "DeleteRouteServerEndpoint" => rest::delete_route_server_endpoint(self, &request),
+            "DeleteRouteServerPeer" => rest::delete_route_server_peer(self, &request),
+            "DeleteSecondaryNetwork" => rest::delete_secondary_network(self, &request),
+            "DeleteTrafficMirrorFilter" => rest::delete_traffic_mirror_filter(self, &request),
+            "DeleteTrafficMirrorFilterRule" => {
+                rest::delete_traffic_mirror_filter_rule(self, &request)
+            }
+            "DeleteTrafficMirrorSession" => rest::delete_traffic_mirror_session(self, &request),
+            "DeleteTrafficMirrorTarget" => rest::delete_traffic_mirror_target(self, &request),
+            "DeleteVpcBlockPublicAccessExclusion" => {
+                rest::delete_vpc_block_public_access_exclusion(self, &request)
+            }
+            "DeleteVpcEncryptionControl" => rest::delete_vpc_encryption_control(self, &request),
+            "DeprovisionByoipCidr" => rest::deprovision_byoip_cidr(self, &request),
+            "DeprovisionPublicIpv4PoolCidr" => {
+                rest::deprovision_public_ipv4_pool_cidr(self, &request)
+            }
+            "DescribeAggregateIdFormat" => rest::describe_aggregate_id_format(self, &request),
+            "DescribeAwsNetworkPerformanceMetricSubscriptions" => {
+                rest::describe_aws_network_performance_metric_subscriptions(self, &request)
+            }
+            "DescribeBundleTasks" => rest::describe_bundle_tasks(self, &request),
+            "DescribeByoipCidrs" => rest::describe_byoip_cidrs(self, &request),
+            "DescribeCapacityManagerDataExports" => {
+                rest::describe_capacity_manager_data_exports(self, &request)
+            }
+            "DescribeClassicLinkInstances" => rest::describe_classic_link_instances(self, &request),
+            "DescribeConversionTasks" => rest::describe_conversion_tasks(self, &request),
+            "DescribeDeclarativePoliciesReports" => {
+                rest::describe_declarative_policies_reports(self, &request)
+            }
+            "DescribeElasticGpus" => rest::describe_elastic_gpus(self, &request),
+            "DescribeExportImageTasks" => rest::describe_export_image_tasks(self, &request),
+            "DescribeExportTasks" => rest::describe_export_tasks(self, &request),
+            "DescribeFpgaImageAttribute" => rest::describe_fpga_image_attribute(self, &request),
+            "DescribeFpgaImages" => rest::describe_fpga_images(self, &request),
+            "DescribeHostReservationOfferings" => {
+                rest::describe_host_reservation_offerings(self, &request)
+            }
+            "DescribeHostReservations" => rest::describe_host_reservations(self, &request),
+            "DescribeIamInstanceProfileAssociations" => {
+                rest::describe_iam_instance_profile_associations(self, &request)
+            }
+            "DescribeIdFormat" => rest::describe_id_format(self, &request),
+            "DescribeIdentityIdFormat" => rest::describe_identity_id_format(self, &request),
+            "DescribeImageReferences" => rest::describe_image_references(self, &request),
+            "DescribeImageUsageReportEntries" => {
+                rest::describe_image_usage_report_entries(self, &request)
+            }
+            "DescribeImageUsageReports" => rest::describe_image_usage_reports(self, &request),
+            "DescribeImportImageTasks" => rest::describe_import_image_tasks(self, &request),
+            "DescribeImportSnapshotTasks" => rest::describe_import_snapshot_tasks(self, &request),
+            "DescribeInstanceEventWindows" => rest::describe_instance_event_windows(self, &request),
+            "DescribeInstanceImageMetadata" => {
+                rest::describe_instance_image_metadata(self, &request)
+            }
+            "DescribeInstanceSqlHaHistoryStates" => {
+                rest::describe_instance_sql_ha_history_states(self, &request)
+            }
+            "DescribeInstanceSqlHaStates" => rest::describe_instance_sql_ha_states(self, &request),
+            "DescribeInstanceTypeOfferings" => {
+                rest::describe_instance_type_offerings(self, &request)
+            }
+            "DescribeIpv6Pools" => rest::describe_ipv6_pools(self, &request),
+            "DescribeMacModificationTasks" => rest::describe_mac_modification_tasks(self, &request),
+            "DescribeManagedPrefixLists" => rest::describe_managed_prefix_lists(self, &request),
+            "DescribeOutpostLags" => rest::describe_outpost_lags(self, &request),
+            "DescribePrefixLists" => rest::describe_prefix_lists(self, &request),
+            "DescribePrincipalIdFormat" => rest::describe_principal_id_format(self, &request),
+            "DescribePublicIpv4Pools" => rest::describe_public_ipv4_pools(self, &request),
+            "DescribeReplaceRootVolumeTasks" => {
+                rest::describe_replace_root_volume_tasks(self, &request)
+            }
+            "DescribeRouteServerEndpoints" => rest::describe_route_server_endpoints(self, &request),
+            "DescribeRouteServerPeers" => rest::describe_route_server_peers(self, &request),
+            "DescribeRouteServers" => rest::describe_route_servers(self, &request),
+            "DescribeScheduledInstanceAvailability" => {
+                rest::describe_scheduled_instance_availability(self, &request)
+            }
+            "DescribeScheduledInstances" => rest::describe_scheduled_instances(self, &request),
+            "DescribeSecondaryInterfaces" => rest::describe_secondary_interfaces(self, &request),
+            "DescribeSecondaryNetworks" => rest::describe_secondary_networks(self, &request),
+            "DescribeServiceLinkVirtualInterfaces" => {
+                rest::describe_service_link_virtual_interfaces(self, &request)
+            }
+            "DescribeTrafficMirrorFilterRules" => {
+                rest::describe_traffic_mirror_filter_rules(self, &request)
+            }
+            "DescribeTrafficMirrorFilters" => rest::describe_traffic_mirror_filters(self, &request),
+            "DescribeTrafficMirrorSessions" => {
+                rest::describe_traffic_mirror_sessions(self, &request)
+            }
+            "DescribeTrafficMirrorTargets" => rest::describe_traffic_mirror_targets(self, &request),
+            "DescribeTrunkInterfaceAssociations" => {
+                rest::describe_trunk_interface_associations(self, &request)
+            }
+            "DescribeVpcBlockPublicAccessExclusions" => {
+                rest::describe_vpc_block_public_access_exclusions(self, &request)
+            }
+            "DescribeVpcBlockPublicAccessOptions" => {
+                rest::describe_vpc_block_public_access_options(self, &request)
+            }
+            "DescribeVpcClassicLink" => rest::describe_vpc_classic_link(self, &request),
+            "DescribeVpcClassicLinkDnsSupport" => {
+                rest::describe_vpc_classic_link_dns_support(self, &request)
+            }
+            "DescribeVpcEncryptionControls" => {
+                rest::describe_vpc_encryption_controls(self, &request)
+            }
+            "DetachClassicLinkVpc" => rest::detach_classic_link_vpc(self, &request),
+            "DisableAwsNetworkPerformanceMetricSubscription" => {
+                rest::disable_aws_network_performance_metric_subscription(self, &request)
+            }
+            "DisableCapacityManager" => rest::disable_capacity_manager(self, &request),
+            "DisableInstanceSqlHaStandbyDetections" => {
+                rest::disable_instance_sql_ha_standby_detections(self, &request)
+            }
+            "DisableRouteServerPropagation" => {
+                rest::disable_route_server_propagation(self, &request)
+            }
+            "DisableVgwRoutePropagation" => rest::disable_vgw_route_propagation(self, &request),
+            "DisableVpcClassicLink" => rest::disable_vpc_classic_link(self, &request),
+            "DisableVpcClassicLinkDnsSupport" => {
+                rest::disable_vpc_classic_link_dns_support(self, &request)
+            }
+            "DisassociateEnclaveCertificateIamRole" => {
+                rest::disassociate_enclave_certificate_iam_role(self, &request)
+            }
+            "DisassociateIamInstanceProfile" => {
+                rest::disassociate_iam_instance_profile(self, &request)
+            }
+            "DisassociateInstanceEventWindow" => {
+                rest::disassociate_instance_event_window(self, &request)
+            }
+            "DisassociateRouteServer" => rest::disassociate_route_server(self, &request),
+            "DisassociateTrunkInterface" => rest::disassociate_trunk_interface(self, &request),
+            "EnableAwsNetworkPerformanceMetricSubscription" => {
+                rest::enable_aws_network_performance_metric_subscription(self, &request)
+            }
+            "EnableCapacityManager" => rest::enable_capacity_manager(self, &request),
+            "EnableInstanceSqlHaStandbyDetections" => {
+                rest::enable_instance_sql_ha_standby_detections(self, &request)
+            }
+            "EnableReachabilityAnalyzerOrganizationSharing" => {
+                rest::enable_reachability_analyzer_organization_sharing(self, &request)
+            }
+            "EnableRouteServerPropagation" => rest::enable_route_server_propagation(self, &request),
+            "EnableVgwRoutePropagation" => rest::enable_vgw_route_propagation(self, &request),
+            "EnableVpcClassicLink" => rest::enable_vpc_classic_link(self, &request),
+            "EnableVpcClassicLinkDnsSupport" => {
+                rest::enable_vpc_classic_link_dns_support(self, &request)
+            }
+            "ExportImage" => rest::export_image(self, &request),
+            "GetAssociatedEnclaveCertificateIamRoles" => {
+                rest::get_associated_enclave_certificate_iam_roles(self, &request)
+            }
+            "GetAssociatedIpv6PoolCidrs" => rest::get_associated_ipv6_pool_cidrs(self, &request),
+            "GetAwsNetworkPerformanceData" => {
+                rest::get_aws_network_performance_data(self, &request)
+            }
+            "GetCapacityManagerAttributes" => rest::get_capacity_manager_attributes(self, &request),
+            "GetCapacityManagerMetricData" => {
+                rest::get_capacity_manager_metric_data(self, &request)
+            }
+            "GetCapacityManagerMetricDimensions" => {
+                rest::get_capacity_manager_metric_dimensions(self, &request)
+            }
+            "GetCapacityManagerMonitoredTagKeys" => {
+                rest::get_capacity_manager_monitored_tag_keys(self, &request)
+            }
+            "GetDeclarativePoliciesReportSummary" => {
+                rest::get_declarative_policies_report_summary(self, &request)
+            }
+            "GetDefaultCreditSpecification" => {
+                rest::get_default_credit_specification(self, &request)
+            }
+            "GetHostReservationPurchasePreview" => {
+                rest::get_host_reservation_purchase_preview(self, &request)
+            }
+            "GetImageAncestry" => rest::get_image_ancestry(self, &request),
+            "GetInstanceTpmEkPub" => rest::get_instance_tpm_ek_pub(self, &request),
+            "GetInstanceUefiData" => rest::get_instance_uefi_data(self, &request),
+            "GetManagedPrefixListAssociations" => {
+                rest::get_managed_prefix_list_associations(self, &request)
+            }
+            "GetManagedPrefixListEntries" => rest::get_managed_prefix_list_entries(self, &request),
+            "GetManagedResourceVisibility" => rest::get_managed_resource_visibility(self, &request),
+            "GetRouteServerAssociations" => rest::get_route_server_associations(self, &request),
+            "GetRouteServerPropagations" => rest::get_route_server_propagations(self, &request),
+            "GetRouteServerRoutingDatabase" => {
+                rest::get_route_server_routing_database(self, &request)
+            }
+            "GetVpcResourcesBlockingEncryptionEnforcement" => {
+                rest::get_vpc_resources_blocking_encryption_enforcement(self, &request)
+            }
+            "ImportImage" => rest::import_image(self, &request),
+            "ImportInstance" => rest::import_instance(self, &request),
+            "ImportSnapshot" => rest::import_snapshot(self, &request),
+            "ImportVolume" => rest::import_volume(self, &request),
+            "ModifyAvailabilityZoneGroup" => rest::modify_availability_zone_group(self, &request),
+            "ModifyDefaultCreditSpecification" => {
+                rest::modify_default_credit_specification(self, &request)
+            }
+            "ModifyFpgaImageAttribute" => rest::modify_fpga_image_attribute(self, &request),
+            "ModifyIdFormat" => rest::modify_id_format(self, &request),
+            "ModifyIdentityIdFormat" => rest::modify_identity_id_format(self, &request),
+            "ModifyInstanceEventWindow" => rest::modify_instance_event_window(self, &request),
+            "ModifyManagedPrefixList" => rest::modify_managed_prefix_list(self, &request),
+            "ModifyManagedResourceVisibility" => {
+                rest::modify_managed_resource_visibility(self, &request)
+            }
+            "ModifyPrivateDnsNameOptions" => rest::modify_private_dns_name_options(self, &request),
+            "ModifyPublicIpDnsNameOptions" => {
+                rest::modify_public_ip_dns_name_options(self, &request)
+            }
+            "ModifyRouteServer" => rest::modify_route_server(self, &request),
+            "ModifyTrafficMirrorFilterNetworkServices" => {
+                rest::modify_traffic_mirror_filter_network_services(self, &request)
+            }
+            "ModifyTrafficMirrorFilterRule" => {
+                rest::modify_traffic_mirror_filter_rule(self, &request)
+            }
+            "ModifyTrafficMirrorSession" => rest::modify_traffic_mirror_session(self, &request),
+            "ModifyVpcBlockPublicAccessExclusion" => {
+                rest::modify_vpc_block_public_access_exclusion(self, &request)
+            }
+            "ModifyVpcBlockPublicAccessOptions" => {
+                rest::modify_vpc_block_public_access_options(self, &request)
+            }
+            "ModifyVpcEncryptionControl" => rest::modify_vpc_encryption_control(self, &request),
+            "ProvisionByoipCidr" => rest::provision_byoip_cidr(self, &request),
+            "ProvisionPublicIpv4PoolCidr" => rest::provision_public_ipv4_pool_cidr(self, &request),
+            "PurchaseHostReservation" => rest::purchase_host_reservation(self, &request),
+            "PurchaseScheduledInstances" => rest::purchase_scheduled_instances(self, &request),
+            "ReplaceIamInstanceProfileAssociation" => {
+                rest::replace_iam_instance_profile_association(self, &request)
+            }
+            "ResetFpgaImageAttribute" => rest::reset_fpga_image_attribute(self, &request),
+            "RestoreManagedPrefixListVersion" => {
+                rest::restore_managed_prefix_list_version(self, &request)
+            }
+            "RunScheduledInstances" => rest::run_scheduled_instances(self, &request),
+            "SendDiagnosticInterrupt" => rest::send_diagnostic_interrupt(self, &request),
+            "StartDeclarativePoliciesReport" => {
+                rest::start_declarative_policies_report(self, &request)
+            }
+            "UpdateCapacityManagerMonitoredTagKeys" => {
+                rest::update_capacity_manager_monitored_tag_keys(self, &request)
+            }
+            "UpdateCapacityManagerOrganizationsAccess" => {
+                rest::update_capacity_manager_organizations_access(self, &request)
+            }
+            "WithdrawByoipCidr" => rest::withdraw_byoip_cidr(self, &request),
+            // Model ops absent from the vendored SDK client; tested via raw query.
+            "CreateCapacityReservationCancellationQuote" => {
+                rest::create_capacity_reservation_cancellation_quote(self, &request)
+            }
+            "DescribeCapacityReservationCancellationQuotes" => {
+                rest::describe_capacity_reservation_cancellation_quotes(self, &request)
+            }
+            "DescribeIpamPoolAllocations" => rest::describe_ipam_pool_allocations(self, &request),
+            "ModifyIpamPoolAllocation" => rest::modify_ipam_pool_allocation(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
