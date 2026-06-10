@@ -629,6 +629,21 @@ pub struct VpnConcentrator {
     pub state: String,
 }
 
+/// A Client VPN endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClientVpnEndpoint {
+    pub id: String,
+    pub description: String,
+    pub status: String,
+    pub server_cert_arn: String,
+    pub transport_protocol: String,
+    pub client_cidr: String,
+    #[serde(default)]
+    pub routes: Vec<String>,
+    #[serde(default)]
+    pub target_networks: Vec<String>,
+}
+
 /// A Transit Gateway peering attachment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgwPeering {
@@ -783,6 +798,8 @@ pub struct Ec2State {
     pub vpn_connections: HashMap<String, VpnConnection>,
     #[serde(default)]
     pub vpn_concentrators: HashMap<String, VpnConcentrator>,
+    #[serde(default)]
+    pub client_vpn_endpoints: HashMap<String, ClientVpnEndpoint>,
 }
 
 impl Ec2State {
