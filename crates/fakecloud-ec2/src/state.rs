@@ -763,6 +763,61 @@ pub struct NetworkInsightsAccessScopeAnalysis {
     pub scope_id: String,
 }
 
+/// A carrier gateway (Wavelength).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CarrierGateway {
+    pub id: String,
+    pub vpc_id: String,
+}
+
+/// A customer-owned IP (CoIP) pool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoipPool {
+    pub id: String,
+    pub route_table_id: String,
+}
+
+/// A local-gateway route table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalGatewayRouteTable {
+    pub id: String,
+    pub local_gateway_id: String,
+    pub mode: String,
+}
+
+/// A local-gateway route-table <-> VPC association.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalGatewayRouteTableVpcAssoc {
+    pub id: String,
+    pub route_table_id: String,
+    pub vpc_id: String,
+}
+
+/// A local-gateway virtual interface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalGatewayVif {
+    pub id: String,
+    pub group_id: String,
+    pub vlan: String,
+    pub local_address: String,
+    pub peer_address: String,
+}
+
+/// A local-gateway virtual-interface group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalGatewayVifGroup {
+    pub id: String,
+    pub local_gateway_id: String,
+}
+
+/// A local-gateway route-table <-> virtual-interface-group association.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalGatewayRouteTableVifgAssoc {
+    pub id: String,
+    pub route_table_id: String,
+    pub vif_group_id: String,
+}
+
 /// A Client VPN endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientVpnEndpoint {
@@ -995,6 +1050,26 @@ pub struct Ec2State {
     pub ni_access_scopes: HashMap<String, NetworkInsightsAccessScope>,
     #[serde(default)]
     pub ni_scope_analyses: HashMap<String, NetworkInsightsAccessScopeAnalysis>,
+    #[serde(default)]
+    pub carrier_gateways: HashMap<String, CarrierGateway>,
+    #[serde(default)]
+    pub coip_pools: HashMap<String, CoipPool>,
+    /// coip-pool-id -> CIDRs.
+    #[serde(default)]
+    pub coip_pool_cidrs: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub lg_route_tables: HashMap<String, LocalGatewayRouteTable>,
+    /// route-table-id -> destination CIDRs.
+    #[serde(default)]
+    pub lg_routes: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub lg_rt_vpc_assocs: HashMap<String, LocalGatewayRouteTableVpcAssoc>,
+    #[serde(default)]
+    pub lg_virtual_interfaces: HashMap<String, LocalGatewayVif>,
+    #[serde(default)]
+    pub lg_vif_groups: HashMap<String, LocalGatewayVifGroup>,
+    #[serde(default)]
+    pub lg_rt_vifg_assocs: HashMap<String, LocalGatewayRouteTableVifgAssoc>,
 }
 
 impl Ec2State {
