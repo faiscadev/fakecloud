@@ -1,6 +1,7 @@
 //! EC2 service entrypoint: `ec2Query` dispatch over the per-account state.
 
 mod capacity;
+mod cvpn;
 mod dhcp;
 mod eip;
 mod endpoint;
@@ -488,6 +489,26 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateVpnConcentrator",
     "DeleteVpnConcentrator",
     "DescribeVpnConcentrators",
+    // Client VPN
+    "CreateClientVpnEndpoint",
+    "DeleteClientVpnEndpoint",
+    "DescribeClientVpnEndpoints",
+    "ModifyClientVpnEndpoint",
+    "CreateClientVpnRoute",
+    "DeleteClientVpnRoute",
+    "DescribeClientVpnRoutes",
+    "AuthorizeClientVpnIngress",
+    "RevokeClientVpnIngress",
+    "DescribeClientVpnAuthorizationRules",
+    "AssociateClientVpnTargetNetwork",
+    "DisassociateClientVpnTargetNetwork",
+    "DescribeClientVpnTargetNetworks",
+    "ApplySecurityGroupsToClientVpnTargetNetwork",
+    "DescribeClientVpnConnections",
+    "TerminateClientVpnConnections",
+    "ExportClientVpnClientCertificateRevocationList",
+    "ExportClientVpnClientConfiguration",
+    "ImportClientVpnClientCertificateRevocationList",
 ];
 
 /// Amazon EC2 service.
@@ -1289,6 +1310,43 @@ impl AwsService for Ec2Service {
             "CreateVpnConcentrator" => vpn::create_vpn_concentrator(self, &request),
             "DeleteVpnConcentrator" => vpn::delete_vpn_concentrator(self, &request),
             "DescribeVpnConcentrators" => vpn::describe_vpn_concentrators(self, &request),
+            "CreateClientVpnEndpoint" => cvpn::create_client_vpn_endpoint(self, &request),
+            "DeleteClientVpnEndpoint" => cvpn::delete_client_vpn_endpoint(self, &request),
+            "DescribeClientVpnEndpoints" => cvpn::describe_client_vpn_endpoints(self, &request),
+            "ModifyClientVpnEndpoint" => cvpn::modify_client_vpn_endpoint(self, &request),
+            "CreateClientVpnRoute" => cvpn::create_client_vpn_route(self, &request),
+            "DeleteClientVpnRoute" => cvpn::delete_client_vpn_route(self, &request),
+            "DescribeClientVpnRoutes" => cvpn::describe_client_vpn_routes(self, &request),
+            "AuthorizeClientVpnIngress" => cvpn::authorize_client_vpn_ingress(self, &request),
+            "RevokeClientVpnIngress" => cvpn::revoke_client_vpn_ingress(self, &request),
+            "DescribeClientVpnAuthorizationRules" => {
+                cvpn::describe_client_vpn_authorization_rules(self, &request)
+            }
+            "AssociateClientVpnTargetNetwork" => {
+                cvpn::associate_client_vpn_target_network(self, &request)
+            }
+            "DisassociateClientVpnTargetNetwork" => {
+                cvpn::disassociate_client_vpn_target_network(self, &request)
+            }
+            "DescribeClientVpnTargetNetworks" => {
+                cvpn::describe_client_vpn_target_networks(self, &request)
+            }
+            "ApplySecurityGroupsToClientVpnTargetNetwork" => {
+                cvpn::apply_security_groups_to_client_vpn_target_network(self, &request)
+            }
+            "DescribeClientVpnConnections" => cvpn::describe_client_vpn_connections(self, &request),
+            "TerminateClientVpnConnections" => {
+                cvpn::terminate_client_vpn_connections(self, &request)
+            }
+            "ExportClientVpnClientCertificateRevocationList" => {
+                cvpn::export_client_vpn_client_certificate_revocation_list(self, &request)
+            }
+            "ExportClientVpnClientConfiguration" => {
+                cvpn::export_client_vpn_client_configuration(self, &request)
+            }
+            "ImportClientVpnClientCertificateRevocationList" => {
+                cvpn::import_client_vpn_client_certificate_revocation_list(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",
