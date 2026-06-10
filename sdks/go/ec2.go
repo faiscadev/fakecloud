@@ -2,7 +2,8 @@ package fakecloud
 
 import "context"
 
-// EC2Client provides access to EC2 introspection endpoints.
+// EC2Client provides access to EC2 introspection endpoints
+// (the fakecloud `/_fakecloud/ec2/*` surface).
 type EC2Client struct {
 	fc *FakeCloud
 }
