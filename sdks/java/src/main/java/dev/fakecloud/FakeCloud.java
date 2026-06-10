@@ -27,6 +27,7 @@ import dev.fakecloud.Types.ConfirmSubscriptionResponse;
 import dev.fakecloud.Types.ConfirmUserRequest;
 import dev.fakecloud.Types.ConfirmUserResponse;
 import dev.fakecloud.Types.ConfirmationCodesResponse;
+import dev.fakecloud.Types.Ec2InstancesResponse;
 import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
@@ -121,6 +122,7 @@ public final class FakeCloud {
     private final HttpTransport http;
 
     private final LambdaClient lambda;
+    private final Ec2Client ec2;
     private final RdsClient rds;
     private final ElastiCacheClient elasticache;
     private final EcrClient ecr;
@@ -161,6 +163,7 @@ public final class FakeCloud {
     public FakeCloud(String baseUrl) {
         this.http = new HttpTransport(trimTrailingSlashes(baseUrl));
         this.lambda = new LambdaClient(http);
+        this.ec2 = new Ec2Client(http);
         this.rds = new RdsClient(http);
         this.elasticache = new ElastiCacheClient(http);
         this.ecr = new EcrClient(http);
@@ -233,6 +236,7 @@ public final class FakeCloud {
     // ── Sub-client accessors ───────────────────────────────────────
 
     public LambdaClient lambda() { return lambda; }
+    public Ec2Client ec2() { return ec2; }
     public RdsClient rds() { return rds; }
     public ElastiCacheClient elasticache() { return elasticache; }
     public EcrClient ecr() { return ecr; }
@@ -322,6 +326,15 @@ public final class FakeCloud {
                             + "/"
                             + version
                             + ".zip");
+        }
+    }
+
+    public static final class Ec2Client {
+        private final HttpTransport http;
+        Ec2Client(HttpTransport http) { this.http = http; }
+
+        public Ec2InstancesResponse getInstances() {
+            return http.get("/_fakecloud/ec2/instances", Ec2InstancesResponse.class);
         }
     }
 

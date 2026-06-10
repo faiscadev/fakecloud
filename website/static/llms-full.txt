@@ -262,7 +262,7 @@ Tables, items, transactions (TransactWriteItems, TransactGetItems), PartiQL (Exe
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### Lambda (85 actions)
+### Lambda (70 actions)
 
 CreateFunction, GetFunction, DeleteFunction, ListFunctions, Invoke, PublishVersion, CreateEventSourceMapping, ListEventSourceMappings, GetEventSourceMapping, DeleteEventSourceMapping
 
@@ -304,7 +304,7 @@ Supported resource types: AWS::SQS::Queue, AWS::SNS::Topic, AWS::SNS::Subscripti
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### SES (110 actions)
+### SES (111 actions)
 
 **SES v2** (97 actions, REST protocol): identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools and IPs, multi-region endpoints, account settings, import/export jobs.
 
@@ -350,7 +350,7 @@ Full registry surface — repositories, images (real OCI v2 push/pull via `docke
 
 Protocol: REST/JSON (control plane) + OCI v2 Distribution (data plane)
 
-### ECS (60 actions)
+### ECS (77 actions)
 
 Clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, task sets (EXTERNAL deployment controller), container instances, capacity providers, attributes, task protection, ECS Exec via `docker exec`, the agent-side Submit*/DiscoverPollEndpoint surface, awslogs forwarding to CloudWatch Logs, secrets[] resolution against SecretsManager + SSM Parameter Store, task role credentials served from /_fakecloud/ecs/creds/{taskId}, tagging.
 
@@ -370,7 +370,7 @@ Features: Complete Amazon States Language (ASL) interpreter with all state types
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### API Gateway v1 / REST APIs (118 actions)
+### API Gateway v1 / REST APIs (124 actions)
 
 **REST APIs:** CreateRestApi, GetRestApi, GetRestApis, UpdateRestApi, PutRestApi (OpenAPI overwrite/merge), ImportRestApi, DeleteRestApi
 **Resources:** CreateResource, GetResource, GetResources, UpdateResource, DeleteResource
@@ -531,6 +531,58 @@ Features: `primary` workgroup + `AwsDataCatalog` GLUE catalog auto-seeded on fir
 
 Protocol: JSON 1.1 (`X-Amz-Target: AmazonAthena.<Action>`)
 
+### EC2 (767 actions)
+
+The complete EC2 control plane — the largest service surface in AWS, all at true 100% Smithy conformance.
+
+**Networking:** VPCs (+ secondary CIDRs, tenancy), DHCP option sets, subnets (+ CIDR reservations), security groups (rules, references, VPC associations), route tables, internet / egress-only / NAT gateways, elastic IPs (+ transfer/move), network ACLs, VPC peering, VPC endpoints + PrivateLink, flow logs, prefix lists, ENIs (+ attachments, permissions, IPv4/IPv6 assignment).
+**Compute & storage:** RunInstances + full lifecycle (start/stop/reboot/terminate/monitor), instance attributes/credit specs/metadata options, instance types + topology, key pairs, placement groups, EBS volumes (+ recycle bin), snapshots (+ copy/tier/lock/fast-restore/block-public-access), AMIs, EBS encryption defaults.
+**Scaling & capacity:** launch templates (+ versions), spot requests / fleets / EC2 fleets, capacity reservations (+ fleets), reserved instances, dedicated hosts.
+**Transit Gateway (74 ops):** gateways, attachments, route tables (+ associations/propagations/prefix-list refs), peering, Connect + Connect peers, policy tables, route-table announcements, multicast domains (+ group members/sources), metering policies, Client-VPN attachments.
+**VPN:** Site-to-Site (customer gateways, VPGs, connections + routes/tunnels/device configs, concentrators) + full Client VPN (endpoints, routes, authorization rules, target networks, connections, cert/config export-import).
+**IPAM:** IPAMs, scopes, pools, pool CIDRs + allocations, resource CIDRs, address history, resource discovery (+ associations + discovered getters), BYOASN, BYOIP-to-IPAM, external resource verification tokens, policies (+ allocation rules / org targets), prefix-list resolvers (+ targets / rules / versions).
+**Edge & access:** Verified Access (instances, trust providers, groups, endpoints, policies, logging, client config), Network Insights (paths + analyses, access scopes + scope analyses), Outpost / local-gateway / CoIP (carrier gateways, CoIP pools, LGW route tables/routes/associations/virtual interfaces), EC2 Instance Connect, fast launch, serial-console access, console output / screenshot, password data.
+
+Features: instance control plane is metadata-faithful (synthetic instance/reservation/state machine); real Docker-backed instance execution is a roadmap follow-up. A few model ops absent from the vendored SDK (Describe/ModifyIpamPoolAllocation, capacity-reservation cancellation-quote pair) are validated via raw ec2Query. Security-group rules + NACLs are stored faithfully but not enforced against traffic. Introspection: `GET /_fakecloud/ec2/instances` lists instances with control-plane metadata.
+
+Protocol: ec2Query (form-encoded request, flattened-XML response)
+
+### Organizations (63 actions)
+
+Org tree (roots / OUs / accounts), `CreateAccount` real async `IN_PROGRESS -> SUCCEEDED` lifecycle, `LeaveOrganization`, policies (SCP / TAG / BACKUP / AISERVICES_OPT_OUT) with **real SCP enforcement** as a permission ceiling under `FAKECLOUD_IAM=strict`, handshakes (invite / accept / decline / cancel state machine), delegated administrators, AWS service access, effective-policy validation, billing responsibility transfers, resource policy, tagging. Mutating calls are management-account only.
+
+Protocol: JSON 1.1
+
+### Glue (265 actions)
+
+Full Data Catalog (databases, tables, partitions with `GetPartitions` `Expression` pruning), jobs, crawlers, classifiers, connections, triggers, workflows, blueprints, dev endpoints, schema registry, interactive sessions, ML transforms, data quality, user-defined functions, usage profiles, column statistics, tagging. Real status transitions (crawler READY<->RUNNING, trigger/workflow/run lifecycles). Job/crawler/Spark execution itself is synthesized — fakecloud is not a Spark engine.
+
+Protocol: JSON 1.1
+
+### CloudWatch / Metrics & Alarms (46 actions)
+
+Metrics (`PutMetricData` / `GetMetricData` / `GetMetricStatistics` / `ListMetrics` / `GetMetricWidgetImage`), metric + composite alarms with SNS / AppAS / EC2 actions on threshold transitions, dashboards, anomaly detectors, insight rules + managed rules + reports, metric streams, alarm mute rules, contributor insights, OTel enrichment, tagging. Metrics in-memory only; alarms evaluate against published data.
+
+Protocol: awsQuery (SigV4 service `monitoring`, distinct from CloudWatch Logs)
+
+### Firehose (12 actions)
+
+Delivery streams with real S3 destination delivery (buffering hints honored), `ExtendedS3` / `Redshift` / `OpenSearch` / `Splunk` / `HttpEndpoint` / `Snowflake` / `Iceberg` destination round-trip, `BufferingHints` range checks, server-side encryption (`Start`/`StopDeliveryStreamEncryption`), `PutRecord` / `PutRecordBatch` with per-record IDs, tagging. Data plane stops at acknowledgement for non-S3 destinations.
+
+Protocol: JSON 1.1
+
+### Cognito Identity (23 actions)
+
+Identity pools, federated identities, `GetId` / `GetCredentialsForIdentity` / `GetOpenIdToken` / `GetOpenIdTokenForDeveloperIdentity`, developer-authenticated identities, identity pool roles + role mappings, principal tags, tagging.
+
+Protocol: JSON 1.1
+
+### Bedrock Agent (72 actions) + Bedrock Agent Runtime (31 actions)
+
+Agents, agent versions / aliases, action groups, knowledge bases, data sources, flows + flow aliases / versions, prompts, agent collaborators, tagging (control plane). Runtime: `InvokeAgent`, `InvokeFlow`, `Retrieve`, `RetrieveAndGenerate`, session + memory management, with configurable and streaming responses.
+
+Protocol: REST-JSON
+
 ## Cross-Service Integration
 
 fakecloud implements real cross-service message delivery:
@@ -558,7 +610,7 @@ fakecloud implements real cross-service message delivery:
 
 fakecloud handles three AWS protocol families:
 
-- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body with `Action` parameter, XML responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache, EC2 ec2Query): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis, Step Functions): JSON body, `X-Amz-Target` header, JSON responses
 - **REST protocol** (S3, Lambda, SES v2, API Gateway v1, API Gateway v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML or JSON responses
 

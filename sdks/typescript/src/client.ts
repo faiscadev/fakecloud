@@ -26,6 +26,7 @@ import type {
   ResetResponse,
   ResetServiceResponse,
   RdsInstancesResponse,
+  Ec2InstancesResponse,
   ElastiCacheAclsResponse,
   ElastiCacheClustersResponse,
   ElastiCacheReplicationGroupsResponse,
@@ -255,6 +256,15 @@ export class RdsClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
     });
+    return parse(resp);
+  }
+}
+
+export class Ec2Client {
+  constructor(private baseUrl: string) {}
+
+  async getInstances(): Promise<Ec2InstancesResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ec2/instances`);
     return parse(resp);
   }
 }
@@ -1116,6 +1126,7 @@ export class FakeCloud {
 
   private readonly _lambda: LambdaClient;
   private readonly _rds: RdsClient;
+  private readonly _ec2: Ec2Client;
   private readonly _elasticache: ElastiCacheClient;
   private readonly _ecr: EcrClient;
   private readonly _logs: LogsClient;
@@ -1153,6 +1164,7 @@ export class FakeCloud {
 
     this._lambda = new LambdaClient(this.baseUrl);
     this._rds = new RdsClient(this.baseUrl);
+    this._ec2 = new Ec2Client(this.baseUrl);
     this._elasticache = new ElastiCacheClient(this.baseUrl);
     this._ecr = new EcrClient(this.baseUrl);
     this._logs = new LogsClient(this.baseUrl);
@@ -1230,6 +1242,10 @@ export class FakeCloud {
 
   get rds(): RdsClient {
     return this._rds;
+  }
+
+  get ec2(): Ec2Client {
+    return this._ec2;
   }
 
   get elasticache(): ElastiCacheClient {

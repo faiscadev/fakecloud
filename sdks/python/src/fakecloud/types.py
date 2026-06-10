@@ -117,6 +117,43 @@ class RdsInstancesResponse:
         )
 
 
+# ── EC2 ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Ec2Instance:
+    instance_id: str
+    image_id: str
+    instance_type: str
+    state: str
+    private_ip: str
+    availability_zone: str
+    launch_time: str
+    security_group_ids: List[str]
+    public_ip: Optional[str] = None
+    subnet_id: Optional[str] = None
+    vpc_id: Optional[str] = None
+    key_name: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Ec2Instance:
+        d = _convert_keys(data)
+        d["security_group_ids"] = list(d.get("security_group_ids", []))
+        return cls(**d)
+
+
+@dataclass
+class Ec2InstancesResponse:
+    instances: List[Ec2Instance]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Ec2InstancesResponse:
+        d = _convert_keys(data)
+        return cls(
+            instances=[Ec2Instance.from_dict(item) for item in d.get("instances", [])],
+        )
+
+
 # ── ElastiCache ─────────────────────────────────────────────────────
 
 

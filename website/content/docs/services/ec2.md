@@ -26,6 +26,10 @@ fakecloud implements **767 of 767** AWS EC2 operations at 100% Smithy conformanc
 
 EC2 uses the `ec2Query` protocol: form-encoded requests and flattened-XML responses (no `<member>` wrapper, lower-camel element names, lowercase `<requestId>`, no `<Result>` envelope). Because EC2 declares no per-operation error shapes, fakecloud is lenient on not-found and validates only wire-observable negatives — missing required scalars, invalid enum values, out-of-range integers / `MaxResults`, and bad lengths.
 
+## Introspection
+
+- `GET /_fakecloud/ec2/instances` — list every fakecloud-managed EC2 instance across all account partitions with its control-plane metadata (`instanceId`, `imageId`, `instanceType`, `state`, `privateIp`, `publicIp`, `subnetId`, `vpcId`, `keyName`, `securityGroupIds`, `availabilityZone`, `launchTime`). Lets tests assert on instance state without re-parsing `DescribeInstances` XML. Exposed through every fakecloud introspection SDK — `fc.ec2().getInstances()` (Go/Java/TS/PHP), `fc.ec2.get_instances()` (Python), `fc.ec2().get_instances()` (Rust).
+
 ## Known limitations
 
 - **Instance execution is metadata-only** — `RunInstances` records a faithful instance, reservation, and state machine, but does not yet boot a real Docker container. Real container-backed execution (reusing the Lambda/ECS/RDS runtime) is a planned follow-up.

@@ -34,6 +34,7 @@ from fakecloud.types import (
     ConfirmUserRequest,
     ConfirmUserResponse,
     CreateAdminResponse,
+    Ec2InstancesResponse,
     EcrImagesResponse,
     EcrPullThroughRulesResponse,
     EcrRepositoriesResponse,
@@ -247,6 +248,19 @@ class RdsClient:
         )
         _check(resp)
         return RdsS3ExportResponse.from_dict(resp.json())
+
+
+class Ec2Client:
+    """Async EC2 introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_instances(self) -> Ec2InstancesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ec2/instances")
+        _check(resp)
+        return Ec2InstancesResponse.from_dict(resp.json())
 
 
 class ElastiCacheClient:
@@ -1798,6 +1812,19 @@ class _SyncRdsClient:
         return RdsS3ExportResponse.from_dict(resp.json())
 
 
+class _SyncEc2Client:
+    """Sync EC2 introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_instances(self) -> Ec2InstancesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ec2/instances")
+        _check(resp)
+        return Ec2InstancesResponse.from_dict(resp.json())
+
+
 class _SyncElastiCacheClient:
     """Sync ElastiCache introspection client."""
 
@@ -2466,6 +2493,10 @@ class FakeCloud:
         return RdsClient(self._client, self._base)
 
     @property
+    def ec2(self) -> Ec2Client:
+        return Ec2Client(self._client, self._base)
+
+    @property
     def elasticache(self) -> ElastiCacheClient:
         return ElastiCacheClient(self._client, self._base)
 
@@ -2649,6 +2680,10 @@ class FakeCloudSync:
     @property
     def rds(self) -> _SyncRdsClient:
         return _SyncRdsClient(self._client, self._base)
+
+    @property
+    def ec2(self) -> _SyncEc2Client:
+        return _SyncEc2Client(self._client, self._base)
 
     @property
     def elasticache(self) -> _SyncElastiCacheClient:

@@ -29,12 +29,13 @@ mod stepfunctions_delivery;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
-    athena_named_query_response, ecr_image_response, ecr_pull_through_rule_response,
-    ecr_repository_response, ecs_cluster_response, ecs_lifecycle_event, ecs_task_metadata_response,
-    ecs_task_response, elasticache_acls_response, elasticache_cluster_response,
-    elasticache_replication_group_response, elasticache_serverless_cache_response,
-    elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
-    elbv2_target_group_response, organizations_accounts_snapshot, rds_instance_response,
+    athena_named_query_response, ec2_instance_response, ecr_image_response,
+    ecr_pull_through_rule_response, ecr_repository_response, ecs_cluster_response,
+    ecs_lifecycle_event, ecs_task_metadata_response, ecs_task_response, elasticache_acls_response,
+    elasticache_cluster_response, elasticache_replication_group_response,
+    elasticache_serverless_cache_response, elbv2_listener_response, elbv2_load_balancer_response,
+    elbv2_rule_response, elbv2_target_group_response, organizations_accounts_snapshot,
+    rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -1511,8 +1512,12 @@ async fn main() {
         organizations_state.clone(),
     )));
     // EC2 (ec2Query protocol). State is self-contained for now; persistence
-    // and the Docker-backed instance runtime are wired in later batches.
-    registry.register(Arc::new(Ec2Service::new()));
+    // and the Docker-backed instance runtime are wired in later batches. We
+    // keep a clone of the shared state so the introspection router can expose
+    // `GET /_fakecloud/ec2/instances`.
+    let ec2_service = Ec2Service::new();
+    let ec2_introspection_state = ec2_service.shared_state();
+    registry.register(Arc::new(ec2_service));
     let mut shared_body_cache: Option<Arc<fakecloud_persistence::cache::BodyCache>> = None;
     let s3_store: Arc<dyn fakecloud_persistence::S3Store> = match persistence_config.mode {
         fakecloud_persistence::StorageMode::Persistent => {
@@ -5121,6 +5126,28 @@ async fn main() {
                             a.db_instance_identifier.cmp(&b.db_instance_identifier)
                         });
                         axum::Json(types::RdsInstancesResponse { instances })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ec2/instances",
+            axum::routing::get({
+                let es = ec2_introspection_state;
+                move || {
+                    let es = es.clone();
+                    async move {
+                        let accounts = es.read();
+                        // Aggregate instances across every account partition —
+                        // real callers land under their derived account id, not
+                        // the default partition.
+                        let mut instances: Vec<types::Ec2Instance> = accounts
+                            .iter()
+                            .flat_map(|(_, state)| state.instances.values())
+                            .map(ec2_instance_response)
+                            .collect();
+                        instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+                        axum::Json(types::Ec2InstancesResponse { instances })
                     }
                 }
             }),

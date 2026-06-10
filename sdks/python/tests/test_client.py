@@ -152,6 +152,29 @@ def test_rds_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
     assert instance.host_port > 0
 
 
+# ── EC2 ───────────────────────────────────────────────────────────────
+
+
+def test_ec2_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    ec2 = boto3.client("ec2", **_boto_kwargs(fakecloud_url))
+    run = ec2.run_instances(
+        ImageId="ami-12345678",
+        InstanceType="t3.micro",
+        MinCount=1,
+        MaxCount=1,
+    )
+    instance_id = run["Instances"][0]["InstanceId"]
+
+    result = fc.ec2.get_instances()
+    instance = next(
+        item for item in result.instances if item.instance_id == instance_id
+    )
+    assert instance.image_id == "ami-12345678"
+    assert instance.instance_type == "t3.micro"
+    assert instance.private_ip
+    assert isinstance(instance.security_group_ids, list)
+
+
 # ── ElastiCache ───────────────────────────────────────────────────────
 
 

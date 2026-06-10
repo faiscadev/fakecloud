@@ -51,6 +51,7 @@ import {
   CreateDBInstanceCommand,
   DescribeDBInstancesCommand,
 } from "@aws-sdk/client-rds";
+import { EC2Client, RunInstancesCommand } from "@aws-sdk/client-ec2";
 import {
   ElastiCacheClient,
   CreateCacheClusterCommand,
@@ -146,6 +147,36 @@ describe("rds", () => {
     expect(instance!.containerId.length).toBeGreaterThan(0);
     expect(instance!.hostPort).toBeGreaterThan(0);
   }, 300_000);
+});
+
+// ── EC2 ─────────────────────────────────────────────────────────────
+
+describe("ec2", () => {
+  it("getInstances() returns fakecloud-managed EC2 instances", async () => {
+    const ec2 = new EC2Client(awsConfig());
+
+    const run = await ec2.send(
+      new RunInstancesCommand({
+        ImageId: "ami-12345678",
+        InstanceType: "t3.micro",
+        MinCount: 1,
+        MaxCount: 1,
+      }),
+    );
+    const instanceId = run.Instances?.[0]?.InstanceId;
+    expect(instanceId).toBeDefined();
+
+    const result = await fc.ec2.getInstances();
+    const instance = result.instances.find(
+      (candidate) => candidate.instanceId === instanceId,
+    );
+    expect(instance).toBeDefined();
+    expect(instance!.imageId).toBe("ami-12345678");
+    expect(instance!.instanceType).toBe("t3.micro");
+    expect(instance!.privateIp.length).toBeGreaterThan(0);
+    expect(instance!.availabilityZone.length).toBeGreaterThan(0);
+    expect(Array.isArray(instance!.securityGroupIds)).toBe(true);
+  });
 });
 
 // ── ElastiCache ─────────────────────────────────────────────────────

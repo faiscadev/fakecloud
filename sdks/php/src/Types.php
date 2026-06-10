@@ -122,6 +122,58 @@ final class RdsInstancesResponse
     }
 }
 
+// ── EC2 ────────────────────────────────────────────────────────
+
+final class Ec2Instance
+{
+    public function __construct(
+        public readonly string $instanceId,
+        public readonly string $imageId,
+        public readonly string $instanceType,
+        public readonly string $state,
+        public readonly string $privateIp,
+        public readonly ?string $publicIp,
+        public readonly ?string $subnetId,
+        public readonly ?string $vpcId,
+        public readonly ?string $keyName,
+        /** @var string[] */
+        public readonly array $securityGroupIds,
+        public readonly string $availabilityZone,
+        public readonly string $launchTime,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['instanceId'],
+            $data['imageId'],
+            $data['instanceType'],
+            $data['state'],
+            $data['privateIp'],
+            $data['publicIp'] ?? null,
+            $data['subnetId'] ?? null,
+            $data['vpcId'] ?? null,
+            $data['keyName'] ?? null,
+            $data['securityGroupIds'] ?? [],
+            $data['availabilityZone'],
+            $data['launchTime'],
+        );
+    }
+}
+
+final class Ec2InstancesResponse
+{
+    public function __construct(
+        /** @var Ec2Instance[] */
+        public readonly array $instances,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Ec2Instance::fromArray(...), $data['instances']));
+    }
+}
+
 // ── ElastiCache ────────────────────────────────────────────────
 
 final class ElastiCacheCluster
