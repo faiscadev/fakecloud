@@ -629,6 +629,39 @@ pub struct VpnConcentrator {
     pub state: String,
 }
 
+/// An IPAM (IP Address Manager).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ipam {
+    pub id: String,
+    pub public_scope_id: String,
+    pub private_scope_id: String,
+    pub tier: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// An IPAM scope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IpamScope {
+    pub id: String,
+    pub ipam_id: String,
+    /// "public" or "private".
+    #[serde(default)]
+    pub scope_type: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// An IPAM pool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IpamPool {
+    pub id: String,
+    pub scope_id: String,
+    pub address_family: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// A Client VPN endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientVpnEndpoint {
@@ -804,6 +837,18 @@ pub struct Ec2State {
     pub vpn_concentrators: HashMap<String, VpnConcentrator>,
     #[serde(default)]
     pub client_vpn_endpoints: HashMap<String, ClientVpnEndpoint>,
+    #[serde(default)]
+    pub ipams: HashMap<String, Ipam>,
+    #[serde(default)]
+    pub ipam_scopes: HashMap<String, IpamScope>,
+    #[serde(default)]
+    pub ipam_pools: HashMap<String, IpamPool>,
+    /// pool-id -> provisioned (cidr, cidr-id).
+    #[serde(default)]
+    pub ipam_pool_cidrs: HashMap<String, Vec<(String, String)>>,
+    /// pool-id -> allocations (cidr, allocation-id).
+    #[serde(default)]
+    pub ipam_pool_allocations: HashMap<String, Vec<(String, String)>>,
 }
 
 impl Ec2State {

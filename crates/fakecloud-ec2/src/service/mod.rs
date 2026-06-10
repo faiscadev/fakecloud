@@ -9,6 +9,7 @@ mod eni;
 mod fleet;
 mod image;
 mod instance;
+mod ipam;
 mod meta;
 mod nacl;
 mod reserved;
@@ -509,6 +510,30 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "ExportClientVpnClientCertificateRevocationList",
     "ExportClientVpnClientConfiguration",
     "ImportClientVpnClientCertificateRevocationList",
+    // IPAM core
+    "CreateIpam",
+    "DeleteIpam",
+    "DescribeIpams",
+    "ModifyIpam",
+    "CreateIpamScope",
+    "DeleteIpamScope",
+    "DescribeIpamScopes",
+    "ModifyIpamScope",
+    "CreateIpamPool",
+    "DeleteIpamPool",
+    "DescribeIpamPools",
+    "ModifyIpamPool",
+    "ProvisionIpamPoolCidr",
+    "DeprovisionIpamPoolCidr",
+    "GetIpamPoolCidrs",
+    "AllocateIpamPoolCidr",
+    "ReleaseIpamPoolAllocation",
+    "GetIpamPoolAllocations",
+    "GetIpamResourceCidrs",
+    "ModifyIpamResourceCidr",
+    "GetIpamAddressHistory",
+    "EnableIpamOrganizationAdminAccount",
+    "DisableIpamOrganizationAdminAccount",
 ];
 
 /// Amazon EC2 service.
@@ -1346,6 +1371,33 @@ impl AwsService for Ec2Service {
             }
             "ImportClientVpnClientCertificateRevocationList" => {
                 cvpn::import_client_vpn_client_certificate_revocation_list(self, &request)
+            }
+            "CreateIpam" => ipam::create_ipam(self, &request),
+            "DeleteIpam" => ipam::delete_ipam(self, &request),
+            "DescribeIpams" => ipam::describe_ipams(self, &request),
+            "ModifyIpam" => ipam::modify_ipam(self, &request),
+            "CreateIpamScope" => ipam::create_ipam_scope(self, &request),
+            "DeleteIpamScope" => ipam::delete_ipam_scope(self, &request),
+            "DescribeIpamScopes" => ipam::describe_ipam_scopes(self, &request),
+            "ModifyIpamScope" => ipam::modify_ipam_scope(self, &request),
+            "CreateIpamPool" => ipam::create_ipam_pool(self, &request),
+            "DeleteIpamPool" => ipam::delete_ipam_pool(self, &request),
+            "DescribeIpamPools" => ipam::describe_ipam_pools(self, &request),
+            "ModifyIpamPool" => ipam::modify_ipam_pool(self, &request),
+            "ProvisionIpamPoolCidr" => ipam::provision_ipam_pool_cidr(self, &request),
+            "DeprovisionIpamPoolCidr" => ipam::deprovision_ipam_pool_cidr(self, &request),
+            "GetIpamPoolCidrs" => ipam::get_ipam_pool_cidrs(self, &request),
+            "AllocateIpamPoolCidr" => ipam::allocate_ipam_pool_cidr(self, &request),
+            "ReleaseIpamPoolAllocation" => ipam::release_ipam_pool_allocation(self, &request),
+            "GetIpamPoolAllocations" => ipam::get_ipam_pool_allocations(self, &request),
+            "GetIpamResourceCidrs" => ipam::get_ipam_resource_cidrs(self, &request),
+            "ModifyIpamResourceCidr" => ipam::modify_ipam_resource_cidr(self, &request),
+            "GetIpamAddressHistory" => ipam::get_ipam_address_history(self, &request),
+            "EnableIpamOrganizationAdminAccount" => {
+                ipam::enable_ipam_organization_admin_account(self, &request)
+            }
+            "DisableIpamOrganizationAdminAccount" => {
+                ipam::disable_ipam_organization_admin_account(self, &request)
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
