@@ -65,6 +65,14 @@
 - **Application Auto Scaling** (14 ops): scalable targets (Register/Deregister/Describe) for ECS, Lambda, DynamoDB, RDS, ElastiCache, SageMaker, EMR, AppStream, Cassandra, Kafka, Neptune, EC2 Spot Fleet, Comprehend. Step + target-tracking + predictive scaling policies, scheduled actions with cron / one-shot start/end times + Timezone. Deterministic `GetPredictiveScalingForecast` with hourly Load + Capacity buckets capped at one week. `Deregister` cascades to policies + scheduled actions
 - **WAF v2** (55 ops): WebACLs / RuleGroups / IPSets / RegexPatternSets with `LockToken` optimistic concurrency that rotates on every successful mutation. REGIONAL + CLOUDFRONT scope segmentation. Web ACL <-> resource associations, `WAFAssociatedItemException` blocks delete-while-associated. `CheckCapacity` computes WCU as recursive count of statement leaves through `AndStatement`/`OrStatement`/`NotStatement`. API keys, logging configs, permission policies, managed rule catalog (Common, KnownBadInputs, SQLi), mobile SDK release lookups + presigned URL synthesis. Control-plane only — no actual HTTP request inspection
 - **Athena** (70 ops): workgroups (default `primary` seeded), data catalogs (default `AwsDataCatalog` seeded), named queries, prepared statements (keyed by `(workgroup, statement_name)`), query executions, notebooks, sessions + calculations, capacity reservations + capacity assignment configuration, tags. `StartQueryExecution` synthesizes a SUCCEEDED execution with a one-row `[["1"]]` result so callers can immediately fetch via `GetQueryResults` without polling. `DeleteWorkGroup` rejects `primary`. Not a SQL engine — every query returns the synthesized result
+- **Cognito Identity** (23 ops): identity pools, federated identities, `GetId`/`GetCredentialsForIdentity`/`GetOpenIdToken`, developer-authenticated identities, identity pool roles + role mappings, tagging
+- **CloudWatch (Metrics & Alarms)** (46 ops): metrics (`PutMetricData`/`GetMetricData`/`GetMetricStatistics`/`ListMetrics`/`GetMetricWidgetImage`), metric + composite alarms with SNS/AppAS/EC2 actions on threshold transitions, dashboards, anomaly detectors, insight rules, metric streams, alarm mute rules, contributor insights, tagging. awsQuery protocol (SigV4 service `monitoring`)
+- **Firehose** (12 ops): delivery streams with real S3 destination delivery, `ExtendedS3`/`Redshift`/`OpenSearch`/`Splunk`/`HttpEndpoint`/`Snowflake`/`Iceberg` destination round-trip, `BufferingHints` range checks, server-side encryption, `PutRecord`/`PutRecordBatch` with per-record IDs, tagging
+- **Glue** (265 ops): Data Catalog (databases, tables, partitions with `GetPartitions` expression pruning), jobs, crawlers, classifiers, connections, triggers, workflows, blueprints, dev endpoints, schema registry, interactive sessions, ML transforms, data quality, UDFs, column statistics, tagging. Real status lifecycles; job/Spark execution synthesized
+- **Organizations** (63 ops): org tree (roots/OUs/accounts), `CreateAccount` async `IN_PROGRESS -> SUCCEEDED`, policies (SCP/TAG/BACKUP/AISERVICES_OPT_OUT) with **real SCP enforcement** as a permission ceiling under `FAKECLOUD_IAM=strict`, handshakes, delegated administrators, AWS service access, billing responsibility transfers, resource policy, tagging
+- **Bedrock Agent** (72 ops): agents, agent versions/aliases, action groups, knowledge bases, data sources, flows, prompts, agent collaborators, tagging
+- **Bedrock Agent Runtime** (31 ops): `InvokeAgent`, `InvokeFlow`, `Retrieve`, `RetrieveAndGenerate`, session management, memory, with configurable + streaming responses
+- **EC2** (767 ops): the complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instance control plane is metadata-faithful; Docker-backed execution is a roadmap follow-up. `ec2Query` protocol with flattened-XML lists
 
 ## Introspection endpoints (for tests)
 
@@ -81,6 +89,7 @@ fakecloud exposes `/_fakecloud/*` endpoints your tests can use to assert on side
 - `GET /_fakecloud/elbv2/target-groups`: list target groups
 - `GET /_fakecloud/elbv2/listeners`: list listeners
 - `GET /_fakecloud/elbv2/rules`: list listener rules
+- `GET /_fakecloud/ec2/instances`: list EC2 instances with control-plane metadata (id, state, type, AMI, IPs, AZ)
 - See [SDK docs](https://fakecloud.dev/docs/sdks/) for the full endpoint list
 
 ## Optional
