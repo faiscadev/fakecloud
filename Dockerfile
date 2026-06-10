@@ -24,7 +24,7 @@ ARG TARGETARCH
 # bakes the Go stdlib into the binary, so a stale toolchain trips the
 # image's Trivy CRITICAL/HIGH gate (27.5.1 shipped go1.22.11, flagged by
 # CVE-2025-68121). 29.5.2 ships go1.26.3, which clears the gate.
-ARG DOCKER_CLI_VERSION=29.5.2
+ARG DOCKER_CLI_VERSION=29.5.3
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && case "$TARGETARCH" in \
