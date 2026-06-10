@@ -12,6 +12,7 @@ mod instance;
 mod ipam;
 mod ipam_discovery;
 mod ipam_policy;
+mod lgw;
 mod meta;
 mod nacl;
 mod ni;
@@ -621,6 +622,36 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DeleteNetworkInsightsAccessScopeAnalysis",
     "DescribeNetworkInsightsAccessScopeAnalyses",
     "GetNetworkInsightsAccessScopeAnalysisFindings",
+    // Outpost / local gateway / CoIP / carrier
+    "CreateCarrierGateway",
+    "DeleteCarrierGateway",
+    "DescribeCarrierGateways",
+    "CreateCoipPool",
+    "DeleteCoipPool",
+    "DescribeCoipPools",
+    "CreateCoipCidr",
+    "DeleteCoipCidr",
+    "GetCoipPoolUsage",
+    "CreateLocalGatewayRouteTable",
+    "DeleteLocalGatewayRouteTable",
+    "DescribeLocalGatewayRouteTables",
+    "CreateLocalGatewayRoute",
+    "DeleteLocalGatewayRoute",
+    "ModifyLocalGatewayRoute",
+    "SearchLocalGatewayRoutes",
+    "CreateLocalGatewayRouteTableVpcAssociation",
+    "DeleteLocalGatewayRouteTableVpcAssociation",
+    "DescribeLocalGatewayRouteTableVpcAssociations",
+    "CreateLocalGatewayVirtualInterface",
+    "DeleteLocalGatewayVirtualInterface",
+    "DescribeLocalGatewayVirtualInterfaces",
+    "CreateLocalGatewayVirtualInterfaceGroup",
+    "DeleteLocalGatewayVirtualInterfaceGroup",
+    "DescribeLocalGatewayVirtualInterfaceGroups",
+    "CreateLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+    "DeleteLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+    "DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations",
+    "DescribeLocalGateways",
 ];
 
 /// Amazon EC2 service.
@@ -1667,6 +1698,67 @@ impl AwsService for Ec2Service {
             "GetNetworkInsightsAccessScopeAnalysisFindings" => {
                 ni::get_network_insights_access_scope_analysis_findings(self, &request)
             }
+            "CreateCarrierGateway" => lgw::create_carrier_gateway(self, &request),
+            "DeleteCarrierGateway" => lgw::delete_carrier_gateway(self, &request),
+            "DescribeCarrierGateways" => lgw::describe_carrier_gateways(self, &request),
+            "CreateCoipPool" => lgw::create_coip_pool(self, &request),
+            "DeleteCoipPool" => lgw::delete_coip_pool(self, &request),
+            "DescribeCoipPools" => lgw::describe_coip_pools(self, &request),
+            "CreateCoipCidr" => lgw::create_coip_cidr(self, &request),
+            "DeleteCoipCidr" => lgw::delete_coip_cidr(self, &request),
+            "GetCoipPoolUsage" => lgw::get_coip_pool_usage(self, &request),
+            "CreateLocalGatewayRouteTable" => lgw::create_local_gateway_route_table(self, &request),
+            "DeleteLocalGatewayRouteTable" => lgw::delete_local_gateway_route_table(self, &request),
+            "DescribeLocalGatewayRouteTables" => {
+                lgw::describe_local_gateway_route_tables(self, &request)
+            }
+            "CreateLocalGatewayRoute" => lgw::create_local_gateway_route(self, &request),
+            "DeleteLocalGatewayRoute" => lgw::delete_local_gateway_route(self, &request),
+            "ModifyLocalGatewayRoute" => lgw::modify_local_gateway_route(self, &request),
+            "SearchLocalGatewayRoutes" => lgw::search_local_gateway_routes(self, &request),
+            "CreateLocalGatewayRouteTableVpcAssociation" => {
+                lgw::create_local_gateway_route_table_vpc_association(self, &request)
+            }
+            "DeleteLocalGatewayRouteTableVpcAssociation" => {
+                lgw::delete_local_gateway_route_table_vpc_association(self, &request)
+            }
+            "DescribeLocalGatewayRouteTableVpcAssociations" => {
+                lgw::describe_local_gateway_route_table_vpc_associations(self, &request)
+            }
+            "CreateLocalGatewayVirtualInterface" => {
+                lgw::create_local_gateway_virtual_interface(self, &request)
+            }
+            "DeleteLocalGatewayVirtualInterface" => {
+                lgw::delete_local_gateway_virtual_interface(self, &request)
+            }
+            "DescribeLocalGatewayVirtualInterfaces" => {
+                lgw::describe_local_gateway_virtual_interfaces(self, &request)
+            }
+            "CreateLocalGatewayVirtualInterfaceGroup" => {
+                lgw::create_local_gateway_virtual_interface_group(self, &request)
+            }
+            "DeleteLocalGatewayVirtualInterfaceGroup" => {
+                lgw::delete_local_gateway_virtual_interface_group(self, &request)
+            }
+            "DescribeLocalGatewayVirtualInterfaceGroups" => {
+                lgw::describe_local_gateway_virtual_interface_groups(self, &request)
+            }
+            "CreateLocalGatewayRouteTableVirtualInterfaceGroupAssociation" => {
+                lgw::create_local_gateway_route_table_virtual_interface_group_association(
+                    self, &request,
+                )
+            }
+            "DeleteLocalGatewayRouteTableVirtualInterfaceGroupAssociation" => {
+                lgw::delete_local_gateway_route_table_virtual_interface_group_association(
+                    self, &request,
+                )
+            }
+            "DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations" => {
+                lgw::describe_local_gateway_route_table_virtual_interface_group_associations(
+                    self, &request,
+                )
+            }
+            "DescribeLocalGateways" => lgw::describe_local_gateways(self, &request),
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

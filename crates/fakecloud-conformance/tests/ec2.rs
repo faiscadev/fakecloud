@@ -9615,3 +9615,594 @@ async fn ec2_get_network_insights_access_scope_analysis_findings() {
         Some(a.as_str())
     );
 }
+
+// ---- local gateway / outpost / coip ----
+
+async fn make_lgrt(c: &aws_sdk_ec2::Client) -> String {
+    c.create_local_gateway_route_table()
+        .local_gateway_id("lgw-1")
+        .send()
+        .await
+        .unwrap()
+        .local_gateway_route_table()
+        .unwrap()
+        .local_gateway_route_table_id()
+        .unwrap()
+        .to_string()
+}
+async fn make_vifg(c: &aws_sdk_ec2::Client) -> String {
+    c.create_local_gateway_virtual_interface_group()
+        .local_gateway_id("lgw-1")
+        .send()
+        .await
+        .unwrap()
+        .local_gateway_virtual_interface_group()
+        .unwrap()
+        .local_gateway_virtual_interface_group_id()
+        .unwrap()
+        .to_string()
+}
+
+#[test_action("ec2", "CreateCarrierGateway", checksum = "d0d31b02")]
+#[tokio::test]
+async fn ec2_create_carrier_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_carrier_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .carrier_gateway()
+        .unwrap()
+        .carrier_gateway_id()
+        .unwrap()
+        .starts_with("cagw-"));
+}
+
+#[test_action("ec2", "DescribeCarrierGateways", checksum = "4508ce3f")]
+#[tokio::test]
+async fn ec2_describe_carrier_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_carrier_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_carrier_gateways().send().await.unwrap();
+    assert!(!r.carrier_gateways().is_empty());
+}
+
+#[test_action("ec2", "DeleteCarrierGateway", checksum = "c8a1e4a5")]
+#[tokio::test]
+async fn ec2_delete_carrier_gateway() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_carrier_gateway()
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .carrier_gateway()
+        .unwrap()
+        .carrier_gateway_id()
+        .unwrap()
+        .to_string();
+    c.delete_carrier_gateway()
+        .carrier_gateway_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateCoipPool", checksum = "6ae7afd8")]
+#[tokio::test]
+async fn ec2_create_coip_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .create_coip_pool()
+        .local_gateway_route_table_id("lgw-rtb-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.coip_pool().is_some());
+}
+
+#[test_action("ec2", "DescribeCoipPools", checksum = "c0695b56")]
+#[tokio::test]
+async fn ec2_describe_coip_pools() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    c.create_coip_pool()
+        .local_gateway_route_table_id("lgw-rtb-1")
+        .send()
+        .await
+        .unwrap();
+    let r = c.describe_coip_pools().send().await.unwrap();
+    assert!(!r.coip_pools().is_empty());
+}
+
+#[test_action("ec2", "DeleteCoipPool", checksum = "be24433b")]
+#[tokio::test]
+async fn ec2_delete_coip_pool() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_coip_pool()
+        .local_gateway_route_table_id("lgw-rtb-1")
+        .send()
+        .await
+        .unwrap()
+        .coip_pool()
+        .unwrap()
+        .pool_id()
+        .unwrap()
+        .to_string();
+    c.delete_coip_pool().coip_pool_id(&id).send().await.unwrap();
+}
+
+#[test_action("ec2", "CreateCoipCidr", checksum = "56c01e87")]
+#[tokio::test]
+async fn ec2_create_coip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_coip_pool()
+        .local_gateway_route_table_id("lgw-rtb-1")
+        .send()
+        .await
+        .unwrap()
+        .coip_pool()
+        .unwrap()
+        .pool_id()
+        .unwrap()
+        .to_string();
+    let r = c
+        .create_coip_cidr()
+        .cidr("10.0.0.0/24")
+        .coip_pool_id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.coip_cidr().is_some());
+}
+
+#[test_action("ec2", "DeleteCoipCidr", checksum = "095a80a5")]
+#[tokio::test]
+async fn ec2_delete_coip_cidr() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = c
+        .create_coip_pool()
+        .local_gateway_route_table_id("lgw-rtb-1")
+        .send()
+        .await
+        .unwrap()
+        .coip_pool()
+        .unwrap()
+        .pool_id()
+        .unwrap()
+        .to_string();
+    c.create_coip_cidr()
+        .cidr("10.0.0.0/24")
+        .coip_pool_id(&id)
+        .send()
+        .await
+        .unwrap();
+    c.delete_coip_cidr()
+        .cidr("10.0.0.0/24")
+        .coip_pool_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "GetCoipPoolUsage", checksum = "959a2c31")]
+#[tokio::test]
+async fn ec2_get_coip_pool_usage() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c
+        .get_coip_pool_usage()
+        .pool_id("ipv4pool-coip-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.coip_pool_id(), Some("ipv4pool-coip-1"));
+}
+
+#[test_action("ec2", "CreateLocalGatewayRouteTable", checksum = "aefa7f05")]
+#[tokio::test]
+async fn ec2_create_local_gateway_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lgrt(&c).await;
+    assert!(id.starts_with("lgw-rtb-"));
+}
+
+#[test_action("ec2", "DescribeLocalGatewayRouteTables", checksum = "b3d081da")]
+#[tokio::test]
+async fn ec2_describe_local_gateway_route_tables() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_lgrt(&c).await;
+    let r = c
+        .describe_local_gateway_route_tables()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.local_gateway_route_tables().is_empty());
+}
+
+#[test_action("ec2", "DeleteLocalGatewayRouteTable", checksum = "ad6b3025")]
+#[tokio::test]
+async fn ec2_delete_local_gateway_route_table() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_lgrt(&c).await;
+    c.delete_local_gateway_route_table()
+        .local_gateway_route_table_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateLocalGatewayRoute", checksum = "37808a0c")]
+#[tokio::test]
+async fn ec2_create_local_gateway_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let r = c
+        .create_local_gateway_route()
+        .local_gateway_route_table_id(&rt)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.route().is_some());
+}
+
+#[test_action("ec2", "DeleteLocalGatewayRoute", checksum = "da5e2d52")]
+#[tokio::test]
+async fn ec2_delete_local_gateway_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    c.create_local_gateway_route()
+        .local_gateway_route_table_id(&rt)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .delete_local_gateway_route()
+        .local_gateway_route_table_id(&rt)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.route().is_some());
+}
+
+#[test_action("ec2", "ModifyLocalGatewayRoute", checksum = "0b8a7aa2")]
+#[tokio::test]
+async fn ec2_modify_local_gateway_route() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let r = c
+        .modify_local_gateway_route()
+        .local_gateway_route_table_id(&rt)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.route().is_some());
+}
+
+#[test_action("ec2", "SearchLocalGatewayRoutes", checksum = "1553e86c")]
+#[tokio::test]
+async fn ec2_search_local_gateway_routes() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    c.create_local_gateway_route()
+        .local_gateway_route_table_id(&rt)
+        .destination_cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .search_local_gateway_routes()
+        .local_gateway_route_table_id(&rt)
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.routes().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "CreateLocalGatewayRouteTableVpcAssociation",
+    checksum = "d60005c1"
+)]
+#[tokio::test]
+async fn ec2_create_local_gateway_route_table_vpc_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let r = c
+        .create_local_gateway_route_table_vpc_association()
+        .local_gateway_route_table_id(&rt)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.local_gateway_route_table_vpc_association().is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeLocalGatewayRouteTableVpcAssociations",
+    checksum = "2cbe006a"
+)]
+#[tokio::test]
+async fn ec2_describe_local_gateway_route_table_vpc_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    c.create_local_gateway_route_table_vpc_association()
+        .local_gateway_route_table_id(&rt)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_local_gateway_route_table_vpc_associations()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.local_gateway_route_table_vpc_associations().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteLocalGatewayRouteTableVpcAssociation",
+    checksum = "9c2b6b3c"
+)]
+#[tokio::test]
+async fn ec2_delete_local_gateway_route_table_vpc_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let id = c
+        .create_local_gateway_route_table_vpc_association()
+        .local_gateway_route_table_id(&rt)
+        .vpc_id("vpc-1")
+        .send()
+        .await
+        .unwrap()
+        .local_gateway_route_table_vpc_association()
+        .unwrap()
+        .local_gateway_route_table_vpc_association_id()
+        .unwrap()
+        .to_string();
+    c.delete_local_gateway_route_table_vpc_association()
+        .local_gateway_route_table_vpc_association_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "CreateLocalGatewayVirtualInterface", checksum = "fe0cd2d7")]
+#[tokio::test]
+async fn ec2_create_local_gateway_virtual_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let g = make_vifg(&c).await;
+    let r = c
+        .create_local_gateway_virtual_interface()
+        .local_gateway_virtual_interface_group_id(&g)
+        .outpost_lag_id("ola-1")
+        .vlan(100)
+        .local_address("10.0.0.1")
+        .peer_address("10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    assert!(r.local_gateway_virtual_interface().is_some());
+}
+
+#[test_action("ec2", "DescribeLocalGatewayVirtualInterfaces", checksum = "cab4e48c")]
+#[tokio::test]
+async fn ec2_describe_local_gateway_virtual_interfaces() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let g = make_vifg(&c).await;
+    c.create_local_gateway_virtual_interface()
+        .local_gateway_virtual_interface_group_id(&g)
+        .outpost_lag_id("ola-1")
+        .vlan(100)
+        .local_address("10.0.0.1")
+        .peer_address("10.0.0.2")
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_local_gateway_virtual_interfaces()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.local_gateway_virtual_interfaces().is_empty());
+}
+
+#[test_action("ec2", "DeleteLocalGatewayVirtualInterface", checksum = "ccfd27a9")]
+#[tokio::test]
+async fn ec2_delete_local_gateway_virtual_interface() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let g = make_vifg(&c).await;
+    let id = c
+        .create_local_gateway_virtual_interface()
+        .local_gateway_virtual_interface_group_id(&g)
+        .outpost_lag_id("ola-1")
+        .vlan(100)
+        .local_address("10.0.0.1")
+        .peer_address("10.0.0.2")
+        .send()
+        .await
+        .unwrap()
+        .local_gateway_virtual_interface()
+        .unwrap()
+        .local_gateway_virtual_interface_id()
+        .unwrap()
+        .to_string();
+    c.delete_local_gateway_virtual_interface()
+        .local_gateway_virtual_interface_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "CreateLocalGatewayVirtualInterfaceGroup",
+    checksum = "797074d8"
+)]
+#[tokio::test]
+async fn ec2_create_local_gateway_virtual_interface_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vifg(&c).await;
+    assert!(id.starts_with("lgw-vif-grp-"));
+}
+
+#[test_action(
+    "ec2",
+    "DescribeLocalGatewayVirtualInterfaceGroups",
+    checksum = "d8875d7a"
+)]
+#[tokio::test]
+async fn ec2_describe_local_gateway_virtual_interface_groups() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    make_vifg(&c).await;
+    let r = c
+        .describe_local_gateway_virtual_interface_groups()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r.local_gateway_virtual_interface_groups().is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteLocalGatewayVirtualInterfaceGroup",
+    checksum = "a6e75ff3"
+)]
+#[tokio::test]
+async fn ec2_delete_local_gateway_virtual_interface_group() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = make_vifg(&c).await;
+    c.delete_local_gateway_virtual_interface_group()
+        .local_gateway_virtual_interface_group_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ec2",
+    "CreateLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+    checksum = "db7084d2"
+)]
+#[tokio::test]
+async fn ec2_create_local_gateway_route_table_virtual_interface_group_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let g = make_vifg(&c).await;
+    let r = c
+        .create_local_gateway_route_table_virtual_interface_group_association()
+        .local_gateway_route_table_id(&rt)
+        .local_gateway_virtual_interface_group_id(&g)
+        .send()
+        .await
+        .unwrap();
+    assert!(r
+        .local_gateway_route_table_virtual_interface_group_association()
+        .is_some());
+}
+
+#[test_action(
+    "ec2",
+    "DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations",
+    checksum = "5917423b"
+)]
+#[tokio::test]
+async fn ec2_describe_local_gateway_route_table_virtual_interface_group_associations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let g = make_vifg(&c).await;
+    c.create_local_gateway_route_table_virtual_interface_group_association()
+        .local_gateway_route_table_id(&rt)
+        .local_gateway_virtual_interface_group_id(&g)
+        .send()
+        .await
+        .unwrap();
+    let r = c
+        .describe_local_gateway_route_table_virtual_interface_group_associations()
+        .send()
+        .await
+        .unwrap();
+    assert!(!r
+        .local_gateway_route_table_virtual_interface_group_associations()
+        .is_empty());
+}
+
+#[test_action(
+    "ec2",
+    "DeleteLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+    checksum = "41436d48"
+)]
+#[tokio::test]
+async fn ec2_delete_local_gateway_route_table_virtual_interface_group_association() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let rt = make_lgrt(&c).await;
+    let g = make_vifg(&c).await;
+    let id = c
+        .create_local_gateway_route_table_virtual_interface_group_association()
+        .local_gateway_route_table_id(&rt)
+        .local_gateway_virtual_interface_group_id(&g)
+        .send()
+        .await
+        .unwrap()
+        .local_gateway_route_table_virtual_interface_group_association()
+        .unwrap()
+        .local_gateway_route_table_virtual_interface_group_association_id()
+        .unwrap()
+        .to_string();
+    c.delete_local_gateway_route_table_virtual_interface_group_association()
+        .local_gateway_route_table_virtual_interface_group_association_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ec2", "DescribeLocalGateways", checksum = "56a8f2fa")]
+#[tokio::test]
+async fn ec2_describe_local_gateways() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let r = c.describe_local_gateways().send().await.unwrap();
+    assert!(r.local_gateways().is_empty());
+}
