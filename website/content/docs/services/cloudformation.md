@@ -21,7 +21,7 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses. Templates 
 - **`Fn::If`** — evaluated inline anywhere a value can appear, including inside resource properties, output values, and nested intrinsics. The `AWS::NoValue` pseudo-parameter prunes the surrounding key.
 - **`Fn::And` / `Fn::Or`** — accept 1-10 sub-conditions and short-circuit on the first decisive value, matching AWS's documented evaluation order.
 - **Outputs** — `Outputs.*.Export.Name` registers entries in an account-wide exports registry; `Fn::ImportValue` substitutes them at provision time. Unknown export names fail the create/update with a `ValidationError` ("No export named X found"), and `DeleteStack` blocks while another live stack still imports an export.
-- **`Transform: AWS::Serverless-2016-10-31`** — SAM templates are expanded into native CloudFormation resources before provisioning: `AWS::Serverless::Function` -> `AWS::Lambda::Function` (+ role, event sources), `AWS::Serverless::Api` -> `AWS::ApiGateway::RestApi` + deployment, `AWS::Serverless::SimpleTable` -> `AWS::DynamoDB::Table`.
+- **`Transform: AWS::Serverless-2016-10-31`** — SAM templates are expanded into native CloudFormation resources before provisioning: `AWS::Serverless::Function` -> `AWS::Lambda::Function` (+ role, event sources), `AWS::Serverless::Api` -> `AWS::ApiGateway::RestApi` + deployment, `AWS::Serverless::HttpApi` -> `AWS::ApiGatewayV2::Api`, `AWS::Serverless::SimpleTable` -> `AWS::DynamoDB::Table`, `AWS::Serverless::LayerVersion` -> `AWS::Lambda::LayerVersion`, `AWS::Serverless::StateMachine` -> `AWS::StepFunctions::StateMachine`.
 
 ## Stack lifecycle
 
