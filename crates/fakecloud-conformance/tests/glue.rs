@@ -1261,12 +1261,12 @@ async fn schema_registry_lifecycle() {
 // Sessions and statements
 // ----------------------------------------------------------------------------
 
-#[test_action("glue", "CreateSession", checksum = "59577207")]
-#[test_action("glue", "GetSession", checksum = "ea3c2eef")]
-#[test_action("glue", "ListSessions", checksum = "850d2437")]
+#[test_action("glue", "CreateSession", checksum = "ffdec0fb")]
+#[test_action("glue", "GetSession", checksum = "eab70118")]
+#[test_action("glue", "ListSessions", checksum = "45116557")]
 #[test_action("glue", "StopSession", checksum = "17e56dd4")]
 #[test_action("glue", "DeleteSession", checksum = "c20b8b75")]
-#[test_action("glue", "RunStatement", checksum = "e34c7dfc")]
+#[test_action("glue", "RunStatement", checksum = "bac28d6f")]
 #[test_action("glue", "GetStatement", checksum = "c8531555")]
 #[test_action("glue", "ListStatements", checksum = "08d952fc")]
 #[test_action("glue", "CancelStatement", checksum = "c3d7db96")]

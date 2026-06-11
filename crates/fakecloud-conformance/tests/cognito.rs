@@ -7,7 +7,7 @@ use helpers::TestServer;
 // User Pool lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserPool", checksum = "42068aef")]
+#[test_action("cognito-idp", "CreateUserPool", checksum = "4c00e8ed")]
 #[tokio::test]
 async fn cognito_create_user_pool() {
     let server = TestServer::start().await;
@@ -25,7 +25,7 @@ async fn cognito_create_user_pool() {
     assert_eq!(pool.name().unwrap(), "conformance-pool");
 }
 
-#[test_action("cognito-idp", "DescribeUserPool", checksum = "974e2ffd")]
+#[test_action("cognito-idp", "DescribeUserPool", checksum = "30076cfd")]
 #[tokio::test]
 async fn cognito_describe_user_pool() {
     let server = TestServer::start().await;
@@ -48,7 +48,7 @@ async fn cognito_describe_user_pool() {
     assert_eq!(resp.user_pool().unwrap().name().unwrap(), "desc-pool");
 }
 
-#[test_action("cognito-idp", "UpdateUserPool", checksum = "556fb3e5")]
+#[test_action("cognito-idp", "UpdateUserPool", checksum = "08737566")]
 #[tokio::test]
 async fn cognito_update_user_pool() {
     let server = TestServer::start().await;
@@ -82,7 +82,7 @@ async fn cognito_update_user_pool() {
     );
 }
 
-#[test_action("cognito-idp", "DeleteUserPool", checksum = "b1e5f200")]
+#[test_action("cognito-idp", "DeleteUserPool", checksum = "07b42911")]
 #[tokio::test]
 async fn cognito_delete_user_pool() {
     let server = TestServer::start().await;
@@ -113,7 +113,7 @@ async fn cognito_delete_user_pool() {
     assert!(svc_err.is_resource_not_found_exception());
 }
 
-#[test_action("cognito-idp", "ListUserPools", checksum = "f67b8722")]
+#[test_action("cognito-idp", "ListUserPools", checksum = "2c97ea7e")]
 #[tokio::test]
 async fn cognito_list_user_pools() {
     let server = TestServer::start().await;
@@ -145,7 +145,7 @@ async fn cognito_list_user_pools() {
 // User Pool Client lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserPoolClient", checksum = "74d65959")]
+#[test_action("cognito-idp", "CreateUserPoolClient", checksum = "c4263428")]
 #[tokio::test]
 async fn cognito_create_user_pool_client() {
     let server = TestServer::start().await;
@@ -171,7 +171,7 @@ async fn cognito_create_user_pool_client() {
     assert_eq!(upc.client_name().unwrap(), "test-client");
 }
 
-#[test_action("cognito-idp", "DescribeUserPoolClient", checksum = "7dc2fb48")]
+#[test_action("cognito-idp", "DescribeUserPoolClient", checksum = "a428104e")]
 #[tokio::test]
 async fn cognito_describe_user_pool_client() {
     let server = TestServer::start().await;
@@ -212,7 +212,7 @@ async fn cognito_describe_user_pool_client() {
     );
 }
 
-#[test_action("cognito-idp", "UpdateUserPoolClient", checksum = "8ba26c73")]
+#[test_action("cognito-idp", "UpdateUserPoolClient", checksum = "0b91a14f")]
 #[tokio::test]
 async fn cognito_update_user_pool_client() {
     let server = TestServer::start().await;
@@ -262,7 +262,7 @@ async fn cognito_update_user_pool_client() {
     );
 }
 
-#[test_action("cognito-idp", "DeleteUserPoolClient", checksum = "954e5fa3")]
+#[test_action("cognito-idp", "DeleteUserPoolClient", checksum = "267926e7")]
 #[tokio::test]
 async fn cognito_delete_user_pool_client() {
     let server = TestServer::start().await;
@@ -308,7 +308,7 @@ async fn cognito_delete_user_pool_client() {
     assert!(err.into_service_error().is_resource_not_found_exception());
 }
 
-#[test_action("cognito-idp", "ListUserPoolClients", checksum = "3946c12e")]
+#[test_action("cognito-idp", "ListUserPoolClients", checksum = "c7688454")]
 #[tokio::test]
 async fn cognito_list_user_pool_clients() {
     let server = TestServer::start().await;
@@ -351,7 +351,7 @@ async fn cognito_list_user_pool_clients() {
 // User management
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AdminCreateUser", checksum = "59b00da9")]
+#[test_action("cognito-idp", "AdminCreateUser", checksum = "f3b0a83f")]
 #[tokio::test]
 async fn cognito_admin_create_user() {
     let server = TestServer::start().await;
@@ -383,7 +383,7 @@ async fn cognito_admin_create_user() {
     assert_eq!(user.username().unwrap(), "testuser");
 }
 
-#[test_action("cognito-idp", "AdminGetUser", checksum = "07298034")]
+#[test_action("cognito-idp", "AdminGetUser", checksum = "4570f5b6")]
 #[tokio::test]
 async fn cognito_admin_get_user() {
     let server = TestServer::start().await;
@@ -415,7 +415,7 @@ async fn cognito_admin_get_user() {
     assert_eq!(resp.username(), "getme");
 }
 
-#[test_action("cognito-idp", "AdminDeleteUser", checksum = "df0f38e1")]
+#[test_action("cognito-idp", "AdminDeleteUser", checksum = "401ae1dd")]
 #[tokio::test]
 async fn cognito_admin_delete_user() {
     let server = TestServer::start().await;
@@ -455,7 +455,7 @@ async fn cognito_admin_delete_user() {
     assert!(err.into_service_error().is_user_not_found_exception());
 }
 
-#[test_action("cognito-idp", "AdminDisableUser", checksum = "dea29c0e")]
+#[test_action("cognito-idp", "AdminDisableUser", checksum = "f326b65f")]
 #[tokio::test]
 async fn cognito_admin_disable_user() {
     let server = TestServer::start().await;
@@ -495,7 +495,7 @@ async fn cognito_admin_disable_user() {
     assert!(!resp.enabled());
 }
 
-#[test_action("cognito-idp", "AdminEnableUser", checksum = "4bf631d2")]
+#[test_action("cognito-idp", "AdminEnableUser", checksum = "f469b798")]
 #[tokio::test]
 async fn cognito_admin_enable_user() {
     let server = TestServer::start().await;
@@ -543,7 +543,7 @@ async fn cognito_admin_enable_user() {
     assert!(resp.enabled());
 }
 
-#[test_action("cognito-idp", "AdminUpdateUserAttributes", checksum = "52c6f704")]
+#[test_action("cognito-idp", "AdminUpdateUserAttributes", checksum = "d6dd29aa")]
 #[tokio::test]
 async fn cognito_admin_update_user_attributes() {
     let server = TestServer::start().await;
@@ -595,7 +595,7 @@ async fn cognito_admin_update_user_attributes() {
     assert_eq!(email.value().unwrap(), "new@example.com");
 }
 
-#[test_action("cognito-idp", "AdminDeleteUserAttributes", checksum = "b27f67be")]
+#[test_action("cognito-idp", "AdminDeleteUserAttributes", checksum = "c0bccf0b")]
 #[tokio::test]
 async fn cognito_admin_delete_user_attributes() {
     let server = TestServer::start().await;
@@ -643,7 +643,7 @@ async fn cognito_admin_delete_user_attributes() {
     assert!(!resp.user_attributes().iter().any(|a| a.name() == "email"));
 }
 
-#[test_action("cognito-idp", "ListUsers", checksum = "3bf0c621")]
+#[test_action("cognito-idp", "ListUsers", checksum = "0540e20d")]
 #[tokio::test]
 async fn cognito_list_users() {
     let server = TestServer::start().await;
@@ -685,7 +685,7 @@ async fn cognito_list_users() {
 // Authentication
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AdminSetUserPassword", checksum = "d903c3d1")]
+#[test_action("cognito-idp", "AdminSetUserPassword", checksum = "20c0f335")]
 #[tokio::test]
 async fn cognito_admin_set_user_password() {
     let server = TestServer::start().await;
@@ -727,7 +727,7 @@ async fn cognito_admin_set_user_password() {
     assert_eq!(user.user_status().unwrap().as_str(), "CONFIRMED");
 }
 
-#[test_action("cognito-idp", "AdminInitiateAuth", checksum = "8890cfdf")]
+#[test_action("cognito-idp", "AdminInitiateAuth", checksum = "4434e3cf")]
 #[tokio::test]
 async fn cognito_admin_initiate_auth() {
     let server = TestServer::start().await;
@@ -799,7 +799,7 @@ async fn cognito_admin_initiate_auth() {
         .is_some());
 }
 
-#[test_action("cognito-idp", "InitiateAuth", checksum = "f2d9f8ac")]
+#[test_action("cognito-idp", "InitiateAuth", checksum = "66f062ec")]
 #[tokio::test]
 async fn cognito_initiate_auth() {
     let server = TestServer::start().await;
@@ -859,8 +859,8 @@ async fn cognito_initiate_auth() {
     assert!(resp.authentication_result().unwrap().id_token().is_some());
 }
 
-#[test_action("cognito-idp", "AdminRespondToAuthChallenge", checksum = "6f8ae02b")]
-#[test_action("cognito-idp", "RespondToAuthChallenge", checksum = "4059d3bd")]
+#[test_action("cognito-idp", "AdminRespondToAuthChallenge", checksum = "4b5be1a2")]
+#[test_action("cognito-idp", "RespondToAuthChallenge", checksum = "9019fe55")]
 #[tokio::test]
 async fn cognito_respond_to_auth_challenge() {
     let server = TestServer::start().await;
@@ -934,8 +934,8 @@ async fn cognito_respond_to_auth_challenge() {
     assert!(resp2.authentication_result().unwrap().id_token().is_some());
 }
 
-#[test_action("cognito-idp", "SignUp", checksum = "295585cc")]
-#[test_action("cognito-idp", "ConfirmSignUp", checksum = "a2468bd2")]
+#[test_action("cognito-idp", "SignUp", checksum = "9c97e5a5")]
+#[test_action("cognito-idp", "ConfirmSignUp", checksum = "ea3c0f15")]
 #[tokio::test]
 async fn cognito_sign_up_and_confirm() {
     let server = TestServer::start().await;
@@ -1022,7 +1022,7 @@ async fn cognito_sign_up_and_confirm() {
         .is_some());
 }
 
-#[test_action("cognito-idp", "AdminConfirmSignUp", checksum = "e13b133c")]
+#[test_action("cognito-idp", "AdminConfirmSignUp", checksum = "ffedd19b")]
 #[tokio::test]
 async fn cognito_admin_confirm_sign_up() {
     let server = TestServer::start().await;
@@ -1081,7 +1081,7 @@ async fn cognito_admin_confirm_sign_up() {
 // Password & Session Management
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "ChangePassword", checksum = "037ca3c2")]
+#[test_action("cognito-idp", "ChangePassword", checksum = "a5cf7990")]
 #[tokio::test]
 async fn cognito_change_password() {
     let server = TestServer::start().await;
@@ -1177,8 +1177,8 @@ async fn cognito_change_password() {
     assert!(new_auth.is_ok(), "New password should work");
 }
 
-#[test_action("cognito-idp", "ForgotPassword", checksum = "e64c387b")]
-#[test_action("cognito-idp", "ConfirmForgotPassword", checksum = "1246f324")]
+#[test_action("cognito-idp", "ForgotPassword", checksum = "1dc8165d")]
+#[test_action("cognito-idp", "ConfirmForgotPassword", checksum = "a3ad1bf5")]
 #[tokio::test]
 async fn cognito_forgot_password_flow() {
     let server = TestServer::start().await;
@@ -1258,7 +1258,7 @@ async fn cognito_forgot_password_flow() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "AdminResetUserPassword", checksum = "00b62940")]
+#[test_action("cognito-idp", "AdminResetUserPassword", checksum = "674c0a3a")]
 #[tokio::test]
 async fn cognito_admin_reset_user_password() {
     let server = TestServer::start().await;
@@ -1307,7 +1307,7 @@ async fn cognito_admin_reset_user_password() {
     assert_eq!(user.user_status().unwrap().as_str(), "RESET_REQUIRED");
 }
 
-#[test_action("cognito-idp", "GlobalSignOut", checksum = "1b6afd7d")]
+#[test_action("cognito-idp", "GlobalSignOut", checksum = "8a3861c9")]
 #[tokio::test]
 async fn cognito_global_sign_out() {
     let server = TestServer::start().await;
@@ -1392,7 +1392,7 @@ async fn cognito_global_sign_out() {
     );
 }
 
-#[test_action("cognito-idp", "AdminUserGlobalSignOut", checksum = "8461322c")]
+#[test_action("cognito-idp", "AdminUserGlobalSignOut", checksum = "ad98619b")]
 #[tokio::test]
 async fn cognito_admin_user_global_sign_out() {
     let server = TestServer::start().await;
@@ -1486,7 +1486,7 @@ async fn cognito_admin_user_global_sign_out() {
 // Groups
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateGroup", checksum = "8458f036")]
+#[test_action("cognito-idp", "CreateGroup", checksum = "68165fcc")]
 #[tokio::test]
 async fn cognito_create_group() {
     let server = TestServer::start().await;
@@ -1515,7 +1515,7 @@ async fn cognito_create_group() {
     assert_eq!(group.precedence().unwrap(), 1);
 }
 
-#[test_action("cognito-idp", "GetGroup", checksum = "a81d68fe")]
+#[test_action("cognito-idp", "GetGroup", checksum = "276d9dca")]
 #[tokio::test]
 async fn cognito_get_group() {
     let server = TestServer::start().await;
@@ -1547,7 +1547,7 @@ async fn cognito_get_group() {
     assert_eq!(resp.group().unwrap().group_name().unwrap(), "readers");
 }
 
-#[test_action("cognito-idp", "UpdateGroup", checksum = "8c9b60d7")]
+#[test_action("cognito-idp", "UpdateGroup", checksum = "d3badba3")]
 #[tokio::test]
 async fn cognito_update_group() {
     let server = TestServer::start().await;
@@ -1593,7 +1593,7 @@ async fn cognito_update_group() {
     assert_eq!(resp.group().unwrap().precedence().unwrap(), 5);
 }
 
-#[test_action("cognito-idp", "DeleteGroup", checksum = "ac33ddbb")]
+#[test_action("cognito-idp", "DeleteGroup", checksum = "4d6720b4")]
 #[tokio::test]
 async fn cognito_delete_group() {
     let server = TestServer::start().await;
@@ -1633,7 +1633,7 @@ async fn cognito_delete_group() {
     assert!(err.into_service_error().is_resource_not_found_exception());
 }
 
-#[test_action("cognito-idp", "ListGroups", checksum = "75858aba")]
+#[test_action("cognito-idp", "ListGroups", checksum = "7be1ea3b")]
 #[tokio::test]
 async fn cognito_list_groups() {
     let server = TestServer::start().await;
@@ -1671,8 +1671,8 @@ async fn cognito_list_groups() {
     assert_eq!(resp.groups().len(), 2);
 }
 
-#[test_action("cognito-idp", "AdminAddUserToGroup", checksum = "5fec870a")]
-#[test_action("cognito-idp", "AdminRemoveUserFromGroup", checksum = "90421bbd")]
+#[test_action("cognito-idp", "AdminAddUserToGroup", checksum = "e53c0329")]
+#[test_action("cognito-idp", "AdminRemoveUserFromGroup", checksum = "bde7dec1")]
 #[tokio::test]
 async fn cognito_admin_add_remove_user_to_group() {
     let server = TestServer::start().await;
@@ -1738,7 +1738,7 @@ async fn cognito_admin_add_remove_user_to_group() {
     assert!(users2.users().is_empty());
 }
 
-#[test_action("cognito-idp", "AdminListGroupsForUser", checksum = "ab20831c")]
+#[test_action("cognito-idp", "AdminListGroupsForUser", checksum = "1bade03b")]
 #[tokio::test]
 async fn cognito_admin_list_groups_for_user() {
     let server = TestServer::start().await;
@@ -1801,7 +1801,7 @@ async fn cognito_admin_list_groups_for_user() {
     assert_eq!(resp.groups().len(), 2);
 }
 
-#[test_action("cognito-idp", "ListUsersInGroup", checksum = "c3ee8bcd")]
+#[test_action("cognito-idp", "ListUsersInGroup", checksum = "8a5ef5f5")]
 #[tokio::test]
 async fn cognito_list_users_in_group() {
     let server = TestServer::start().await;
@@ -1934,7 +1934,7 @@ async fn setup_authenticated_user(
     (pool_id, client_id, access_token)
 }
 
-#[test_action("cognito-idp", "GetUser", checksum = "43ac140c")]
+#[test_action("cognito-idp", "GetUser", checksum = "95893ea2")]
 #[tokio::test]
 async fn cognito_get_user_self() {
     let server = TestServer::start().await;
@@ -1951,7 +1951,7 @@ async fn cognito_get_user_self() {
     assert_eq!(resp.username(), "selfuser");
 }
 
-#[test_action("cognito-idp", "DeleteUser", checksum = "f81d91ec")]
+#[test_action("cognito-idp", "DeleteUser", checksum = "1e9caf12")]
 #[tokio::test]
 async fn cognito_delete_user_self() {
     let server = TestServer::start().await;
@@ -1975,8 +1975,8 @@ async fn cognito_delete_user_self() {
     assert!(err.into_service_error().is_not_authorized_exception());
 }
 
-#[test_action("cognito-idp", "UpdateUserAttributes", checksum = "23608e20")]
-#[test_action("cognito-idp", "DeleteUserAttributes", checksum = "f40bb25d")]
+#[test_action("cognito-idp", "UpdateUserAttributes", checksum = "3376fbce")]
+#[test_action("cognito-idp", "DeleteUserAttributes", checksum = "d352119a")]
 #[tokio::test]
 async fn cognito_update_delete_user_attributes_self() {
     let server = TestServer::start().await;
@@ -2029,9 +2029,9 @@ async fn cognito_update_delete_user_attributes_self() {
 #[test_action(
     "cognito-idp",
     "GetUserAttributeVerificationCode",
-    checksum = "717d600d"
+    checksum = "88633ea1"
 )]
-#[test_action("cognito-idp", "VerifyUserAttribute", checksum = "fc368ddf")]
+#[test_action("cognito-idp", "VerifyUserAttribute", checksum = "29f55aeb")]
 #[tokio::test]
 async fn cognito_verify_user_attribute() {
     let server = TestServer::start().await;
@@ -2099,7 +2099,7 @@ async fn cognito_verify_user_attribute() {
         .any(|a| a.name() == "email_verified" && a.value() == Some("true")));
 }
 
-#[test_action("cognito-idp", "ResendConfirmationCode", checksum = "7cece340")]
+#[test_action("cognito-idp", "ResendConfirmationCode", checksum = "26498fd8")]
 #[tokio::test]
 async fn cognito_resend_confirmation_code() {
     let server = TestServer::start().await;
@@ -2150,7 +2150,7 @@ async fn cognito_resend_confirmation_code() {
 // MFA / Software Tokens
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "5088405f")]
+#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "ede6d026")]
 #[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "685386f6")]
 #[tokio::test]
 async fn cognito_set_get_user_pool_mfa_config() {
@@ -2190,7 +2190,7 @@ async fn cognito_set_get_user_pool_mfa_config() {
     );
 }
 
-#[test_action("cognito-idp", "AdminSetUserMFAPreference", checksum = "98a9d568")]
+#[test_action("cognito-idp", "AdminSetUserMFAPreference", checksum = "2f88211c")]
 #[tokio::test]
 async fn cognito_admin_set_user_mfa_preference() {
     let server = TestServer::start().await;
@@ -2227,7 +2227,7 @@ async fn cognito_admin_set_user_mfa_preference() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "SetUserMFAPreference", checksum = "a6f56143")]
+#[test_action("cognito-idp", "SetUserMFAPreference", checksum = "db2033b6")]
 #[tokio::test]
 async fn cognito_set_user_mfa_preference() {
     let server = TestServer::start().await;
@@ -2249,8 +2249,8 @@ async fn cognito_set_user_mfa_preference() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "AssociateSoftwareToken", checksum = "d4a0b55a")]
-#[test_action("cognito-idp", "VerifySoftwareToken", checksum = "a56ac88e")]
+#[test_action("cognito-idp", "AssociateSoftwareToken", checksum = "b926df4c")]
+#[test_action("cognito-idp", "VerifySoftwareToken", checksum = "08e97a2d")]
 #[tokio::test]
 async fn cognito_associate_verify_software_token() {
     let server = TestServer::start().await;
@@ -2482,8 +2482,8 @@ async fn cognito_list_identity_providers() {
 // Resource Servers & Domains
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateResourceServer", checksum = "b97cc403")]
-#[test_action("cognito-idp", "DescribeResourceServer", checksum = "67f1b947")]
+#[test_action("cognito-idp", "CreateResourceServer", checksum = "aec2b115")]
+#[test_action("cognito-idp", "DescribeResourceServer", checksum = "da393bfc")]
 #[tokio::test]
 async fn cognito_create_describe_resource_server() {
     let server = TestServer::start().await;
@@ -2530,8 +2530,8 @@ async fn cognito_create_describe_resource_server() {
     );
 }
 
-#[test_action("cognito-idp", "UpdateResourceServer", checksum = "5e9ce1ee")]
-#[test_action("cognito-idp", "DeleteResourceServer", checksum = "ad92e082")]
+#[test_action("cognito-idp", "UpdateResourceServer", checksum = "13d16448")]
+#[test_action("cognito-idp", "DeleteResourceServer", checksum = "2a2d3226")]
 #[tokio::test]
 async fn cognito_update_delete_resource_server() {
     let server = TestServer::start().await;
@@ -2593,7 +2593,7 @@ async fn cognito_update_delete_resource_server() {
     assert!(err.into_service_error().is_resource_not_found_exception());
 }
 
-#[test_action("cognito-idp", "ListResourceServers", checksum = "5c4ebddb")]
+#[test_action("cognito-idp", "ListResourceServers", checksum = "a66f2d71")]
 #[tokio::test]
 async fn cognito_list_resource_servers() {
     let server = TestServer::start().await;
@@ -2634,8 +2634,8 @@ async fn cognito_list_resource_servers() {
     assert_eq!(resp.resource_servers().len(), 2);
 }
 
-#[test_action("cognito-idp", "CreateUserPoolDomain", checksum = "28b91b3c")]
-#[test_action("cognito-idp", "DescribeUserPoolDomain", checksum = "6ecd5522")]
+#[test_action("cognito-idp", "CreateUserPoolDomain", checksum = "938b663d")]
+#[test_action("cognito-idp", "DescribeUserPoolDomain", checksum = "e48aafb2")]
 #[tokio::test]
 async fn cognito_create_describe_domain() {
     let server = TestServer::start().await;
@@ -2668,8 +2668,8 @@ async fn cognito_create_describe_domain() {
     assert_eq!(desc.user_pool_id().unwrap(), pool_id);
 }
 
-#[test_action("cognito-idp", "UpdateUserPoolDomain", checksum = "03177020")]
-#[test_action("cognito-idp", "DeleteUserPoolDomain", checksum = "f25ae5ad")]
+#[test_action("cognito-idp", "UpdateUserPoolDomain", checksum = "3e6f181d")]
+#[test_action("cognito-idp", "DeleteUserPoolDomain", checksum = "e2680fa9")]
 #[tokio::test]
 async fn cognito_update_delete_domain() {
     let server = TestServer::start().await;
@@ -2713,9 +2713,9 @@ async fn cognito_update_delete_domain() {
 // Device Management
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "ConfirmDevice", checksum = "d2285f4d")]
-#[test_action("cognito-idp", "AdminGetDevice", checksum = "b7ff3b4f")]
-#[test_action("cognito-idp", "AdminListDevices", checksum = "52c1799f")]
+#[test_action("cognito-idp", "ConfirmDevice", checksum = "103f44ff")]
+#[test_action("cognito-idp", "AdminGetDevice", checksum = "3e785fb7")]
+#[test_action("cognito-idp", "AdminListDevices", checksum = "ba73916f")]
 #[tokio::test]
 async fn cognito_device_lifecycle() {
     let server = TestServer::start().await;
@@ -2751,8 +2751,8 @@ async fn cognito_device_lifecycle() {
     assert_eq!(list.devices().len(), 1);
 }
 
-#[test_action("cognito-idp", "AdminUpdateDeviceStatus", checksum = "4c7d9838")]
-#[test_action("cognito-idp", "AdminForgetDevice", checksum = "3383fe72")]
+#[test_action("cognito-idp", "AdminUpdateDeviceStatus", checksum = "74f8d2bd")]
+#[test_action("cognito-idp", "AdminForgetDevice", checksum = "9e47cba9")]
 #[tokio::test]
 async fn cognito_admin_update_forget_device() {
     let server = TestServer::start().await;
@@ -2803,10 +2803,10 @@ async fn cognito_admin_update_forget_device() {
 // User-facing Device Operations
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "ForgetDevice", checksum = "b406e013")]
-#[test_action("cognito-idp", "GetDevice", checksum = "29875916")]
-#[test_action("cognito-idp", "ListDevices", checksum = "c3f85481")]
-#[test_action("cognito-idp", "UpdateDeviceStatus", checksum = "830e0020")]
+#[test_action("cognito-idp", "ForgetDevice", checksum = "4fc5e131")]
+#[test_action("cognito-idp", "GetDevice", checksum = "bcafc644")]
+#[test_action("cognito-idp", "ListDevices", checksum = "f6902dc2")]
+#[test_action("cognito-idp", "UpdateDeviceStatus", checksum = "c5909a54")]
 #[tokio::test]
 async fn cognito_user_device_ops() {
     let server = TestServer::start().await;
@@ -2875,7 +2875,7 @@ async fn cognito_user_device_ops() {
 // Token Operations
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "RevokeToken", checksum = "8874ade0")]
+#[test_action("cognito-idp", "RevokeToken", checksum = "762d4b3e")]
 #[tokio::test]
 async fn cognito_revoke_token() {
     let server = TestServer::start().await;
@@ -2910,7 +2910,7 @@ async fn cognito_revoke_token() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "GetTokensFromRefreshToken", checksum = "667ba23d")]
+#[test_action("cognito-idp", "GetTokensFromRefreshToken", checksum = "f07424cc")]
 #[tokio::test]
 async fn cognito_get_tokens_from_refresh_token() {
     let server = TestServer::start().await;
@@ -2956,9 +2956,9 @@ async fn cognito_get_tokens_from_refresh_token() {
 // Tags
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "TagResource", checksum = "b19b19ae")]
-#[test_action("cognito-idp", "UntagResource", checksum = "3bd5fe69")]
-#[test_action("cognito-idp", "ListTagsForResource", checksum = "a72e0056")]
+#[test_action("cognito-idp", "TagResource", checksum = "fa34152e")]
+#[test_action("cognito-idp", "UntagResource", checksum = "c59cc4ba")]
+#[test_action("cognito-idp", "ListTagsForResource", checksum = "b3ec5117")]
 #[tokio::test]
 async fn cognito_tag_untag_list() {
     let server = TestServer::start().await;
@@ -3014,9 +3014,9 @@ async fn cognito_tag_untag_list() {
 // Import Jobs
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserImportJob", checksum = "6cf3fba2")]
-#[test_action("cognito-idp", "DescribeUserImportJob", checksum = "1c8e4fe5")]
-#[test_action("cognito-idp", "ListUserImportJobs", checksum = "f4ef28a5")]
+#[test_action("cognito-idp", "CreateUserImportJob", checksum = "584bf0d4")]
+#[test_action("cognito-idp", "DescribeUserImportJob", checksum = "e5648858")]
+#[test_action("cognito-idp", "ListUserImportJobs", checksum = "02afb9e6")]
 #[tokio::test]
 async fn cognito_import_jobs() {
     let server = TestServer::start().await;
@@ -3064,7 +3064,7 @@ async fn cognito_import_jobs() {
     assert_eq!(list.user_import_jobs().len(), 1);
 }
 
-#[test_action("cognito-idp", "GetCSVHeader", checksum = "c4b2b3d1")]
+#[test_action("cognito-idp", "GetCSVHeader", checksum = "20d45741")]
 #[tokio::test]
 async fn cognito_get_csv_header() {
     let server = TestServer::start().await;
@@ -3092,7 +3092,7 @@ async fn cognito_get_csv_header() {
 // Legacy MFA Settings
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AdminSetUserSettings", checksum = "e9566291")]
+#[test_action("cognito-idp", "AdminSetUserSettings", checksum = "3e595369")]
 #[tokio::test]
 async fn cognito_admin_set_user_settings() {
     let server = TestServer::start().await;
@@ -3119,7 +3119,7 @@ async fn cognito_admin_set_user_settings() {
 // Custom Attributes
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AddCustomAttributes", checksum = "01878c7f")]
+#[test_action("cognito-idp", "AddCustomAttributes", checksum = "3c9470ee")]
 #[tokio::test]
 async fn cognito_add_custom_attributes() {
     let server = TestServer::start().await;
@@ -3150,7 +3150,7 @@ async fn cognito_add_custom_attributes() {
         .unwrap();
 }
 
-#[test_action("cognito-idp", "SetUserSettings", checksum = "dcf3e62f")]
+#[test_action("cognito-idp", "SetUserSettings", checksum = "9b075af2")]
 #[tokio::test]
 async fn cognito_set_user_settings() {
     let server = TestServer::start().await;
@@ -3176,8 +3176,8 @@ async fn cognito_set_user_settings() {
 // Provider Linking
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AdminLinkProviderForUser", checksum = "f709054a")]
-#[test_action("cognito-idp", "AdminDisableProviderForUser", checksum = "5e2a50fd")]
+#[test_action("cognito-idp", "AdminLinkProviderForUser", checksum = "5443dd21")]
+#[test_action("cognito-idp", "AdminDisableProviderForUser", checksum = "0adecdcc")]
 #[tokio::test]
 async fn cognito_admin_link_disable_provider() {
     let server = TestServer::start().await;
@@ -3225,9 +3225,9 @@ async fn cognito_admin_link_disable_provider() {
 // Auth Events
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "AdminListUserAuthEvents", checksum = "da6f6313")]
-#[test_action("cognito-idp", "AdminUpdateAuthEventFeedback", checksum = "581f73ed")]
-#[test_action("cognito-idp", "UpdateAuthEventFeedback", checksum = "3136afd3")]
+#[test_action("cognito-idp", "AdminListUserAuthEvents", checksum = "201b188e")]
+#[test_action("cognito-idp", "AdminUpdateAuthEventFeedback", checksum = "46b09574")]
+#[test_action("cognito-idp", "UpdateAuthEventFeedback", checksum = "cf33bd69")]
 #[tokio::test]
 async fn cognito_auth_events() {
     let server = TestServer::start().await;
@@ -3404,8 +3404,8 @@ async fn cognito_get_idp_by_identifier() {
 // Import Job State Transitions
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "StartUserImportJob", checksum = "3f2ac87b")]
-#[test_action("cognito-idp", "StopUserImportJob", checksum = "07546a5b")]
+#[test_action("cognito-idp", "StartUserImportJob", checksum = "203b5a53")]
+#[test_action("cognito-idp", "StopUserImportJob", checksum = "d81404ea")]
 #[tokio::test]
 async fn cognito_start_stop_import_job() {
     let server = TestServer::start().await;
@@ -3470,7 +3470,7 @@ async fn cognito_start_stop_import_job() {
 // GetUserAuthFactors
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "GetUserAuthFactors", checksum = "958af3b1")]
+#[test_action("cognito-idp", "GetUserAuthFactors", checksum = "bc93157c")]
 #[tokio::test]
 async fn cognito_get_user_auth_factors() {
     let server = TestServer::start().await;
@@ -3492,7 +3492,7 @@ async fn cognito_get_user_auth_factors() {
 // GetSigningCertificate
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "GetSigningCertificate", checksum = "03a117ae")]
+#[test_action("cognito-idp", "GetSigningCertificate", checksum = "81cfd4ff")]
 #[tokio::test]
 async fn cognito_get_signing_certificate() {
     let server = TestServer::start().await;
@@ -3519,7 +3519,7 @@ async fn cognito_get_signing_certificate() {
 // UI Customization
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "SetUICustomization", checksum = "27bc4b26")]
+#[test_action("cognito-idp", "SetUICustomization", checksum = "b0acd38d")]
 #[tokio::test]
 async fn cognito_set_ui_customization() {
     let server = TestServer::start().await;
@@ -3545,7 +3545,7 @@ async fn cognito_set_ui_customization() {
     assert_eq!(ui.css().unwrap(), "body { background: red; }");
 }
 
-#[test_action("cognito-idp", "GetUICustomization", checksum = "807d92dc")]
+#[test_action("cognito-idp", "GetUICustomization", checksum = "b57c5f0b")]
 #[tokio::test]
 async fn cognito_get_ui_customization() {
     let server = TestServer::start().await;
@@ -3669,7 +3669,7 @@ async fn cognito_get_log_delivery_configuration() {
 // Risk Configuration
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "SetRiskConfiguration", checksum = "f74ed3fe")]
+#[test_action("cognito-idp", "SetRiskConfiguration", checksum = "7f3c0ddb")]
 #[tokio::test]
 async fn cognito_set_risk_configuration() {
     let server = TestServer::start().await;
@@ -3699,7 +3699,7 @@ async fn cognito_set_risk_configuration() {
     assert_eq!(cfg.user_pool_id().unwrap(), pool_id);
 }
 
-#[test_action("cognito-idp", "DescribeRiskConfiguration", checksum = "da8ca179")]
+#[test_action("cognito-idp", "DescribeRiskConfiguration", checksum = "915fefb4")]
 #[tokio::test]
 async fn cognito_describe_risk_configuration() {
     let server = TestServer::start().await;
@@ -3751,7 +3751,7 @@ async fn cognito_describe_risk_configuration() {
 // Managed Login Branding
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateManagedLoginBranding", checksum = "cb913f30")]
+#[test_action("cognito-idp", "CreateManagedLoginBranding", checksum = "4412f295")]
 #[tokio::test]
 async fn cognito_create_managed_login_branding() {
     let server = TestServer::start().await;
@@ -3792,7 +3792,7 @@ async fn cognito_create_managed_login_branding() {
     assert_eq!(branding.user_pool_id().unwrap(), pool_id);
 }
 
-#[test_action("cognito-idp", "DescribeManagedLoginBranding", checksum = "078abe45")]
+#[test_action("cognito-idp", "DescribeManagedLoginBranding", checksum = "7ea0d6b0")]
 #[tokio::test]
 async fn cognito_describe_managed_login_branding() {
     let server = TestServer::start().await;
@@ -3850,7 +3850,7 @@ async fn cognito_describe_managed_login_branding() {
 #[test_action(
     "cognito-idp",
     "DescribeManagedLoginBrandingByClient",
-    checksum = "1614d8e7"
+    checksum = "02521cd6"
 )]
 #[tokio::test]
 async fn cognito_describe_managed_login_branding_by_client() {
@@ -3899,7 +3899,7 @@ async fn cognito_describe_managed_login_branding_by_client() {
     assert_eq!(b.user_pool_id().unwrap(), pool_id);
 }
 
-#[test_action("cognito-idp", "UpdateManagedLoginBranding", checksum = "efc1e7bb")]
+#[test_action("cognito-idp", "UpdateManagedLoginBranding", checksum = "03be3a62")]
 #[tokio::test]
 async fn cognito_update_managed_login_branding() {
     let server = TestServer::start().await;
@@ -3954,7 +3954,7 @@ async fn cognito_update_managed_login_branding() {
     assert_eq!(b.managed_login_branding_id().unwrap(), branding_id);
 }
 
-#[test_action("cognito-idp", "DeleteManagedLoginBranding", checksum = "7f018306")]
+#[test_action("cognito-idp", "DeleteManagedLoginBranding", checksum = "bcf8432a")]
 #[tokio::test]
 async fn cognito_delete_managed_login_branding() {
     let server = TestServer::start().await;
@@ -4019,7 +4019,7 @@ async fn cognito_delete_managed_login_branding() {
 // Terms
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateTerms", checksum = "90fa360e")]
+#[test_action("cognito-idp", "CreateTerms", checksum = "32a0a500")]
 #[tokio::test]
 async fn cognito_create_terms() {
     let server = TestServer::start().await;
@@ -4057,7 +4057,7 @@ async fn cognito_create_terms() {
     assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "test-terms");
 }
 
-#[test_action("cognito-idp", "DescribeTerms", checksum = "e32983f6")]
+#[test_action("cognito-idp", "DescribeTerms", checksum = "c9169b66")]
 #[tokio::test]
 async fn cognito_describe_terms() {
     let server = TestServer::start().await;
@@ -4115,7 +4115,7 @@ async fn cognito_describe_terms() {
     assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "desc-terms");
 }
 
-#[test_action("cognito-idp", "ListTerms", checksum = "86783ac4")]
+#[test_action("cognito-idp", "ListTerms", checksum = "29f404a6")]
 #[tokio::test]
 async fn cognito_list_terms() {
     let server = TestServer::start().await;
@@ -4167,7 +4167,7 @@ async fn cognito_list_terms() {
     assert_eq!(terms.len(), 2);
 }
 
-#[test_action("cognito-idp", "UpdateTerms", checksum = "831f5b6c")]
+#[test_action("cognito-idp", "UpdateTerms", checksum = "16058cfb")]
 #[tokio::test]
 async fn cognito_update_terms() {
     let server = TestServer::start().await;
@@ -4225,7 +4225,7 @@ async fn cognito_update_terms() {
     assert_eq!(body["Terms"]["TermsName"].as_str().unwrap(), "new-name");
 }
 
-#[test_action("cognito-idp", "DeleteTerms", checksum = "85c898a8")]
+#[test_action("cognito-idp", "DeleteTerms", checksum = "d3714831")]
 #[tokio::test]
 async fn cognito_delete_terms() {
     let server = TestServer::start().await;
@@ -4301,7 +4301,7 @@ async fn cognito_delete_terms() {
 // WebAuthn
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "StartWebAuthnRegistration", checksum = "372f550e")]
+#[test_action("cognito-idp", "StartWebAuthnRegistration", checksum = "a37f67b7")]
 #[tokio::test]
 async fn cognito_start_web_authn_registration() {
     let server = TestServer::start().await;
@@ -4333,7 +4333,7 @@ async fn cognito_start_web_authn_registration() {
     assert!(body["CredentialCreationOptions"]["user"].is_object());
 }
 
-#[test_action("cognito-idp", "CompleteWebAuthnRegistration", checksum = "f18b9292")]
+#[test_action("cognito-idp", "CompleteWebAuthnRegistration", checksum = "b4aa44c4")]
 #[tokio::test]
 async fn cognito_complete_web_authn_registration() {
     let server = TestServer::start().await;
@@ -4370,7 +4370,7 @@ async fn cognito_complete_web_authn_registration() {
     assert_eq!(resp.status(), 200);
 }
 
-#[test_action("cognito-idp", "ListWebAuthnCredentials", checksum = "e93ad619")]
+#[test_action("cognito-idp", "ListWebAuthnCredentials", checksum = "9d10948b")]
 #[tokio::test]
 async fn cognito_list_web_authn_credentials() {
     let server = TestServer::start().await;
@@ -4424,7 +4424,7 @@ async fn cognito_list_web_authn_credentials() {
     assert_eq!(creds[0]["CredentialId"].as_str().unwrap(), "list-cred-1");
 }
 
-#[test_action("cognito-idp", "DeleteWebAuthnCredential", checksum = "271bbdea")]
+#[test_action("cognito-idp", "DeleteWebAuthnCredential", checksum = "9beb2ce8")]
 #[tokio::test]
 async fn cognito_delete_web_authn_credential() {
     let server = TestServer::start().await;

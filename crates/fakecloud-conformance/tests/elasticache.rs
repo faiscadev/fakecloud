@@ -178,7 +178,7 @@ async fn elasticache_describe_reserved_cache_nodes_offerings() {
         .all(|offering| offering.duration() == Some(94_608_000)));
 }
 
-#[test_action("elasticache", "CreateReplicationGroup", checksum = "d97235ac")]
+#[test_action("elasticache", "CreateReplicationGroup", checksum = "7de8c760")]
 #[tokio::test]
 async fn elasticache_create_replication_group() {
     let server = TestServer::start().await;
@@ -254,7 +254,7 @@ async fn elasticache_create_cache_cluster() {
     assert_eq!(cluster.engine(), Some("redis"));
 }
 
-#[test_action("elasticache", "DescribeReplicationGroups", checksum = "70aa64c5")]
+#[test_action("elasticache", "DescribeReplicationGroups", checksum = "744d4d5b")]
 #[tokio::test]
 async fn elasticache_describe_replication_groups() {
     let server = TestServer::start().await;
@@ -352,7 +352,7 @@ async fn elasticache_describe_cache_clusters() {
     assert_eq!(clusters[0].cache_nodes().len(), 1);
 }
 
-#[test_action("elasticache", "DeleteReplicationGroup", checksum = "e3cec3b6")]
+#[test_action("elasticache", "DeleteReplicationGroup", checksum = "b55d09ff")]
 #[tokio::test]
 async fn elasticache_delete_replication_group() {
     let server = TestServer::start().await;
@@ -794,7 +794,7 @@ async fn elasticache_describe_cache_parameter_groups() {
     );
 }
 
-#[test_action("elasticache", "ModifyReplicationGroup", checksum = "df9899e6")]
+#[test_action("elasticache", "ModifyReplicationGroup", checksum = "a4a7bb07")]
 #[tokio::test]
 async fn elasticache_modify_replication_group() {
     let server = TestServer::start().await;
@@ -821,7 +821,7 @@ async fn elasticache_modify_replication_group() {
     assert_eq!(group.description(), Some("Updated description"));
 }
 
-#[test_action("elasticache", "IncreaseReplicaCount", checksum = "e5ca0f20")]
+#[test_action("elasticache", "IncreaseReplicaCount", checksum = "30f8a5d9")]
 #[tokio::test]
 async fn elasticache_increase_replica_count() {
     let server = TestServer::start().await;
@@ -849,7 +849,7 @@ async fn elasticache_increase_replica_count() {
     assert_eq!(group.member_clusters().len(), 3);
 }
 
-#[test_action("elasticache", "DecreaseReplicaCount", checksum = "cab83215")]
+#[test_action("elasticache", "DecreaseReplicaCount", checksum = "cb232903")]
 #[tokio::test]
 async fn elasticache_decrease_replica_count() {
     let server = TestServer::start().await;
@@ -878,7 +878,7 @@ async fn elasticache_decrease_replica_count() {
     assert_eq!(group.member_clusters().len(), 2);
 }
 
-#[test_action("elasticache", "CreateSnapshot", checksum = "10b847ad")]
+#[test_action("elasticache", "CreateSnapshot", checksum = "5ebf2c3f")]
 #[tokio::test]
 async fn elasticache_create_snapshot() {
     let server = TestServer::start().await;
@@ -905,7 +905,7 @@ async fn elasticache_create_snapshot() {
     assert_eq!(snapshot.replication_group_id(), Some("snap-repl-group"));
 }
 
-#[test_action("elasticache", "DescribeSnapshots", checksum = "00f83d10")]
+#[test_action("elasticache", "DescribeSnapshots", checksum = "0d36ba3b")]
 #[tokio::test]
 async fn elasticache_describe_snapshots() {
     let server = TestServer::start().await;
@@ -939,7 +939,7 @@ async fn elasticache_describe_snapshots() {
     assert_eq!(snapshots[0].snapshot_name(), Some("desc-snapshot"));
 }
 
-#[test_action("elasticache", "DeleteSnapshot", checksum = "85aa2082")]
+#[test_action("elasticache", "DeleteSnapshot", checksum = "78c52a3b")]
 #[tokio::test]
 async fn elasticache_delete_snapshot() {
     let server = TestServer::start().await;
@@ -972,7 +972,7 @@ async fn elasticache_delete_snapshot() {
     assert_eq!(snapshot.snapshot_name(), Some("del-snapshot"));
 }
 
-#[test_action("elasticache", "TestFailover", checksum = "c08470ff")]
+#[test_action("elasticache", "TestFailover", checksum = "6dbf541d")]
 #[tokio::test]
 async fn elasticache_test_failover() {
     let server = TestServer::start().await;
@@ -1005,7 +1005,7 @@ async fn elasticache_test_failover() {
     );
 }
 
-#[test_action("elasticache", "CreateServerlessCache", checksum = "f551fb86")]
+#[test_action("elasticache", "CreateServerlessCache", checksum = "eab3b237")]
 #[tokio::test]
 async fn elasticache_create_serverless_cache() {
     let server = TestServer::start().await;
@@ -1032,7 +1032,7 @@ async fn elasticache_create_serverless_cache() {
     assert_eq!(cache.status(), Some("creating"));
 }
 
-#[test_action("elasticache", "DescribeServerlessCaches", checksum = "130bb42b")]
+#[test_action("elasticache", "DescribeServerlessCaches", checksum = "ff0205f0")]
 #[tokio::test]
 async fn elasticache_describe_serverless_caches() {
     let server = TestServer::start().await;
@@ -1058,7 +1058,7 @@ async fn elasticache_describe_serverless_caches() {
     assert_eq!(caches[0].serverless_cache_name(), Some("desc-serverless"));
 }
 
-#[test_action("elasticache", "ModifyServerlessCache", checksum = "309e3779")]
+#[test_action("elasticache", "ModifyServerlessCache", checksum = "88f0dbff")]
 #[tokio::test]
 async fn elasticache_modify_serverless_cache() {
     let server = TestServer::start().await;
@@ -1088,7 +1088,7 @@ async fn elasticache_modify_serverless_cache() {
     assert_eq!(cache.snapshot_retention_limit(), Some(9));
 }
 
-#[test_action("elasticache", "DeleteServerlessCache", checksum = "5a8a697e")]
+#[test_action("elasticache", "DeleteServerlessCache", checksum = "28efbe0c")]
 #[tokio::test]
 async fn elasticache_delete_serverless_cache() {
     let server = TestServer::start().await;
@@ -1455,7 +1455,7 @@ async fn elasticache_cluster_modify_reboot_list() {
 #[test_action(
     "elasticache",
     "ModifyReplicationGroupShardConfiguration",
-    checksum = "1f767f8f"
+    checksum = "231ce31b"
 )]
 #[tokio::test]
 async fn elasticache_modify_replication_group_shard_configuration() {
@@ -1662,7 +1662,7 @@ async fn elasticache_events_and_updates() {
         .unwrap();
 }
 
-#[test_action("elasticache", "CopySnapshot", checksum = "34d69e9f")]
+#[test_action("elasticache", "CopySnapshot", checksum = "62b54f15")]
 #[tokio::test]
 async fn elasticache_copy_snapshot() {
     let server = TestServer::start().await;
@@ -1734,9 +1734,9 @@ async fn elasticache_serverless_cache_snapshot_copy_export() {
         .unwrap();
 }
 
-#[test_action("elasticache", "StartMigration", checksum = "09e9b62f")]
-#[test_action("elasticache", "CompleteMigration", checksum = "508de31d")]
-#[test_action("elasticache", "TestMigration", checksum = "2d1ccbf2")]
+#[test_action("elasticache", "StartMigration", checksum = "1b866746")]
+#[test_action("elasticache", "CompleteMigration", checksum = "ad9548cc")]
+#[test_action("elasticache", "TestMigration", checksum = "a1e60d57")]
 #[tokio::test]
 async fn elasticache_migration_lifecycle() {
     let server = TestServer::start().await;
