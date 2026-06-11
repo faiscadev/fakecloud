@@ -183,6 +183,7 @@ jobs:
           publish fakecloud-sqs
           publish fakecloud-iam
           publish fakecloud-organizations
+          publish fakecloud-ec2            # depends on aws + core only
           publish fakecloud-lambda
           publish fakecloud-logs
           publish fakecloud-kms
