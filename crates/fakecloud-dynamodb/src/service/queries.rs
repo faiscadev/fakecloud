@@ -11,7 +11,8 @@ use super::{
     build_consumed_capacity, compare_attribute_values, evaluate_filter_expression,
     evaluate_key_condition, extract_key_for_schema, get_table, item_matches_key,
     parse_expression_attribute_names, parse_expression_attribute_values, parse_key_map,
-    project_item, require_str, return_consumed_mode, DynamoDbService,
+    project_item, require_str, return_consumed_mode, translate_legacy_conditions, DynamoDbService,
+    LegacyConditionRole,
 };
 
 impl DynamoDbService {
@@ -25,24 +26,43 @@ impl DynamoDbService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
         let table = get_table(&state.tables, table_name)?;
 
-        let expr_attr_names = parse_expression_attribute_names(&body);
-        let expr_attr_values = parse_expression_attribute_values(&body);
+        let mut expr_attr_names = parse_expression_attribute_names(&body);
+        let mut expr_attr_values = parse_expression_attribute_values(&body);
 
-        let key_condition = body["KeyConditionExpression"].as_str();
-        // Query REQUIRES a key condition. Without one, AWS rejects the
-        // request rather than scanning the whole table — returning every
-        // item on a missing KeyConditionExpression is a silent
-        // wrong-result bug (bug-audit 2026-05-28, 1.1). The legacy
-        // `KeyConditions`/`QueryFilter` parameters are not supported here,
-        // so an absent KeyConditionExpression is always invalid.
-        if key_condition.map(str::trim).unwrap_or("").is_empty() {
-            return Err(AwsServiceError::aws_error(
-                http::StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Either the KeyConditions or KeyConditionExpression parameter must be specified in the request.",
-            ));
-        }
-        let filter_expression = body["FilterExpression"].as_str();
+        // Query REQUIRES a key condition. Accept either the modern
+        // `KeyConditionExpression` or the legacy `KeyConditions` parameter
+        // (AWS-deprecated in 2014 but still accepted by real DynamoDB and
+        // every SDK), which we translate into the equivalent expression and
+        // evaluate through the same machinery. Without any key condition,
+        // AWS rejects the request rather than scanning the whole table —
+        // returning every item would be a silent wrong-result bug
+        // (bug-audit 2026-05-28, 1.1).
+        let key_condition = resolve_legacy_or_expression(
+            &body,
+            "KeyConditionExpression",
+            "KeyConditions",
+            LegacyConditionRole::Key,
+            &mut expr_attr_names,
+            &mut expr_attr_values,
+        )?;
+        let key_condition = match key_condition {
+            Some(kc) if !kc.trim().is_empty() => kc,
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Either the KeyConditions or KeyConditionExpression parameter must be specified in the request.",
+                ));
+            }
+        };
+        let filter_expression = resolve_legacy_or_expression(
+            &body,
+            "FilterExpression",
+            "QueryFilter",
+            LegacyConditionRole::Filter,
+            &mut expr_attr_names,
+            &mut expr_attr_values,
+        )?;
         let scan_forward = body["ScanIndexForward"].as_bool().unwrap_or(true);
         let limit = body["Limit"].as_i64().map(|l| l as usize);
         let index_name = body["IndexName"].as_str();
@@ -106,11 +126,7 @@ impl DynamoDbService {
         let mut matched: Vec<&HashMap<String, AttributeValue>> = items_to_scan
             .iter()
             .filter(|item| {
-                if let Some(kc) = key_condition {
-                    evaluate_key_condition(kc, item, &expr_attr_names, &expr_attr_values)
-                } else {
-                    true
-                }
+                evaluate_key_condition(&key_condition, item, &expr_attr_names, &expr_attr_values)
             })
             .collect();
 
@@ -221,7 +237,7 @@ impl DynamoDbService {
 
         let scanned_count = matched.len();
 
-        if let Some(filter) = filter_expression {
+        if let Some(filter) = filter_expression.as_deref() {
             matched.retain(|item| {
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
             });
@@ -323,9 +339,18 @@ impl DynamoDbService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
         let table = get_table(&state.tables, table_name)?;
 
-        let expr_attr_names = parse_expression_attribute_names(&body);
-        let expr_attr_values = parse_expression_attribute_values(&body);
-        let filter_expression = body["FilterExpression"].as_str();
+        let mut expr_attr_names = parse_expression_attribute_names(&body);
+        let mut expr_attr_values = parse_expression_attribute_values(&body);
+        // Accept the legacy `ScanFilter` parameter alongside the modern
+        // `FilterExpression` (same parity rationale as Query's QueryFilter).
+        let filter_expression = resolve_legacy_or_expression(
+            &body,
+            "FilterExpression",
+            "ScanFilter",
+            LegacyConditionRole::Filter,
+            &mut expr_attr_names,
+            &mut expr_attr_values,
+        )?;
         let limit = body["Limit"].as_i64().map(|l| l as usize);
         let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
             parse_key_map(&body["ExclusiveStartKey"]);
@@ -445,7 +470,7 @@ impl DynamoDbService {
 
         let scanned_count = matched.len();
 
-        if let Some(filter) = filter_expression {
+        if let Some(filter) = filter_expression.as_deref() {
             matched.retain(|item| {
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
             });
@@ -535,6 +560,46 @@ impl DynamoDbService {
         }
 
         Self::ok_json(result)
+    }
+}
+
+/// Resolve an expression-API parameter (`KeyConditionExpression` /
+/// `FilterExpression`) against its legacy non-expression counterpart
+/// (`KeyConditions` / `QueryFilter` / `ScanFilter`) for one role.
+///
+/// Returns the expression string to evaluate, or `None` when neither form
+/// was supplied (callers decide whether that's an error). When only the
+/// legacy form is present it is translated and its placeholders are injected
+/// into `names`/`values`. Supplying both forms for the same role is rejected,
+/// matching real DynamoDB.
+fn resolve_legacy_or_expression(
+    body: &Value,
+    expression_param: &str,
+    legacy_param: &str,
+    role: LegacyConditionRole,
+    names: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Value>,
+) -> Result<Option<String>, AwsServiceError> {
+    let expression = body[expression_param]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let legacy = body[legacy_param].as_object().filter(|m| !m.is_empty());
+
+    match (expression, legacy) {
+        (Some(_), Some(_)) => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!(
+                "Can not use both expression and non-expression parameters in the same request: \
+                 Non-expression parameters: {{{legacy_param}}} Expression parameters: {{{expression_param}}}"
+            ),
+        )),
+        (Some(expr), None) => Ok(Some(expr.to_string())),
+        (None, Some(legacy)) => Ok(Some(translate_legacy_conditions(
+            legacy, role, names, values,
+        )?)),
+        (None, None) => Ok(None),
     }
 }
 

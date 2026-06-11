@@ -4957,3 +4957,268 @@ async fn dynamodb_partiql_execute_statement_emits_stream_record() {
         .iter()
         .all(|r| r.event_name().unwrap().as_str() == "INSERT"));
 }
+
+/// Helper: create a simple HASH-only table with partition key `pk`.
+async fn create_pk_table(client: &aws_sdk_dynamodb::Client, name: &str) {
+    client
+        .create_table()
+        .table_name(name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+}
+
+/// The canonical repro: a legacy `KeyConditions` Query (EQ on the hash key)
+/// must return the same item as the equivalent `KeyConditionExpression`.
+/// `KeyConditions` was AWS-deprecated in 2014 but is still accepted by real
+/// DynamoDB and every SDK — this is a parity fix.
+#[tokio::test]
+async fn dynamodb_query_legacy_key_conditions_eq() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    create_pk_table(&client, "t").await;
+
+    client
+        .put_item()
+        .table_name("t")
+        .item("pk", AttributeValue::S("a".to_string()))
+        .item("v", AttributeValue::S("1".to_string()))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_item()
+        .table_name("t")
+        .item("pk", AttributeValue::S("b".to_string()))
+        .item("v", AttributeValue::S("2".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let output = server
+        .aws_cli(&[
+            "dynamodb",
+            "query",
+            "--table-name",
+            "t",
+            "--key-conditions",
+            r#"{"pk":{"AttributeValueList":[{"S":"a"}],"ComparisonOperator":"EQ"}}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "legacy KeyConditions query failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["Count"].as_i64().unwrap(), 1);
+    assert_eq!(json["Items"][0]["pk"]["S"].as_str().unwrap(), "a");
+    assert_eq!(json["Items"][0]["v"]["S"].as_str().unwrap(), "1");
+}
+
+/// Legacy `KeyConditions` on a composite key: EQ on the hash plus
+/// BEGINS_WITH on the sort key.
+#[tokio::test]
+async fn dynamodb_query_legacy_key_conditions_begins_with() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    client
+        .create_table()
+        .table_name("orders")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("sk")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for sk in ["ord#1", "ord#2", "shp#1"] {
+        client
+            .put_item()
+            .table_name("orders")
+            .item("pk", AttributeValue::S("u1".to_string()))
+            .item("sk", AttributeValue::S(sk.to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let output = server
+        .aws_cli(&[
+            "dynamodb",
+            "query",
+            "--table-name",
+            "orders",
+            "--key-conditions",
+            r#"{"pk":{"AttributeValueList":[{"S":"u1"}],"ComparisonOperator":"EQ"},"sk":{"AttributeValueList":[{"S":"ord#"}],"ComparisonOperator":"BEGINS_WITH"}}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "legacy composite KeyConditions query failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["Count"].as_i64().unwrap(), 2);
+    let sks: Vec<&str> = json["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["sk"]["S"].as_str().unwrap())
+        .collect();
+    assert_eq!(sks, vec!["ord#1", "ord#2"]);
+}
+
+/// Legacy `QueryFilter` (a non-key filter) must apply on top of the key
+/// condition, mirroring `FilterExpression`.
+#[tokio::test]
+async fn dynamodb_query_legacy_query_filter() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    create_pk_table(&client, "t").await;
+
+    for (pk, color) in [("a", "red"), ("b", "red"), ("c", "blue")] {
+        client
+            .put_item()
+            .table_name("t")
+            .item("pk", AttributeValue::S(pk.to_string()))
+            .item("color", AttributeValue::S(color.to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let output = server
+        .aws_cli(&[
+            "dynamodb",
+            "query",
+            "--table-name",
+            "t",
+            "--key-conditions",
+            r#"{"pk":{"AttributeValueList":[{"S":"a"}],"ComparisonOperator":"EQ"}}"#,
+            "--query-filter",
+            r#"{"color":{"AttributeValueList":[{"S":"blue"}],"ComparisonOperator":"EQ"}}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "legacy QueryFilter query failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    // pk=a is the only key match, but its color is red, so the filter drops it.
+    assert_eq!(json["Count"].as_i64().unwrap(), 0);
+    assert_eq!(json["ScannedCount"].as_i64().unwrap(), 1);
+}
+
+/// Legacy `ScanFilter` on Scan must behave like `FilterExpression`.
+#[tokio::test]
+async fn dynamodb_scan_legacy_scan_filter() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    create_pk_table(&client, "t").await;
+
+    for (pk, color) in [("a", "red"), ("b", "blue"), ("c", "red")] {
+        client
+            .put_item()
+            .table_name("t")
+            .item("pk", AttributeValue::S(pk.to_string()))
+            .item("color", AttributeValue::S(color.to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let output = server
+        .aws_cli(&[
+            "dynamodb",
+            "scan",
+            "--table-name",
+            "t",
+            "--scan-filter",
+            r#"{"color":{"AttributeValueList":[{"S":"red"}],"ComparisonOperator":"EQ"}}"#,
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "legacy ScanFilter scan failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+    assert_eq!(json["Count"].as_i64().unwrap(), 2);
+}
+
+/// Mixing the legacy and expression forms for the same role is rejected by
+/// real DynamoDB; we must reject it too.
+#[tokio::test]
+async fn dynamodb_query_rejects_mixed_key_condition_forms() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    create_pk_table(&client, "t").await;
+
+    let output = server
+        .aws_cli(&[
+            "dynamodb",
+            "query",
+            "--table-name",
+            "t",
+            "--key-condition-expression",
+            "pk = :v",
+            "--expression-attribute-values",
+            r#"{":v":{"S":"a"}}"#,
+            "--key-conditions",
+            r#"{"pk":{"AttributeValueList":[{"S":"a"}],"ComparisonOperator":"EQ"}}"#,
+        ])
+        .await;
+    assert!(
+        !output.success(),
+        "mixing KeyConditions + KeyConditionExpression must be rejected"
+    );
+    let stderr = output.stderr_text();
+    assert!(
+        stderr.contains("ValidationException")
+            && stderr.contains("both expression and non-expression"),
+        "unexpected error: {stderr}"
+    );
+}
