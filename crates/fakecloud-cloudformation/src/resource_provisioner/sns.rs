@@ -115,4 +115,96 @@ impl ResourceProvisioner {
         state.subscriptions.remove(physical_id);
         Ok(())
     }
+
+    // --- SNS TopicPolicy ---
+    //
+    // AWS::SNS::TopicPolicy stores the PolicyDocument as the `Policy` attribute
+    // on each referenced topic, so a subsequent GetTopicAttributes round-trips
+    // it. The `Topics` property is a list of topic ARNs (Refs are resolved to
+    // physical ids before we run). The physical id encodes those ARNs
+    // (newline-joined) so delete can locate and clear each topic.
+
+    pub(super) fn create_sns_topic_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let topic_arns = sns_policy_topic_arns(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __sns_mas = self.sns_state.write();
+        let state = __sns_mas.get_or_create(&self.account_id);
+        for arn in &topic_arns {
+            let topic = state
+                .topics
+                .get_mut(arn)
+                .ok_or_else(|| format!("Topic {arn} not yet provisioned"))?;
+            topic
+                .attributes
+                .insert("Policy".to_string(), policy.clone());
+        }
+        Ok(ProvisionResult::new(topic_arns.join("\n")))
+    }
+
+    pub(super) fn update_sns_topic_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let old_arns: Vec<String> = existing
+            .physical_id
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        let new_arns = sns_policy_topic_arns(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __sns_mas = self.sns_state.write();
+        let state = __sns_mas.get_or_create(&self.account_id);
+        for arn in &old_arns {
+            if !new_arns.contains(arn) {
+                if let Some(topic) = state.topics.get_mut(arn) {
+                    topic.attributes.remove("Policy");
+                }
+            }
+        }
+        for arn in &new_arns {
+            let topic = state
+                .topics
+                .get_mut(arn)
+                .ok_or_else(|| format!("Topic {arn} not yet provisioned"))?;
+            topic
+                .attributes
+                .insert("Policy".to_string(), policy.clone());
+        }
+        Ok(ProvisionResult::new(new_arns.join("\n")))
+    }
+
+    pub(super) fn delete_sns_topic_policy(&self, physical_id: &str) -> Result<(), String> {
+        let mut __sns_mas = self.sns_state.write();
+        let state = __sns_mas.get_or_create(&self.account_id);
+        for arn in physical_id.split('\n').filter(|s| !s.is_empty()) {
+            if let Some(topic) = state.topics.get_mut(arn) {
+                topic.attributes.remove("Policy");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the `Topics` property (a list of Refs already resolved to topic
+/// ARNs) into a list of topic ARNs.
+fn sns_policy_topic_arns(props: &serde_json::Value) -> Result<Vec<String>, String> {
+    let topics = props
+        .get("Topics")
+        .and_then(|v| v.as_array())
+        .ok_or("Topics is required")?;
+    let arns: Vec<String> = topics
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if arns.is_empty() {
+        return Err("Topics must contain at least one topic".to_string());
+    }
+    Ok(arns)
 }

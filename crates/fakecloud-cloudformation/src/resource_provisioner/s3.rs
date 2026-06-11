@@ -65,4 +65,76 @@ impl ResourceProvisioner {
         state.buckets.remove(physical_id);
         Ok(())
     }
+
+    // --- S3 BucketPolicy ---
+    //
+    // AWS::S3::BucketPolicy stores the PolicyDocument on `bucket.policy` — the
+    // same field PutBucketPolicy writes — so GetBucketPolicy round-trips it.
+    // The `Bucket` property is a single Ref already resolved to the bucket name
+    // (which is the bucket's physical id). The policy resource's physical id is
+    // `{bucket}-policy`; delete strips the suffix to recover the bucket name.
+
+    pub(super) fn create_s3_bucket_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let bucket_name = s3_policy_bucket_name(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __s3_mas = self.s3_state.write();
+        let state = __s3_mas.get_or_create(&self.account_id);
+        let bucket = state
+            .buckets
+            .get_mut(&bucket_name)
+            .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
+        bucket.policy = Some(policy);
+        Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
+    }
+
+    pub(super) fn update_s3_bucket_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let bucket_name = s3_policy_bucket_name(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __s3_mas = self.s3_state.write();
+        let state = __s3_mas.get_or_create(&self.account_id);
+        // If the policy was moved to a different bucket, clear the old one.
+        let old_bucket = existing
+            .physical_id
+            .strip_suffix("-policy")
+            .unwrap_or(&existing.physical_id);
+        if old_bucket != bucket_name {
+            if let Some(bucket) = state.buckets.get_mut(old_bucket) {
+                bucket.policy = None;
+            }
+        }
+        let bucket = state
+            .buckets
+            .get_mut(&bucket_name)
+            .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
+        bucket.policy = Some(policy);
+        Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
+    }
+
+    pub(super) fn delete_s3_bucket_policy(&self, physical_id: &str) -> Result<(), String> {
+        let bucket_name = physical_id.strip_suffix("-policy").unwrap_or(physical_id);
+        let mut __s3_mas = self.s3_state.write();
+        let state = __s3_mas.get_or_create(&self.account_id);
+        if let Some(bucket) = state.buckets.get_mut(bucket_name) {
+            bucket.policy = None;
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the `Bucket` property (a Ref already resolved to the bucket name).
+fn s3_policy_bucket_name(props: &serde_json::Value) -> Result<String, String> {
+    props
+        .get("Bucket")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Bucket is required".to_string())
 }
