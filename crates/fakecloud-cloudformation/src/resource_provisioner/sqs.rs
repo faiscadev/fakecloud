@@ -88,4 +88,99 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- SQS QueuePolicy ---
+    //
+    // AWS::SQS::QueuePolicy doesn't create a standalone object; it stores the
+    // PolicyDocument as the `Policy` attribute on each referenced queue, so a
+    // subsequent GetQueueAttributes round-trips it. The `Queues` property is a
+    // list of queue URLs (Refs are already resolved to physical ids by the
+    // time we run). The physical id encodes those URLs (newline-joined, a char
+    // that can't appear in a URL) so delete can locate and clear each queue.
+
+    pub(super) fn create_sqs_queue_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let queue_urls = sqs_policy_queue_urls(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __sqs_mas = self.sqs_state.write();
+        let state = __sqs_mas.get_or_create(&self.account_id);
+        for url in &queue_urls {
+            let queue = state
+                .queues
+                .get_mut(url)
+                .ok_or_else(|| format!("Queue {url} not yet provisioned"))?;
+            queue
+                .attributes
+                .insert("Policy".to_string(), policy.clone());
+        }
+        Ok(ProvisionResult::new(queue_urls.join("\n")))
+    }
+
+    pub(super) fn update_sqs_queue_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        // Clear the policy from queues that are no longer referenced, then
+        // (re)apply to the current set.
+        let old_urls: Vec<String> = existing
+            .physical_id
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        let new_urls = sqs_policy_queue_urls(&resource.properties)?;
+        let policy = policy_document_string(&resource.properties)?;
+
+        let mut __sqs_mas = self.sqs_state.write();
+        let state = __sqs_mas.get_or_create(&self.account_id);
+        for url in &old_urls {
+            if !new_urls.contains(url) {
+                if let Some(queue) = state.queues.get_mut(url) {
+                    queue.attributes.remove("Policy");
+                }
+            }
+        }
+        for url in &new_urls {
+            let queue = state
+                .queues
+                .get_mut(url)
+                .ok_or_else(|| format!("Queue {url} not yet provisioned"))?;
+            queue
+                .attributes
+                .insert("Policy".to_string(), policy.clone());
+        }
+        Ok(ProvisionResult::new(new_urls.join("\n")))
+    }
+
+    pub(super) fn delete_sqs_queue_policy(&self, physical_id: &str) -> Result<(), String> {
+        let mut __sqs_mas = self.sqs_state.write();
+        let state = __sqs_mas.get_or_create(&self.account_id);
+        for url in physical_id.split('\n').filter(|s| !s.is_empty()) {
+            if let Some(queue) = state.queues.get_mut(url) {
+                queue.attributes.remove("Policy");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the `Queues` property (a list of Refs already resolved to queue
+/// URLs) into a list of queue URLs.
+fn sqs_policy_queue_urls(props: &serde_json::Value) -> Result<Vec<String>, String> {
+    let queues = props
+        .get("Queues")
+        .and_then(|v| v.as_array())
+        .ok_or("Queues is required")?;
+    let urls: Vec<String> = queues
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if urls.is_empty() {
+        return Err("Queues must contain at least one queue".to_string());
+    }
+    Ok(urls)
 }

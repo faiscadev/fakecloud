@@ -85,11 +85,11 @@ Resources of these types create real backing state in the corresponding fakeclou
 - **Organizations** — `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy`
 - **RDS** — `DBInstance`, `DBCluster`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBSubnetGroup`, `DBSecurityGroup`, `OptionGroup`, `DBProxy`, `EventSubscription`
 - **Route 53** — `HostedZone`, `RecordSet`, `HealthCheck`, `DNSSEC`, `KeySigningKey`
-- **S3** — `Bucket`
+- **S3** — `Bucket`, `BucketPolicy`
 - **Secrets Manager** — `Secret`, `ResourcePolicy`, `RotationSchedule`, `SecretTargetAttachment`
 - **SES v2** — `EmailIdentity`, `ConfigurationSet`, `ConfigurationSetEventDestination`, `ContactList`, `DedicatedIpPool`, `ReceiptFilter`, `ReceiptRule`, `ReceiptRuleSet`, `Template`, `VdmAttributes`
-- **SNS** — `Topic`, `Subscription`
-- **SQS** — `Queue`
+- **SNS** — `Topic`, `TopicPolicy`, `Subscription`
+- **SQS** — `Queue`, `QueuePolicy`
 - **SSM** — `Parameter`
 - **Step Functions** — `StateMachine`, `StateMachineVersion`, `StateMachineAlias`, `Activity`
 - **WAFv2** — `WebACL`, `WebACLAssociation`, `IPSet`, `RegexPatternSet`, `RuleGroup`, `LoggingConfiguration`

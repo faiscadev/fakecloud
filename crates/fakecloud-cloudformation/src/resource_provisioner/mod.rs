@@ -846,6 +846,17 @@ impl ProvisionResult {
     }
 }
 
+/// Extract a resource policy's `PolicyDocument` property as a JSON string,
+/// accepting either an inline object or an already-serialized string. Shared by
+/// the SQS/SNS/S3 resource-policy provisioners.
+fn policy_document_string(props: &serde_json::Value) -> Result<String, String> {
+    match props.get("PolicyDocument") {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(other) => Ok(other.to_string()),
+        None => Err("PolicyDocument is required".to_string()),
+    }
+}
+
 /// Holds references to all service states so CloudFormation can provision resources.
 pub struct ResourceProvisioner {
     pub sqs_state: SharedSqsState,
@@ -925,7 +936,9 @@ impl ResourceProvisioner {
     pub fn create_resource(&self, resource: &ResourceDefinition) -> Result<StackResource, String> {
         let result = match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.create_sqs_queue(resource),
+            "AWS::SQS::QueuePolicy" => self.create_sqs_queue_policy(resource),
             "AWS::SNS::Topic" => self.create_sns_topic(resource),
+            "AWS::SNS::TopicPolicy" => self.create_sns_topic_policy(resource),
             "AWS::SNS::Subscription" => self.create_sns_subscription(resource),
             "AWS::SSM::Parameter" => self.create_ssm_parameter(resource),
             "AWS::IAM::Role" => self.create_iam_role(resource),
@@ -941,6 +954,7 @@ impl ResourceProvisioner {
             "AWS::IAM::ServiceLinkedRole" => self.create_iam_service_linked_role(resource),
             "AWS::IAM::VirtualMFADevice" => self.create_iam_virtual_mfa_device(resource),
             "AWS::S3::Bucket" => self.create_s3_bucket(resource),
+            "AWS::S3::BucketPolicy" => self.create_s3_bucket_policy(resource),
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::Events::Connection" => self.create_eventbridge_connection(resource),
             "AWS::Events::ApiDestination" => self.create_eventbridge_api_destination(resource),
@@ -1285,6 +1299,9 @@ impl ResourceProvisioner {
             "AWS::StepFunctions::StateMachine" => {
                 Some(self.update_sfn_state_machine(existing, new_def)?)
             }
+            "AWS::SQS::QueuePolicy" => Some(self.update_sqs_queue_policy(existing, new_def)?),
+            "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
+            "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
             _ => None,
         };
 
@@ -1413,7 +1430,9 @@ impl ResourceProvisioner {
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
         match resource.resource_type.as_str() {
             "AWS::SQS::Queue" => self.delete_sqs_queue(&resource.physical_id),
+            "AWS::SQS::QueuePolicy" => self.delete_sqs_queue_policy(&resource.physical_id),
             "AWS::SNS::Topic" => self.delete_sns_topic(&resource.physical_id),
+            "AWS::SNS::TopicPolicy" => self.delete_sns_topic_policy(&resource.physical_id),
             "AWS::SNS::Subscription" => self.delete_sns_subscription(&resource.physical_id),
             "AWS::SSM::Parameter" => self.delete_ssm_parameter(&resource.physical_id),
             "AWS::IAM::Role" => self.delete_iam_role(&resource.physical_id),
@@ -1435,6 +1454,7 @@ impl ResourceProvisioner {
                 self.delete_iam_virtual_mfa_device(&resource.physical_id)
             }
             "AWS::S3::Bucket" => self.delete_s3_bucket(&resource.physical_id),
+            "AWS::S3::BucketPolicy" => self.delete_s3_bucket_policy(&resource.physical_id),
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::Events::Connection" => self.delete_eventbridge_connection(&resource.physical_id),
             "AWS::Events::EventBus" => self.delete_eventbridge_event_bus(&resource.physical_id),
@@ -6298,6 +6318,141 @@ mod tests {
         let sr = prov.create_resource(&res).unwrap();
         assert_eq!(sr.physical_id, "my-bucket");
         prov.delete_resource(&sr).unwrap();
+    }
+
+    #[test]
+    fn sqs_queue_policy_stored_on_queue_and_cleared_on_delete() {
+        let prov = make_provisioner();
+        let queue = prov
+            .create_resource(&make_resource(
+                "AWS::SQS::Queue",
+                "Q",
+                serde_json::json!({"QueueName": "q1"}),
+            ))
+            .unwrap();
+        // `Queues` carries the queue URL — what `Ref` resolves to.
+        let policy = make_resource(
+            "AWS::SQS::QueuePolicy",
+            "QP",
+            serde_json::json!({
+                "Queues": [queue.physical_id.clone()],
+                "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": "sns.amazonaws.com"},
+                    "Action": "sqs:SendMessage",
+                    "Resource": "*"
+                }]}
+            }),
+        );
+        let sr = prov.create_resource(&policy).unwrap();
+
+        {
+            let mut accounts = prov.sqs_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            let stored = state.queues[&queue.physical_id]
+                .attributes
+                .get("Policy")
+                .expect("policy stored on queue");
+            assert!(stored.contains("sqs:SendMessage"));
+        }
+
+        prov.delete_resource(&sr).unwrap();
+        {
+            let mut accounts = prov.sqs_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            assert!(!state.queues[&queue.physical_id]
+                .attributes
+                .contains_key("Policy"));
+        }
+    }
+
+    #[test]
+    fn sns_topic_policy_stored_on_topic_and_cleared_on_delete() {
+        let prov = make_provisioner();
+        let topic = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Topic",
+                "T",
+                serde_json::json!({"TopicName": "t1"}),
+            ))
+            .unwrap();
+        let policy = make_resource(
+            "AWS::SNS::TopicPolicy",
+            "TP",
+            serde_json::json!({
+                "Topics": [topic.physical_id.clone()],
+                "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": "events.amazonaws.com"},
+                    "Action": "sns:Publish",
+                    "Resource": "*"
+                }]}
+            }),
+        );
+        let sr = prov.create_resource(&policy).unwrap();
+
+        {
+            let mut accounts = prov.sns_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            let stored = state.topics[&topic.physical_id]
+                .attributes
+                .get("Policy")
+                .expect("policy stored on topic");
+            assert!(stored.contains("sns:Publish"));
+        }
+
+        prov.delete_resource(&sr).unwrap();
+        {
+            let mut accounts = prov.sns_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            assert!(!state.topics[&topic.physical_id]
+                .attributes
+                .contains_key("Policy"));
+        }
+    }
+
+    #[test]
+    fn s3_bucket_policy_stored_on_bucket_and_cleared_on_delete() {
+        let prov = make_provisioner();
+        let bucket = prov
+            .create_resource(&make_resource(
+                "AWS::S3::Bucket",
+                "B",
+                serde_json::json!({"BucketName": "b1"}),
+            ))
+            .unwrap();
+        let policy = make_resource(
+            "AWS::S3::BucketPolicy",
+            "BP",
+            serde_json::json!({
+                "Bucket": bucket.physical_id.clone(),
+                "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "s3:GetObject",
+                    "Resource": "arn:aws:s3:::b1/*"
+                }]}
+            }),
+        );
+        let sr = prov.create_resource(&policy).unwrap();
+        assert_eq!(sr.physical_id, "b1-policy");
+
+        {
+            let mut accounts = prov.s3_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            let stored = state.buckets[&bucket.physical_id]
+                .policy
+                .as_ref()
+                .expect("policy stored on bucket");
+            assert!(stored.contains("s3:GetObject"));
+        }
+
+        prov.delete_resource(&sr).unwrap();
+        {
+            let mut accounts = prov.s3_state.write();
+            let state = accounts.get_or_create(&prov.account_id);
+            assert!(state.buckets[&bucket.physical_id].policy.is_none());
+        }
     }
 
     #[test]
