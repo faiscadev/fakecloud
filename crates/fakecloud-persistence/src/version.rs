@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,21 @@ use thiserror::Error;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const VERSION_FILE_NAME: &str = "fakecloud.version.toml";
+
+/// Filesystem artifacts that may exist in an otherwise-empty data directory and
+/// must not count toward the "non-empty" emptiness check — e.g. ext4 always creates
+/// `lost+found` at the root of a freshly formatted volume, and NetApp exposes
+/// `.snapshot`. Dot-prefixed names are also ignored (see [`is_benign_entry`]).
+const IGNORED_DIR_ENTRIES: &[&str] = &["lost+found", ".snapshot"];
+
+/// Whether a directory entry is a benign filesystem artifact that should not make
+/// the data directory count as "non-empty".
+fn is_benign_entry(name: &OsStr) -> bool {
+    match name.to_str() {
+        Some(s) => s.starts_with('.') || IGNORED_DIR_ENTRIES.contains(&s),
+        None => false, // non-UTF8 name => treat as a real entry, be conservative
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormatVersion {
@@ -93,11 +109,14 @@ pub fn ensure_version_file(dir: &Path, fakecloud_version: &str) -> Result<(), Ve
         return check_version_file(dir);
     }
     if dir.exists() {
-        let mut entries = std::fs::read_dir(dir).map_err(|source| VersionError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        if entries.next().is_some() {
+        let has_real_entry = std::fs::read_dir(dir)
+            .map_err(|source| VersionError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?
+            .filter_map(Result::ok)
+            .any(|entry| !is_benign_entry(&entry.file_name()));
+        if has_real_entry {
             return Err(VersionError::NonEmptyDirectoryWithoutVersionFile {
                 dir: dir.to_path_buf(),
                 file: VERSION_FILE_NAME.to_string(),
@@ -127,6 +146,36 @@ mod tests {
             err,
             VersionError::NonEmptyDirectoryWithoutVersionFile { .. }
         );
+    }
+
+    #[test]
+    fn ensure_ok_when_dir_has_only_lost_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("lost+found")).unwrap();
+        ensure_version_file(tmp.path(), "test").unwrap();
+        assert!(tmp.path().join(VERSION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn ensure_ok_when_dir_has_only_dotfiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".DS_Store"), b"junk").unwrap();
+        std::fs::create_dir(tmp.path().join(".snapshot")).unwrap();
+        ensure_version_file(tmp.path(), "test").unwrap();
+        assert!(tmp.path().join(VERSION_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn ensure_rejects_real_file_alongside_lost_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("lost+found")).unwrap();
+        std::fs::write(tmp.path().join("data.bin"), b"real data").unwrap();
+        let err = ensure_version_file(tmp.path(), "test").unwrap_err();
+        assert!(matches!(
+            err,
+            VersionError::NonEmptyDirectoryWithoutVersionFile { .. }
+        ));
+        assert!(!tmp.path().join(VERSION_FILE_NAME).exists());
     }
 
     #[test]
