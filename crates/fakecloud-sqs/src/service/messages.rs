@@ -654,12 +654,25 @@ impl SqsService {
 
         // Move messages to DLQ — also with at-rest bodies untouched,
         // since the DLQ may have its own SSE settings and a downstream
-        // receive call decrypts what's there.
+        // receive call decrypts what's there. If the redrive target ARN
+        // doesn't resolve to a known queue (DLQ deleted, ARN typo), the
+        // message is returned to the source queue instead of being
+        // dropped — real SQS never destroys a message over a
+        // misconfigured redrive target.
         for (dlq_arn, mut msg) in dlq_messages.into_iter() {
+            msg.receipt_handle = None;
+            msg.visible_at = None;
             if let Some(dlq) = state.queues.values_mut().find(|q| q.arn == dlq_arn) {
-                msg.receipt_handle = None;
-                msg.visible_at = None;
                 dlq.messages.push_back(msg);
+            } else {
+                tracing::warn!(
+                    queue = %queue_arn,
+                    dlq_arn = %dlq_arn,
+                    "redrive target queue not found; returning message to source queue"
+                );
+                if let Some(source) = state.queues.values_mut().find(|q| q.arn == queue_arn) {
+                    source.messages.push_back(msg);
+                }
             }
         }
 

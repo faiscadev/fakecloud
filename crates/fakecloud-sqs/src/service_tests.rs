@@ -1232,6 +1232,41 @@ fn list_dead_letter_source_queues_finds_sources() {
     assert!(urls[0].as_str().unwrap().contains("src-q"));
 }
 
+#[test]
+fn redrive_with_unresolvable_dlq_arn_keeps_message_on_source_queue() {
+    // A RedrivePolicy whose deadLetterTargetArn doesn't resolve (DLQ deleted,
+    // ARN typo) must not destroy over-limit messages: real SQS keeps them on
+    // the source queue. Previously the redrive move silently dropped them.
+    let svc = make_service();
+    let src_url = create_queue_url(&svc, "bad-dlq-src");
+    let redrive = json!({
+        "deadLetterTargetArn": "arn:aws:sqs:us-east-1:000000000000:no-such-dlq",
+        "maxReceiveCount": "1"
+    })
+    .to_string();
+    svc.set_queue_attributes(&make_request(
+        "SetQueueAttributes",
+        json!({ "QueueUrl": src_url, "Attributes": { "RedrivePolicy": redrive } }),
+    ))
+    .unwrap();
+    send_msg(&svc, &src_url, "survivor");
+
+    // First receive delivers (receive_count 1 == max); the second crosses
+    // maxReceiveCount and routes the message through the redrive path.
+    assert_eq!(receive_msgs(&svc, &src_url, 1).len(), 1);
+    assert_eq!(receive_msgs(&svc, &src_url, 1).len(), 0);
+
+    // The message survives on the source queue instead of vanishing.
+    let attrs = body_json(
+        svc.get_queue_attributes(&make_request(
+            "GetQueueAttributes",
+            json!({ "QueueUrl": src_url, "AttributeNames": ["ApproximateNumberOfMessages"] }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(attrs["Attributes"]["ApproximateNumberOfMessages"], "1");
+}
+
 // ── Error branch tests ──
 
 #[test]
