@@ -297,6 +297,9 @@ fn filter_sdk_compound_shapes() {
         ),
         ("not-true", "NOT (a = :99)", true),
         ("not-false", "NOT (a = :1)", false),
+        // No-space `NOT(` form (python_dynamodb_lock / hand-written).
+        ("not-true-no-space", "NOT(a = :99)", true),
+        ("not-false-no-space", "NOT(a = :1)", false),
         (
             "and-of-or",
             "((a = :1) OR (a = :99)) AND ((b = :2) OR (b = :99))",

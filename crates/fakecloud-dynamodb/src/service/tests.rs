@@ -1819,6 +1819,34 @@ fn test_evaluate_condition_not_operator() {
 }
 
 #[test]
+fn test_evaluate_condition_not_no_space() {
+    // `NOT(` with no space between the keyword and `(` is what
+    // python_dynamodb_lock and most hand-written expressions emit. It must be
+    // tokenized identically to `NOT (...)`.
+    let item = cond_item(&[("state", "active")]);
+    let names = cond_names(&[("#s", "state"), ("#pk", "pk"), ("#sk", "sk")]);
+    let values = cond_values(&[]);
+
+    // NOT(attribute_exists(#s)) on a missing item => NOT false => true
+    assert!(evaluate_condition("NOT(attribute_exists(#s))", None, &names, &values).is_ok());
+    // ...on an existing item => NOT true => false
+    assert!(evaluate_condition("NOT(attribute_exists(#s))", Some(&item), &names, &values).is_err());
+
+    // The python_dynamodb_lock acquire form on a missing item => passes.
+    assert!(evaluate_condition(
+        "NOT(attribute_exists(#pk) AND attribute_exists(#sk))",
+        None,
+        &names,
+        &values
+    )
+    .is_ok());
+
+    // Regression guard: the spaced form still behaves as before.
+    assert!(evaluate_condition("NOT (attribute_exists(#s))", None, &names, &values).is_ok());
+    assert!(evaluate_condition("NOT attribute_exists(#s)", Some(&item), &names, &values).is_err());
+}
+
+#[test]
 fn test_evaluate_condition_begins_with() {
     // After unification, conditions support begins_with via
     // evaluate_single_filter_condition (previously only filters had it).

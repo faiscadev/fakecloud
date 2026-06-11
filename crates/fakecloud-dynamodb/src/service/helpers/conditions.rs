@@ -412,9 +412,18 @@ pub(crate) fn evaluate_filter_expression(
         return evaluate_filter_expression(stripped, item, expr_attr_names, expr_attr_values);
     }
 
-    // Handle NOT prefix (case-insensitive)
-    if trimmed.len() > 4 && trimmed[..4].eq_ignore_ascii_case("NOT ") {
-        return !evaluate_filter_expression(&trimmed[4..], item, expr_attr_names, expr_attr_values);
+    // Handle NOT prefix (case-insensitive). Accept both `NOT (...)` and the
+    // no-space `NOT(...)` that python_dynamodb_lock and hand-written expressions
+    // emit — mirroring extract_function_arg's func( / func ( tolerance. Requiring
+    // the char after `NOT` to be whitespace or `(` avoids misparsing an identifier
+    // like `NOTanattr`.
+    if let Some(rest) = trimmed
+        .get(..3)
+        .filter(|p| p.eq_ignore_ascii_case("NOT"))
+        .map(|_| &trimmed[3..])
+        .filter(|after| after.starts_with(|c: char| c.is_ascii_whitespace() || c == '('))
+    {
+        return !evaluate_filter_expression(rest, item, expr_attr_names, expr_attr_values);
     }
 
     evaluate_single_filter_condition(trimmed, item, expr_attr_names, expr_attr_values)
