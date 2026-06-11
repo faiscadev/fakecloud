@@ -786,6 +786,20 @@ Resources:
     }
 
     #[test]
+    fn ref_on_lambda_alias_resolves_to_alias_arn() {
+        // `Ref` returns a resource's physical id; the Lambda alias
+        // provisioner exposes the alias ARN as its physical id, so
+        // `Ref` on the alias yields the ARN — like real CloudFormation,
+        // and what the ESM create path needs to find the function.
+        let (p, r, mut ids, attrs) = empty();
+        let alias_arn = "arn:aws:lambda:us-east-1:123456789012:function:my-func:live";
+        ids.insert("Alias".to_string(), alias_arn.to_string());
+        let v: Value = serde_json::from_str(r#"{"Ref": "Alias"}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::String(alias_arn.to_string()));
+    }
+
+    #[test]
     fn fn_split_emits_array() {
         let (p, r, ids, attrs) = empty();
         let v: Value = serde_json::from_str(r#"{"Fn::Split": [",", "a,b,c"]}"#).unwrap();

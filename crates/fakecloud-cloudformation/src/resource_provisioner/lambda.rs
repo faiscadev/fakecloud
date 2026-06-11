@@ -795,7 +795,12 @@ impl ResourceProvisioner {
                 },
             );
         }
-        Ok(ProvisionResult::new(key).with("AliasArn", alias_arn))
+        // Expose the alias ARN as the physical id so `Ref` on the alias
+        // resolves to the ARN, like real CloudFormation. The internal
+        // `aliases` / `provisioned_concurrency` maps stay keyed by
+        // `{function}:{alias}` (`key`); update/delete recover that key
+        // from the ARN physical id via `alias_state_key`.
+        Ok(ProvisionResult::new(alias_arn.clone()).with("AliasArn", alias_arn))
     }
 
     /// Update an existing Lambda Alias in place. FunctionVersion,
@@ -821,17 +826,18 @@ impl ResourceProvisioner {
             .to_string();
         let routing_config = props.get("RoutingConfig").cloned();
 
+        // `existing.physical_id` is the alias ARN; the maps are keyed by
+        // `{function}:{alias}`.
+        let key = alias_state_key(&existing.physical_id);
+
         let mut accounts = self.lambda_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        let alias = state
-            .aliases
-            .get_mut(&existing.physical_id)
-            .ok_or_else(|| {
-                format!(
-                    "Alias {} does not exist in lambda state",
-                    existing.physical_id
-                )
-            })?;
+        let alias = state.aliases.get_mut(&key).ok_or_else(|| {
+            format!(
+                "Alias {} does not exist in lambda state",
+                existing.physical_id
+            )
+        })?;
         alias.function_version = function_version;
         alias.description = description;
         alias.routing_config = routing_config;
@@ -847,7 +853,7 @@ impl ResourceProvisioner {
         {
             Some(cnt) => {
                 state.provisioned_concurrency.insert(
-                    existing.physical_id.clone(),
+                    key.clone(),
                     fakecloud_lambda::ProvisionedConcurrencyConfig {
                         requested: cnt,
                         allocated: cnt,
@@ -857,16 +863,20 @@ impl ResourceProvisioner {
                 );
             }
             None => {
-                state.provisioned_concurrency.remove(&existing.physical_id);
+                state.provisioned_concurrency.remove(&key);
             }
         }
         Ok(ProvisionResult::new(existing.physical_id.clone()).with("AliasArn", alias_arn))
     }
 
     pub(super) fn delete_lambda_alias(&self, physical_id: &str) -> Result<(), String> {
+        // `physical_id` is the alias ARN; the maps are keyed by
+        // `{function}:{alias}`.
+        let key = alias_state_key(physical_id);
         let mut accounts = self.lambda_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        state.aliases.remove(physical_id);
+        state.aliases.remove(&key);
+        state.provisioned_concurrency.remove(&key);
         Ok(())
     }
 
