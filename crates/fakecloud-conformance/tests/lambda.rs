@@ -907,11 +907,11 @@ async fn lambda_tag_resource_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateCapacityProvider", checksum = "cf3a7b6a")]
-#[test_action("lambda", "GetCapacityProvider", checksum = "ad947440")]
-#[test_action("lambda", "ListCapacityProviders", checksum = "dae35ca3")]
-#[test_action("lambda", "UpdateCapacityProvider", checksum = "5d2bbc06")]
-#[test_action("lambda", "DeleteCapacityProvider", checksum = "555e0456")]
+#[test_action("lambda", "CreateCapacityProvider", checksum = "716c4344")]
+#[test_action("lambda", "GetCapacityProvider", checksum = "e0aa8ee9")]
+#[test_action("lambda", "ListCapacityProviders", checksum = "efb43bca")]
+#[test_action("lambda", "UpdateCapacityProvider", checksum = "0209aaaa")]
+#[test_action("lambda", "DeleteCapacityProvider", checksum = "88a85b26")]
 #[test_action(
     "lambda",
     "ListFunctionVersionsByCapacityProvider",

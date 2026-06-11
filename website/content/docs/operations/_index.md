@@ -1208,6 +1208,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateUserPool`
 - `CreateUserPoolClient`
 - `CreateUserPoolDomain`
+- `CreateUserPoolReplica`
 - `DeleteGroup`
 - `DeleteIdentityProvider`
 - `DeleteManagedLoginBranding`
@@ -1219,6 +1220,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteUserPoolClient`
 - `DeleteUserPoolClientSecret`
 - `DeleteUserPoolDomain`
+- `DeleteUserPoolReplica`
 - `DeleteWebAuthnCredential`
 - `DescribeIdentityProvider`
 - `DescribeManagedLoginBranding`
@@ -1255,6 +1257,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListUserImportJobs`
 - `ListUserPoolClientSecrets`
 - `ListUserPoolClients`
+- `ListUserPoolReplicas`
 - `ListUserPools`
 - `ListUsers`
 - `ListUsersInGroup`
@@ -1285,6 +1288,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateUserPool`
 - `UpdateUserPoolClient`
 - `UpdateUserPoolDomain`
+- `UpdateUserPoolReplica`
 - `VerifySoftwareToken`
 - `VerifyUserAttribute`
 
@@ -2887,6 +2891,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetCrawlerMetrics`
 - `GetCrawlers`
 - `GetCustomEntityType`
+- `GetDashboardUrl`
 - `GetDataCatalogEncryptionSettings`
 - `GetDataQualityModel`
 - `GetDataQualityModelResult`
@@ -2928,6 +2933,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetSecurityConfiguration`
 - `GetSecurityConfigurations`
 - `GetSession`
+- `GetSessionEndpoint`
 - `GetStatement`
 - `GetTable`
 - `GetTableOptimizer`
