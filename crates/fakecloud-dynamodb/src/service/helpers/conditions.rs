@@ -382,6 +382,178 @@ pub(crate) fn evaluate_size_comparison(
     })
 }
 
+/// Which legacy condition family is being translated. `KeyConditions`
+/// (the `Query` key) accept only the comparison + range operators a key
+/// condition allows; the filter families (`QueryFilter` / `ScanFilter`)
+/// accept the broader operator set the FilterExpression evaluator supports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyConditionRole {
+    Key,
+    Filter,
+}
+
+/// Translate a legacy `KeyConditions` / `QueryFilter` / `ScanFilter` map into
+/// the equivalent expression string, hoisting attribute names into `#leg*`
+/// placeholders and values into `:legv*` placeholders in the supplied
+/// expr-attr maps so the result can be fed straight through the existing
+/// `evaluate_key_condition` / `evaluate_filter_expression` machinery.
+///
+/// AWS deprecated these parameters in 2014 in favor of the expression API,
+/// but real DynamoDB and every SDK still accept them — this is a parity
+/// translation, not new evaluation logic. Entries are AND-ed together
+/// (the only join AWS supports for the legacy form). Iteration is in sorted
+/// attribute-name order so the synthesized expression is deterministic.
+pub(crate) fn translate_legacy_conditions(
+    conditions: &serde_json::Map<String, Value>,
+    role: LegacyConditionRole,
+    names: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Value>,
+) -> Result<String, AwsServiceError> {
+    // Role-specific placeholder tag so the key-condition and filter
+    // translations in a single Query don't clobber each other's entries in
+    // the shared expr-attr maps.
+    let tag = match role {
+        LegacyConditionRole::Key => "k",
+        LegacyConditionRole::Filter => "f",
+    };
+
+    let mut entries: Vec<(&String, &Value)> = conditions.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut fragments: Vec<String> = Vec::with_capacity(entries.len());
+    for (idx, (attr, spec)) in entries.iter().enumerate() {
+        let operator = spec
+            .get("ComparisonOperator")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                legacy_validation_err(format!(
+                    "ComparisonOperator is required for the condition on attribute {attr}"
+                ))
+            })?;
+        let value_list: &[Value] = spec
+            .get("AttributeValueList")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+
+        // Hoist the attribute name into a collision-safe placeholder.
+        let name_ph = format!("#leg{tag}{idx}");
+        names.insert(name_ph.clone(), (*attr).clone());
+
+        // Hoist each operand value into its own placeholder.
+        let mut value_phs: Vec<String> = Vec::with_capacity(value_list.len());
+        for (vi, v) in value_list.iter().enumerate() {
+            let ph = format!(":legv{tag}{idx}_{vi}");
+            values.insert(ph.clone(), v.clone());
+            value_phs.push(ph);
+        }
+
+        fragments.push(build_legacy_fragment(&name_ph, operator, &value_phs, role)?);
+    }
+
+    Ok(fragments.join(" AND "))
+}
+
+fn legacy_validation_err(message: String) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", message)
+}
+
+/// Build the expression fragment for a single legacy condition entry.
+fn build_legacy_fragment(
+    name_ph: &str,
+    operator: &str,
+    values: &[String],
+    role: LegacyConditionRole,
+) -> Result<String, AwsServiceError> {
+    // Operators a key condition may use; everything else is filter-only.
+    let key_ok = matches!(
+        operator,
+        "EQ" | "LE" | "LT" | "GE" | "GT" | "BEGINS_WITH" | "BETWEEN"
+    );
+    if role == LegacyConditionRole::Key && !key_ok {
+        return Err(legacy_validation_err(format!(
+            "Unsupported operator on KeyConditions: {operator}"
+        )));
+    }
+
+    let want = |n: usize| -> Result<(), AwsServiceError> {
+        if values.len() == n {
+            Ok(())
+        } else {
+            Err(legacy_validation_err(format!(
+                "ComparisonOperator {operator} requires {n} value(s) in AttributeValueList, got {}",
+                values.len()
+            )))
+        }
+    };
+
+    let frag = match operator {
+        "EQ" => {
+            want(1)?;
+            format!("{name_ph} = {}", values[0])
+        }
+        "NE" => {
+            want(1)?;
+            format!("{name_ph} <> {}", values[0])
+        }
+        "LE" => {
+            want(1)?;
+            format!("{name_ph} <= {}", values[0])
+        }
+        "LT" => {
+            want(1)?;
+            format!("{name_ph} < {}", values[0])
+        }
+        "GE" => {
+            want(1)?;
+            format!("{name_ph} >= {}", values[0])
+        }
+        "GT" => {
+            want(1)?;
+            format!("{name_ph} > {}", values[0])
+        }
+        "BEGINS_WITH" => {
+            want(1)?;
+            format!("begins_with({name_ph}, {})", values[0])
+        }
+        "BETWEEN" => {
+            want(2)?;
+            format!("{name_ph} BETWEEN {} AND {}", values[0], values[1])
+        }
+        "CONTAINS" => {
+            want(1)?;
+            format!("contains({name_ph}, {})", values[0])
+        }
+        "NOT_CONTAINS" => {
+            want(1)?;
+            format!("NOT contains({name_ph}, {})", values[0])
+        }
+        "NOT_NULL" => {
+            want(0)?;
+            format!("attribute_exists({name_ph})")
+        }
+        "NULL" => {
+            want(0)?;
+            format!("attribute_not_exists({name_ph})")
+        }
+        "IN" => {
+            if values.is_empty() {
+                return Err(legacy_validation_err(
+                    "ComparisonOperator IN requires at least one value in AttributeValueList"
+                        .to_string(),
+                ));
+            }
+            format!("{name_ph} IN ({})", values.join(", "))
+        }
+        other => {
+            return Err(legacy_validation_err(format!(
+                "Unsupported ComparisonOperator: {other}"
+            )));
+        }
+    };
+    Ok(frag)
+}
+
 pub(crate) fn evaluate_filter_expression(
     expr: &str,
     item: &HashMap<String, AttributeValue>,
@@ -418,4 +590,171 @@ pub(crate) fn evaluate_filter_expression(
     }
 
     evaluate_single_filter_condition(trimmed, item, expr_attr_names, expr_attr_values)
+}
+
+#[cfg(test)]
+mod legacy_translation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(pairs: &[(&str, Value)]) -> HashMap<String, AttributeValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn conditions(v: Value) -> serde_json::Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn key_conditions_eq_and_begins_with() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let expr = translate_legacy_conditions(
+            &conditions(json!({
+                "pk": {"AttributeValueList": [{"S": "a"}], "ComparisonOperator": "EQ"},
+                "sk": {"AttributeValueList": [{"S": "ord#"}], "ComparisonOperator": "BEGINS_WITH"},
+            })),
+            LegacyConditionRole::Key,
+            &mut names,
+            &mut values,
+        )
+        .unwrap();
+
+        // Sorted attribute order: pk (#legk0) before sk (#legk1).
+        assert_eq!(
+            expr,
+            "#legk0 = :legvk0_0 AND begins_with(#legk1, :legvk1_0)"
+        );
+
+        let matching = item(&[("pk", json!({"S": "a"})), ("sk", json!({"S": "ord#1"}))]);
+        let wrong_pk = item(&[("pk", json!({"S": "b"})), ("sk", json!({"S": "ord#1"}))]);
+        let wrong_sk = item(&[("pk", json!({"S": "a"})), ("sk", json!({"S": "x"}))]);
+        assert!(evaluate_key_condition(&expr, &matching, &names, &values));
+        assert!(!evaluate_key_condition(&expr, &wrong_pk, &names, &values));
+        assert!(!evaluate_key_condition(&expr, &wrong_sk, &names, &values));
+    }
+
+    #[test]
+    fn key_conditions_between_maps_correctly() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let expr = translate_legacy_conditions(
+            &conditions(json!({
+                "n": {
+                    "AttributeValueList": [{"N": "10"}, {"N": "20"}],
+                    "ComparisonOperator": "BETWEEN",
+                },
+            })),
+            LegacyConditionRole::Key,
+            &mut names,
+            &mut values,
+        )
+        .unwrap();
+        assert_eq!(expr, "#legk0 BETWEEN :legvk0_0 AND :legvk0_1");
+
+        let inside = item(&[("n", json!({"N": "15"}))]);
+        let below = item(&[("n", json!({"N": "5"}))]);
+        let above = item(&[("n", json!({"N": "25"}))]);
+        assert!(evaluate_key_condition(&expr, &inside, &names, &values));
+        assert!(!evaluate_key_condition(&expr, &below, &names, &values));
+        assert!(!evaluate_key_condition(&expr, &above, &names, &values));
+    }
+
+    #[test]
+    fn filter_operators_ne_contains_not_null() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let expr = translate_legacy_conditions(
+            &conditions(json!({
+                "color": {"AttributeValueList": [{"S": "red"}], "ComparisonOperator": "NE"},
+                "tags": {"AttributeValueList": [{"S": "vip"}], "ComparisonOperator": "CONTAINS"},
+                "zzz": {"ComparisonOperator": "NOT_NULL"},
+            })),
+            LegacyConditionRole::Filter,
+            &mut names,
+            &mut values,
+        )
+        .unwrap();
+        // Sorted: color (#legf0), tags (#legf1), zzz (#legf2).
+        assert_eq!(
+            expr,
+            "#legf0 <> :legvf0_0 AND contains(#legf1, :legvf1_0) AND attribute_exists(#legf2)"
+        );
+
+        let hit = item(&[
+            ("color", json!({"S": "blue"})),
+            ("tags", json!({"SS": ["vip", "x"]})),
+            ("zzz", json!({"S": "present"})),
+        ]);
+        let miss_color = item(&[
+            ("color", json!({"S": "red"})),
+            ("tags", json!({"SS": ["vip"]})),
+            ("zzz", json!({"S": "present"})),
+        ]);
+        let miss_zzz = item(&[
+            ("color", json!({"S": "blue"})),
+            ("tags", json!({"SS": ["vip"]})),
+        ]);
+        assert!(evaluate_filter_expression(&expr, &hit, &names, &values));
+        assert!(!evaluate_filter_expression(
+            &expr,
+            &miss_color,
+            &names,
+            &values
+        ));
+        assert!(!evaluate_filter_expression(
+            &expr, &miss_zzz, &names, &values
+        ));
+    }
+
+    #[test]
+    fn unknown_operator_rejected() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let err = translate_legacy_conditions(
+            &conditions(json!({
+                "a": {"AttributeValueList": [{"S": "x"}], "ComparisonOperator": "WAT"},
+            })),
+            LegacyConditionRole::Filter,
+            &mut names,
+            &mut values,
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("Unsupported ComparisonOperator"));
+    }
+
+    #[test]
+    fn wrong_value_count_rejected() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let err = translate_legacy_conditions(
+            &conditions(json!({
+                "n": {"AttributeValueList": [{"N": "10"}], "ComparisonOperator": "BETWEEN"},
+            })),
+            LegacyConditionRole::Key,
+            &mut names,
+            &mut values,
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("requires 2 value"));
+    }
+
+    #[test]
+    fn key_role_rejects_filter_only_operator() {
+        let mut names = HashMap::new();
+        let mut values = HashMap::new();
+        let err = translate_legacy_conditions(
+            &conditions(json!({
+                "a": {"AttributeValueList": [{"S": "x"}], "ComparisonOperator": "CONTAINS"},
+            })),
+            LegacyConditionRole::Key,
+            &mut names,
+            &mut values,
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("Unsupported operator on KeyConditions"));
+    }
 }
