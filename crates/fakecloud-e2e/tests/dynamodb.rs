@@ -768,6 +768,63 @@ async fn dynamodb_condition_expression() {
 }
 
 #[tokio::test]
+async fn dynamodb_condition_expression_not_attribute_exists() {
+    // python_dynamodb_lock acquires with `NOT(attribute_exists(...))` (no space).
+    // On a missing key this must succeed; on an existing key it must fail with
+    // ConditionalCheckFailedException.
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("NotCondTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Missing key: NOT(attribute_exists(id)) => NOT false => true => succeeds.
+    client
+        .put_item()
+        .table_name("NotCondTable")
+        .item("id", AttributeValue::S("lock".to_string()))
+        .condition_expression("NOT(attribute_exists(id))")
+        .send()
+        .await
+        .unwrap();
+
+    // Now the key exists: same condition => NOT true => false => fails.
+    let result = client
+        .put_item()
+        .table_name("NotCondTable")
+        .item("id", AttributeValue::S("lock".to_string()))
+        .condition_expression("NOT(attribute_exists(id))")
+        .send()
+        .await;
+    let err =
+        result.expect_err("put on existing key must fail the NOT(attribute_exists) condition");
+    assert!(
+        err.into_service_error()
+            .is_conditional_check_failed_exception(),
+        "expected ConditionalCheckFailedException"
+    );
+}
+
+#[tokio::test]
 async fn dynamodb_nested_projection_on_list_element() {
     let server = TestServer::start().await;
     let client = server.dynamodb_client().await;
