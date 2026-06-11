@@ -390,18 +390,40 @@ fn parse_log_group_name(input: &str) -> String {
     input.to_string()
 }
 
-/// Pull the function name out of either a bare name or a Lambda
-/// function ARN. CFN passes `{Ref: SomeFunction}` which resolves to the
-/// function name today, but `{Fn::GetAtt: [F, Arn]}` resolves to the
-/// full ARN; both shapes need to land at the same map key.
+/// Pull the bare function name out of any shape AWS accepts for a Lambda
+/// `FunctionName`: a name, a partial ARN, or a full ARN — each optionally
+/// `:qualified` with an alias or version. CFN feeds this `{Ref: SomeFunction}`
+/// (resolves to a name, or — for an alias — the alias ARN), `{Fn::GetAtt:
+/// [F, Arn]}` (full ARN), or a literal; all shapes must land at the same map
+/// key. Function names cannot contain `:`, so any trailing `:segment` on a
+/// non-ARN input is always a qualifier.
 fn parse_lambda_function_name(input: &str) -> String {
+    // Full ARN: arn:aws:lambda:region:account:function:name[:qualifier]
     if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
         if let Some(after) = rest.split(":function:").nth(1) {
-            // Trim trailing `:qualifier` (alias / version).
             return after.split(':').next().unwrap_or(after).to_string();
         }
     }
-    input.to_string()
+    // Partial ARN: account:function:name[:qualifier]
+    if let Some(after) = input.split(":function:").nth(1) {
+        return after.split(':').next().unwrap_or(after).to_string();
+    }
+    // Bare name, optionally qualified: name[:qualifier]
+    input.split(':').next().unwrap_or(input).to_string()
+}
+
+/// Recover the internal `{function}:{alias}` key used by the lambda
+/// state's `aliases` / `provisioned_concurrency` maps from an alias
+/// resource's physical id. The physical id is the alias ARN
+/// (`arn:aws:lambda:region:account:function:name:alias`); a legacy bare
+/// `name:alias` value is returned unchanged.
+fn alias_state_key(physical_id: &str) -> String {
+    if let Some(rest) = physical_id.strip_prefix("arn:aws:lambda:") {
+        if let Some(after) = rest.split(":function:").nth(1) {
+            return after.to_string();
+        }
+    }
+    physical_id.to_string()
 }
 
 /// All AWS::Lambda::Function CFN properties parsed and pre-defaulted into
@@ -7249,5 +7271,46 @@ mod tests {
         assert_eq!(sr.physical_id, "primary|my-ps");
 
         prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn parse_lambda_function_name_handles_every_shape() {
+        // Plain name, unqualified — passes through.
+        assert_eq!(parse_lambda_function_name("my-func"), "my-func");
+        // Bare name with an alias/version qualifier (what `Ref` on an
+        // alias used to feed the ESM create path).
+        assert_eq!(parse_lambda_function_name("my-func:live"), "my-func");
+        assert_eq!(parse_lambda_function_name("my-func:42"), "my-func");
+        // Full ARN, unqualified and qualified.
+        assert_eq!(
+            parse_lambda_function_name("arn:aws:lambda:us-east-1:123456789012:function:my-func"),
+            "my-func"
+        );
+        assert_eq!(
+            parse_lambda_function_name(
+                "arn:aws:lambda:us-east-1:123456789012:function:my-func:live"
+            ),
+            "my-func"
+        );
+        // Partial ARN, unqualified and qualified.
+        assert_eq!(
+            parse_lambda_function_name("123456789012:function:my-func"),
+            "my-func"
+        );
+        assert_eq!(
+            parse_lambda_function_name("123456789012:function:my-func:live"),
+            "my-func"
+        );
+    }
+
+    #[test]
+    fn alias_state_key_recovers_internal_key_from_arn() {
+        // Alias ARN -> `{function}:{alias}` internal map key.
+        assert_eq!(
+            alias_state_key("arn:aws:lambda:us-east-1:123456789012:function:my-func:live"),
+            "my-func:live"
+        );
+        // Legacy bare `name:alias` physical id is returned unchanged.
+        assert_eq!(alias_state_key("my-func:live"), "my-func:live");
     }
 }
