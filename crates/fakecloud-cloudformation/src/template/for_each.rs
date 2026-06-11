@@ -277,6 +277,68 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 }
                 new_resources.insert(logical_id.clone(), Value::Object(layer_resource));
             }
+            "AWS::Serverless::StateMachine" => {
+                let mut sfn_props = if let Some(p) = properties.as_object() {
+                    p.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                // `Definition` (inline ASL object) passes through unchanged —
+                // the native provisioner's resolve_sfn_definition reads it
+                // directly. `DefinitionSubstitutions` likewise passes through.
+                // Map `DefinitionUri` onto `DefinitionS3Location`, reusing the
+                // same `s3://bucket/key` parsing the Function arm uses for
+                // CodeUri. SAM also allows the object form
+                // `{Bucket, Key, Version}`, which maps over verbatim.
+                if let Some(uri) = sfn_props.get("DefinitionUri").cloned() {
+                    sfn_props.remove("DefinitionUri");
+                    let location = if let Some(s) = uri.as_str() {
+                        if let Some(stripped) = s.strip_prefix("s3://") {
+                            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
+                            if parts.len() == 2 {
+                                json!({"Bucket": parts[0], "Key": parts[1]})
+                            } else {
+                                json!({"Bucket": "sam", "Key": s})
+                            }
+                        } else {
+                            json!({"Bucket": "sam", "Key": s})
+                        }
+                    } else {
+                        // Already an object form: {Bucket, Key, Version}.
+                        uri
+                    };
+                    sfn_props.insert("DefinitionS3Location".to_string(), location);
+                }
+                // `Role` (ARN) → `RoleArn`.
+                if let Some(role) = sfn_props.remove("Role") {
+                    sfn_props.insert("RoleArn".to_string(), role);
+                }
+                // `Name` → `StateMachineName`.
+                if let Some(name) = sfn_props.remove("Name") {
+                    sfn_props.insert("StateMachineName".to_string(), name);
+                }
+                // SAM `Type` (STANDARD|EXPRESS) → native `StateMachineType`.
+                if let Some(machine_type) = sfn_props.remove("Type") {
+                    sfn_props.insert("StateMachineType".to_string(), machine_type);
+                }
+                // TODO: expand `Events` (Api/Schedule/EventBridge/SQS/etc.)
+                // into the corresponding trigger resources. Deferred — the
+                // state machine itself expands and provisions without it.
+                sfn_props.remove("Events");
+
+                let mut sfn_resource = serde_json::Map::new();
+                sfn_resource.insert(
+                    "Type".to_string(),
+                    json!("AWS::StepFunctions::StateMachine"),
+                );
+                sfn_resource.insert("Properties".to_string(), Value::Object(sfn_props));
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        sfn_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(sfn_resource));
+            }
             _ => {
                 new_resources.insert(logical_id.clone(), resource.clone());
             }
@@ -359,5 +421,87 @@ pub(super) fn substitute_loop_vars_in_value(
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_sam_statemachine_inline_definition() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "MySM": {
+                    "Type": "AWS::Serverless::StateMachine",
+                    "DependsOn": "SomeOtherResource",
+                    "Properties": {
+                        "Definition": {
+                            "StartAt": "Done",
+                            "States": {"Done": {"Type": "Succeed"}}
+                        },
+                        "DefinitionSubstitutions": {"fn": "my-fn"},
+                        "Role": "arn:aws:iam::123456789012:role/sfn-role",
+                        "Name": "my-state-machine",
+                        "Type": "EXPRESS"
+                    }
+                }
+            }
+        });
+
+        let expanded = expand_sam(&template);
+        let resource = &expanded["Resources"]["MySM"];
+
+        assert_eq!(resource["Type"], json!("AWS::StepFunctions::StateMachine"));
+
+        let props = &resource["Properties"];
+        assert_eq!(
+            props["RoleArn"],
+            json!("arn:aws:iam::123456789012:role/sfn-role")
+        );
+        assert_eq!(props["StateMachineName"], json!("my-state-machine"));
+        assert_eq!(props["StateMachineType"], json!("EXPRESS"));
+        // Inline definition carries over unchanged for the provisioner to read.
+        assert_eq!(
+            props["Definition"],
+            json!({"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}})
+        );
+        // DefinitionSubstitutions passes through.
+        assert_eq!(props["DefinitionSubstitutions"], json!({"fn": "my-fn"}));
+        // SAM-only keys are gone.
+        assert!(props.get("Role").is_none());
+        assert!(props.get("Name").is_none());
+        // Resource-level metadata is preserved.
+        assert_eq!(resource["DependsOn"], json!("SomeOtherResource"));
+    }
+
+    #[test]
+    fn expand_sam_statemachine_definition_uri() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "MySM": {
+                    "Type": "AWS::Serverless::StateMachine",
+                    "Properties": {
+                        "DefinitionUri": "s3://my-bucket/path/to/def.asl.json",
+                        "Role": "arn:aws:iam::123456789012:role/sfn-role"
+                    }
+                }
+            }
+        });
+
+        let expanded = expand_sam(&template);
+        let props = &expanded["Resources"]["MySM"]["Properties"];
+
+        assert_eq!(
+            props["DefinitionS3Location"],
+            json!({"Bucket": "my-bucket", "Key": "path/to/def.asl.json"})
+        );
+        assert!(props.get("DefinitionUri").is_none());
+        assert_eq!(
+            props["RoleArn"],
+            json!("arn:aws:iam::123456789012:role/sfn-role")
+        );
     }
 }

@@ -35,6 +35,12 @@ pub fn resolve_resource_properties_with_attrs(
     // Re-expand ForEach so the resource we look up matches the post-
     // expansion logical IDs from the original parse.
     let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
+    // Re-apply the SAM transform too: the original parse rewrote SAM
+    // resources (e.g. AWS::Serverless::StateMachine -> the native
+    // AWS::StepFunctions::StateMachine, Role -> RoleArn). Without this the
+    // properties get re-read from the raw SAM resource and the native
+    // provisioner sees SAM property names it doesn't understand.
+    let value = expand_sam(&value);
 
     let resources_obj = value
         .get("Resources")
