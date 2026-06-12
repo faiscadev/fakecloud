@@ -202,6 +202,79 @@ fn session_statement_increments() {
 }
 
 #[test]
+fn get_session_endpoint_requires_existing_session() {
+    let svc = GlueService::default();
+    // Missing session -> EntityNotFoundException.
+    let err = svc
+        .get_session_endpoint(&req("GetSessionEndpoint", json!({"SessionId": "nope"})))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("EntityNotFound"));
+
+    svc.create_session(&req(
+        "CreateSession",
+        json!({"Id": "s", "Role": "r", "Command": {"Name": "glueetl"}}),
+    ))
+    .unwrap();
+    let ep = body_of(
+        svc.get_session_endpoint(&req("GetSessionEndpoint", json!({"SessionId": "s"})))
+            .unwrap(),
+    );
+    let sc = &ep["SparkConnect"];
+    assert!(sc["Url"].as_str().unwrap().contains("/s"));
+    assert!(sc["AuthToken"].as_str().unwrap().contains("s"));
+    assert!(sc["AuthTokenExpirationTime"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn get_dashboard_url_validates_type_and_session() {
+    let svc = GlueService::default();
+    // Bad ResourceType -> InvalidInputException.
+    let err = svc
+        .get_dashboard_url(&req(
+            "GetDashboardUrl",
+            json!({"ResourceId": "x", "ResourceType": "BOGUS"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("InvalidInput"));
+
+    // SESSION type requires the session to exist.
+    let err = svc
+        .get_dashboard_url(&req(
+            "GetDashboardUrl",
+            json!({"ResourceId": "missing", "ResourceType": "SESSION"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("EntityNotFound"));
+
+    svc.create_session(&req(
+        "CreateSession",
+        json!({"Id": "s", "Role": "r", "Command": {"Name": "glueetl"}}),
+    ))
+    .unwrap();
+    let r = body_of(
+        svc.get_dashboard_url(&req(
+            "GetDashboardUrl",
+            json!({"ResourceId": "s", "ResourceType": "SESSION"}),
+        ))
+        .unwrap(),
+    );
+    assert!(r["Url"].as_str().unwrap().contains("/session/s"));
+
+    // JOB type does not require existence (no job-run lookup).
+    let r = body_of(
+        svc.get_dashboard_url(&req(
+            "GetDashboardUrl",
+            json!({"ResourceId": "jr_123", "ResourceType": "JOB"}),
+        ))
+        .unwrap(),
+    );
+    assert!(r["Url"].as_str().unwrap().contains("/job/jr_123"));
+}
+
+#[test]
 fn ml_transform_and_task_run() {
     let svc = GlueService::default();
     let created = body_of(
