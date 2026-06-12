@@ -127,6 +127,35 @@ jobs:
         if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
+      # The lambda-runtimes partitions pull several large language-runtime
+      # images and stack container layers during the run, which can exhaust the
+      # root filesystem even after free-disk-space (the recurring "No space left
+      # on device" flake). Move container storage onto the runner's much larger
+      # ephemeral /mnt disk so image/layer growth no longer fills `/`.
+      - name: Relocate container storage to /mnt
+        run: |
+          echo "=== disk before relocation ==="; df -h / /mnt || df -h /
+          # Docker: move data-root to /mnt and symlink so the daemon config and
+          # any preinstalled images are preserved.
+          sudo systemctl stop docker docker.socket || true
+          sudo mkdir -p /mnt/docker
+          if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
+            sudo rsync -a /var/lib/docker/ /mnt/docker/ || true
+            sudo rm -rf /var/lib/docker
+          fi
+          sudo ln -sfn /mnt/docker /var/lib/docker
+          sudo systemctl start docker
+          # Podman (rootless): point graphroot/runroot at /mnt as well.
+          if [ "$INSTALL_PODMAN" = "true" ]; then
+            sudo mkdir -p /mnt/podman-storage /mnt/podman-run
+            sudo chown -R "$USER" /mnt/podman-storage /mnt/podman-run
+            mkdir -p ~/.config/containers
+            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/podman-storage"\nrunroot = "/mnt/podman-run"\n' > ~/.config/containers/storage.conf
+          fi
+          echo "=== docker info root + disk after ==="
+          docker info --format '{{.DockerRootDir}}' || true
+          df -h / /mnt || df -h /
+
       - name: Prune container state before tests
         run: |
           docker system prune -af --volumes || true
