@@ -400,6 +400,9 @@ impl CognitoService {
         // Remove associated resource servers
         state.resource_servers.remove(pool_id);
 
+        // Remove associated multi-region replicas
+        state.user_pool_replicas.remove(pool_id);
+
         // Remove associated domains
         state.domains.retain(|_, d| d.user_pool_id != pool_id);
 

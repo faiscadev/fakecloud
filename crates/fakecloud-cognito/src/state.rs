@@ -127,6 +127,20 @@ pub struct CognitoState {
     /// inspecting the JWT they just received.
     #[serde(default, skip)]
     pub pre_token_gen_invocations: Vec<PreTokenGenInvocation>,
+    /// pool_id -> (region -> replica). Multi-region user pool replicas
+    /// created via `CreateUserPoolReplica`. The pool's own (primary) region
+    /// is not stored here — it is synthesized as a `PRIMARY` entry by
+    /// `ListUserPoolReplicas`; only secondary regions live in this map.
+    #[serde(default)]
+    pub user_pool_replicas: BTreeMap<String, BTreeMap<String, ReplicaEntry>>,
+}
+
+/// A secondary-region replica of a user pool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicaEntry {
+    pub region: String,
+    /// One of CREATING | ACTIVE | INACTIVE | DELETING.
+    pub status: String,
 }
 
 /// One PreTokenGeneration Lambda trigger invocation captured for
@@ -238,6 +252,7 @@ impl CognitoState {
             compromised_password_hashes: std::collections::BTreeSet::new(),
             principal_tag_attribute_maps: BTreeMap::new(),
             pre_token_gen_invocations: Vec::new(),
+            user_pool_replicas: BTreeMap::new(),
         }
     }
 
@@ -268,6 +283,7 @@ impl CognitoState {
         self.federated_identities.clear();
         self.principal_tag_attribute_maps.clear();
         self.pre_token_gen_invocations.clear();
+        self.user_pool_replicas.clear();
     }
 }
 
