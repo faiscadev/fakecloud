@@ -58,7 +58,7 @@ Full control plane: `CreateStackSet`, `UpdateStackSet`, `DeleteStackSet`, `Descr
 
 ## Resource provisioners
 
-Resources of these types create real backing state in the corresponding fakecloud service. Other resource types are accepted and recorded but don't allocate underlying state — your stack still reports them as provisioned, but dependent operations may fail.
+Resources of these types create real backing state in the corresponding fakecloud service. Any other resource type — including real AWS types fakecloud doesn't model (e.g. `AWS::CloudFormation::WaitConditionHandle`) — is accepted and recorded as provisioned without allocating underlying state, rather than failing the stack; `Ref` on it resolves to its logical ID. Dependent operations that need real backing state may still fail.
 
 - **API Gateway v1** — `RestApi`, `Resource`, `Method`, `Model`, `RequestValidator`, `Authorizer`, `Deployment`, `Stage`, `ApiKey`, `UsagePlan`, `UsagePlanKey`, `DomainName`, `BasePathMapping`, `GatewayResponse`
 - **API Gateway v2** — `Api`, `Stage`, `Route`, `RouteResponse`, `Integration`, `IntegrationResponse`, `Authorizer`, `Deployment`, `Model`, `DomainName`, `ApiMapping`, `VpcLink`

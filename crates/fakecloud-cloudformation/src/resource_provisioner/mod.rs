@@ -1150,7 +1150,24 @@ impl ResourceProvisioner {
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
-            other => Err(format!("Unsupported resource type: {other}")),
+            other => {
+                // No provisioner for this type. Real CloudFormation provisions
+                // many resource types fakecloud doesn't model, and SAM/CDK
+                // output routinely includes ones like
+                // `AWS::CloudFormation::WaitConditionHandle`; failing the whole
+                // stack on each would block otherwise-valid templates. Match the
+                // documented contract (docs/services/cloudformation.md): accept
+                // and record the resource as provisioned with no backing state.
+                // Dependent operations that need real state may still fail —
+                // that is the honest outcome. The physical id is the logical id
+                // so `Ref` on the resource resolves to a stable value.
+                tracing::warn!(
+                    resource_type = %other,
+                    logical_id = %resource.logical_id,
+                    "CloudFormation: no provisioner for resource type; recording it as provisioned with no backing state"
+                );
+                Ok(ProvisionResult::new(resource.logical_id.clone()))
+            }
         };
 
         let is_custom = resource.resource_type.starts_with("Custom::")
@@ -1755,7 +1772,10 @@ impl ResourceProvisioner {
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
-            other => Err(format!("Unsupported resource type: {other}")),
+            // No provisioner for this type — it was recorded with no backing
+            // state at create time (see `create_resource`), so there is nothing
+            // to delete. Succeed so stack teardown isn't blocked.
+            _ => Ok(()),
         }
     }
 
@@ -6043,6 +6063,26 @@ mod tests {
     }
 
     #[test]
+    fn unknown_resource_type_records_instead_of_failing() {
+        let prov = make_provisioner();
+        // A real AWS type fakecloud has no provisioner for. It must NOT fail
+        // the stack — it's recorded as provisioned with no backing state, and
+        // `Ref` (its physical id) resolves to a stable value (the logical id).
+        let sr = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFormation::WaitConditionHandle",
+                "Handle",
+                serde_json::json!({}),
+            ))
+            .expect("unknown resource type should record, not fail");
+        assert_eq!(sr.physical_id, "Handle");
+        assert_eq!(sr.status, "CREATE_COMPLETE");
+        // Teardown of a recorded no-op resource also succeeds.
+        prov.delete_resource(&sr)
+            .expect("delete no-op should succeed");
+    }
+
+    #[test]
     fn sns_subscription_rejects_nonexistent_topic() {
         let prov = make_provisioner();
         let resource = make_resource(
@@ -6524,10 +6564,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_resource_type_fails() {
+    fn unsupported_resource_type_is_recorded_not_failed() {
+        // An unmodelled type is recorded as provisioned (no backing state)
+        // rather than failing the stack — see
+        // `unknown_resource_type_records_instead_of_failing`.
         let prov = make_provisioner();
         let res = make_resource("AWS::NonExistent::Thing", "X", serde_json::json!({}));
-        assert!(prov.create_resource(&res).is_err());
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "X");
     }
 
     #[test]
@@ -6571,10 +6615,13 @@ mod tests {
     // ── additional resource types ──
 
     #[test]
-    fn unsupported_resource_type_errors() {
+    fn unsupported_resource_type_recorded_with_logical_id() {
+        // Recorded, not failed; physical id is the logical id so `Ref` resolves.
         let prov = make_provisioner();
         let res = make_resource("AWS::FooBar::Thing", "X", serde_json::json!({}));
-        assert!(prov.create_resource(&res).is_err());
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "X");
+        assert_eq!(sr.status, "CREATE_COMPLETE");
     }
 
     #[test]
