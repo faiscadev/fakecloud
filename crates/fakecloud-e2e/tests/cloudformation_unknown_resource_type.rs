@@ -60,7 +60,10 @@ async fn unknown_resource_type_does_not_fail_stack() {
         .find(|o| o.output_key() == Some("HandleRef"))
         .and_then(|o| o.output_value())
         .expect("HandleRef output");
-    assert!(!handle_ref.is_empty(), "Ref on the unmodelled resource should resolve");
+    assert!(
+        !handle_ref.is_empty(),
+        "Ref on the unmodelled resource should resolve"
+    );
 
     // The recorded resource is reported as provisioned.
     let resources = cfn
