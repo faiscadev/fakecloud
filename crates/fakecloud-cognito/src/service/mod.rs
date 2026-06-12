@@ -8,6 +8,7 @@ mod legacy;
 mod mfa;
 mod misc;
 mod resource_servers;
+mod user_pool_replicas;
 mod user_pools;
 mod users;
 
@@ -294,6 +295,7 @@ fn is_mutating_action(action: &str) -> bool {
             | "ListUserPools"
             | "ListUserPoolClients"
             | "ListUserPoolClientSecrets"
+            | "ListUserPoolReplicas"
             | "ListUsers"
             | "ListUsersInGroup"
             | "ListGroups"
@@ -336,6 +338,10 @@ impl AwsService for CognitoService {
             "UpdateUserPool" => self.update_user_pool(&req),
             "DeleteUserPool" => self.delete_user_pool(&req),
             "ListUserPools" => self.list_user_pools(&req),
+            "CreateUserPoolReplica" => self.create_user_pool_replica(&req),
+            "DeleteUserPoolReplica" => self.delete_user_pool_replica(&req),
+            "ListUserPoolReplicas" => self.list_user_pool_replicas(&req),
+            "UpdateUserPoolReplica" => self.update_user_pool_replica(&req),
             "CreateUserPoolClient" => self.create_user_pool_client(&req),
             "DescribeUserPoolClient" => self.describe_user_pool_client(&req),
             "UpdateUserPoolClient" => self.update_user_pool_client(&req),
@@ -473,6 +479,10 @@ impl AwsService for CognitoService {
             "UpdateUserPool",
             "DeleteUserPool",
             "ListUserPools",
+            "CreateUserPoolReplica",
+            "DeleteUserPoolReplica",
+            "ListUserPoolReplicas",
+            "UpdateUserPoolReplica",
             "CreateUserPoolClient",
             "DescribeUserPoolClient",
             "UpdateUserPoolClient",

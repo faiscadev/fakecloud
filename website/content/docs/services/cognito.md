@@ -4,7 +4,7 @@ description = "User pools, app clients, MFA, identity providers, full authentica
 weight = 15
 +++
 
-fakecloud implements **122 of 122** Cognito User Pools operations at 100% Smithy conformance.
+fakecloud implements **126 of 126** Cognito User Pools operations at 100% Smithy conformance.
 
 ## Supported features
 
@@ -17,6 +17,7 @@ fakecloud implements **122 of 122** Cognito User Pools operations at 100% Smithy
 - **Identity providers** — SAML, OIDC, social
 - **Resource servers** — CRUD, custom scopes
 - **Domains** — user pool domains
+- **Multi-region replicas** — `CreateUserPoolReplica` / `DeleteUserPoolReplica` / `ListUserPoolReplicas` / `UpdateUserPoolReplica`. The pool's own region is reported as the `PRIMARY` replica; secondary regions are recorded as control-plane entries (region + status) — fakecloud is single-region, so a replica is a record rather than a real second directory copy
 - **Authentication flows** — USER_PASSWORD_AUTH, USER_SRP_AUTH, REFRESH_TOKEN_AUTH, CUSTOM_AUTH, ADMIN_USER_PASSWORD_AUTH
 - **Password management** — ChangePassword, ForgotPassword, ConfirmForgotPassword
 - **Confirmation codes** — email/SMS confirmation flows

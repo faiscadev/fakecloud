@@ -4492,3 +4492,87 @@ async fn cognito_delete_web_authn_credential() {
     let list_body: serde_json::Value = list_resp.json().await.unwrap();
     assert!(list_body["Credentials"].as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Multi-region user pool replicas
+//
+// CreateUserPoolReplica / DeleteUserPoolReplica / ListUserPoolReplicas /
+// UpdateUserPoolReplica are newer than the typed aws-sdk-cognitoidentityprovider
+// client, so they are driven over raw awsJson1.1.
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "CreateUserPoolReplica", checksum = "76e1e828")]
+#[test_action("cognito-idp", "ListUserPoolReplicas", checksum = "622fb122")]
+#[test_action("cognito-idp", "UpdateUserPoolReplica", checksum = "40f02895")]
+#[test_action("cognito-idp", "DeleteUserPoolReplica", checksum = "28f2b0b6")]
+#[tokio::test]
+async fn cognito_user_pool_replica_lifecycle() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("replica-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let call = |op: &str, body: serde_json::Value| {
+        // `post` parses the endpoint and `json` serializes the body eagerly, so
+        // the returned future borrows neither — no per-call clones needed.
+        http.post(endpoint)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header(
+                "X-Amz-Target",
+                format!("AWSCognitoIdentityProviderService.{op}"),
+            )
+            .json(&body)
+            .send()
+    };
+
+    // Create a secondary replica.
+    let resp = call(
+        "CreateUserPoolReplica",
+        serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["UserPoolReplica"]["RegionName"], "us-west-2");
+    assert_eq!(body["UserPoolReplica"]["Role"], "SECONDARY");
+
+    // List shows PRIMARY + the SECONDARY.
+    let resp = call(
+        "ListUserPoolReplicas",
+        serde_json::json!({"UserPoolId": pool_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["UserPoolReplicas"].as_array().unwrap().len(), 2);
+
+    // Update its status.
+    let resp = call(
+        "UpdateUserPoolReplica",
+        serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2", "Status": "INACTIVE"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["UserPoolReplica"]["Status"], "INACTIVE");
+
+    // Delete it.
+    let resp = call(
+        "DeleteUserPoolReplica",
+        serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+}

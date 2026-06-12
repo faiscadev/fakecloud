@@ -7077,3 +7077,177 @@ fn get_signing_certificate_returns_real_x509_matching_pool_jwt_key() {
         "subject should mention fakecloud"
     );
 }
+
+// --- user pool replicas ---
+
+fn replica_test_service() -> (CognitoService, String) {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+    let pool_resp =
+        block_on(svc.create_user_pool(&replica_req("CreateUserPool", json!({"PoolName":"rep"}))))
+            .unwrap();
+    let pool_json: Value =
+        serde_json::from_str(core::str::from_utf8(pool_resp.body.expect_bytes()).unwrap()).unwrap();
+    let pool_id = pool_json["UserPool"]["Id"].as_str().unwrap().to_string();
+    (svc, pool_id)
+}
+
+fn replica_req(action: &str, body: Value) -> AwsRequest {
+    AwsRequest {
+        service: "cognito-idp".to_string(),
+        action: action.to_string(),
+        region: "us-east-1".to_string(),
+        account_id: "123456789012".to_string(),
+        request_id: "test".to_string(),
+        headers: http::HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![],
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: http::Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+fn body_json(resp: fakecloud_core::service::AwsResponse) -> Value {
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+#[test]
+fn user_pool_replica_lifecycle() {
+    let (svc, pool_id) = replica_test_service();
+
+    // List on a fresh pool: only the synthesized PRIMARY in the pool's region.
+    let listed = body_json(
+        svc.list_user_pool_replicas(&replica_req(
+            "ListUserPoolReplicas",
+            json!({"UserPoolId": pool_id}),
+        ))
+        .unwrap(),
+    );
+    let reps = listed["UserPoolReplicas"].as_array().unwrap();
+    assert_eq!(reps.len(), 1);
+    assert_eq!(reps[0]["Role"], "PRIMARY");
+    assert_eq!(reps[0]["RegionName"], "us-east-1");
+
+    // Create a secondary replica.
+    let created = body_json(
+        svc.create_user_pool_replica(&replica_req(
+            "CreateUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(created["UserPoolReplica"]["RegionName"], "us-west-2");
+    assert_eq!(created["UserPoolReplica"]["Role"], "SECONDARY");
+    assert_eq!(created["UserPoolReplica"]["Status"], "ACTIVE");
+    assert!(created["UserPoolReplica"]["UserPoolArn"]
+        .as_str()
+        .unwrap()
+        .contains(":us-west-2:"));
+
+    // Now list shows PRIMARY + the new SECONDARY.
+    let listed = body_json(
+        svc.list_user_pool_replicas(&replica_req(
+            "ListUserPoolReplicas",
+            json!({"UserPoolId": pool_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(listed["UserPoolReplicas"].as_array().unwrap().len(), 2);
+
+    // Update its status to INACTIVE.
+    let updated = body_json(
+        svc.update_user_pool_replica(&replica_req(
+            "UpdateUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "us-west-2", "Status": "INACTIVE"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(updated["UserPoolReplica"]["Status"], "INACTIVE");
+
+    // Delete it.
+    svc.delete_user_pool_replica(&replica_req(
+        "DeleteUserPoolReplica",
+        json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
+    ))
+    .unwrap();
+    let listed = body_json(
+        svc.list_user_pool_replicas(&replica_req(
+            "ListUserPoolReplicas",
+            json!({"UserPoolId": pool_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(listed["UserPoolReplicas"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn user_pool_replica_error_paths() {
+    let (svc, pool_id) = replica_test_service();
+
+    // Missing pool -> ResourceNotFound.
+    let err = svc
+        .create_user_pool_replica(&replica_req(
+            "CreateUserPoolReplica",
+            json!({"UserPoolId": "us-east-1_missing", "RegionName": "us-west-2"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("ResourceNotFound"));
+
+    // Primary region as replica -> InvalidParameter.
+    let err = svc
+        .create_user_pool_replica(&replica_req(
+            "CreateUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "us-east-1"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("InvalidParameter"));
+
+    // Update a non-existent replica -> ResourceNotFound.
+    let err = svc
+        .update_user_pool_replica(&replica_req(
+            "UpdateUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "eu-west-1", "Status": "ACTIVE"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("ResourceNotFound"));
+
+    // Bad status -> InvalidParameter (after creating a replica to update).
+    svc.create_user_pool_replica(&replica_req(
+        "CreateUserPoolReplica",
+        json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
+    ))
+    .unwrap();
+    let err = svc
+        .update_user_pool_replica(&replica_req(
+            "UpdateUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "us-west-2", "Status": "BOGUS"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("InvalidParameter"));
+
+    // Delete a non-existent replica -> ResourceNotFound.
+    let err = svc
+        .delete_user_pool_replica(&replica_req(
+            "DeleteUserPoolReplica",
+            json!({"UserPoolId": pool_id, "RegionName": "ap-south-1"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("ResourceNotFound"));
+}
