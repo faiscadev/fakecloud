@@ -4521,18 +4521,16 @@ async fn cognito_user_pool_replica_lifecycle() {
     let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
 
     let call = |op: &str, body: serde_json::Value| {
-        let http = http.clone();
-        let endpoint = endpoint.clone();
-        let target = format!("AWSCognitoIdentityProviderService.{op}");
-        async move {
-            http.post(endpoint)
-                .header("Content-Type", "application/x-amz-json-1.1")
-                .header("X-Amz-Target", target)
-                .json(&body)
-                .send()
-                .await
-                .unwrap()
-        }
+        // `post` parses the endpoint and `json` serializes the body eagerly, so
+        // the returned future borrows neither — no per-call clones needed.
+        http.post(endpoint)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header(
+                "X-Amz-Target",
+                format!("AWSCognitoIdentityProviderService.{op}"),
+            )
+            .json(&body)
+            .send()
     };
 
     // Create a secondary replica.
@@ -4540,7 +4538,8 @@ async fn cognito_user_pool_replica_lifecycle() {
         "CreateUserPoolReplica",
         serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["UserPoolReplica"]["RegionName"], "us-west-2");
@@ -4551,7 +4550,8 @@ async fn cognito_user_pool_replica_lifecycle() {
         "ListUserPoolReplicas",
         serde_json::json!({"UserPoolId": pool_id}),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["UserPoolReplicas"].as_array().unwrap().len(), 2);
@@ -4561,7 +4561,8 @@ async fn cognito_user_pool_replica_lifecycle() {
         "UpdateUserPoolReplica",
         serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2", "Status": "INACTIVE"}),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["UserPoolReplica"]["Status"], "INACTIVE");
@@ -4571,6 +4572,7 @@ async fn cognito_user_pool_replica_lifecycle() {
         "DeleteUserPoolReplica",
         serde_json::json!({"UserPoolId": pool_id, "RegionName": "us-west-2"}),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(resp.status(), 200);
 }
