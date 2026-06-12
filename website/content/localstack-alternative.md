@@ -1,6 +1,6 @@
 +++
 title = "Free, open-source LocalStack alternative"
-description = "fakecloud is a free, open-source local AWS emulator: 41 services, 3,704 operations, 124,255/124,255 Smithy variants pass (true 100% conformance), 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
+description = "fakecloud is a free, open-source local AWS emulator: 41 services, 3,706 operations, 124,255/124,255 Smithy variants pass (true 100% conformance), 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
 template = "page.html"
 aliases = [
     "/alternative/localstack/",
@@ -31,7 +31,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 ## What fakecloud gives you
 
 - **41 AWS services.** S3, SQS, SNS, EventBridge, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager, CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache, Step Functions, API Gateway v1 (REST), API Gateway v2 (HTTP), Bedrock, Bedrock Agent, Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2, CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue.
-- **3,704 API operations. True 100% conformance** across every implemented service — 124,255/124,255 Smithy-model-generated test variants pass on every commit.
+- **3,706 API operations. True 100% conformance** across every implemented service — 124,255/124,255 Smithy-model-generated test variants pass on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 23 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached. Your Lambda talking to RDS is talking to a real Postgres (or Oracle, or SQL Server).

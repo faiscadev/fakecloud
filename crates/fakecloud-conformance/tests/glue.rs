@@ -1326,6 +1326,71 @@ async fn session_lifecycle() {
     glue.delete_session().id("sess").send().await.unwrap();
 }
 
+// GetSessionEndpoint / GetDashboardUrl are newer than the typed aws-sdk-glue
+// client, so drive them over raw awsJson1.1 (x-amz-target: AWSGlue.<Op>).
+#[test_action("glue", "GetSessionEndpoint", checksum = "cea7dc9e")]
+#[test_action("glue", "GetDashboardUrl", checksum = "59e6e9b3")]
+#[tokio::test]
+async fn session_endpoint_and_dashboard_url() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+    use aws_sdk_glue::types::SessionCommand;
+
+    glue.create_session()
+        .id("ep-sess")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .command(SessionCommand::builder().name("glueetl").build())
+        .send()
+        .await
+        .unwrap();
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/glue/aws4_request, SignedHeaders=host, Signature=0";
+    let call = |op: &str, body: String| {
+        let url = server.endpoint();
+        let target = format!("AWSGlue.{op}");
+        async move {
+            reqwest::Client::new()
+                .post(url)
+                .header("Authorization", auth)
+                .header("Content-Type", "application/x-amz-json-1.1")
+                .header("X-Amz-Target", target)
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let resp = call(
+        "GetSessionEndpoint",
+        r#"{"SessionId":"ep-sess"}"#.to_string(),
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "GetSessionEndpoint: {}",
+        resp.status()
+    );
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["SparkConnect"]["Url"]
+        .as_str()
+        .unwrap()
+        .contains("ep-sess"));
+
+    let resp = call(
+        "GetDashboardUrl",
+        r#"{"ResourceId":"ep-sess","ResourceType":"SESSION"}"#.to_string(),
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "GetDashboardUrl: {}",
+        resp.status()
+    );
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v["Url"].as_str().unwrap().contains("ep-sess"));
+}
+
 // ----------------------------------------------------------------------------
 // ML transforms, ML task runs
 // ----------------------------------------------------------------------------

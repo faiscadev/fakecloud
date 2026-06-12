@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::common::{entity_not_found, missing, now_ts, req_present, req_str};
+use crate::common::{entity_not_found, invalid_input, missing, now_ts, req_present, req_str};
 use crate::generic;
 use crate::service::GlueService;
 
@@ -176,5 +176,64 @@ impl GlueService {
             obj.insert("State".into(), json!("CANCELLED"));
         }
         Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // --- monitoring / connectivity ---
+
+    /// Return the Spark monitoring dashboard URL for a session or job. The URL
+    /// is synthesized (fakecloud is not a Spark engine); for `SESSION` the
+    /// referenced session must exist, matching real Glue's EntityNotFound.
+    pub(crate) fn get_dashboard_url(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_id = req_str(&body, "ResourceId")?.to_string();
+        let resource_type = req_str(&body, "ResourceType")?.to_string();
+        if resource_type != "SESSION" && resource_type != "JOB" {
+            return Err(invalid_input(format!(
+                "ResourceType must be one of JOB, SESSION; got {resource_type}"
+            )));
+        }
+        if resource_type == "SESSION" {
+            let accounts = self.state.read();
+            let exists = accounts
+                .get(&req.account_id)
+                .is_some_and(|st| st.sessions.contains_key(&resource_id));
+            if !exists {
+                return Err(entity_not_found(format!("Session {resource_id} not found")));
+            }
+        }
+        let url = format!(
+            "https://glue-dashboard.{}.amazonaws.com/{}/{resource_id}",
+            req.region,
+            resource_type.to_lowercase()
+        );
+        Ok(AwsResponse::ok_json(json!({ "Url": url })))
+    }
+
+    /// Return the Spark Connect endpoint for an interactive session. The
+    /// session must exist (EntityNotFound otherwise). The auth token is
+    /// synthesized and expires one hour out.
+    pub(crate) fn get_session_endpoint(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let session_id = req_str(&body, "SessionId")?.to_string();
+        let accounts = self.state.read();
+        let region = accounts
+            .get(&req.account_id)
+            .filter(|st| st.sessions.contains_key(&session_id))
+            .map(|_| req.region.clone())
+            .ok_or_else(|| entity_not_found(format!("Session {session_id} not found")))?;
+        let url = format!("sc://glue-spark-connect.{region}.amazonaws.com:443/{session_id}");
+        Ok(AwsResponse::ok_json(json!({
+            "SparkConnect": {
+                "Url": url,
+                "AuthToken": format!("glue-sc-{session_id}"),
+                "AuthTokenExpirationTime": now_ts() + 3600.0,
+            }
+        })))
     }
 }
