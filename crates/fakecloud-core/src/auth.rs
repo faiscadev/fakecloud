@@ -422,6 +422,28 @@ pub trait IamPolicyEvaluator: Send + Sync {
         session_policies: &[String],
         scps: Option<&[String]>,
     ) -> IamDecision;
+
+    /// Evaluate `action` for an **anonymous** (unsigned) caller against a
+    /// resource-based policy in isolation. Anonymous requests carry no
+    /// identity, so the resource policy is the sole authorization source:
+    /// the request is allowed only if the policy explicitly grants the
+    /// action to a wildcard principal (`Principal:"*"` / `{"AWS":"*"}`).
+    ///
+    /// `resource_policy_json` is the raw policy document (S3 bucket policy
+    /// today); `None` or a non-public policy yields [`IamDecision::ImplicitDeny`].
+    /// ACL-based public grants are evaluated separately by the dispatcher
+    /// via [`ResourcePolicyProvider::public_acl_allows`].
+    ///
+    /// The default implementation returns [`IamDecision::ImplicitDeny`] so
+    /// evaluators that don't support anonymous access never silently grant.
+    fn evaluate_anonymous(
+        &self,
+        _action: &IamAction,
+        _context: &ConditionContext,
+        _resource_policy_json: Option<&str>,
+    ) -> IamDecision {
+        IamDecision::ImplicitDeny
+    }
 }
 
 /// Abstraction over "given a principal, return the inherited SCP
@@ -480,6 +502,20 @@ pub trait ResourcePolicyProvider: Send + Sync {
     /// the dispatcher parse it from the ARN. Default `None`.
     fn resource_owner_account(&self, _service: &str, _resource_arn: &str) -> Option<String> {
         None
+    }
+
+    /// Whether a **public-read ACL** on `resource_arn` grants `action` to
+    /// an anonymous (unsigned) caller. Distinct from a bucket policy: S3
+    /// ACLs are a separate grant surface, so an object/bucket with an
+    /// `AllUsers` group grant is publicly readable even without a bucket
+    /// policy. `action` is the bare AWS action name (`"GetObject"`,
+    /// `"ListBucket"`, …).
+    ///
+    /// Implementations must honor `PublicAccessBlock` (a bucket with
+    /// `IgnorePublicAcls` set is not public via ACL). Default `false` so
+    /// providers that don't model ACLs never grant anonymous access.
+    fn public_acl_allows(&self, _service: &str, _resource_arn: &str, _action: &str) -> bool {
+        false
     }
 }
 
@@ -594,6 +630,12 @@ impl ResourcePolicyProvider for MultiResourcePolicyProvider {
         self.providers
             .iter()
             .find_map(|p| p.resource_owner_account(service, resource_arn))
+    }
+
+    fn public_acl_allows(&self, service: &str, resource_arn: &str, action: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.public_acl_allows(service, resource_arn, action))
     }
 }
 

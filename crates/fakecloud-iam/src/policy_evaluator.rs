@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use fakecloud_core::auth::{
-    ConditionContext, IamAction, IamDecision, IamPolicyEvaluator, Principal,
+    ConditionContext, IamAction, IamDecision, IamPolicyEvaluator, Principal, PrincipalType,
 };
 
 use crate::evaluator::{self, Decision, EvalRequest};
@@ -96,6 +96,48 @@ impl IamPolicyEvaluator for IamPolicyEvaluatorImpl {
             &request,
             resource_account_id,
         ))
+    }
+
+    fn evaluate_anonymous(
+        &self,
+        action: &IamAction,
+        context: &ConditionContext,
+        resource_policy_json: Option<&str>,
+    ) -> IamDecision {
+        // Anonymous callers carry no identity; only the resource policy can
+        // grant access, and only via a wildcard principal. Evaluate the
+        // bucket policy in isolation against a synthetic anonymous principal
+        // — `evaluate_resource_policy_only` matches `Principal:"*"`
+        // (`PrincipalRef::AnyAws`) while an account-root or specific-ARN
+        // grant fails to match the empty anonymous identity, exactly as AWS
+        // treats unsigned requests.
+        let Some(json) = resource_policy_json else {
+            return IamDecision::ImplicitDeny;
+        };
+        let anonymous = anonymous_principal();
+        let request = EvalRequest {
+            principal: &anonymous,
+            action: action.action_string(),
+            resource: action.resource.clone(),
+            context: context.clone(),
+        };
+        let policy = evaluator::PolicyDocument::parse(json);
+        decision_to_core(evaluator::evaluate_resource_policy_only(&policy, &request))
+    }
+}
+
+/// A synthetic principal standing in for an unsigned (anonymous) caller.
+/// It has no account and an empty ARN, so only a wildcard `Principal:"*"`
+/// resource-policy statement matches it — account-root and specific-ARN
+/// grants do not, matching how real AWS authorizes anonymous requests.
+fn anonymous_principal() -> Principal {
+    Principal {
+        arn: String::new(),
+        user_id: String::new(),
+        account_id: String::new(),
+        principal_type: PrincipalType::Unknown,
+        source_identity: None,
+        tags: None,
     }
 }
 
@@ -477,6 +519,57 @@ mod tests {
             ),
             IamDecision::Allow
         );
+    }
+
+    #[test]
+    fn anonymous_allowed_by_wildcard_resource_policy() {
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/*"}]}"#;
+        assert_eq!(
+            eval.evaluate_anonymous(
+                &s3_get_object_action(),
+                &ConditionContext::default(),
+                Some(policy)
+            ),
+            IamDecision::Allow
+        );
+    }
+
+    #[test]
+    fn anonymous_denied_without_resource_policy() {
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        assert_eq!(
+            eval.evaluate_anonymous(&s3_get_object_action(), &ConditionContext::default(), None),
+            IamDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn anonymous_denied_when_policy_grants_specific_account() {
+        // A bucket policy that grants a named account root — not "*" — must not
+        // let an anonymous (identity-less) caller through.
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:root"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/*"}]}"#;
+        assert_eq!(
+            eval.evaluate_anonymous(
+                &s3_get_object_action(),
+                &ConditionContext::default(),
+                Some(policy)
+            ),
+            IamDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn anonymous_explicit_deny_in_resource_policy() {
+        let eval = IamPolicyEvaluatorImpl::new(setup());
+        let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket/*"}]}"#;
+        let decision = eval.evaluate_anonymous(
+            &s3_get_object_action(),
+            &ConditionContext::default(),
+            Some(policy),
+        );
+        assert!(!decision.is_allow());
     }
 
     #[test]

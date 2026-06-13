@@ -106,6 +106,19 @@ pub async fn dispatch(
                         action: String::new(),
                         protocol: AwsProtocol::Rest,
                     }
+                } else if let Some(bucket) = anonymous_s3_bucket(&parts.uri, &config) {
+                    // Unsigned request whose first path segment names an
+                    // existing S3 bucket: an anonymous path-style S3 access
+                    // (e.g. serving a public-read object to a browser). Without
+                    // this it would fall through to the apigateway catch-all
+                    // below and 404 with "Stage not found" (#1707). Authorization
+                    // for the anonymous caller still runs in the IAM block.
+                    tracing::debug!(bucket = %bucket, "routing unsigned request to S3 (existing bucket)");
+                    protocol::DetectedRequest {
+                        service: "s3".to_string(),
+                        action: String::new(),
+                        protocol: AwsProtocol::Rest,
+                    }
                 } else if !parts.uri.path().starts_with("/_") {
                     // Requests without AWS auth that don't match any service might be
                     // API Gateway execute API calls (plain HTTP without signatures).
@@ -638,6 +651,75 @@ pub async fn dispatch(
                         );
                     }
                 }
+            } else if aws_request.access_key_id.is_none() {
+                // Truly anonymous (unsigned) caller — no Authorization header at
+                // all. No identity policies exist, so authorization rests
+                // entirely on the resource policy (a bucket policy granting
+                // `Principal:"*"`) and public-read ACLs — mirroring AWS, which
+                // denies anonymous requests unless the resource is explicitly
+                // made public. Without this an anonymous request that reached an
+                // iam_enforceable service in enforcement mode would bypass
+                // authorization entirely.
+                //
+                // A request that carried an Authorization header but whose
+                // credential did not resolve (principal `None` with
+                // `access_key_id` `Some`) is intentionally left alone here: with
+                // SigV4 verification off, fakecloud does not reject unverified
+                // signed requests, and turning them into anonymous denials would
+                // change long-standing behavior.
+                if let Some(iam_action) = service.iam_action_for(&aws_request) {
+                    let now = chrono::Utc::now();
+                    let mut condition_context = ConditionContext {
+                        aws_source_ip: remote_addr.map(|sa| sa.ip()),
+                        aws_current_time: Some(now),
+                        aws_epoch_time: Some(now.timestamp()),
+                        aws_secure_transport: Some(is_secure_transport(&aws_request.headers)),
+                        aws_requested_region: Some(aws_request.region.clone()),
+                        ..Default::default()
+                    };
+                    condition_context.service_keys =
+                        service.iam_condition_keys_for(&aws_request, &iam_action);
+                    let resource_policy_json = config
+                        .resource_policy_provider
+                        .as_ref()
+                        .and_then(|p| p.resource_policy(&detected.service, &iam_action.resource));
+                    let policy_allows = evaluator
+                        .evaluate_anonymous(
+                            &iam_action,
+                            &condition_context,
+                            resource_policy_json.as_deref(),
+                        )
+                        .is_allow();
+                    let acl_allows = config.resource_policy_provider.as_ref().is_some_and(|p| {
+                        p.public_acl_allows(
+                            &detected.service,
+                            &iam_action.resource,
+                            iam_action.action,
+                        )
+                    });
+                    if !policy_allows && !acl_allows {
+                        tracing::warn!(
+                            target: "fakecloud::iam::audit",
+                            service = %detected.service,
+                            action = %iam_action.action_string(),
+                            resource = %iam_action.resource,
+                            resource_policy_present = resource_policy_json.is_some(),
+                            mode = %config.iam_mode,
+                            request_id = %request_id,
+                            "anonymous request denied: no public bucket policy or ACL grants the action"
+                        );
+                        if config.iam_mode.is_strict() {
+                            return build_error_response(
+                                StatusCode::FORBIDDEN,
+                                "AccessDenied",
+                                "Access Denied",
+                                &request_id,
+                                detected.protocol,
+                            );
+                        }
+                        // Soft mode: audit log emitted; fall through to the handler.
+                    }
+                }
             }
         }
     }
@@ -1017,6 +1099,23 @@ fn sanitize_header_value(s: &str) -> String {
 /// request. Populates the 10 global condition keys from the resolved
 /// principal + the HTTP request. Service-specific keys are deferred to
 /// a follow-up batch and left empty.
+/// For an unsigned request that no other detection rule claimed, return the
+/// bucket name when the first path segment names an existing S3 bucket.
+///
+/// fakecloud serves every service from one endpoint, so an anonymous
+/// path-style S3 request (`GET /bucket/key`, no SigV4) is indistinguishable
+/// from an API Gateway execute-api call by headers alone. Bucket existence is
+/// the disambiguator: if the segment is a real bucket, route to S3; otherwise
+/// fall through to the apigateway catch-all. Uses the already-wired
+/// `resource_policy_provider`, which resolves S3 bucket ownership from state
+/// (`Some` => the bucket exists). Returns `None` when no provider is wired.
+fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
+    let provider = config.resource_policy_provider.as_ref()?;
+    let segment = uri.path().split('/').find(|s| !s.is_empty())?.to_string();
+    let arn = format!("arn:aws:s3:::{segment}");
+    provider.resource_owner_account("s3", &arn).map(|_| segment)
+}
+
 fn build_condition_context(
     principal: &Principal,
     remote_addr: Option<SocketAddr>,
