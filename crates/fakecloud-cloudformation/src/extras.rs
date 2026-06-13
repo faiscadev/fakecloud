@@ -2842,6 +2842,87 @@ mod tests {
         assert!(!stack.outputs[0].value.is_empty());
     }
 
+    // Gap #3: a StateMachine that references a Lambda via DefinitionSubstitutions
+    // must provision *after* the Lambda even when it sorts/declares first, so the
+    // substitution resolves to the function name rather than leaving the logical
+    // id baked in the ASL (which broke every invoke with Lambda.ResourceNotFound).
+    #[test]
+    fn changeset_provisions_lambda_before_referencing_state_machine() {
+        let d = deps();
+        let sfn = d.stepfunctions.clone();
+        let state: SharedCloudFormationState =
+            Arc::new(RwLock::new(MultiAccountState::<CloudFormationState>::new(
+                "000000000000",
+                "us-east-1",
+                "",
+            )));
+        let svc = CloudFormationService::new(state, d);
+
+        // "Machine" sorts before "Worker", so without dependency ordering the
+        // StateMachine provisions first and bakes the unresolved logical id.
+        let template = r#"{
+            "Resources": {
+                "Machine": {
+                    "Type": "AWS::StepFunctions::StateMachine",
+                    "Properties": {
+                        "RoleArn": "arn:aws:iam::000000000000:role/sfn",
+                        "DefinitionString": "{\"StartAt\":\"T\",\"States\":{\"T\":{\"Type\":\"Task\",\"Resource\":\"${fn}\",\"End\":true}}}",
+                        "DefinitionSubstitutions": {"fn": {"Ref": "Worker"}}
+                    }
+                },
+                "Worker": {
+                    "Type": "AWS::Lambda::Function",
+                    "Properties": {
+                        "FunctionName": "workflow_dispatcher_v2-1",
+                        "Runtime": "python3.12",
+                        "Handler": "index.handler",
+                        "Role": "arn:aws:iam::000000000000:role/lambda",
+                        "Code": {"ZipFile": "def handler(e, c): return e"}
+                    }
+                }
+            }
+        }"#;
+
+        svc.handle_extra_action(&req(
+            "CreateChangeSet",
+            &[
+                ("StackName", "wf"),
+                ("ChangeSetName", "cs1"),
+                ("ChangeSetType", "CREATE"),
+                ("TemplateBody", template),
+            ],
+        ))
+        .expect("create change set");
+        svc.handle_extra_action(&req(
+            "ExecuteChangeSet",
+            &[("StackName", "wf"), ("ChangeSetName", "cs1")],
+        ))
+        .expect("execute change set");
+
+        let accounts = sfn.read();
+        let st = accounts.get("000000000000").expect("sfn account exists");
+        let machine = st
+            .state_machines
+            .values()
+            .next()
+            .expect("state machine was provisioned");
+        assert!(
+            machine.definition.contains("workflow_dispatcher_v2-1"),
+            "ASL should carry the resolved function name, got: {}",
+            machine.definition
+        );
+        assert!(
+            !machine.definition.contains("${fn}"),
+            "substitution token left unreplaced: {}",
+            machine.definition
+        );
+        assert!(
+            !machine.definition.contains("Worker"),
+            "logical id leaked into baked ASL: {}",
+            machine.definition
+        );
+    }
+
     #[test]
     fn stack_sets_instances_refactors() {
         ok("CreateStackSet", &[("StackSetName", "ss")]);
