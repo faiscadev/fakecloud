@@ -12,6 +12,40 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        // Validate the SSE config fields *before* persisting. The stored
+        // body is later round-tripped, field-by-field, into the object
+        // default-encryption headers on PutObject and ultimately into the
+        // `x-amz-server-side-encryption` / `-aws-kms-key-id` *response*
+        // headers on a later GET/HEAD. A control byte here (all bytes
+        // 0x00-0x1F are legal XML body bytes but illegal HTTP header bytes)
+        // would otherwise be persisted verbatim and crash the read path —
+        // a reachable, unauthenticated-input DoS (bug-audit 2026-06-13 2.1/2.2).
+        if let Some(algo) = extract_xml_value(&body_str, "SSEAlgorithm") {
+            // SSEAlgorithm is a closed enum; AWS returns MalformedXML for
+            // anything outside it.
+            if algo != "AES256" && algo != "aws:kms" && algo != "aws:kms:dsse" {
+                return Err(malformed_encryption("SSEAlgorithm", &algo));
+            }
+        }
+        if let Some(kid) = extract_xml_value(&body_str, "KMSMasterKeyID") {
+            // A real KMS key id / ARN / alias never contains control
+            // characters. Reject any value that isn't a legal HTTP header
+            // value rather than persisting a string that would later panic
+            // the GET/HEAD response path. AWS rejects a malformed key id with
+            // KMS.KMSInvalidStateException / InvalidArgument; InvalidArgument
+            // is the closest stable shape here.
+            if kid.parse::<http::header::HeaderValue>().is_err() {
+                return Err(AwsServiceError::aws_error_with_fields(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The KMSMasterKeyID is not a valid KMS key id, ARN, or alias",
+                    vec![
+                        ("ArgumentName".to_string(), "KMSMasterKeyID".to_string()),
+                        ("ArgumentValue".to_string(), kid.clone()),
+                    ],
+                ));
+            }
+        }
         // aws:kms / aws:kms:dsse rules require KMSMasterKeyID — AWS
         // rejects these with InvalidArgument when the field is
         // missing or empty, since the bucket would otherwise have
@@ -108,4 +142,21 @@ impl S3Service {
             .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
+}
+
+/// Build a `MalformedXML` error for a bucket-encryption field whose value
+/// isn't a member of its closed enum (e.g. an `SSEAlgorithm` other than
+/// AES256/aws:kms/aws:kms:dsse). Matches AWS, which rejects such bodies with
+/// 400 MalformedXML.
+fn malformed_encryption(field: &str, value: &str) -> AwsServiceError {
+    AwsServiceError::aws_error_with_fields(
+        StatusCode::BAD_REQUEST,
+        "MalformedXML",
+        "The XML you provided was not well-formed or did not validate against \
+         our published schema",
+        vec![
+            ("ArgumentName".to_string(), field.to_string()),
+            ("ArgumentValue".to_string(), value.to_string()),
+        ],
+    )
 }

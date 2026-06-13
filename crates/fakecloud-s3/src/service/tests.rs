@@ -4063,6 +4063,117 @@ fn put_bucket_encryption_aws_kms_requires_kms_master_key_id() {
 }
 
 #[test]
+fn put_bucket_encryption_rejects_control_char_in_kms_key_id() {
+    // Regression (bug-audit 2026-06-13 2.1): a control byte (newline) in the
+    // bucket-default KMSMasterKeyID used to be persisted verbatim, applied as
+    // an object default on PutObject, then panic the GET/HEAD response path
+    // when round-tripped into x-amz-server-side-encryption-aws-kms-key-id.
+    // It must now be rejected up front with 400, not a panic.
+    let svc = make_service();
+    seed_bucket(&svc, "kmsfuzz");
+
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>bad\nkey</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/kmsfuzz", &[("encryption", "")], body);
+    let err = match svc.put_bucket_encryption("123456789012", &req, "kmsfuzz") {
+        Err(e) => e,
+        Ok(_) => panic!("control char in KMSMasterKeyID should be rejected"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    // A NUL byte is likewise rejected.
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>k\x00id</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/kmsfuzz", &[("encryption", "")], body);
+    assert!(
+        svc.put_bucket_encryption("123456789012", &req, "kmsfuzz")
+            .is_err(),
+        "NUL byte in KMSMasterKeyID should be rejected"
+    );
+
+    // A legitimate KMS key ARN still round-trips and persists.
+    let arn = "arn:aws:kms:us-east-1:123456789012:key/abcd-1234";
+    let body = format!(
+        "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>{arn}</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+    );
+    let req = make_request(
+        Method::PUT,
+        "/kmsfuzz",
+        &[("encryption", "")],
+        body.as_bytes(),
+    );
+    svc.put_bucket_encryption("123456789012", &req, "kmsfuzz")
+        .expect("a valid KMS key ARN must be accepted");
+}
+
+#[test]
+fn put_bucket_encryption_rejects_invalid_sse_algorithm() {
+    // Regression (bug-audit 2026-06-13 2.2): SSEAlgorithm is a closed enum.
+    // A garbage value (including one carrying a control char) used to be
+    // stored verbatim and later panic the GET response header. AWS returns
+    // MalformedXML for an unknown algorithm.
+    let svc = make_service();
+    seed_bucket(&svc, "algofuzz");
+
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>x\ny</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/algofuzz", &[("encryption", "")], body);
+    let err = match svc.put_bucket_encryption("123456789012", &req, "algofuzz") {
+        Err(e) => e,
+        Ok(_) => panic!("invalid SSEAlgorithm should be rejected"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    // AES256 still accepted.
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/algofuzz", &[("encryption", "")], body);
+    svc.put_bucket_encryption("123456789012", &req, "algofuzz")
+        .expect("AES256 is a valid SSEAlgorithm");
+}
+
+#[tokio::test]
+async fn bucket_default_kms_key_round_trips_on_get_without_panic() {
+    // End-to-end of the fixed path: a valid bucket-default KMS config is
+    // applied to an object PUT with no SSE headers and surfaces cleanly on
+    // GET — no dropped connection, and the key id is returned verbatim.
+    let svc = make_service();
+    seed_bucket(&svc, "kmsdef");
+
+    let arn = "arn:aws:kms:us-east-1:123456789012:key/abcd-1234";
+    let enc = format!(
+        "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>{arn}</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+    );
+    let enc_req = make_request(
+        Method::PUT,
+        "/kmsdef",
+        &[("encryption", "")],
+        enc.as_bytes(),
+    );
+    svc.put_bucket_encryption("123456789012", &enc_req, "kmsdef")
+        .unwrap();
+
+    let put_req = make_request(Method::PUT, "/kmsdef/obj", &[], b"data");
+    svc.put_object("123456789012", &put_req, "kmsdef", "obj")
+        .await
+        .unwrap();
+
+    let get_req = make_request(Method::GET, "/kmsdef/obj", &[], b"");
+    let resp = svc
+        .get_object("123456789012", &get_req, "kmsdef", "obj")
+        .unwrap();
+    assert_eq!(
+        resp.headers
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|v| v.to_str().ok()),
+        Some(arn),
+        "valid bucket-default KMS key id must round-trip on GET"
+    );
+    assert_eq!(
+        resp.headers
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok()),
+        Some("aws:kms")
+    );
+}
+
+#[test]
 fn get_bucket_policy_status_uses_real_json_parse() {
     // Substring scan would falsely flag a Description string as
     // public. Real JSON parse only flags actual Principal=*.
