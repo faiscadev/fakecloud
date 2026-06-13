@@ -58,63 +58,25 @@ impl DockerBackend {
     /// `server_port` is the port the main fakecloud server bound to; used
     /// to resolve `PackageType=Image` ECR URIs against fakecloud ECR.
     pub fn auto_detect(server_port: u16) -> Option<Self> {
-        let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-            if std::process::Command::new(&cli)
-                .arg("info")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
-                cli
-            } else {
-                return None;
-            }
-        } else if is_cli_available("docker") {
-            "docker".to_string()
-        } else if is_cli_available("podman") {
-            "podman".to_string()
-        } else {
-            return None;
-        };
-
+        // Container-to-host networking (CLI detection, host alias,
+        // --add-host injection, and the in-container sibling address) all
+        // come from the shared `fakecloud-core::container_net` helper so the
+        // four container-spawning runtimes (Lambda/ECS/RDS/ElastiCache) can't
+        // drift apart on the issue #1539 fix. `detect_container_cli` honors
+        // `FAKECLOUD_CONTAINER_CLI` and prefers docker then podman, returning
+        // `None` when neither is usable.
+        let cli = fakecloud_core::container_net::detect_container_cli()?;
         let instance_id = format!("fakecloud-{}", std::process::id());
-
-        let (host_alias, add_host_arg) = if is_podman_binary(&cli) {
-            // Podman ships `host.containers.internal` as a built-in container
-            // DNS entry on every supported platform; injecting `host-gateway`
-            // on macOS fails because rootless podman's gvproxy doesn't
-            // expose the magic alias (issue #1539).
-            ("host.containers.internal".to_string(), None)
-        } else if cfg!(target_os = "linux") {
-            // Bare docker on Linux: resolve the bridge gateway IP and add
-            // an explicit alias. `host.docker.internal:host-gateway` only
-            // works on Docker Desktop; native Linux docker has no such
-            // magic.
-            let ip = detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string());
-            (
-                "host.docker.internal".to_string(),
-                Some(format!("host.docker.internal:{ip}")),
-            )
-        } else {
-            // Docker Desktop on Mac/Windows: `host-gateway` is a Docker
-            // Desktop-only alias that resolves to the host's IP.
-            (
-                "host.docker.internal".to_string(),
-                Some("host.docker.internal:host-gateway".to_string()),
-            )
-        };
+        let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
-        let sibling_host = resolve_sibling_host(std::env::var("FAKECLOUD_IN_CONTAINER").ok());
         Some(Self {
             cli,
             instance_id,
-            host_alias,
-            add_host_arg,
+            host_alias: net.host_alias,
+            add_host_arg: net.add_host_arg,
             server_port,
-            sibling_host,
+            sibling_host: net.sibling_host,
             docker_config,
         })
     }
@@ -624,74 +586,6 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// Detect the Docker bridge gateway IP on Linux. Returns None if detection fails.
-fn detect_bridge_gateway(cli: &str) -> Option<String> {
-    let output = std::process::Command::new(cli)
-        .args([
-            "network",
-            "inspect",
-            "bridge",
-            "--format",
-            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
-        ])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !gateway.is_empty() && gateway.contains('.') {
-            tracing::info!(
-                gateway = %gateway,
-                "Detected Docker bridge gateway for Lambda containers"
-            );
-            return Some(gateway);
-        }
-    }
-    None
-}
-
-/// Decide what loopback address fakecloud uses to reach the *sibling*
-/// Lambda containers it just spawned. Pure helper so the env-var
-/// parsing can be tested without touching the process's real
-/// environment (which would race with parallel tests).
-///
-/// - `Some("1")` or `Some("true")` -> fakecloud is in a container,
-///   sibling published ports live on `host.docker.internal:<port>`.
-/// - Anything else, including `None` -> fakecloud runs on the host,
-///   sibling ports live on `127.0.0.1:<port>`.
-fn resolve_sibling_host(env_value: Option<String>) -> String {
-    let in_container = env_value
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if in_container {
-        "host.docker.internal".to_string()
-    } else {
-        "127.0.0.1".to_string()
-    }
-}
-
-fn is_cli_available(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// True when `cli` is podman or a podman-compatible binary. Matches on the
-/// filename component so absolute paths (`/opt/homebrew/bin/podman`) and
-/// wrappers (`podman-remote`) both register as podman. Docker Desktop's
-/// compatibility CLI is named `docker`, so this check is safe.
-fn is_podman_binary(cli: &str) -> bool {
-    std::path::Path::new(cli)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.contains("podman"))
-        .unwrap_or(false)
-}
-
 fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
     let dir = TempDir::new().ok()?;
     let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime");
@@ -782,50 +676,6 @@ mod tests {
             Some("public.ecr.aws/lambda/dotnet:10".to_string())
         );
         assert_eq!(runtime_to_image("unknown"), None);
-    }
-
-    #[test]
-    fn is_podman_binary_matches_bare_name() {
-        assert!(is_podman_binary("podman"));
-        assert!(is_podman_binary("podman-remote"));
-    }
-
-    #[test]
-    fn is_podman_binary_matches_absolute_path() {
-        assert!(is_podman_binary("/opt/homebrew/bin/podman"));
-        assert!(is_podman_binary("/usr/local/bin/podman-remote"));
-    }
-
-    #[test]
-    fn is_podman_binary_rejects_docker() {
-        assert!(!is_podman_binary("docker"));
-        assert!(!is_podman_binary("/usr/local/bin/docker"));
-        // Docker Desktop's compatibility CLI is `docker`, not `podman`.
-        assert!(!is_podman_binary("docker-credential-helper"));
-    }
-
-    #[test]
-    fn resolve_sibling_host_defaults_to_loopback() {
-        assert_eq!(resolve_sibling_host(None), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some("".to_string())), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some("0".to_string())), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some("false".to_string())), "127.0.0.1");
-    }
-
-    #[test]
-    fn resolve_sibling_host_uses_docker_internal_when_in_container() {
-        assert_eq!(
-            resolve_sibling_host(Some("1".to_string())),
-            "host.docker.internal"
-        );
-        assert_eq!(
-            resolve_sibling_host(Some("true".to_string())),
-            "host.docker.internal"
-        );
-        assert_eq!(
-            resolve_sibling_host(Some("TRUE".to_string())),
-            "host.docker.internal"
-        );
     }
 
     #[test]
