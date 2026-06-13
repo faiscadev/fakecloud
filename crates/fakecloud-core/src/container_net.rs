@@ -107,7 +107,8 @@ impl HostNetworking {
     /// the process environment.
     pub fn detect(cli: &str) -> Self {
         let (host_alias, add_host_arg) = resolve_host_alias(cli);
-        let sibling_host = resolve_sibling_host(std::env::var("FAKECLOUD_IN_CONTAINER").ok());
+        let sibling_host =
+            resolve_sibling_host(&host_alias, std::env::var("FAKECLOUD_IN_CONTAINER").ok());
         Self {
             host_alias,
             add_host_arg,
@@ -159,15 +160,20 @@ pub fn resolve_host_alias(cli: &str) -> (String, Option<String>) {
 /// touching the process's real environment.
 ///
 /// - `Some("1")` / `Some("true")` (case-insensitive) -> fakecloud is in a
-///   container, siblings live on `host.docker.internal:<port>`.
+///   container; the siblings publish their ports on the host's daemon and
+///   are reachable at the same host alias the spawned containers use to
+///   reach fakecloud — `host.docker.internal` under docker,
+///   `host.containers.internal` under podman. Hardcoding
+///   `host.docker.internal` here broke podman, whose gvproxy network only
+///   resolves `host.containers.internal` (issue #1539 follow-up).
 /// - anything else, including `None` -> fakecloud runs on the host,
 ///   siblings live on `127.0.0.1:<port>`.
-pub fn resolve_sibling_host(env_value: Option<String>) -> String {
+pub fn resolve_sibling_host(host_alias: &str, env_value: Option<String>) -> String {
     let in_container = env_value
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if in_container {
-        "host.docker.internal".to_string()
+        host_alias.to_string()
     } else {
         "127.0.0.1".to_string()
     }
@@ -218,25 +224,58 @@ mod tests {
 
     #[test]
     fn resolve_sibling_host_defaults_to_loopback() {
-        assert_eq!(resolve_sibling_host(None), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some(String::new())), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some("0".to_string())), "127.0.0.1");
-        assert_eq!(resolve_sibling_host(Some("false".to_string())), "127.0.0.1");
+        assert_eq!(
+            resolve_sibling_host("host.docker.internal", None),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            resolve_sibling_host("host.docker.internal", Some(String::new())),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            resolve_sibling_host("host.docker.internal", Some("0".to_string())),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            resolve_sibling_host("host.containers.internal", Some("false".to_string())),
+            "127.0.0.1"
+        );
     }
 
     #[test]
-    fn resolve_sibling_host_uses_docker_internal_when_in_container() {
+    fn resolve_sibling_host_uses_host_alias_when_in_container() {
+        // Docker: siblings reachable at host.docker.internal.
         assert_eq!(
-            resolve_sibling_host(Some("1".to_string())),
+            resolve_sibling_host("host.docker.internal", Some("1".to_string())),
             "host.docker.internal"
         );
         assert_eq!(
-            resolve_sibling_host(Some("true".to_string())),
+            resolve_sibling_host("host.docker.internal", Some("true".to_string())),
             "host.docker.internal"
         );
         assert_eq!(
-            resolve_sibling_host(Some("TRUE".to_string())),
+            resolve_sibling_host("host.docker.internal", Some("TRUE".to_string())),
             "host.docker.internal"
+        );
+        // Podman: must use host.containers.internal, NOT host.docker.internal
+        // (issue #1539 follow-up — gvproxy only resolves the containers alias).
+        assert_eq!(
+            resolve_sibling_host("host.containers.internal", Some("1".to_string())),
+            "host.containers.internal"
+        );
+    }
+
+    #[test]
+    fn detect_wires_sibling_host_to_podman_alias_in_container() {
+        // Full path: a podman binary in a container must advertise siblings
+        // at host.containers.internal. resolve_host_alias drives host_alias,
+        // which resolve_sibling_host then reuses.
+        let (alias, add_host) = resolve_host_alias("podman");
+        assert_eq!(alias, "host.containers.internal");
+        assert_eq!(add_host, None);
+        assert_eq!(
+            resolve_sibling_host(&alias, Some("1".to_string())),
+            "host.containers.internal"
         );
     }
 

@@ -511,9 +511,13 @@ impl DockerCache {
     }
 
     async fn wait_for_redis(&self, host_port: u16) -> Result<(), RuntimeError> {
+        // Probe the same address clients reach the published port at:
+        // 127.0.0.1 on the host, host.docker.internal /
+        // host.containers.internal when fakecloud is containerized (#1539).
+        let host = &self.net.sibling_host;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{host_port}"))
+            if tokio::net::TcpStream::connect(format!("{host}:{host_port}"))
                 .await
                 .is_ok()
             {
@@ -528,10 +532,11 @@ impl DockerCache {
 
     async fn wait_for_memcached(&self, host_port: u16) -> Result<(), RuntimeError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let host = &self.net.sibling_host;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let Ok(mut stream) =
-                tokio::net::TcpStream::connect(format!("127.0.0.1:{host_port}")).await
+                tokio::net::TcpStream::connect(format!("{host}:{host_port}")).await
             else {
                 continue;
             };

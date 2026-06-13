@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fakecloud_core::container_net::{detect_container_cli, HostNetworking};
 use parking_lot::RwLock;
 use tokio_postgres::NoTls;
 
@@ -55,7 +56,12 @@ pub struct RdsRuntime {
     cli: String,
     containers: RwLock<HashMap<String, RunningDbContainer>>,
     instance_id: String,
-    host_ip: String,
+    /// Container-to-host networking resolved from the shared
+    /// `fakecloud-core::container_net` helper (issue #1539): the host alias
+    /// the spawned DB container uses to reach fakecloud, the `--add-host`
+    /// flag (None under podman), and the sibling address fakecloud uses to
+    /// reach the DB it just spawned. Unused on the k8s backend.
+    net: HostNetworking,
     server_port: u16,
     image_cache: RwLock<HashMap<String, Arc<tokio::sync::Mutex<bool>>>>,
     /// `Some` when running on the Kubernetes backend; the public methods
@@ -85,34 +91,20 @@ pub enum BackendInitError {
 
 impl RdsRuntime {
     pub fn new(server_port: u16) -> Option<Self> {
-        let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-            if cli_available(&cli) {
-                cli
-            } else {
-                return None;
-            }
-        } else if cli_available("docker") {
-            "docker".to_string()
-        } else if cli_available("podman") {
-            "podman".to_string()
-        } else {
-            return None;
-        };
-
-        // Match Lambda runtime container-to-host networking: Linux uses the
-        // bridge gateway IP directly, macOS/Windows use Docker Desktop's
-        // host-gateway alias. Containers reach fakecloud at host.docker.internal.
-        let host_ip = if cfg!(target_os = "linux") {
-            detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
-        } else {
-            "host-gateway".to_string()
-        };
+        // CLI detection, host alias, `--add-host` injection, and the
+        // in-container sibling address all come from the shared
+        // `container_net` helper so RDS can't drift from Lambda/ECS/
+        // ElastiCache on the issue #1539 fix (podman gets no `--add-host`
+        // and the `host.containers.internal` alias; macOS docker gets
+        // `host-gateway`; Linux docker gets the resolved bridge IP).
+        let cli = detect_container_cli()?;
+        let net = HostNetworking::detect(&cli);
 
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
             instance_id: format!("fakecloud-{}", std::process::id()),
-            host_ip,
+            net,
             server_port,
             image_cache: RwLock::new(HashMap::new()),
             k8s: None,
@@ -128,7 +120,14 @@ impl RdsRuntime {
             cli: String::new(),
             containers: RwLock::new(HashMap::new()),
             instance_id: format!("fakecloud-{}", std::process::id()),
-            host_ip: String::new(),
+            // Docker networking is unused on the k8s backend (Pod addresses
+            // come from `K8sDb`); a host-loopback default keeps the field
+            // populated without affecting behavior.
+            net: HostNetworking {
+                host_alias: String::new(),
+                add_host_arg: None,
+                sibling_host: "127.0.0.1".to_string(),
+            },
             server_port,
             image_cache: RwLock::new(HashMap::new()),
             k8s: Some(db),
@@ -199,8 +198,8 @@ impl RdsRuntime {
                     format!("POSTGRES_PASSWORD={password}"),
                     format!("POSTGRES_DB={db_name}"),
                     format!(
-                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
-                        self.server_port
+                        "FAKECLOUD_ENDPOINT=http://{}:{}",
+                        self.net.host_alias, self.server_port
                     ),
                     format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
                     format!("FAKECLOUD_REGION={region}"),
@@ -221,8 +220,8 @@ impl RdsRuntime {
                     format!("MYSQL_PASSWORD={password}"),
                     format!("MYSQL_DATABASE={db_name}"),
                     format!(
-                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
-                        self.server_port
+                        "FAKECLOUD_ENDPOINT=http://{}:{}",
+                        self.net.host_alias, self.server_port
                     ),
                     format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
                     format!("FAKECLOUD_REGION={region}"),
@@ -244,8 +243,8 @@ impl RdsRuntime {
                     format!("MARIADB_PASSWORD={password}"),
                     format!("MARIADB_DATABASE={db_name}"),
                     format!(
-                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
-                        self.server_port
+                        "FAKECLOUD_ENDPOINT=http://{}:{}",
+                        self.net.host_alias, self.server_port
                     ),
                     format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
                     format!("FAKECLOUD_REGION={region}"),
@@ -320,12 +319,13 @@ impl RdsRuntime {
         }
 
         // Bridge-aware engines (postgres aws_lambda, mysql/mariadb
-        // fakecloud_post UDF) call back into fakecloud over HTTP. Wire
-        // the host gateway alias so the in-container code can resolve
-        // host.docker.internal on every platform.
+        // fakecloud_post UDF) call back into fakecloud over HTTP. Inject the
+        // host-gateway `--add-host` mapping so the in-container code can
+        // resolve the host alias. No-op under podman, which provides
+        // `host.containers.internal` natively — passing `host-gateway` there
+        // fails with "host containers internal IP address is empty" (#1539).
         if bridge_engine_version.is_some() {
-            args.push("--add-host".to_string());
-            args.push(format!("host.docker.internal:{}", self.host_ip));
+            self.net.push_add_host_args(&mut args);
         }
 
         for env_var in env_vars {
@@ -398,7 +398,10 @@ impl RdsRuntime {
         let running = RunningDbContainer {
             container_id,
             host_port,
-            endpoint_address: "127.0.0.1".to_string(),
+            // 127.0.0.1 on the host; host.docker.internal /
+            // host.containers.internal when fakecloud is itself
+            // containerized (issue #1539).
+            endpoint_address: self.net.sibling_host.clone(),
             endpoint_port: host_port,
         };
         self.containers
@@ -492,7 +495,7 @@ impl RdsRuntime {
         let running = RunningDbContainer {
             container_id: running.container_id,
             host_port,
-            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_address: self.net.sibling_host.clone(),
             endpoint_port: host_port,
         };
         self.containers
@@ -545,7 +548,8 @@ impl RdsRuntime {
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let connection_string = format!(
-                "host=127.0.0.1 port={host_port} user={username} password={password} dbname={db_name}"
+                "host={} port={host_port} user={username} password={password} dbname={db_name}",
+                self.net.sibling_host
             );
             if let Ok((client, connection)) =
                 tokio_postgres::connect(&connection_string, NoTls).await
@@ -576,7 +580,7 @@ impl RdsRuntime {
 
         for attempt in 1..=40 {
             let opts = OptsBuilder::default()
-                .ip_or_hostname("127.0.0.1")
+                .ip_or_hostname(self.net.sibling_host.as_str())
                 .tcp_port(host_port)
                 .user(Some(username))
                 .pass(Some(password))
@@ -677,8 +681,9 @@ impl RdsRuntime {
     /// listener may bind a moment after the readiness log line.
     async fn wait_for_tcp(&self, host_port: u16, deadline_secs: u64) -> Result<(), RuntimeError> {
         let deadline = std::time::Instant::now() + Duration::from_secs(deadline_secs);
+        let host = self.net.sibling_host.as_str();
         while std::time::Instant::now() < deadline {
-            if tokio::net::TcpStream::connect(("127.0.0.1", host_port))
+            if tokio::net::TcpStream::connect((host, host_port))
                 .await
                 .is_ok()
             {
@@ -687,8 +692,8 @@ impl RdsRuntime {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Err(RuntimeError::ContainerStartFailed(format!(
-            "TCP probe to 127.0.0.1:{} did not succeed within {}s",
-            host_port, deadline_secs
+            "TCP probe to {}:{} did not succeed within {}s",
+            host, host_port, deadline_secs
         )))
     }
 
@@ -1150,40 +1155,6 @@ impl RdsRuntime {
 
         Ok(())
     }
-}
-
-fn cli_available(cli: &str) -> bool {
-    std::process::Command::new(cli)
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-/// On Linux Docker bridge networks, ask the daemon for the bridge
-/// gateway IP so containers can reach the host's loopback. macOS and
-/// Windows use the magic `host-gateway` alias instead.
-fn detect_bridge_gateway(cli: &str) -> Option<String> {
-    let output = std::process::Command::new(cli)
-        .args([
-            "network",
-            "inspect",
-            "bridge",
-            "--format",
-            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if gateway.is_empty() || !gateway.contains('.') {
-        return None;
-    }
-    Some(gateway)
 }
 
 /// Build the prebuilt-image reference for a given engine + major
