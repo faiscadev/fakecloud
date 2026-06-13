@@ -207,6 +207,25 @@ pub struct CloudFormationService {
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
+/// Everything the async CreateStack provisioning task needs to provision
+/// resources and flip the stack to its terminal status. Bundled into one
+/// owned struct so it can move into a detached `tokio::spawn`.
+struct CreateStackContext {
+    state: SharedCloudFormationState,
+    delivery: Arc<DeliveryBus>,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
+    provisioner: ResourceProvisioner,
+    account_id: String,
+    stack_name: String,
+    stack_id: String,
+    template_body: String,
+    parameters: BTreeMap<String, String>,
+    notification_arns: Vec<String>,
+    imported_names: Vec<String>,
+    resource_defs: Vec<template::ResourceDefinition>,
+}
+
 impl CloudFormationService {
     pub fn new(state: SharedCloudFormationState, deps: CloudFormationDeps) -> Self {
         Self {
@@ -587,7 +606,7 @@ impl CloudFormationService {
         Ok(())
     }
 
-    fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let params = Self::get_all_params(req);
 
         // `negative_omit_StackName` expects any 4xx; the AnyError expectation
@@ -684,59 +703,32 @@ impl CloudFormationService {
             &parameters,
         )?;
 
-        let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
-        // Provisioning is synchronous and can run for a long time — cold image
-        // pulls, and custom-resource Lambda invokes that block on their own
-        // runtime (`invoke_lambda_sync`). On the multi-threaded server runtime,
-        // run it via `block_in_place` so the current worker is handed off and a
-        // replacement keeps serving other requests; otherwise enough concurrent
-        // CreateStack calls would starve the worker pool and stall unrelated
-        // requests server-wide (bug-audit 2026-05-28, 3.1). Outside a
-        // multi-thread runtime (unit tests / current-thread), provision inline.
-        let resources = {
-            let provision = || {
-                provision_stack_resources(
-                    &provisioner,
-                    &parsed.resources,
-                    template_body,
-                    &parameters,
-                )
-            };
-            match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
-                Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-                    tokio::task::block_in_place(provision)
-                }
-                _ => provision(),
-            }
-        }?;
-
-        let outputs =
-            Self::resolve_template_outputs(template_body, &parameters, &resources, &self.state);
-
-        Self::ensure_export_uniqueness(&self.state, &req.account_id, stack_name, &outputs)?;
-
-        let stack = Stack {
-            name: stack_name.clone(),
-            stack_id: stack_id.clone(),
-            template: template_body.clone(),
-            status: "CREATE_COMPLETE".to_string(),
-            resources: resources.clone(),
-            parameters,
-            tags,
-            created_at: Utc::now(),
-            updated_at: None,
-            description: parsed.description,
-            notification_arns: notification_arns.clone(),
-            outputs: outputs.clone(),
-        };
-
+        // Seed the stack as CREATE_IN_PROGRESS before any resource work runs.
+        // Real CloudFormation returns the StackId immediately and provisions
+        // asynchronously; DescribeStacks reports CREATE_IN_PROGRESS until the
+        // stack reaches a terminal status. Up-front, synchronous-by-nature
+        // validation (template parse, duplicate stack, missing imports) has
+        // already happened above and still surfaces as a synchronous error.
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
-            state.stacks.insert(stack_name.clone(), stack);
-            Self::sync_exports_imports(state, &stack_id, stack_name, &outputs, &imported_names);
-
-            // Emit lifecycle events for CreateStack
+            state.stacks.insert(
+                stack_name.clone(),
+                Stack {
+                    name: stack_name.clone(),
+                    stack_id: stack_id.clone(),
+                    template: template_body.clone(),
+                    status: "CREATE_IN_PROGRESS".to_string(),
+                    resources: Vec::new(),
+                    parameters: parameters.clone(),
+                    tags: tags.clone(),
+                    created_at: Utc::now(),
+                    updated_at: None,
+                    description: parsed.description.clone(),
+                    notification_arns: notification_arns.clone(),
+                    outputs: Vec::new(),
+                },
+            );
             record_stack_status_event(
                 state,
                 &stack_id,
@@ -744,6 +736,161 @@ impl CloudFormationService {
                 "AWS::CloudFormation::Stack",
                 "CREATE_IN_PROGRESS",
             );
+        }
+
+        let ctx = CreateStackContext {
+            state: self.state.clone(),
+            delivery: self.deps.delivery.clone(),
+            snapshot_store: self.snapshot_store.clone(),
+            snapshot_lock: self.snapshot_lock.clone(),
+            provisioner: self.provisioner(&stack_id, &req.account_id, &req.region),
+            account_id: req.account_id.clone(),
+            stack_name: stack_name.clone(),
+            stack_id: stack_id.clone(),
+            template_body: template_body.clone(),
+            parameters,
+            notification_arns,
+            imported_names,
+            resource_defs: parsed.resources,
+        };
+
+        // Custom resources (`Custom::*` / `AWS::CloudFormation::CustomResource`)
+        // provision by invoking a Lambda synchronously (`invoke_lambda_sync`),
+        // which can trigger a cold container image pull lasting minutes — far
+        // past the AWS CLI's 60s read timeout. Real CloudFormation returns the
+        // StackId in <1s and provisions asynchronously, so when the template
+        // contains a custom resource we do the same: spawn a detached task and
+        // let DescribeStacks observe the CREATE_IN_PROGRESS ->
+        // CREATE_COMPLETE/CREATE_FAILED transition (bug-audit 2026-06-13, 3.1).
+        //
+        // Every other resource type provisions in-memory in microseconds, so
+        // we keep provisioning inline for them: CreateStack returns with the
+        // stack already CREATE_COMPLETE, matching long-standing client
+        // expectations that the stack's resources/outputs are queryable as
+        // soon as CreateStack returns. The async branch only triggers on a
+        // multi-thread runtime (the server); unit tests run current-thread.
+        let has_custom_resource = ctx.resource_defs.iter().any(|r| {
+            r.resource_type.starts_with("Custom::")
+                || r.resource_type == "AWS::CloudFormation::CustomResource"
+        });
+        let multi_thread = matches!(
+            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        );
+        if has_custom_resource && multi_thread {
+            // Emit the IN_PROGRESS lifecycle notification only on the async
+            // path — AWS sends it before the terminal CREATE_COMPLETE. The
+            // inline path provisions instantly and sends only CREATE_COMPLETE,
+            // preserving the single-notification contract callers depend on.
+            Self::send_stack_notification(
+                &self.deps.delivery,
+                &ctx.notification_arns,
+                stack_name,
+                &stack_id,
+                "CREATE_IN_PROGRESS",
+            );
+            tokio::spawn(async move {
+                Self::finish_create_stack(ctx).await;
+            });
+        } else {
+            Self::finish_create_stack(ctx).await;
+        }
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_responses::create_stack_response(&stack_id, &req.request_id),
+        ))
+    }
+
+    /// Runs the resource provisioning loop for a CreateStack and flips the
+    /// stack to its terminal status (CREATE_COMPLETE or CREATE_FAILED). Safe
+    /// to run inline (current-thread tests) or in a detached `tokio::spawn`
+    /// task (the multi-thread server). Persists the final state via the same
+    /// snapshot mechanism the request handler uses.
+    async fn finish_create_stack(ctx: CreateStackContext) {
+        let CreateStackContext {
+            state,
+            delivery,
+            snapshot_store,
+            snapshot_lock,
+            provisioner,
+            account_id,
+            stack_name,
+            stack_id,
+            template_body,
+            parameters,
+            notification_arns,
+            imported_names,
+            resource_defs,
+        } = ctx;
+
+        // The provisioning loop is fully synchronous (it may block on cold
+        // image pulls / custom-resource Lambda invokes). Hand it to a
+        // blocking thread so it never stalls a tokio worker.
+        let provision_result = {
+            let template_body = template_body.clone();
+            let parameters = parameters.clone();
+            tokio::task::spawn_blocking(move || {
+                provision_stack_resources(&provisioner, &resource_defs, &template_body, &parameters)
+            })
+            .await
+        };
+
+        // A spawn_blocking JoinError (panic) or a provisioning error both
+        // roll the stack into CREATE_FAILED.
+        let provisioned = match provision_result {
+            Ok(Ok(resources)) => Ok(resources),
+            Ok(Err(err)) => Err(err.message()),
+            Err(join_err) => Err(format!("provisioning task failed: {join_err}")),
+        };
+
+        let resources = match provisioned {
+            Ok(resources) => resources,
+            Err(reason) => {
+                Self::mark_create_failed(
+                    &state,
+                    &delivery,
+                    &account_id,
+                    &stack_name,
+                    &stack_id,
+                    &notification_arns,
+                    &reason,
+                );
+                save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
+                return;
+            }
+        };
+
+        let outputs =
+            Self::resolve_template_outputs(&template_body, &parameters, &resources, &state);
+
+        // Export-name collisions surface as a failed create (the stack is
+        // already inserted, so this can no longer be a synchronous error).
+        if let Err(err) = Self::ensure_export_uniqueness(&state, &account_id, &stack_name, &outputs)
+        {
+            Self::mark_create_failed(
+                &state,
+                &delivery,
+                &account_id,
+                &stack_name,
+                &stack_id,
+                &notification_arns,
+                &err.message(),
+            );
+            save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
+            return;
+        }
+
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(&account_id);
+            if let Some(stack) = st.stacks.get_mut(&stack_name) {
+                stack.status = "CREATE_COMPLETE".to_string();
+                stack.resources = resources.clone();
+                stack.outputs = outputs.clone();
+            }
+            Self::sync_exports_imports(st, &stack_id, &stack_name, &outputs, &imported_names);
+
             let changes: Vec<ResourceChange> = resources
                 .iter()
                 .map(|r| ResourceChange {
@@ -753,28 +900,61 @@ impl CloudFormationService {
                     resource_type: r.resource_type.clone(),
                 })
                 .collect();
-            record_stack_events(state, &stack_id, stack_name, &changes);
+            record_stack_events(st, &stack_id, &stack_name, &changes);
             record_stack_status_event(
-                state,
+                st,
                 &stack_id,
-                stack_name,
+                &stack_name,
                 "AWS::CloudFormation::Stack",
                 "CREATE_COMPLETE",
             );
         }
 
         Self::send_stack_notification(
-            &self.deps.delivery,
+            &delivery,
             &notification_arns,
-            stack_name,
+            &stack_name,
             &stack_id,
             "CREATE_COMPLETE",
         );
 
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            xml_responses::create_stack_response(&stack_id, &req.request_id),
-        ))
+        save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+    }
+
+    /// Roll a stack into CREATE_FAILED, record the lifecycle event, and
+    /// notify subscribers. Used by the async provisioning task on a
+    /// provisioning error or export collision.
+    fn mark_create_failed(
+        state: &SharedCloudFormationState,
+        delivery: &DeliveryBus,
+        account_id: &str,
+        stack_name: &str,
+        stack_id: &str,
+        notification_arns: &[String],
+        reason: &str,
+    ) {
+        tracing::warn!(%stack_name, %reason, "CreateStack provisioning failed");
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(account_id);
+            if let Some(stack) = st.stacks.get_mut(stack_name) {
+                stack.status = "CREATE_FAILED".to_string();
+            }
+            record_stack_status_event(
+                st,
+                stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                "CREATE_FAILED",
+            );
+        }
+        Self::send_stack_notification(
+            delivery,
+            notification_arns,
+            stack_name,
+            stack_id,
+            "CREATE_FAILED",
+        );
     }
 
     fn delete_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1338,7 +1518,7 @@ impl AwsService for CloudFormationService {
                 | "DeactivateOrganizationsAccess"
         );
         let result = match action {
-            "CreateStack" => self.create_stack(&req),
+            "CreateStack" => self.create_stack(&req).await,
             "DeleteStack" => self.delete_stack(&req),
             "DescribeStacks" => self.describe_stacks(&req),
             "ListStacks" => self.list_stacks(&req),
@@ -1719,6 +1899,37 @@ pub(crate) fn record_event(
 /// Emits IN_PROGRESS + COMPLETE event pairs for every resource change
 /// applied during an update. Mirrors the event sequence real CloudFormation
 /// publishes during `ExecuteChangeSet` / `UpdateStack`.
+/// Persist the CloudFormation snapshot from a detached task. Mirrors
+/// `CloudFormationService::save_snapshot` but takes owned handles so it can
+/// run inside the background CreateStack provisioning task (see RDS's
+/// `save_snapshot_static`).
+async fn save_snapshot_static(
+    state: SharedCloudFormationState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: Arc<AsyncMutex<()>>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = CloudFormationSnapshot {
+        schema_version: CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION,
+        state: None,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write cloudformation snapshot"),
+        Err(err) => tracing::error!(%err, "cloudformation snapshot task panicked"),
+    }
+}
+
 pub(crate) fn record_stack_events(
     state: &mut crate::state::CloudFormationState,
     stack_id: &str,
@@ -1976,8 +2187,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_stack_sets_failed_status_on_resource_error() {
+    #[tokio::test]
+    async fn update_stack_sets_failed_status_on_resource_error() {
         let svc = make_service();
 
         // Create a stack with just a queue
@@ -1988,7 +2199,7 @@ mod tests {
             r#"{"Resources":{"MyQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"q1"}}}}"#.to_string(),
         );
         let req = make_request("CreateStack", create_params);
-        let result = svc.create_stack(&req);
+        let result = svc.create_stack(&req).await;
         assert!(result.is_ok());
 
         // Update stack adding an SNS subscription with a non-existent topic
@@ -2013,8 +2224,8 @@ mod tests {
         assert_eq!(stack.status, "UPDATE_ROLLBACK_COMPLETE");
     }
 
-    #[test]
-    fn create_stack_resolves_ref_to_physical_id() {
+    #[tokio::test]
+    async fn create_stack_resolves_ref_to_physical_id() {
         let svc = make_service();
 
         // Template where subscription Refs the topic
@@ -2039,7 +2250,7 @@ mod tests {
         params.insert("StackName".to_string(), "ref-stack".to_string());
         params.insert("TemplateBody".to_string(), template.to_string());
         let req = make_request("CreateStack", params);
-        let result = svc.create_stack(&req);
+        let result = svc.create_stack(&req).await;
         assert!(result.is_ok(), "CreateStack failed: {:?}", result.err());
 
         // Verify both resources were created
@@ -2062,19 +2273,103 @@ mod tests {
         );
     }
 
+    /// On the multi-thread server runtime, a stack containing a custom
+    /// resource (whose provisioning can block for minutes on a cold Lambda
+    /// image pull) must NOT be provisioned synchronously inside the request
+    /// handler — CreateStack returns the StackId immediately and DescribeStacks
+    /// observes CREATE_IN_PROGRESS -> CREATE_COMPLETE (bug-audit 2026-06-13,
+    /// 3.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_stack_custom_resource_provisions_asynchronously() {
+        let svc = make_service();
+        let template = r#"{
+            "Resources": {
+                "MyCustom": {
+                    "Type": "Custom::Thing",
+                    "Properties": {
+                        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:handler"
+                    }
+                }
+            }
+        }"#;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "async-stack".to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        let req = make_request("CreateStack", params);
+
+        // CreateStack returns promptly with a StackId; provisioning runs in a
+        // detached background task. The stack is recorded before the task can
+        // possibly finish, so right after return it is at worst already
+        // terminal — never a value that proves the handler blocked on the
+        // (potentially minutes-long) provisioning loop. The key guarantee is
+        // that the call returns without running the provisioner inline.
+        let resp = svc
+            .create_stack(&req)
+            .await
+            .expect("create returns StackId");
+        assert!(resp.status.is_success());
+        {
+            let accounts = svc.state.read();
+            let stack = accounts
+                .get("123456789012")
+                .unwrap()
+                .stacks
+                .get("async-stack")
+                .expect("stack seeded synchronously");
+            assert!(
+                stack.status == "CREATE_IN_PROGRESS" || stack.status == "CREATE_COMPLETE",
+                "unexpected status right after create: {}",
+                stack.status
+            );
+        }
+
+        // Poll DescribeStacks (via state) until the background task flips the
+        // stack to its terminal CREATE_COMPLETE status.
+        let mut status = String::new();
+        for _ in 0..200 {
+            {
+                let accounts = svc.state.read();
+                if let Some(stack) = accounts
+                    .get("123456789012")
+                    .and_then(|s| s.stacks.get("async-stack"))
+                {
+                    status = stack.status.clone();
+                    if status != "CREATE_IN_PROGRESS" {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            status, "CREATE_COMPLETE",
+            "stack should reach CREATE_COMPLETE"
+        );
+
+        let accounts = svc.state.read();
+        let stack = accounts
+            .get("123456789012")
+            .unwrap()
+            .stacks
+            .get("async-stack")
+            .unwrap();
+        assert_eq!(stack.resources.len(), 1);
+        assert_eq!(stack.resources[0].resource_type, "Custom::Thing");
+    }
+
     // ── Service error paths ──
 
-    #[test]
-    fn create_stack_missing_name_errors() {
+    #[tokio::test]
+    async fn create_stack_missing_name_errors() {
         let svc = make_service();
         let mut params = HashMap::new();
         params.insert("TemplateBody".to_string(), "{}".to_string());
         let req = make_request("CreateStack", params);
-        assert!(svc.create_stack(&req).is_err());
+        assert!(svc.create_stack(&req).await.is_err());
     }
 
-    #[test]
-    fn create_stack_missing_template_creates_empty_stack() {
+    #[tokio::test]
+    async fn create_stack_missing_template_creates_empty_stack() {
         // `TemplateBody` isn't `@required` in Smithy and CreateStack
         // declares no `ValidationError` shape, so missing/placeholder
         // bodies now create an empty stack rather than rejecting with
@@ -2083,11 +2378,13 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("StackName".to_string(), "s".to_string());
         let req = make_request("CreateStack", params);
-        svc.create_stack(&req).expect("empty-body create succeeds");
+        svc.create_stack(&req)
+            .await
+            .expect("empty-body create succeeds");
     }
 
-    #[test]
-    fn create_stack_duplicate_errors() {
+    #[tokio::test]
+    async fn create_stack_duplicate_errors() {
         let svc = make_service();
         let mut params = HashMap::new();
         params.insert("StackName".to_string(), "dup".to_string());
@@ -2097,13 +2394,13 @@ mod tests {
                 .to_string(),
         );
         let req = make_request("CreateStack", params.clone());
-        svc.create_stack(&req).unwrap();
+        svc.create_stack(&req).await.unwrap();
         let req = make_request("CreateStack", params);
-        assert!(svc.create_stack(&req).is_err());
+        assert!(svc.create_stack(&req).await.is_err());
     }
 
-    #[test]
-    fn create_stack_invalid_template_creates_empty_stack() {
+    #[tokio::test]
+    async fn create_stack_invalid_template_creates_empty_stack() {
         // CreateStack's Smithy `errors` list has no `ValidationError`
         // shape, so unparseable bodies degrade to an empty parsed
         // template instead of raising an undeclared wire code.
@@ -2112,7 +2409,9 @@ mod tests {
         params.insert("StackName".to_string(), "bad".to_string());
         params.insert("TemplateBody".to_string(), "not json".to_string());
         let req = make_request("CreateStack", params);
-        svc.create_stack(&req).expect("bad-body create succeeds");
+        svc.create_stack(&req)
+            .await
+            .expect("bad-body create succeeds");
     }
 
     #[test]
@@ -2245,8 +2544,8 @@ mod tests {
         assert!(b.contains("UpdateStackResult"));
     }
 
-    #[test]
-    fn create_stack_resolves_outputs_and_records_export() {
+    #[tokio::test]
+    async fn create_stack_resolves_outputs_and_records_export() {
         let svc = make_service();
         let template = r#"{
             "Resources": {
@@ -2264,7 +2563,7 @@ mod tests {
         params.insert("StackName".to_string(), "outs".to_string());
         params.insert("TemplateBody".to_string(), template.to_string());
         let req = make_request("CreateStack", params);
-        svc.create_stack(&req).expect("create stack");
+        svc.create_stack(&req).await.expect("create stack");
 
         let accounts = svc.state.read();
         let stack = accounts
@@ -2279,8 +2578,8 @@ mod tests {
         assert!(!stack.outputs[0].value.is_empty());
     }
 
-    #[test]
-    fn create_stack_rejects_duplicate_export_name() {
+    #[tokio::test]
+    async fn create_stack_rejects_duplicate_export_name() {
         let svc = make_service();
         let mk = |name: &str| {
             let template = format!(
@@ -2294,21 +2593,38 @@ mod tests {
             params.insert("TemplateBody".to_string(), template);
             make_request("CreateStack", params)
         };
-        match svc.create_stack(&mk("first")) {
+        match svc.create_stack(&mk("first")).await {
             Ok(_) => {}
             Err(e) => panic!("first stack: {e:?}"),
         }
-        match svc.create_stack(&mk("second")) {
-            Ok(_) => panic!("expected duplicate-export error"),
-            Err(e) => assert!(
-                format!("{e:?}").contains("already exported"),
-                "expected duplicate-export error, got {e:?}"
-            ),
-        }
+        // The second stack's export collides with the first. Since
+        // provisioning is now asynchronous, the collision can no longer be a
+        // synchronous CreateStack error — it surfaces as a failed create.
+        // On the current-thread test runtime the provisioning task runs
+        // inline, so the stack is already CREATE_FAILED on return.
+        svc.create_stack(&mk("second"))
+            .await
+            .expect("CreateStack returns StackId even when provisioning fails");
+        let accounts = svc.state.read();
+        let stack = accounts
+            .get("123456789012")
+            .unwrap()
+            .stacks
+            .get("second")
+            .expect("second stack recorded");
+        assert_eq!(stack.status, "CREATE_FAILED");
+        // The first stack keeps the export.
+        let exports = &accounts.get("123456789012").unwrap().exports;
+        assert_eq!(
+            exports
+                .get("DupExport")
+                .map(|e| e.exporting_stack_name.as_str()),
+            Some("first")
+        );
     }
 
-    #[test]
-    fn import_value_resolves_against_other_stack_export() {
+    #[tokio::test]
+    async fn import_value_resolves_against_other_stack_export() {
         let svc = make_service();
 
         let producer_tpl = r#"{
@@ -2319,6 +2635,7 @@ mod tests {
         p.insert("StackName".to_string(), "producer".to_string());
         p.insert("TemplateBody".to_string(), producer_tpl.to_string());
         svc.create_stack(&make_request("CreateStack", p))
+            .await
             .expect("producer");
 
         let consumer_tpl = r#"{
@@ -2329,6 +2646,7 @@ mod tests {
         p.insert("StackName".to_string(), "consumer".to_string());
         p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
         svc.create_stack(&make_request("CreateStack", p))
+            .await
             .expect("consumer");
 
         let accounts = svc.state.read();
@@ -2350,8 +2668,8 @@ mod tests {
         assert_eq!(cons.outputs[0].value, prod_url);
     }
 
-    #[test]
-    fn create_stack_records_export_in_state_registry() {
+    #[tokio::test]
+    async fn create_stack_records_export_in_state_registry() {
         let svc = make_service();
         let template = r#"{
             "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"reg-q"}}},
@@ -2361,6 +2679,7 @@ mod tests {
         params.insert("StackName".to_string(), "reg".to_string());
         params.insert("TemplateBody".to_string(), template.to_string());
         svc.create_stack(&make_request("CreateStack", params))
+            .await
             .expect("create");
 
         let accounts = svc.state.read();
@@ -2374,8 +2693,8 @@ mod tests {
         assert!(export.exporting_stack_id.contains("reg"));
     }
 
-    #[test]
-    fn import_value_with_unknown_export_errors() {
+    #[tokio::test]
+    async fn import_value_with_unknown_export_errors() {
         let svc = make_service();
         let consumer_tpl = r#"{
             "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{
@@ -2385,7 +2704,7 @@ mod tests {
         let mut p = HashMap::new();
         p.insert("StackName".to_string(), "bad-consumer".to_string());
         p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
-        match svc.create_stack(&make_request("CreateStack", p)) {
+        match svc.create_stack(&make_request("CreateStack", p)).await {
             Ok(_) => panic!("expected ValidationError for unknown export"),
             Err(e) => {
                 let msg = format!("{e:?}");
@@ -2394,8 +2713,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn delete_stack_blocked_when_export_in_use_and_unblocked_after_consumer_delete() {
+    #[tokio::test]
+    async fn delete_stack_blocked_when_export_in_use_and_unblocked_after_consumer_delete() {
         let svc = make_service();
 
         let producer_tpl = r#"{
@@ -2406,6 +2725,7 @@ mod tests {
         p.insert("StackName".to_string(), "producer".to_string());
         p.insert("TemplateBody".to_string(), producer_tpl.to_string());
         svc.create_stack(&make_request("CreateStack", p))
+            .await
             .expect("producer");
 
         let consumer_tpl = r#"{
@@ -2418,6 +2738,7 @@ mod tests {
         p.insert("StackName".to_string(), "consumer".to_string());
         p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
         svc.create_stack(&make_request("CreateStack", p))
+            .await
             .expect("consumer");
 
         // Producer delete must fail while consumer still imports.

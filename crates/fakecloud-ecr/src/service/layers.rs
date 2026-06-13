@@ -179,7 +179,7 @@ impl EcrService {
         })))
     }
 
-    pub(super) fn upload_layer_part(
+    pub(super) async fn upload_layer_part(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -199,63 +199,107 @@ impl EcrService {
             .decode(part_blob_b64.as_bytes())
             .map_err(|_| invalid_layer("layerPartBlob is not valid base64"))?;
         let account = target_account_id(request, &body);
-        let mut accounts = self.state.write();
-        let state = accounts
-            .get_mut(&account)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let repo = state
-            .repositories
-            .get(&name)
-            .ok_or_else(|| repository_not_found(&name))?;
-        check_repo_policy(
-            &account,
-            &request.account_id,
-            &repo.repository_arn,
-            &name,
-            repo.policy.as_deref(),
-            "ecr:UploadLayerPart",
-        )?;
-        let upload = state
-            .layer_uploads
-            .get_mut(&upload_id)
-            .ok_or_else(|| upload_not_found(&upload_id))?;
-        if upload.repository_name != name {
-            return Err(upload_not_found(&upload_id));
-        }
-        if first_byte != upload.last_byte_received {
-            return Err(invalid_layer(format!(
-                "Layer part upload out of order: expected partFirstByte {} got {}",
-                upload.last_byte_received, first_byte,
-            )));
-        }
-        let expected_len = last_byte
-            .checked_sub(first_byte)
-            .and_then(|d| d.checked_add(1))
-            .ok_or_else(|| invalid_layer("partLastByte < partFirstByte"))?;
-        if part_bytes.len() as u64 != expected_len {
-            return Err(invalid_layer(format!(
-                "Layer part size mismatch: bytes {} doesn't match range [{first_byte}, {last_byte}]",
-                part_bytes.len()
-            )));
-        }
-        let spool = std::path::PathBuf::from(&upload.spool_path);
-        crate::oci::append_bytes_sync(&spool, &part_bytes).map_err(|e| {
+        // Validate under the lock, capture the spool path, then release the
+        // lock before touching the filesystem so the blocking append never
+        // runs while the state lock is held.
+        let spool = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let repo = state
+                .repositories
+                .get(&name)
+                .ok_or_else(|| repository_not_found(&name))?;
+            check_repo_policy(
+                &account,
+                &request.account_id,
+                &repo.repository_arn,
+                &name,
+                repo.policy.as_deref(),
+                "ecr:UploadLayerPart",
+            )?;
+            let upload = state
+                .layer_uploads
+                .get(&upload_id)
+                .ok_or_else(|| upload_not_found(&upload_id))?;
+            if upload.repository_name != name {
+                return Err(upload_not_found(&upload_id));
+            }
+            if first_byte != upload.last_byte_received {
+                return Err(invalid_layer(format!(
+                    "Layer part upload out of order: expected partFirstByte {} got {}",
+                    upload.last_byte_received, first_byte,
+                )));
+            }
+            let expected_len = last_byte
+                .checked_sub(first_byte)
+                .and_then(|d| d.checked_add(1))
+                .ok_or_else(|| invalid_layer("partLastByte < partFirstByte"))?;
+            if part_bytes.len() as u64 != expected_len {
+                return Err(invalid_layer(format!(
+                    "Layer part size mismatch: bytes {} doesn't match range [{first_byte}, {last_byte}]",
+                    part_bytes.len()
+                )));
+            }
+            std::path::PathBuf::from(&upload.spool_path)
+        };
+
+        // Append the (potentially multi-hundred-MB) chunk on a blocking
+        // thread so the JSON `aws ecr` upload path doesn't stall a tokio
+        // worker (bug-audit 2026-06-13, 3.2). The OCI `docker push` path
+        // already streams asynchronously.
+        let append_spool = spool.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::oci::append_bytes_sync(&append_spool, &part_bytes)
+        })
+        .await
+        .map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("layer part append task failed: {e}"),
+            )
+        })?
+        .map_err(|e| {
             AwsServiceError::aws_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "InternalError",
                 format!("failed to append upload chunk: {e}"),
             )
         })?;
-        upload.last_byte_received = last_byte + 1;
+
+        // Re-acquire the lock to advance the received-byte cursor. Re-check
+        // the upload still exists and the cursor is where we left it; if a
+        // concurrent part raced in we surface an out-of-order error rather
+        // than corrupting the cursor.
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        {
+            let upload = state
+                .layer_uploads
+                .get_mut(&upload_id)
+                .ok_or_else(|| upload_not_found(&upload_id))?;
+            if upload.last_byte_received != first_byte {
+                return Err(invalid_layer(format!(
+                    "Layer part upload out of order: expected partFirstByte {} got {}",
+                    upload.last_byte_received, first_byte,
+                )));
+            }
+            upload.last_byte_received = last_byte + 1;
+        }
+        let registry_id = state.registry_id();
         Ok(AwsResponse::ok_json(json!({
-            "registryId": state.registry_id(),
+            "registryId": registry_id,
             "repositoryName": name,
             "uploadId": upload_id,
             "lastByteReceived": last_byte,
         })))
     }
 
-    pub(super) fn complete_layer_upload(
+    pub(super) async fn complete_layer_upload(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -277,41 +321,66 @@ impl EcrService {
             ));
         }
         let account = target_account_id(request, &body);
-        let mut accounts = self.state.write();
-        let state = accounts
-            .get_mut(&account)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let repo = state
-            .repositories
-            .get(&name)
-            .ok_or_else(|| repository_not_found(&name))?;
-        check_repo_policy(
-            &account,
-            &request.account_id,
-            &repo.repository_arn,
-            &name,
-            repo.policy.as_deref(),
-            "ecr:CompleteLayerUpload",
-        )?;
-        // Peek, validate, then commit — so a digest mismatch lets the
-        // caller retry CompleteLayerUpload with the correct digest
-        // instead of having to re-upload the entire blob.
-        let upload = state
-            .layer_uploads
-            .get(&upload_id)
-            .ok_or_else(|| upload_not_found(&upload_id))?;
-        if upload.repository_name != name {
-            return Err(upload_not_found(&upload_id));
-        }
-        let spool = std::path::PathBuf::from(&upload.spool_path);
-        let blob_bytes = crate::oci::read_spool(&spool).map_err(|e| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "InternalError",
-                format!("failed to read upload spool: {e}"),
-            )
-        })?;
-        let computed = sha256_digest(&blob_bytes);
+        // Validate under the lock and capture the spool path, then release
+        // the lock before reading and hashing the (potentially
+        // multi-hundred-MB) spool file.
+        let spool = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let repo = state
+                .repositories
+                .get(&name)
+                .ok_or_else(|| repository_not_found(&name))?;
+            check_repo_policy(
+                &account,
+                &request.account_id,
+                &repo.repository_arn,
+                &name,
+                repo.policy.as_deref(),
+                "ecr:CompleteLayerUpload",
+            )?;
+            // Peek, validate, then commit — so a digest mismatch lets the
+            // caller retry CompleteLayerUpload with the correct digest
+            // instead of having to re-upload the entire blob.
+            let upload = state
+                .layer_uploads
+                .get(&upload_id)
+                .ok_or_else(|| upload_not_found(&upload_id))?;
+            if upload.repository_name != name {
+                return Err(upload_not_found(&upload_id));
+            }
+            std::path::PathBuf::from(&upload.spool_path)
+        };
+
+        // Read the full spool and compute its SHA-256 on a blocking thread so
+        // the JSON `aws ecr` CompleteLayerUpload path doesn't stall a tokio
+        // worker (bug-audit 2026-06-13, 3.2). The OCI `docker push` path
+        // already streams the blob asynchronously.
+        let read_spool = spool.clone();
+        let (blob_bytes, computed) =
+            tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<u8>, String)> {
+                let bytes = crate::oci::read_spool(&read_spool)?;
+                let digest = sha256_digest(&bytes);
+                Ok((bytes, digest))
+            })
+            .await
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    format!("layer read/hash task failed: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    format!("failed to read upload spool: {e}"),
+                )
+            })?;
+
         if !digests.iter().any(|d| d == &computed) {
             // Spool stays — caller can retry with the correct digest
             // without re-uploading every UploadLayerPart chunk.
@@ -324,12 +393,19 @@ impl EcrService {
                 ),
             ));
         }
-        let _upload = state.layer_uploads.remove(&upload_id).unwrap();
+
+        // Re-acquire to commit: remove the upload record and unlink the spool.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| repository_not_found(&name))?;
+            if state.layer_uploads.remove(&upload_id).is_none() {
+                return Err(upload_not_found(&upload_id));
+            }
+        }
         crate::oci::unlink_spool(&spool);
         let size = blob_bytes.len() as u64;
-        // Drop the write guard before the KMS encrypt call (which takes
-        // its own lock). Re-acquire to insert.
-        drop(accounts);
         let (stored_bytes, encrypted_with) =
             crate::oci::encrypt_layer_bytes(self, &account, &name, &blob_bytes);
         let mut accounts = self.state.write();
