@@ -2635,9 +2635,22 @@ mod tests {
         assert!(xml.contains("HOOK_COMPLETE_SUCCEEDED"), "get XML: {xml}");
         assert!(xml.contains("MyOrg::MyHook::Hook"));
 
-        // An unknown HookResultId is a real error, not canned success.
-        let err = s.handle_extra_action(&req("GetHookResult", &[("HookResultId", "nope")]));
-        assert!(err.is_err());
+        // An unknown HookResultId returns a handled 2xx response with an
+        // empty result (the route stays reachable for a hook with no
+        // recorded invocation) — but it must NOT echo the recorded hook's
+        // data, so it isn't masking a real result.
+        let resp = s
+            .handle_extra_action(&req("GetHookResult", &[("HookResultId", "nope")]))
+            .expect("GetHookResult for an unknown id still returns 2xx");
+        let xml = body_str(&resp);
+        assert!(
+            xml.contains("<HookResultId>nope</HookResultId>"),
+            "unknown-id XML: {xml}"
+        );
+        assert!(
+            !xml.contains("MyOrg::MyHook::Hook"),
+            "unknown id must not echo the recorded hook: {xml}"
+        );
     }
 
     #[test]
