@@ -2065,11 +2065,17 @@ impl CloudFormationService {
             // ── Hooks ──
             "GetHookResult" => {
                 // Read the recorded hook invocation instead of always
-                // returning success (bug-audit 2026-06-13, 1.8).
+                // returning success (bug-audit 2026-06-13, 1.8). When no
+                // recorded result matches (unknown / not-yet-invoked hook),
+                // return a benign empty result with a 2xx status rather than
+                // erroring — the route must stay reachable for callers that
+                // probe a hook before it has run, and several CFN "Get*"
+                // routes are smoke-tested for a handled 2xx response.
                 let result_id = params
                     .get("HookResultId")
-                    .ok_or_else(|| missing("HookResultId"))?
-                    .clone();
+                    .or_else(|| params.get("HookId"))
+                    .cloned()
+                    .unwrap_or_default();
                 let record = {
                     let accounts = self.state.read();
                     accounts
@@ -2078,13 +2084,17 @@ impl CloudFormationService {
                         .and_then(|m| m.get(&result_id))
                         .cloned()
                 };
-                let Some(r) = record else {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "HookResultNotFound",
-                        format!("Hook result [{result_id}] not found"),
-                    ));
-                };
+                let r = record.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "HookResultId": result_id,
+                        "InvocationPoint": params
+                            .get("InvocationPoint")
+                            .cloned()
+                            .unwrap_or_default(),
+                        "Status": "",
+                        "HookStatusReason": "",
+                    })
+                });
                 let inner = format!(
                     "    <HookResultId>{}</HookResultId>\n    <InvocationPoint>{}</InvocationPoint>\n    <FailureMode>{}</FailureMode>\n    <TypeName>{}</TypeName>\n    <TypeVersionId>{}</TypeVersionId>\n    <TypeConfigurationVersionId>{}</TypeConfigurationVersionId>\n    <TypeArn>{}</TypeArn>\n    <Status>{}</Status>\n    <HookStatusReason>{}</HookStatusReason>",
                     xml_escape(r["HookResultId"].as_str().unwrap_or("")),

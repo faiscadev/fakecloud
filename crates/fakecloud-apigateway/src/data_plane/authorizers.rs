@@ -240,10 +240,30 @@ pub(crate) async fn test_invoke_authorizer_eval(
         }
         // TOKEN / REQUEST / CUSTOM are Lambda authorizers.
         _ => {
+            // An authorizer with no identity source configured requires
+            // nothing of the caller, so there is nothing to deny on — the
+            // authorizer authorizes (clientStatus 200). Only an authorizer
+            // that *declares* an identity source and doesn't receive it
+            // returns 401.
+            let has_identity_source = authorizer
+                .identity_source
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty());
+            if !has_identity_source {
+                return Ok(json!({
+                    "clientStatus": 200,
+                    "log": "TestInvokeAuthorizer: no identity source configured",
+                    "latency": 0,
+                    "principalId": "user",
+                    "authorization": {},
+                    "claims": {},
+                }));
+            }
             let token_value = match token_value.filter(|v| !v.trim().is_empty()) {
                 Some(v) => v,
                 None => {
-                    // Missing required identity source -> AWS returns 401
+                    // Identity source declared but absent -> AWS returns 401
                     // with no policy.
                     return Ok(json!({
                         "clientStatus": 401,
