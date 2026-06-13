@@ -3664,6 +3664,84 @@ async fn s3_object_retention_put_get() {
     );
 }
 
+/// Regression (audit-2026-06-13): a crafted PutObjectRetention /
+/// PutObjectLegalHold body with an out-of-enum value used to be persisted
+/// verbatim and then panic the server thread when round-tripped into the
+/// `x-amz-object-lock-mode` / `x-amz-object-lock-legal-hold` response header
+/// on GET/HEAD (illegal header bytes). The value is now rejected up front with
+/// 400 MalformedXML and the server stays alive.
+#[tokio::test]
+async fn s3_object_lock_invalid_values_rejected_no_panic() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    s3.create_bucket()
+        .bucket("lock-fuzz-bucket")
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+    s3.put_object()
+        .bucket("lock-fuzz-bucket")
+        .key("obj.txt")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake";
+
+    // Retention Mode with an embedded CRLF — illegal as an HTTP header value.
+    let bad_retention = "<Retention><Mode>BAD\r\ninjected</Mode>\
+        <RetainUntilDate>2999-01-01T00:00:00Z</RetainUntilDate></Retention>";
+    let resp = http
+        .put(format!(
+            "{}/lock-fuzz-bucket/obj.txt?retention",
+            server.endpoint()
+        ))
+        .header("Authorization", auth)
+        .body(bad_retention)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid retention Mode should be rejected, not persisted"
+    );
+
+    // Legal-hold Status outside the ON|OFF enum.
+    let bad_hold = "<LegalHold><Status>weird\r\nvalue</Status></LegalHold>";
+    let resp = http
+        .put(format!(
+            "{}/lock-fuzz-bucket/obj.txt?legal-hold",
+            server.endpoint()
+        ))
+        .header("Authorization", auth)
+        .body(bad_hold)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid legal-hold Status should be rejected"
+    );
+
+    // The server must still be alive and the object readable — no panic, no
+    // poisoned lock from the crafted requests above.
+    let got = s3
+        .get_object()
+        .bucket("lock-fuzz-bucket")
+        .key("obj.txt")
+        .send()
+        .await
+        .expect("server should survive crafted lock values and still serve GET");
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"data");
+}
+
 #[tokio::test]
 async fn s3_object_legal_hold_put_get() {
     let server = TestServer::start().await;

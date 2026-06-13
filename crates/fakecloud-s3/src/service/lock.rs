@@ -21,6 +21,15 @@ impl S3Service {
         let version_id = req.query_params.get("versionId").cloned();
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
         let mode = extract_xml_value(body_str, "Mode");
+        // Mode is a closed enum in the S3 Object Lock schema. Reject anything
+        // else with MalformedXML (as AWS does) instead of persisting an
+        // arbitrary string that would later be round-tripped into the
+        // `x-amz-object-lock-mode` response header.
+        if let Some(ref m) = mode {
+            if m != "GOVERNANCE" && m != "COMPLIANCE" {
+                return Err(malformed_object_lock("Mode", m));
+            }
+        }
         let retain_until = extract_xml_value(body_str, "RetainUntilDate")
             .and_then(|s| s.parse::<DateTime<Utc>>().ok());
 
@@ -150,6 +159,13 @@ impl S3Service {
         let version_id = req.query_params.get("versionId").cloned();
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
         let status = extract_xml_value(body_str, "Status");
+        // LegalHold Status is a closed enum (ON | OFF); reject anything else
+        // with MalformedXML rather than persisting a header-unsafe string.
+        if let Some(ref s) = status {
+            if s != "ON" && s != "OFF" {
+                return Err(malformed_object_lock("Status", s));
+            }
+        }
 
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
@@ -256,4 +272,21 @@ impl S3Service {
             )),
         }
     }
+}
+
+/// Build a `MalformedXML` error for an object-lock field whose value isn't a
+/// member of its closed enum (e.g. `Mode` other than GOVERNANCE/COMPLIANCE,
+/// `Status` other than ON/OFF). Matches AWS, which rejects such bodies with
+/// 400 MalformedXML.
+fn malformed_object_lock(field: &str, value: &str) -> AwsServiceError {
+    AwsServiceError::aws_error_with_fields(
+        StatusCode::BAD_REQUEST,
+        "MalformedXML",
+        "The XML you provided was not well-formed or did not validate against \
+         our published schema",
+        vec![
+            ("ArgumentName".to_string(), field.to_string()),
+            ("ArgumentValue".to_string(), value.to_string()),
+        ],
+    )
 }
