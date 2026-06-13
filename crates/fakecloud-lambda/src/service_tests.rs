@@ -1411,7 +1411,10 @@ async fn update_event_source_mapping_persists_enabled_and_sac() {
     let resp = svc.handle(req).await.unwrap();
     let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(v["State"], "Disabled");
-    assert_eq!(v["SourceAccessConfigurations"][0]["URI"], "arn:aws:secretsmanager:us-east-1:123456789012:secret:x");
+    assert_eq!(
+        v["SourceAccessConfigurations"][0]["URI"],
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:x"
+    );
 
     // Re-enable round-trips back to Enabled.
     let req = make_request(

@@ -573,7 +573,10 @@ async fn create_script_reflects_dag_nodes() {
     assert!(py.contains("database = \"warehouse\""), "py=\n{py}");
     // The edge must wire the sink to its upstream source.
     assert!(py.contains("frame = datasource0"), "py=\n{py}");
-    assert!(resp.scala_code().unwrap_or_default().contains("val datasink0"));
+    assert!(resp
+        .scala_code()
+        .unwrap_or_default()
+        .contains("val datasink0"));
 }
 
 #[tokio::test]

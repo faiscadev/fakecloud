@@ -2186,9 +2186,7 @@ async fn dynamodb_global_table_replicates_writes() {
 
 #[tokio::test]
 async fn dynamodb_replica_auto_scaling_reflects_global_table_replicas() {
-    use aws_sdk_dynamodb::types::{
-        AutoScalingSettingsUpdate, ReplicaAutoScalingUpdate,
-    };
+    use aws_sdk_dynamodb::types::{AutoScalingSettingsUpdate, ReplicaAutoScalingUpdate};
     let server = TestServer::start().await;
     let client = server.dynamodb_client().await;
 

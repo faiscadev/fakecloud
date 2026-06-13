@@ -142,10 +142,7 @@ impl GlueService {
         })))
     }
 
-    pub(crate) fn test_connection(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn test_connection(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // AWS accepts either a named, already-created connection
         // (`ConnectionName`) or an inline `TestConnectionInput`. Validate that
         // one of them is present and resolvable, then return the empty success
@@ -164,7 +161,11 @@ impl GlueService {
             // Inline test input: require the connection type + properties that
             // a real connection attempt needs, mirroring AWS validation.
             let input = req_present(&body, "TestConnectionInput")?;
-            if input.get("ConnectionType").and_then(|v| v.as_str()).is_none() {
+            if input
+                .get("ConnectionType")
+                .and_then(|v| v.as_str())
+                .is_none()
+            {
                 return Err(missing("TestConnectionInput.ConnectionType"));
             }
             req_present(input, "ConnectionProperties")?;

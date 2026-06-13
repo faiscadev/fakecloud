@@ -301,7 +301,11 @@ pub(crate) fn describe_reserved_instances_listings(
         .reserved_instances_listings
         .values()
         .filter(|l| want_listing.map(|w| w == &l.listing_id).unwrap_or(true))
-        .filter(|l| want_ri.map(|w| w == &l.reserved_instances_id).unwrap_or(true))
+        .filter(|l| {
+            want_ri
+                .map(|w| w == &l.reserved_instances_id)
+                .unwrap_or(true)
+        })
         .map(listing_xml)
         .collect();
     items.sort();

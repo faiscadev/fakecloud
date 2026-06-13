@@ -370,9 +370,7 @@ impl DynamoDbService {
 /// Build the `Replicas` list (`ReplicaAutoScalingDescription[]`) from a
 /// global-table replication group, emitting any persisted autoscaling
 /// settings.
-fn replica_auto_scaling_list(
-    replicas: &[crate::state::ReplicaDescription],
-) -> Vec<Value> {
+fn replica_auto_scaling_list(replicas: &[crate::state::ReplicaDescription]) -> Vec<Value> {
     replicas
         .iter()
         .map(|r| {

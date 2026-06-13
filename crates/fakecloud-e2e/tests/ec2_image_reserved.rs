@@ -202,7 +202,9 @@ async fn reserved_instances_listings_persist_and_describe() {
         .await
         .unwrap();
     assert_eq!(
-        described.reserved_instances_listings()[0].status().map(|s| s.as_str()),
+        described.reserved_instances_listings()[0]
+            .status()
+            .map(|s| s.as_str()),
         Some("cancelled")
     );
 }

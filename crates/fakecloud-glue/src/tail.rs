@@ -1570,8 +1570,14 @@ fn generate_script(nodes: &[Value], edges: &[Value]) -> (String, String) {
 
 /// Generate scripts for `GetPlan` from the source/sinks/mapping inputs.
 fn generate_plan(source: &Value, sinks: &[Value], mapping: &Value) -> (String, String) {
-    let src_db = source.get("DatabaseName").and_then(|v| v.as_str()).unwrap_or("");
-    let src_tbl = source.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
+    let src_db = source
+        .get("DatabaseName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let src_tbl = source
+        .get("TableName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let mut python = format!(
         "import sys\nfrom awsglue.transforms import *\nfrom awsglue.context import GlueContext\nfrom pyspark.context import SparkContext\n\nglueContext = GlueContext(SparkContext.getOrCreate())\ndatasource = glueContext.create_dynamic_frame.from_catalog(database = \"{src_db}\", table_name = \"{src_tbl}\")\n",
     );
@@ -1583,7 +1589,10 @@ fn generate_plan(source: &Value, sinks: &[Value], mapping: &Value) -> (String, S
             .iter()
             .filter_map(|m| {
                 let sp = m.get("SourcePath").and_then(|v| v.as_str())?;
-                let st = m.get("SourceType").and_then(|v| v.as_str()).unwrap_or("string");
+                let st = m
+                    .get("SourceType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("string");
                 let tp = m.get("TargetPath").and_then(|v| v.as_str()).unwrap_or(sp);
                 let tt = m.get("TargetType").and_then(|v| v.as_str()).unwrap_or(st);
                 Some(format!("(\"{sp}\", \"{st}\", \"{tp}\", \"{tt}\")"))
@@ -1601,7 +1610,10 @@ fn generate_plan(source: &Value, sinks: &[Value], mapping: &Value) -> (String, S
         }
     }
     for sink in sinks {
-        let sdb = sink.get("DatabaseName").and_then(|v| v.as_str()).unwrap_or("");
+        let sdb = sink
+            .get("DatabaseName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let stbl = sink.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
         python.push_str(&format!(
             "glueContext.write_dynamic_frame.from_catalog(frame = applymapping, database = \"{sdb}\", table_name = \"{stbl}\")\n",

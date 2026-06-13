@@ -288,8 +288,12 @@ fn launch_permission_mods(
         let mut i = 1usize;
         loop {
             let base = format!("LaunchPermission.{op}.{i}");
-            let user = params.get(&format!("{base}.UserId")).filter(|v| !v.is_empty());
-            let group = params.get(&format!("{base}.Group")).filter(|v| !v.is_empty());
+            let user = params
+                .get(&format!("{base}.UserId"))
+                .filter(|v| !v.is_empty());
+            let group = params
+                .get(&format!("{base}.Group"))
+                .filter(|v| !v.is_empty());
             if user.is_none() && group.is_none() {
                 break;
             }
@@ -388,11 +392,7 @@ pub(crate) fn modify_image_attribute(
     // ── launchPermission ──
     let (add_u, add_g, rem_u, rem_g) = launch_permission_mods(&req.query_params);
     let legacy_lp = attribute == Some("launchPermission");
-    if !add_u.is_empty()
-        || !add_g.is_empty()
-        || !rem_u.is_empty()
-        || !rem_g.is_empty()
-        || legacy_lp
+    if !add_u.is_empty() || !add_g.is_empty() || !rem_u.is_empty() || !rem_g.is_empty() || legacy_lp
     {
         validate_enum(&req.query_params, "OperationType", &["add", "remove"])?;
         // Legacy UserId.N / UserGroup.N form keyed by OperationType.
@@ -422,7 +422,8 @@ pub(crate) fn modify_image_attribute(
                 img.launch_permission_groups.push(g);
             }
         }
-        img.launch_permission_users.retain(|u| !rem_users.contains(u));
+        img.launch_permission_users
+            .retain(|u| !rem_users.contains(u));
         img.launch_permission_groups
             .retain(|g| !rem_groups.contains(g));
         // The `all` group makes the AMI public, matching AWS.
