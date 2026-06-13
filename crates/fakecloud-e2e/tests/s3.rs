@@ -3802,8 +3802,20 @@ async fn s3_bucket_default_sse_invalid_values_no_panic() {
     );
 
     // The server is still alive: a legitimate bucket-default KMS config sets,
-    // applies to a no-SSE object PUT, and round-trips cleanly on GET.
-    let arn = "arn:aws:kms:us-east-1:000000000000:key/abcd-1234";
+    // applies to a no-SSE object PUT, and round-trips cleanly on GET. Use a
+    // real KMS key so the encrypt path on PutObject succeeds — a non-existent
+    // key id correctly fails with KMS.NotFound at encrypt time.
+    let kms = aws_sdk_kms::Client::new(&server.aws_config().await);
+    let arn = kms
+        .create_key()
+        .send()
+        .await
+        .expect("create kms key")
+        .key_metadata()
+        .and_then(|m| m.arn())
+        .expect("key arn")
+        .to_string();
+    let arn = arn.as_str();
     s3.put_bucket_encryption()
         .bucket("sse-fuzz-bucket")
         .server_side_encryption_configuration(
