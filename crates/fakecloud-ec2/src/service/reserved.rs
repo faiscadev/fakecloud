@@ -6,7 +6,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{gen_id, indexed_list, require, validate_enum, validate_max_results};
-use crate::state::{DedicatedHost, Ec2State, ReservedInstances, Tag};
+use crate::state::{
+    DedicatedHost, Ec2State, ReservedInstances, ReservedInstancesListing,
+    ReservedInstancesModification, Tag,
+};
 
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
@@ -198,76 +201,192 @@ pub(crate) fn purchase_reserved_instances_offering(
     ))
 }
 
-fn listing_xml(listing_id: &str, ri_id: &str) -> String {
+fn listing_xml(l: &ReservedInstancesListing) -> String {
     format!(
-        "{}{}<status>active</status><statusMessage>ACTIVE</statusMessage>{}{}{}{}",
-        ec2_elem("reservedInstancesListingId", listing_id),
-        ec2_elem("reservedInstancesId", ri_id),
+        "{}{}<status>{}</status><statusMessage>{}</statusMessage>{}{}{}{}{}",
+        ec2_elem("reservedInstancesListingId", &l.listing_id),
+        ec2_elem("reservedInstancesId", &l.reserved_instances_id),
+        l.status,
+        l.status_message,
         ec2_elem("createDate", FIXED_TIME),
         ec2_elem("updateDate", FIXED_TIME),
+        ec2_elem("clientToken", &l.client_token),
         ec2_list("instanceCounts", &[]),
         ec2_list("priceSchedules", &[]),
     )
 }
 
 pub(crate) fn create_reserved_instances_listing(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let ri = require(&req.query_params, "ReservedInstancesId")?;
-    require(&req.query_params, "InstanceCount")?;
-    require(&req.query_params, "ClientToken")?;
-    let item = listing_xml(&gen_id("ril"), &ri);
+    let count: i64 = require(&req.query_params, "InstanceCount")?
+        .parse()
+        .unwrap_or(1);
+    let client_token = require(&req.query_params, "ClientToken")?;
+    let listing = ReservedInstancesListing {
+        listing_id: gen_id("ril"),
+        reserved_instances_id: ri,
+        instance_count: count,
+        client_token,
+        status: "active".to_string(),
+        status_message: "ACTIVE".to_string(),
+    };
+    let xml = listing_xml(&listing);
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .reserved_instances_listings
+            .insert(listing.listing_id.clone(), listing);
+    }
     Ok(Ec2Service::respond(
         "CreateReservedInstancesListing",
         &req.request_id,
-        &ec2_list("reservedInstancesListingsSet", &[item]),
+        &ec2_list("reservedInstancesListingsSet", &[xml]),
     ))
 }
 
 pub(crate) fn cancel_reserved_instances_listing(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ReservedInstancesListingId")?;
-    let item = listing_xml(&id, "ri-cancelled");
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    // Cancel the persisted listing if present; AWS returns the (now cancelled)
+    // listing either way, so synthesize one for ids we never created.
+    let listing = match state.reserved_instances_listings.get_mut(&id) {
+        Some(listing) => {
+            listing.status = "cancelled".to_string();
+            listing.status_message = "CANCELLED".to_string();
+            listing.clone()
+        }
+        None => ReservedInstancesListing {
+            listing_id: id.clone(),
+            reserved_instances_id: "ri-cancelled".to_string(),
+            instance_count: 0,
+            client_token: String::new(),
+            status: "cancelled".to_string(),
+            status_message: "CANCELLED".to_string(),
+        },
+    };
+    let xml = listing_xml(&listing);
     Ok(Ec2Service::respond(
         "CancelReservedInstancesListing",
         &req.request_id,
-        &ec2_list("reservedInstancesListingsSet", &[item]),
+        &ec2_list("reservedInstancesListingsSet", &[xml]),
     ))
 }
 
 pub(crate) fn describe_reserved_instances_listings(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // AWS supports filtering by `ReservedInstancesListingId` and
+    // `ReservedInstancesId` (single scalar params, not indexed lists).
+    let want_listing = req
+        .query_params
+        .get("ReservedInstancesListingId")
+        .filter(|v| !v.is_empty());
+    let want_ri = req
+        .query_params
+        .get("ReservedInstancesId")
+        .filter(|v| !v.is_empty());
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let mut items: Vec<String> = state
+        .reserved_instances_listings
+        .values()
+        .filter(|l| want_listing.map(|w| w == &l.listing_id).unwrap_or(true))
+        .filter(|l| {
+            want_ri
+                .map(|w| w == &l.reserved_instances_id)
+                .unwrap_or(true)
+        })
+        .map(listing_xml)
+        .collect();
+    items.sort();
     Ok(Ec2Service::respond(
         "DescribeReservedInstancesListings",
         &req.request_id,
-        &ec2_list("reservedInstancesListingsSet", &[]),
+        &ec2_list("reservedInstancesListingsSet", &items),
     ))
 }
 
+fn modification_xml(m: &ReservedInstancesModification) -> String {
+    let ids: Vec<String> = m
+        .reserved_instances_ids
+        .iter()
+        .map(|id| format!("<item>{}</item>", ec2_elem("reservedInstancesId", id)))
+        .collect();
+    format!(
+        "{}{}<status>{}</status>{}{}{}{}",
+        ec2_elem("reservedInstancesModificationId", &m.modification_id),
+        ec2_elem("clientToken", &m.client_token),
+        m.status,
+        ec2_elem("createDate", FIXED_TIME),
+        ec2_elem("updateDate", FIXED_TIME),
+        ec2_elem("effectiveDate", FIXED_TIME),
+        format_args!(
+            "<reservedInstancesSet>{}</reservedInstancesSet>",
+            ids.join("")
+        ),
+    )
+}
+
 pub(crate) fn describe_reserved_instances_modifications(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let want = indexed_list(&req.query_params, "ReservedInstancesModificationId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let mut items: Vec<String> = state
+        .reserved_instances_modifications
+        .values()
+        .filter(|m| want.is_empty() || want.contains(&m.modification_id))
+        .map(modification_xml)
+        .collect();
+    items.sort();
     Ok(Ec2Service::respond(
         "DescribeReservedInstancesModifications",
         &req.request_id,
-        &ec2_list("reservedInstancesModificationsSet", &[]),
+        &ec2_list("reservedInstancesModificationsSet", &items),
     ))
 }
 
 pub(crate) fn modify_reserved_instances(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let reserved_instances_ids = indexed_list(&req.query_params, "ReservedInstancesId");
+    let client_token = req
+        .query_params
+        .get("ClientToken")
+        .cloned()
+        .unwrap_or_default();
+    let modification = ReservedInstancesModification {
+        modification_id: gen_id("rimod"),
+        reserved_instances_ids,
+        status: "processing".to_string(),
+        client_token,
+    };
+    let mod_id = modification.modification_id.clone();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .reserved_instances_modifications
+            .insert(mod_id.clone(), modification);
+    }
     Ok(Ec2Service::respond(
         "ModifyReservedInstances",
         &req.request_id,
-        &ec2_elem("reservedInstancesModificationId", &gen_id("rimod")),
+        &ec2_elem("reservedInstancesModificationId", &mod_id),
     ))
 }
 

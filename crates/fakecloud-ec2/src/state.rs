@@ -358,6 +358,17 @@ pub struct Image {
     pub deprecation_time: Option<String>,
     #[serde(default)]
     pub deregistration_protection: bool,
+    /// `launchPermission` — AWS account ids the AMI is explicitly shared with
+    /// (cross-account share via `ModifyImageAttribute`).
+    #[serde(default)]
+    pub launch_permission_users: Vec<String>,
+    /// `launchPermission` groups — only `all` is valid in AWS (public share).
+    #[serde(default)]
+    pub launch_permission_groups: Vec<String>,
+    /// `bootMode` — `legacy-bios` | `uefi` | `uefi-preferred`. `None` reports
+    /// the default `uefi`; settable via `ModifyImageAttribute`.
+    #[serde(default)]
+    pub boot_mode: Option<String>,
 }
 
 /// A network ACL entry (rule).
@@ -524,6 +535,28 @@ pub struct ReservedInstances {
     pub duration: i64,
     pub fixed_price: String,
     pub usage_price: String,
+}
+
+/// A Reserved Instances listing in the Reserved Instance Marketplace.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReservedInstancesListing {
+    pub listing_id: String,
+    pub reserved_instances_id: String,
+    pub instance_count: i64,
+    pub client_token: String,
+    /// `active` | `cancelled` | `closed`.
+    pub status: String,
+    pub status_message: String,
+}
+
+/// A Reserved Instances modification request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReservedInstancesModification {
+    pub modification_id: String,
+    pub reserved_instances_ids: Vec<String>,
+    /// `processing` | `fulfilled` | `failed`.
+    pub status: String,
+    pub client_token: String,
 }
 
 /// A Dedicated Host.
@@ -949,6 +982,10 @@ pub struct Ec2State {
     pub capacity_reservation_fleets: HashMap<String, String>,
     #[serde(default)]
     pub reserved_instances: HashMap<String, ReservedInstances>,
+    #[serde(default)]
+    pub reserved_instances_listings: HashMap<String, ReservedInstancesListing>,
+    #[serde(default)]
+    pub reserved_instances_modifications: HashMap<String, ReservedInstancesModification>,
     #[serde(default)]
     pub dedicated_hosts: HashMap<String, DedicatedHost>,
     #[serde(default)]

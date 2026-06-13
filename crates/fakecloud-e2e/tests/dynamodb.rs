@@ -2185,6 +2185,128 @@ async fn dynamodb_global_table_replicates_writes() {
 }
 
 #[tokio::test]
+async fn dynamodb_replica_auto_scaling_reflects_global_table_replicas() {
+    use aws_sdk_dynamodb::types::{AutoScalingSettingsUpdate, ReplicaAutoScalingUpdate};
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ScaleTbl")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // No replicas yet -> empty replica list.
+    let resp = client
+        .describe_table_replica_auto_scaling()
+        .table_name("ScaleTbl")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .table_auto_scaling_description()
+        .unwrap()
+        .replicas()
+        .is_empty());
+
+    // Create the global table with two replicas.
+    client
+        .create_global_table()
+        .global_table_name("ScaleTbl")
+        .replication_group(Replica::builder().region_name("us-east-1").build())
+        .replication_group(Replica::builder().region_name("eu-west-1").build())
+        .send()
+        .await
+        .unwrap();
+
+    // Describe now reflects the configured replicas (was always empty: 1.4).
+    let resp = client
+        .describe_table_replica_auto_scaling()
+        .table_name("ScaleTbl")
+        .send()
+        .await
+        .unwrap();
+    let regions: Vec<&str> = resp
+        .table_auto_scaling_description()
+        .unwrap()
+        .replicas()
+        .iter()
+        .filter_map(|r| r.region_name())
+        .collect();
+    assert!(regions.contains(&"us-east-1"), "regions={regions:?}");
+    assert!(regions.contains(&"eu-west-1"), "regions={regions:?}");
+
+    // Update autoscaling settings for one replica; they must persist + reflect.
+    let updated = client
+        .update_table_replica_auto_scaling()
+        .table_name("ScaleTbl")
+        .replica_updates(
+            ReplicaAutoScalingUpdate::builder()
+                .region_name("us-east-1")
+                .replica_provisioned_read_capacity_auto_scaling_update(
+                    AutoScalingSettingsUpdate::builder()
+                        .minimum_units(5)
+                        .maximum_units(50)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let use1 = updated
+        .table_auto_scaling_description()
+        .unwrap()
+        .replicas()
+        .iter()
+        .find(|r| r.region_name() == Some("us-east-1"))
+        .unwrap();
+    let read = use1
+        .replica_provisioned_read_capacity_auto_scaling_settings()
+        .unwrap();
+    assert_eq!(read.minimum_units(), Some(5));
+    assert_eq!(read.maximum_units(), Some(50));
+
+    // Re-describe: the persisted settings survive.
+    let resp = client
+        .describe_table_replica_auto_scaling()
+        .table_name("ScaleTbl")
+        .send()
+        .await
+        .unwrap();
+    let use1 = resp
+        .table_auto_scaling_description()
+        .unwrap()
+        .replicas()
+        .iter()
+        .find(|r| r.region_name() == Some("us-east-1"))
+        .unwrap();
+    assert_eq!(
+        use1.replica_provisioned_read_capacity_auto_scaling_settings()
+            .unwrap()
+            .maximum_units(),
+        Some(50)
+    );
+}
+
+#[tokio::test]
 async fn dynamodb_contributor_insights_tracks_access() {
     let server = TestServer::start().await;
     let client = server.dynamodb_client().await;

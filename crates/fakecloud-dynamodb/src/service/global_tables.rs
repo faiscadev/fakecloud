@@ -32,6 +32,8 @@ impl DynamoDbService {
                 r["RegionName"].as_str().map(|rn| ReplicaDescription {
                     region_name: rn.to_string(),
                     replica_status: "ACTIVE".to_string(),
+                    read_capacity_auto_scaling: None,
+                    write_capacity_auto_scaling: None,
                 })
             })
             .collect::<Vec<_>>();
@@ -215,6 +217,8 @@ impl DynamoDbService {
                         gt.replication_group.push(ReplicaDescription {
                             region_name: region.to_string(),
                             replica_status: "ACTIVE".to_string(),
+                            read_capacity_auto_scaling: None,
+                            write_capacity_auto_scaling: None,
                         });
                     }
                 }

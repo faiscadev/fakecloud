@@ -236,6 +236,14 @@ pub struct GlobalTableDescription {
 pub struct ReplicaDescription {
     pub region_name: String,
     pub replica_status: String,
+    /// Per-replica provisioned-read-capacity autoscaling settings, as supplied
+    /// via `UpdateTableReplicaAutoScaling`. Round-tripped through
+    /// `DescribeTableReplicaAutoScaling` as `AutoScalingSettingsDescription`.
+    #[serde(default)]
+    pub read_capacity_auto_scaling: Option<serde_json::Value>,
+    /// Per-replica provisioned-write-capacity autoscaling settings.
+    #[serde(default)]
+    pub write_capacity_auto_scaling: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

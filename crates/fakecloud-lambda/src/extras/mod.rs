@@ -982,41 +982,29 @@ impl LambdaService {
         if let Some(n) = body.get("TumblingWindowInSeconds").and_then(|v| v.as_i64()) {
             esm.tumbling_window_in_seconds = Some(n);
         }
-        let mut body_json = json!({
-            "UUID": esm.uuid,
-            "FunctionArn": esm.function_arn,
-            "EventSourceArn": esm.event_source_arn,
-            "BatchSize": esm.batch_size,
-            "State": "Enabled",
-            "StateTransitionReason": "USER_INITIATED",
-            "LastModified": chrono::Utc::now().timestamp() as f64,
-        });
-        let obj = body_json.as_object_mut().expect("json! built object");
-        if !esm.filter_patterns.is_empty() {
-            obj.insert(
-                "FilterCriteria".into(),
-                json!({
-                    "Filters": esm
-                        .filter_patterns
-                        .iter()
-                        .map(|p| json!({"Pattern": p}))
-                        .collect::<Vec<_>>(),
-                }),
-            );
+        // Enabled toggles the ESM State between Enabled/Disabled. AWS
+        // momentarily returns Enabling/Disabling but settles to the terminal
+        // state; we report the terminal state directly since there's no poller
+        // lag to model.
+        if let Some(enabled) = body.get("Enabled").and_then(|v| v.as_bool()) {
+            esm.enabled = enabled;
+            esm.state = if enabled { "Enabled" } else { "Disabled" }.to_string();
         }
-        if !esm.function_response_types.is_empty() {
-            obj.insert(
-                "FunctionResponseTypes".into(),
-                json!(esm.function_response_types),
-            );
+        // SourceAccessConfigurations (Kafka/MQ/MSK VPC + auth config). Replace
+        // wholesale when provided so credential/subnet updates actually persist
+        // rather than vanishing silently (1.1).
+        if let Some(sac) = body
+            .get("SourceAccessConfigurations")
+            .and_then(|v| v.as_array())
+        {
+            esm.source_access_configurations = sac.clone();
         }
-        if let Some(w) = esm.maximum_batching_window_in_seconds {
-            obj.insert("MaximumBatchingWindowInSeconds".into(), json!(w));
-        }
-        if let Some(p) = esm.parallelization_factor {
-            obj.insert("ParallelizationFactor".into(), json!(p));
-        }
-        ok(body_json)
+        esm.last_modified = chrono::Utc::now();
+        // Reuse the shared serializer so Update echoes the same full field set
+        // (State, SourceAccessConfigurations, KMSKeyArn, DestinationConfig,
+        // MetricsConfig, MaximumRetryAttempts, ...) that Create/Get/List emit.
+        let response = self.event_source_mapping_json(esm);
+        ok(response)
     }
 
     fn region_for(&self, account_id: &str) -> String {
