@@ -1404,3 +1404,149 @@ fn fail_state_with_explicit_error_and_cause() {
     let err = read_exec(&state, &arn, |e| e.error.clone().unwrap_or_default());
     assert_eq!(err, "MyError");
 }
+
+// ── Task: lambda:invoke integration — function errors, transport, envelope ──
+
+use fakecloud_core::delivery::{DeliveryBus, LambdaDelivery};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Stub `LambdaDelivery` that returns canned results, one per call. Once the
+/// canned list is exhausted it repeats the last entry — so "fail once, then
+/// succeed forever" needs only two entries.
+struct StubLambda {
+    responses: Vec<Result<Vec<u8>, String>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl StubLambda {
+    fn bus(responses: Vec<Result<Vec<u8>, String>>) -> (Arc<DeliveryBus>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stub = Arc::new(StubLambda {
+            responses,
+            calls: calls.clone(),
+        });
+        (Arc::new(DeliveryBus::new().with_lambda(stub)), calls)
+    }
+}
+
+impl LambdaDelivery for StubLambda {
+    fn invoke_lambda(
+        &self,
+        _function_arn: &str,
+        _payload: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> {
+        let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+        let resp = self
+            .responses
+            .get(idx)
+            .or_else(|| self.responses.last())
+            .cloned()
+            .unwrap_or_else(|| Ok(b"{}".to_vec()));
+        Box::pin(async move { resp })
+    }
+}
+
+fn drive_with_delivery(
+    state: &SharedStepFunctionsState,
+    arn: &str,
+    def: Value,
+    input: Option<&str>,
+    delivery: Arc<DeliveryBus>,
+) {
+    create_execution(state, arn, input.map(|s| s.to_string()));
+    let fut = execute_state_machine(
+        state.clone(),
+        arn.to_string(),
+        def.to_string(),
+        input.map(|s| s.to_string()),
+        Some(delivery),
+        None,
+        None,
+        None,
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(fut);
+}
+
+/// A single `lambda:invoke` Task ending the machine, with optional Retry/Catch.
+fn lambda_invoke_def(extra: Value) -> Value {
+    let mut task = json!({
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": { "FunctionName": "fn" },
+        "End": true
+    });
+    if let (Some(task_obj), Some(extra_obj)) = (task.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            task_obj.insert(k.clone(), v.clone());
+        }
+    }
+    json!({ "StartAt": "T", "States": { "T": task } })
+}
+
+// Case 1: a function error fails the task with the errorType as the Error.
+#[test]
+fn lambda_function_error_fails_task_with_error_type() {
+    let state = make_state();
+    let arn = arn_for("lambda-fn-error");
+    let (bus, calls) = StubLambda::bus(vec![Ok(
+        br#"{"errorMessage":"boom","errorType":"MyCustomError","stackTrace":[]}"#.to_vec(),
+    )]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("MyCustomError"));
+        assert!(exec.cause.as_deref().unwrap().contains("errorMessage"));
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+// Case 2: Retry on a custom errorType fires and the second attempt succeeds.
+#[test]
+fn lambda_retry_on_custom_error_type_succeeds() {
+    let state = make_state();
+    let arn = arn_for("lambda-retry");
+    let (bus, calls) = StubLambda::bus(vec![
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"ok":true}"#.to_vec()),
+    ]);
+    let def = lambda_invoke_def(json!({
+        "Retry": [{ "ErrorEquals": ["MyCustomError"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+// Case 3: Catch on the errorType routes into the handler with Error/Cause.
+#[test]
+fn lambda_catch_on_custom_error_type_routes() {
+    let state = make_state();
+    let arn = arn_for("lambda-catch");
+    let (bus, _calls) = StubLambda::bus(vec![Ok(
+        br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+    )]);
+    let def = lambda_invoke_def(json!({
+        "Catch": [{ "ErrorEquals": ["MyCustomError"], "Next": "Handler", "ResultPath": "$.err" }]
+    }));
+    let mut def = def;
+    def["States"]["Handler"] = json!({ "Type": "Pass", "End": true });
+    drive_with_delivery(&state, &arn, def, Some(r#"{"orig":"v"}"#), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["err"]["Error"], json!("MyCustomError"));
+        assert!(output["err"]["Cause"]
+            .as_str()
+            .unwrap()
+            .contains("errorMessage"));
+    });
+}
