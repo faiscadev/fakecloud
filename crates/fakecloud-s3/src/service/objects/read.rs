@@ -130,14 +130,18 @@ impl S3Service {
             );
         }
 
-        // SSE headers - only when explicitly set
+        // SSE headers - only when explicitly set. The algorithm / kms key id
+        // can originate from a bucket-default-encryption XML body
+        // (PutBucketEncryption), so a crafted value must never crash the read
+        // path; skip-if-invalid mirrors the object-lock guards below.
         if let Some(algo) = &obj.sse_algorithm {
-            headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-server-side-encryption", algo);
         }
         if let Some(kid) = &obj.sse_kms_key_id {
-            headers.insert(
+            insert_str_header(
+                &mut headers,
                 "x-amz-server-side-encryption-aws-kms-key-id",
-                kid.parse().unwrap(),
+                kid,
             );
         }
         if let Some(true) = obj.bucket_key_enabled {
@@ -476,14 +480,17 @@ impl S3Service {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
         }
 
-        // SSE headers
+        // SSE headers. As in get_object above, these can carry a
+        // bucket-default value sourced from an XML body, so insert through the
+        // skip-if-invalid helper rather than .parse().unwrap().
         if let Some(algo) = &obj.sse_algorithm {
-            headers.insert("x-amz-server-side-encryption", algo.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-server-side-encryption", algo);
         }
         if let Some(kid) = &obj.sse_kms_key_id {
-            headers.insert(
+            insert_str_header(
+                &mut headers,
                 "x-amz-server-side-encryption-aws-kms-key-id",
-                kid.parse().unwrap(),
+                kid,
             );
         }
         if let Some(true) = obj.bucket_key_enabled {

@@ -3742,6 +3742,114 @@ async fn s3_object_lock_invalid_values_rejected_no_panic() {
     assert_eq!(&body[..], b"data");
 }
 
+/// Regression (bug-audit 2026-06-13 2.1/2.2): a PutBucketEncryption body with
+/// a control byte in `<KMSMasterKeyID>` (or `<SSEAlgorithm>`) used to be
+/// persisted verbatim, applied as the object default on a no-SSE PutObject,
+/// then panic the server when round-tripped into the
+/// `x-amz-server-side-encryption-aws-kms-key-id` /
+/// `x-amz-server-side-encryption` response headers on GET/HEAD — a dropped
+/// connection (the #1539 failure mode) on a *later* request than the one that
+/// planted the poison. The crafted config is now rejected with 400 up front,
+/// the server stays alive, and a legitimate KMS key id still round-trips.
+#[tokio::test]
+async fn s3_bucket_default_sse_invalid_values_no_panic() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+
+    s3.create_bucket()
+        .bucket("sse-fuzz-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let auth = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fake";
+
+    // PutBucketEncryption with a newline embedded in KMSMasterKeyID — a legal
+    // XML body byte but illegal as an HTTP header value.
+    let poison = "<ServerSideEncryptionConfiguration><Rule>\
+        <ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>\
+        <KMSMasterKeyID>bad\nkey</KMSMasterKeyID>\
+        </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let resp = http
+        .put(format!("{}/sse-fuzz-bucket?encryption", server.endpoint()))
+        .header("Authorization", auth)
+        .body(poison)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "control char in KMSMasterKeyID should be rejected, not persisted"
+    );
+
+    // Likewise a junk SSEAlgorithm (outside the closed enum) is rejected.
+    let bad_algo = "<ServerSideEncryptionConfiguration><Rule>\
+        <ApplyServerSideEncryptionByDefault><SSEAlgorithm>x\ny</SSEAlgorithm>\
+        </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let resp = http
+        .put(format!("{}/sse-fuzz-bucket?encryption", server.endpoint()))
+        .header("Authorization", auth)
+        .body(bad_algo)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid SSEAlgorithm should be rejected"
+    );
+
+    // The server is still alive: a legitimate bucket-default KMS config sets,
+    // applies to a no-SSE object PUT, and round-trips cleanly on GET.
+    let arn = "arn:aws:kms:us-east-1:000000000000:key/abcd-1234";
+    s3.put_bucket_encryption()
+        .bucket("sse-fuzz-bucket")
+        .server_side_encryption_configuration(
+            aws_sdk_s3::types::ServerSideEncryptionConfiguration::builder()
+                .rules(
+                    aws_sdk_s3::types::ServerSideEncryptionRule::builder()
+                        .apply_server_side_encryption_by_default(
+                            aws_sdk_s3::types::ServerSideEncryptionByDefault::builder()
+                                .sse_algorithm(aws_sdk_s3::types::ServerSideEncryption::AwsKms)
+                                .kms_master_key_id(arn)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("a valid bucket-default KMS config must be accepted");
+
+    s3.put_object()
+        .bucket("sse-fuzz-bucket")
+        .key("obj.txt")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+
+    let got = s3
+        .get_object()
+        .bucket("sse-fuzz-bucket")
+        .key("obj.txt")
+        .send()
+        .await
+        .expect("server should survive crafted SSE config and still serve GET");
+    assert_eq!(
+        got.ssekms_key_id().map(|s| s.to_string()),
+        Some(arn.to_string()),
+        "valid bucket-default KMS key id must round-trip on GET"
+    );
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"data");
+}
+
 #[tokio::test]
 async fn s3_object_legal_hold_put_get() {
     let server = TestServer::start().await;
