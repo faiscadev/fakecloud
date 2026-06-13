@@ -21,7 +21,7 @@ use crate::state::{AclGrant, S3Bucket, S3Object, SharedS3State};
 mod access_points;
 mod acl;
 mod buckets;
-mod config;
+pub(crate) mod config;
 mod lock;
 mod multipart;
 mod notifications;
