@@ -1879,7 +1879,38 @@ pub(crate) fn record_event(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    let entry = json!({
+    let log = state.events.entry(stack_id.to_string()).or_default();
+
+    // Timestamps must be sub-second AND strictly increasing within a stack's
+    // event log. `sam`'s deploy-wait reads the REVIEW_IN_PROGRESS marker's
+    // timestamp and then only registers events whose `Timestamp` is strictly
+    // greater; a fast stack that provisions within one second would otherwise
+    // stamp its REVIEW_IN_PROGRESS marker and terminal CREATE_COMPLETE
+    // identically, so sam never sees completion and polls until it times out.
+    // Use millisecond precision and bump by 1ms when the clock hasn't advanced
+    // past the previous event, guaranteeing a strict order.
+    // Truncate to the stored (millisecond) resolution before comparing, so the
+    // strict-ordering check isn't fooled by sub-millisecond bits that vanish on
+    // serialization (two events in the same millisecond would otherwise both
+    // serialize identically despite `now > prev` holding at full precision).
+    let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .unwrap_or_else(Utc::now);
+    let timestamp = match log.last().and_then(|e| e["Timestamp"].as_str()) {
+        Some(prev) => match chrono::DateTime::parse_from_rfc3339(prev) {
+            Ok(prev) => {
+                let prev = prev.with_timezone(&Utc);
+                if now > prev {
+                    now
+                } else {
+                    prev + chrono::Duration::milliseconds(1)
+                }
+            }
+            Err(_) => now,
+        },
+        None => now,
+    };
+
+    log.push(json!({
         "EventId": event_id,
         "StackId": stack_id,
         "StackName": stack_name,
@@ -1887,13 +1918,8 @@ pub(crate) fn record_event(
         "PhysicalResourceId": physical_id,
         "ResourceType": resource_type,
         "ResourceStatus": status,
-        "Timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    });
-    state
-        .events
-        .entry(stack_id.to_string())
-        .or_default()
-        .push(entry);
+        "Timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
 }
 
 /// Emits IN_PROGRESS + COMPLETE event pairs for every resource change

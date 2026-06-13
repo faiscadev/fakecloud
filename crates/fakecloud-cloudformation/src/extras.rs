@@ -2712,6 +2712,59 @@ mod tests {
         assert!(body.contains("REVIEW_IN_PROGRESS"), "body: {body}");
     }
 
+    // Gap #2b: a stack that provisions within one wall-clock second must still
+    // produce strictly-increasing, sub-second event timestamps — sam's
+    // deploy-wait only registers completion on an event strictly later than the
+    // REVIEW_IN_PROGRESS marker, so equal whole-second timestamps hang it.
+    #[test]
+    fn changeset_stack_events_have_monotonic_subsecond_timestamps() {
+        let svc = svc();
+        svc.handle_extra_action(&req(
+            "CreateChangeSet",
+            &[
+                ("StackName", "cs-fast"),
+                ("ChangeSetName", "cs1"),
+                ("ChangeSetType", "CREATE"),
+                ("TemplateBody", CS_TEMPLATE),
+            ],
+        ))
+        .expect("create change set");
+        svc.handle_extra_action(&req(
+            "ExecuteChangeSet",
+            &[("StackName", "cs-fast"), ("ChangeSetName", "cs1")],
+        ))
+        .expect("execute change set");
+
+        let accounts = svc.state.read();
+        let acct = accounts.get("000000000000").unwrap();
+        let stack_id = acct.stacks.get("cs-fast").unwrap().stack_id.clone();
+        let events = acct.events.get(&stack_id).expect("stack has events");
+
+        // The full create lifecycle: REVIEW_IN_PROGRESS marker through the
+        // terminal CREATE_COMPLETE, several events deep, all within one second.
+        assert!(events.len() >= 3, "expected several lifecycle events");
+        let ts: Vec<&str> = events
+            .iter()
+            .map(|e| e["Timestamp"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            events.first().unwrap()["ResourceStatus"].as_str(),
+            Some("REVIEW_IN_PROGRESS")
+        );
+        assert_eq!(
+            events.last().unwrap()["ResourceStatus"].as_str(),
+            Some("CREATE_COMPLETE")
+        );
+        // Millisecond precision (fractional seconds) and strictly increasing.
+        // The fixed-width rfc3339 millis format sorts lexicographically by time.
+        for t in &ts {
+            assert!(t.contains('.'), "timestamp lacks sub-second precision: {t}");
+        }
+        for w in ts.windows(2) {
+            assert!(w[1] > w[0], "timestamps not strictly increasing: {w:?}");
+        }
+    }
+
     #[test]
     fn stack_sets_instances_refactors() {
         ok("CreateStackSet", &[("StackSetName", "ss")]);
