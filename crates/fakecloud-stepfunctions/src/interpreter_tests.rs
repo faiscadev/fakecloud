@@ -1550,3 +1550,39 @@ fn lambda_catch_on_custom_error_type_routes() {
             .contains("errorMessage"));
     });
 }
+
+// Case 4a: a transport error surfaces as Lambda.Unknown and is retryable.
+#[test]
+fn lambda_transport_error_is_lambda_unknown_and_retryable() {
+    let state = make_state();
+    let arn = arn_for("lambda-transport-retry");
+    let (bus, calls) = StubLambda::bus(vec![
+        Err("invocation failed: error sending request for url".to_string()),
+        Ok(br#"{"ok":true}"#.to_vec()),
+    ]);
+    let def = lambda_invoke_def(json!({
+        "Retry": [{ "ErrorEquals": ["Lambda.Unknown"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+// Case 4b: without a retry the transport error fails with Lambda.Unknown.
+#[test]
+fn lambda_transport_error_fails_as_lambda_unknown() {
+    let state = make_state();
+    let arn = arn_for("lambda-transport-fail");
+    let (bus, _calls) = StubLambda::bus(vec![Err(
+        "invocation failed: error sending request for url".to_string(),
+    )]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("Lambda.Unknown"));
+    });
+}

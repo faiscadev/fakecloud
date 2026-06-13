@@ -1891,7 +1891,22 @@ async fn invoke_lambda_direct(
 
             Ok(value)
         }
-        Some(Err(e)) => Err(("States.TaskFailed".to_string(), e)),
+        Some(Err(e)) => {
+            // Failures of the Lambda Invoke API call itself surface on real AWS
+            // with `Lambda.`-prefixed error names (`Lambda.ServiceException`,
+            // `Lambda.SdkClientException`, `Lambda.Unknown`, ...) — never
+            // `States.TaskFailed` — and those are the names AWS documents for
+            // Retry rules. The delivery error is an unstructured string with
+            // the outcome flattened, so the honest default is `Lambda.Unknown`
+            // ("outcome unknown"). The one case we can cheaply distinguish is a
+            // missing function, which AWS reports as
+            // `Lambda.ResourceNotFoundException`.
+            if e.starts_with("Function not found") {
+                Err(("Lambda.ResourceNotFoundException".to_string(), e))
+            } else {
+                Err(("Lambda.Unknown".to_string(), e))
+            }
+        }
         None => {
             // No runtime available — return empty result
             Ok(json!({}))
