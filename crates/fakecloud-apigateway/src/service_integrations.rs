@@ -333,74 +333,78 @@ impl ApiGatewayService {
         }))
     }
 
-    pub(super) fn test_invoke_authorizer(
+    pub(super) async fn test_invoke_authorizer(
         &self,
         req: &AwsRequest,
         params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Authorizer execution would need a real Lambda/Cognito hook, so the
-        // returned policy is still a canned Allow. But we DO evaluate the
-        // authorizer's identity source against the supplied request headers:
-        // AWS returns clientStatus 401 (no policy) when a required
-        // identity-source header is absent, rather than always allowing
-        // (bug-audit 2026-05-28, 1.18 — this op was a blanket Allow stub).
+        // Evaluate the *actual* authorizer rather than returning a canned
+        // Allow (bug-audit 2026-06-13, 1.7). For a Lambda authorizer
+        // (TOKEN/REQUEST/CUSTOM) this invokes the configured function and
+        // reflects its policy + principalId + context; for a Cognito
+        // authorizer it verifies the supplied JWT. A misconfigured
+        // authorizer now surfaces a 401/403 with the real verdict instead
+        // of an unconditional pass.
         let rest_api_id = params.get("restApiId").cloned().unwrap_or_default();
         let authorizer_id = params.get("authorizerId").cloned().unwrap_or_default();
         let body = req.json_body();
 
-        let identity_source = {
+        let authorizer = {
             let accounts = self.state.read();
             let state = accounts
                 .get(&request_account(req))
                 .ok_or_else(|| not_found("Authorizer not found"))?;
-            let authorizer = state
+            state
                 .authorizers
                 .get(&rest_api_id)
                 .and_then(|m| m.get(&authorizer_id))
-                .ok_or_else(|| not_found("Authorizer not found"))?;
-            authorizer.identity_source.clone()
+                .cloned()
+                .ok_or_else(|| not_found("Authorizer not found"))?
         };
 
-        let req_headers = body.get("headers").and_then(Value::as_object);
-        let identity_present = match identity_source.as_deref() {
-            // No identity source configured: nothing to require -> allow.
-            None | Some("") => true,
-            Some(src) => src
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                // Each entry looks like `method.request.header.Authorization`;
-                // the header name is the final dotted segment.
-                .all(|entry| {
-                    let header = entry.rsplit('.').next().unwrap_or(entry);
-                    req_headers
-                        .and_then(|h| h.iter().find(|(k, _)| k.eq_ignore_ascii_case(header)))
-                        .and_then(|(_, v)| v.as_str())
-                        .map(|v| !v.is_empty())
-                        .unwrap_or(false)
-                }),
-        };
-
-        if !identity_present {
-            // Missing identity source -> Unauthorized, no policy.
-            return ok(json!({
-                "clientStatus": 401,
-                "log": "TestInvokeAuthorizer: identity source not found",
-                "latency": 0,
-                "principalId": "",
-                "authorization": {},
-                "claims": {},
-            }));
+        // Build a synthetic request carrying the headers supplied in the
+        // TestInvokeAuthorizer body so the shared identity-source and
+        // Lambda-event helpers operate on the test's headers, not the
+        // wire request's.
+        let mut headers = http::HeaderMap::new();
+        if let Some(map) = body.get("headers").and_then(Value::as_object) {
+            for (k, v) in map {
+                if let Some(s) = v.as_str() {
+                    if let (Ok(name), Ok(val)) = (
+                        http::HeaderName::try_from(k.as_str()),
+                        http::HeaderValue::from_str(s),
+                    ) {
+                        headers.insert(name, val);
+                    }
+                }
+            }
         }
+        let synthetic = AwsRequest {
+            service: "apigateway".to_string(),
+            action: String::new(),
+            method: Method::GET,
+            raw_path: String::new(),
+            raw_query: String::new(),
+            path_segments: Vec::new(),
+            query_params: HashMap::new(),
+            headers,
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            account_id: req.account_id.clone(),
+            region: req.region.clone(),
+            request_id: req.request_id.clone(),
+            is_query_protocol: false,
+            access_key_id: req.access_key_id.clone(),
+            principal: req.principal.clone(),
+        };
 
-        ok(json!({
-            "clientStatus": 200,
-            "log": "TestInvokeAuthorizer ok",
-            "latency": 0,
-            "principalId": "user",
-            "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"execute-api:Invoke\",\"Resource\":\"*\"}]}",
-            "authorization": {},
-            "claims": {},
-        }))
+        let result = crate::data_plane::test_invoke_authorizer_eval(
+            self,
+            &synthetic,
+            &rest_api_id,
+            &authorizer,
+        )
+        .await?;
+        ok(result)
     }
 }

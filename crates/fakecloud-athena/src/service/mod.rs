@@ -292,41 +292,97 @@ impl AthenaService {
         let body = req.json_body();
         // Smithy: MaxResults targets MaxEngineVersionsCount @range(1,10);
         // NextToken targets Token @length(1,1024).
-        validate_max_results(&body, 1, 10)?;
+        let max = validate_max_results(&body, 1, 10)?;
         validate_opt_string_len(&body, "NextToken", 1, 1024)?;
-        Ok(AwsResponse::ok_json(json!({
-            "EngineVersions": [
-                {"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "AUTO"},
-                {"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "Athena engine version 3"},
-            ]
-        })))
+        let all = vec![
+            json!({"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "AUTO"}),
+            json!({"EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "Athena engine version 3"}),
+        ];
+        // Honor MaxResults + NextToken round-tripping instead of always
+        // returning the full array (bug-audit 2026-06-13, 1.10).
+        let (page, next) =
+            paginate_checked(&all, body.get("NextToken").and_then(Value::as_str), max)
+                .map_err(|_| invalid_request("Invalid NextToken"))?;
+        let mut resp = json!({ "EngineVersions": page });
+        if let Some(t) = next {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn list_application_dpu_sizes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         // Smithy: MaxResults targets MaxApplicationDPUSizesCount @range(1,100);
         // NextToken targets Token @length(1,1024).
-        validate_max_results(&body, 1, 100)?;
+        let max = validate_max_results(&body, 1, 100)?;
         validate_opt_string_len(&body, "NextToken", 1, 1024)?;
-        Ok(AwsResponse::ok_json(json!({
-            "ApplicationDPUSizes": [
-                {"ApplicationRuntimeId": "Athena-PySpark-3.0", "SupportedDPUSizes": [1, 2, 4, 8, 16, 32]},
-            ]
-        })))
+        let all = vec![
+            json!({"ApplicationRuntimeId": "Athena-PySpark-3.0", "SupportedDPUSizes": [1, 2, 4, 8, 16, 32]}),
+        ];
+        let (page, next) =
+            paginate_checked(&all, body.get("NextToken").and_then(Value::as_str), max)
+                .map_err(|_| invalid_request("Invalid NextToken"))?;
+        let mut resp = json!({ "ApplicationDPUSizes": page });
+        if let Some(t) = next {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn list_executors(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let session_id = require_str(&body, "SessionId")?;
+        // Smithy: MaxResults targets MaxListExecutorsCount @range(1,100);
+        // NextToken targets SessionManagerToken @length(1,1024).
+        let max = validate_max_results(&body, 1, 100)?;
+        validate_opt_string_len(&body, "NextToken", 1, 1024)?;
+        let state_filter = body.get("ExecutorStateFilter").and_then(Value::as_str);
+
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
-        if !account.sessions.contains_key(&session_id) {
-            return Err(invalid_request(format!("Session {session_id} not found")));
+        let session = account
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| invalid_request(format!("Session {session_id} not found")))?;
+
+        // A live Spark session has a coordinator executor. A terminated
+        // session reports it as TERMINATED. Derive the executor from the
+        // session state instead of always returning an empty list
+        // (bug-audit 2026-06-13, 1.10).
+        let session_active = matches!(session.state.as_str(), "IDLE" | "BUSY" | "CREATED");
+        let executor_state = if session_active {
+            "CREATED"
+        } else {
+            "TERMINATED"
+        };
+        let start = session.start_date_time.timestamp_millis();
+        let termination = session.end_date_time.map(|d| json!(d.timestamp_millis()));
+        let mut executor = json!({
+            "ExecutorId": format!("{session_id}-coordinator"),
+            "ExecutorType": "COORDINATOR",
+            "ExecutorState": executor_state,
+            "ExecutorSize": 1i64,
+            "StartDateTime": start,
+        });
+        if let Some(t) = termination {
+            executor["TerminationDateTime"] = t;
         }
-        Ok(AwsResponse::ok_json(json!({
+
+        let all: Vec<Value> = match state_filter {
+            Some(f) if f != executor_state => Vec::new(),
+            _ => vec![executor],
+        };
+        let (page, next) =
+            paginate_checked(&all, body.get("NextToken").and_then(Value::as_str), max)
+                .map_err(|_| invalid_request("Invalid NextToken"))?;
+        let mut resp = json!({
             "SessionId": session_id,
-            "ExecutorsSummary": [],
-        })))
+            "ExecutorsSummary": page,
+        });
+        if let Some(t) = next {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 }
 
@@ -1367,6 +1423,62 @@ mod tests {
         // Exact expression must match the name, not every name.
         assert!(match_table_expression("orders", "orders"));
         assert!(!match_table_expression("orders", "sales"));
+    }
+
+    #[test]
+    fn list_engine_versions_paginates_with_next_token() {
+        // MaxResults + NextToken are honored, not ignored (1.10).
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let resp = svc
+            .list_engine_versions(&req("ListEngineVersions", json!({ "MaxResults": 1 })))
+            .unwrap();
+        let body = parse_json(&resp);
+        assert_eq!(body["EngineVersions"].as_array().unwrap().len(), 1);
+        let token = body["NextToken"].as_str().expect("expected a NextToken");
+
+        let resp = svc
+            .list_engine_versions(&req(
+                "ListEngineVersions",
+                json!({ "MaxResults": 1, "NextToken": token }),
+            ))
+            .unwrap();
+        let body = parse_json(&resp);
+        assert_eq!(body["EngineVersions"].as_array().unwrap().len(), 1);
+        // Two total engine versions -> second page exhausts the set.
+        assert!(body["NextToken"].is_null());
+    }
+
+    #[test]
+    fn list_engine_versions_rejects_bad_next_token() {
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let err = match svc.list_engine_versions(&req(
+            "ListEngineVersions",
+            json!({ "NextToken": "garbage" }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error for a non-numeric NextToken"),
+        };
+        assert!(err.message().contains("Invalid NextToken"));
+    }
+
+    #[test]
+    fn list_executors_reflects_active_session() {
+        // An active session reports a coordinator executor rather than an
+        // unconditional empty list (1.10).
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let resp = svc
+            .start_session(&req("StartSession", json!({ "WorkGroup": "primary" })))
+            .unwrap();
+        let session_id = parse_json(&resp)["SessionId"].as_str().unwrap().to_string();
+
+        let resp = svc
+            .list_executors(&req("ListExecutors", json!({ "SessionId": session_id })))
+            .unwrap();
+        let body = parse_json(&resp);
+        let executors = body["ExecutorsSummary"].as_array().unwrap();
+        assert_eq!(executors.len(), 1);
+        assert_eq!(executors[0]["ExecutorType"], json!("COORDINATOR"));
+        assert_eq!(executors[0]["ExecutorState"], json!("CREATED"));
     }
 }
 

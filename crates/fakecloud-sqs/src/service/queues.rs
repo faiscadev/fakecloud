@@ -92,7 +92,8 @@ impl SqsService {
         // Default attributes (real AWS SQS defaults).
         attributes.insert("VisibilityTimeout".to_string(), "30".to_string());
         attributes.insert("DelaySeconds".to_string(), "0".to_string());
-        attributes.insert("MaximumMessageSize".to_string(), "1048576".to_string());
+        // AWS default MaximumMessageSize is 256 KiB (262144), not 1 MiB.
+        attributes.insert("MaximumMessageSize".to_string(), "262144".to_string());
         attributes.insert("MessageRetentionPeriod".to_string(), "345600".to_string());
         attributes.insert("ReceiveMessageWaitTimeSeconds".to_string(), "0".to_string());
         // Encryption defaults. Since May 2023, real AWS SQS enables SSE-SQS

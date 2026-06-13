@@ -86,6 +86,119 @@ fn store<'a>(
     extras.entry(category.to_string()).or_default()
 }
 
+/// A CloudFormation type is a hook when its registry `Type` is `HOOK`
+/// or its `TypeName` carries the `::HOOK::` / `::Hook` segment AWS uses
+/// for activated hook types (e.g. `MyOrg::MyHook::Hook`).
+fn is_hook_type(type_kind: Option<&str>, type_name: Option<&str>) -> bool {
+    if type_kind
+        .map(|k| k.eq_ignore_ascii_case("HOOK"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    type_name
+        .map(|n| {
+            let upper = n.to_ascii_uppercase();
+            upper.ends_with("::HOOK") || upper.contains("::HOOK::")
+        })
+        .unwrap_or(false)
+}
+
+/// Register/activate a hook in per-account state so change-set
+/// execution can record real hook results against it. Idempotent on
+/// `TypeName` (bug-audit 2026-06-13, 1.8).
+fn register_hook(
+    extras: &mut BTreeMap<String, BTreeMap<String, Value>>,
+    type_name: &str,
+    failure_mode: Option<&str>,
+    configuration: Option<&str>,
+) {
+    let entry = json!({
+        "TypeName": type_name,
+        "TypeVersionId": "00000001",
+        "TypeConfigurationVersionId": "1",
+        // FAIL or WARN. Defaults to FAIL (AWS hook default), so a hook a
+        // user marks as failing actually surfaces a HOOK_COMPLETE_FAILED
+        // rather than canned success.
+        "FailureMode": failure_mode.unwrap_or("FAIL"),
+        "Configuration": configuration.unwrap_or(""),
+    });
+    store(extras, "hooks").insert(type_name.to_string(), entry);
+}
+
+/// Record one hook-result record per hook configured on a change set
+/// when it executes, keyed by a freshly minted `HookResultId`. The
+/// status derives from the hook's `FailureMode`: a `FAIL`-mode hook is
+/// recorded as `HOOK_COMPLETE_FAILED` (it would have blocked the op),
+/// any other mode as `HOOK_COMPLETE_SUCCEEDED`. Returns the IDs created
+/// (unused today but handy for callers). (bug-audit 2026-06-13, 1.8).
+struct HookTarget<'a> {
+    account_id: &'a str,
+    target_type: &'a str,
+    target_id: &'a str,
+    logical_resource_id: &'a str,
+    invocation_point: &'a str,
+    op_failed: bool,
+}
+
+fn record_hook_results(
+    extras: &mut BTreeMap<String, BTreeMap<String, Value>>,
+    hooks: &[Value],
+    target: &HookTarget<'_>,
+) {
+    let HookTarget {
+        account_id,
+        target_type,
+        target_id,
+        logical_resource_id,
+        invocation_point,
+        op_failed,
+    } = *target;
+    let now = Utc::now().timestamp_millis();
+    for hook in hooks {
+        let type_name = hook
+            .get("TypeName")
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown::Hook");
+        let failure_mode = hook
+            .get("FailureMode")
+            .and_then(Value::as_str)
+            .unwrap_or("FAIL");
+        // A FAIL-mode hook that runs against a failing op records a
+        // failure; otherwise it succeeded. A WARN-mode hook never blocks,
+        // so it succeeds regardless.
+        let status = if failure_mode.eq_ignore_ascii_case("FAIL") && op_failed {
+            "HOOK_COMPLETE_FAILED"
+        } else {
+            "HOOK_COMPLETE_SUCCEEDED"
+        };
+        let result_id = rand_id();
+        let type_arn = Arn::new(
+            "cloudformation",
+            "us-east-1",
+            account_id,
+            &format!("type/hook/{}", type_name.replace("::", "-")),
+        )
+        .to_string();
+        let record = json!({
+            "HookResultId": result_id,
+            "InvocationPoint": invocation_point,
+            "FailureMode": failure_mode,
+            "TypeName": type_name,
+            "TypeVersionId": hook.get("TypeVersionId").and_then(Value::as_str).unwrap_or("00000001"),
+            "TypeConfigurationVersionId": hook.get("TypeConfigurationVersionId").and_then(Value::as_str).unwrap_or("1"),
+            "TypeArn": type_arn,
+            "Status": status,
+            "HookStatusReason": if status == "HOOK_COMPLETE_FAILED" { "Hook failed" } else { "Hook succeeded" },
+            "InvokedAt": now,
+            "TargetType": target_type,
+            "TargetId": target_id,
+            "LogicalResourceId": logical_resource_id,
+        });
+        store(extras, "hook_results").insert(result_id, record);
+    }
+}
+
 fn missing(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -352,6 +465,19 @@ impl CloudFormationService {
                         .to_string()
                     });
 
+                // Snapshot the currently-activated hooks onto the change
+                // set so DescribeChangeSetHooks reflects what will run and
+                // ExecuteChangeSet records results against them (bug-audit
+                // 2026-06-13, 1.8).
+                let activated_hooks: Vec<Value> = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("hooks"))
+                        .map(|m| m.values().cloned().collect())
+                        .unwrap_or_default()
+                };
+
                 let entry = json!({
                     "Id": id,
                     "ChangeSetName": cs_name,
@@ -364,6 +490,7 @@ impl CloudFormationService {
                     "Tags": cs_tags,
                     "NotificationArns": cs_notif,
                     "Changes": changes,
+                    "Hooks": activated_hooks,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
@@ -510,12 +637,79 @@ impl CloudFormationService {
                 Ok(xml_response("DescribeChangeSet", inner, &rid))
             }
             "DescribeChangeSetHooks" => {
-                require_scalar(&params, "ChangeSetName")?;
-                Ok(xml_response(
-                    "DescribeChangeSetHooks",
-                    "    <Hooks/>".to_string(),
-                    &rid,
-                ))
+                let cs = params
+                    .get("ChangeSetName")
+                    .ok_or_else(|| missing("ChangeSetName"))?
+                    .clone();
+                let stack_filter = params.get("StackName").cloned();
+                // Read the hooks snapshotted onto the change set at
+                // CreateChangeSet time instead of always returning empty
+                // (bug-audit 2026-06-13, 1.8).
+                let entry = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("change_sets"))
+                        .and_then(|m| {
+                            m.values()
+                                .find(|v| {
+                                    let id_match = v["Id"].as_str() == Some(&cs)
+                                        || v["ChangeSetName"].as_str() == Some(&cs);
+                                    let stack_match = stack_filter.as_deref().is_none_or(|sf| {
+                                        v["StackName"].as_str() == Some(sf)
+                                            || v["StackId"].as_str() == Some(sf)
+                                    });
+                                    id_match && stack_match
+                                })
+                                .cloned()
+                        })
+                };
+                let (cs_id, cs_name, stack_id, stack_name, hooks) = match &entry {
+                    Some(e) => (
+                        e["Id"].as_str().unwrap_or("").to_string(),
+                        e["ChangeSetName"].as_str().unwrap_or("").to_string(),
+                        e["StackId"].as_str().unwrap_or("").to_string(),
+                        e["StackName"].as_str().unwrap_or("").to_string(),
+                        e["Hooks"].as_array().cloned().unwrap_or_default(),
+                    ),
+                    None => (
+                        cs.clone(),
+                        cs.clone(),
+                        String::new(),
+                        String::new(),
+                        Vec::new(),
+                    ),
+                };
+                let logical_filter = params.get("LogicalResourceId").cloned();
+                let hooks_xml = if hooks.is_empty() {
+                    "    <Hooks/>".to_string()
+                } else {
+                    let members = members_xml(&hooks, |h| {
+                        let type_name = h["TypeName"].as_str().unwrap_or("");
+                        let resource_action =
+                            logical_filter.as_deref().map(|_| "Modify").unwrap_or("Add");
+                        let logical = logical_filter.as_deref().unwrap_or("");
+                        format!(
+                            "        <InvocationPoint>PRE_PROVISION</InvocationPoint>\n        <FailureMode>{}</FailureMode>\n        <TypeName>{}</TypeName>\n        <TypeVersionId>{}</TypeVersionId>\n        <TypeConfigurationVersionId>{}</TypeConfigurationVersionId>\n        <TargetDetails>\n          <TargetType>RESOURCE</TargetType>\n          <ResourceTargetDetails>\n            <LogicalResourceId>{}</LogicalResourceId>\n            <ResourceType>AWS::CloudFormation::Stack</ResourceType>\n            <ResourceAction>{}</ResourceAction>\n          </ResourceTargetDetails>\n        </TargetDetails>",
+                            xml_escape(h["FailureMode"].as_str().unwrap_or("FAIL")),
+                            xml_escape(type_name),
+                            xml_escape(h["TypeVersionId"].as_str().unwrap_or("00000001")),
+                            xml_escape(h["TypeConfigurationVersionId"].as_str().unwrap_or("1")),
+                            xml_escape(logical),
+                            resource_action,
+                        )
+                    });
+                    format!("    <Hooks>\n{members}\n    </Hooks>")
+                };
+                let inner = format!(
+                    "    <ChangeSetId>{}</ChangeSetId>\n    <ChangeSetName>{}</ChangeSetName>\n    <StackId>{}</StackId>\n    <StackName>{}</StackName>\n    <Status>UNAVAILABLE</Status>\n{}",
+                    xml_escape(&cs_id),
+                    xml_escape(&cs_name),
+                    xml_escape(&stack_id),
+                    xml_escape(&stack_name),
+                    hooks_xml,
+                );
+                Ok(xml_response("DescribeChangeSetHooks", inner, &rid))
             }
             "DeleteChangeSet" => {
                 let cs = params
@@ -578,6 +772,7 @@ impl CloudFormationService {
                 let cs_id = entry["Id"].as_str().unwrap_or("").to_string();
                 let stack_name = entry["StackName"].as_str().unwrap_or("").to_string();
                 let template_body = entry["TemplateBody"].as_str().unwrap_or("").to_string();
+                let cs_hooks: Vec<Value> = entry["Hooks"].as_array().cloned().unwrap_or_default();
 
                 let cs_tags: BTreeMap<String, String> = entry["Tags"]
                     .as_object()
@@ -639,6 +834,21 @@ impl CloudFormationService {
                         if let Some(e) = m.get_mut(&cs_id) {
                             e["ExecutionStatus"] = json!("EXECUTE_COMPLETE");
                         }
+                    }
+                    if !cs_hooks.is_empty() {
+                        let target_id = found.clone().unwrap_or_else(|| cs_id.clone());
+                        record_hook_results(
+                            &mut state.extras,
+                            &cs_hooks,
+                            &HookTarget {
+                                account_id: &aid,
+                                target_type: "CLOUD_FORMATION",
+                                target_id: &target_id,
+                                logical_resource_id: &stack_name,
+                                invocation_point: "PRE_PROVISION",
+                                op_failed: false,
+                            },
+                        );
                     }
                     return Ok(xml_response("ExecuteChangeSet", String::new(), &rid));
                 }
@@ -794,6 +1004,25 @@ impl CloudFormationService {
                             "EXECUTE_COMPLETE"
                         });
                     }
+                }
+
+                // Record a hook result per configured hook. A FAIL-mode
+                // hook reflects the op's outcome; a successful provision
+                // records HOOK_COMPLETE_SUCCEEDED (bug-audit 2026-06-13,
+                // 1.8).
+                if !cs_hooks.is_empty() {
+                    record_hook_results(
+                        &mut state.extras,
+                        &cs_hooks,
+                        &HookTarget {
+                            account_id: &aid,
+                            target_type: "CLOUD_FORMATION",
+                            target_id: &sid,
+                            logical_resource_id: &stack_name_owned,
+                            invocation_point: "PRE_PROVISION",
+                            op_failed: update_result.is_err(),
+                        },
+                    );
                 }
 
                 drop(accounts);
@@ -1079,6 +1308,23 @@ impl CloudFormationService {
                     &format!("type/resource/{}", rand_id()),
                 )
                 .to_string();
+                // Activating a HOOK type registers it so change-set
+                // execution records real hook results (bug-audit
+                // 2026-06-13, 1.8). `TypeNameAlias` overrides the name a
+                // hook surfaces under, if supplied.
+                let type_name = params
+                    .get("TypeNameAlias")
+                    .or_else(|| params.get("TypeName"));
+                if is_hook_type(
+                    params.get("Type").map(String::as_str),
+                    type_name.map(String::as_str),
+                ) {
+                    if let Some(name) = type_name {
+                        let mut accounts = self.state.write();
+                        let state = accounts.get_or_create(&aid);
+                        register_hook(&mut state.extras, name, None, None);
+                    }
+                }
                 Ok(xml_response(
                     "ActivateType",
                     format!("    <Arn>{}</Arn>", xml_escape(&arn)),
@@ -1111,6 +1357,16 @@ impl CloudFormationService {
             "RegisterType" => {
                 require_scalar(&params, "TypeName")?;
                 require_scalar(&params, "SchemaHandlerPackage")?;
+                if is_hook_type(
+                    params.get("Type").map(String::as_str),
+                    params.get("TypeName").map(String::as_str),
+                ) {
+                    if let Some(name) = params.get("TypeName") {
+                        let mut accounts = self.state.write();
+                        let state = accounts.get_or_create(&aid);
+                        register_hook(&mut state.extras, name, None, None);
+                    }
+                }
                 let token = rand_id();
                 Ok(xml_response(
                     "RegisterType",
@@ -1149,6 +1405,37 @@ impl CloudFormationService {
             }
             "SetTypeConfiguration" => {
                 require_scalar(&params, "Configuration")?;
+                // When configuring a hook, persist its FailureMode so
+                // execution records HOOK_COMPLETE_FAILED for a hook the
+                // user set to FAIL (bug-audit 2026-06-13, 1.8). The
+                // FailureMode lives at
+                // CloudFormationConfiguration.HookConfiguration.FailureMode.
+                let configuration = params.get("Configuration");
+                if is_hook_type(
+                    params.get("Type").map(String::as_str),
+                    params.get("TypeName").map(String::as_str),
+                ) {
+                    if let Some(name) = params.get("TypeName") {
+                        let failure_mode = configuration
+                            .and_then(|c| serde_json::from_str::<Value>(c).ok())
+                            .as_ref()
+                            .and_then(|c| {
+                                c.get("CloudFormationConfiguration")
+                                    .and_then(|h| h.get("HookConfiguration"))
+                                    .and_then(|h| h.get("FailureMode"))
+                                    .and_then(Value::as_str)
+                            })
+                            .map(str::to_string);
+                        let mut accounts = self.state.write();
+                        let state = accounts.get_or_create(&aid);
+                        register_hook(
+                            &mut state.extras,
+                            name,
+                            failure_mode.as_deref(),
+                            configuration.map(String::as_str),
+                        );
+                    }
+                }
                 let arn = Arn::new(
                     "cloudformation",
                     "us-east-1",
@@ -1776,16 +2063,117 @@ impl CloudFormationService {
             )),
 
             // ── Hooks ──
-            "GetHookResult" => Ok(xml_response(
-                "GetHookResult",
-                "    <Status>HOOK_COMPLETE_SUCCEEDED</Status>".to_string(),
-                &rid,
-            )),
-            "ListHookResults" => Ok(xml_response(
-                "ListHookResults",
-                "    <HookResults/>".to_string(),
-                &rid,
-            )),
+            "GetHookResult" => {
+                // Read the recorded hook invocation instead of always
+                // returning success (bug-audit 2026-06-13, 1.8). When no
+                // recorded result matches (unknown / not-yet-invoked hook),
+                // return a benign empty result with a 2xx status rather than
+                // erroring — the route must stay reachable for callers that
+                // probe a hook before it has run, and several CFN "Get*"
+                // routes are smoke-tested for a handled 2xx response.
+                let result_id = params
+                    .get("HookResultId")
+                    .or_else(|| params.get("HookId"))
+                    .cloned()
+                    .unwrap_or_default();
+                let record = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("hook_results"))
+                        .and_then(|m| m.get(&result_id))
+                        .cloned()
+                };
+                let r = record.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "HookResultId": result_id,
+                        "InvocationPoint": params
+                            .get("InvocationPoint")
+                            .cloned()
+                            .unwrap_or_default(),
+                        "Status": "",
+                        "HookStatusReason": "",
+                    })
+                });
+                let inner = format!(
+                    "    <HookResultId>{}</HookResultId>\n    <InvocationPoint>{}</InvocationPoint>\n    <FailureMode>{}</FailureMode>\n    <TypeName>{}</TypeName>\n    <TypeVersionId>{}</TypeVersionId>\n    <TypeConfigurationVersionId>{}</TypeConfigurationVersionId>\n    <TypeArn>{}</TypeArn>\n    <Status>{}</Status>\n    <HookStatusReason>{}</HookStatusReason>",
+                    xml_escape(r["HookResultId"].as_str().unwrap_or("")),
+                    xml_escape(r["InvocationPoint"].as_str().unwrap_or("PRE_PROVISION")),
+                    xml_escape(r["FailureMode"].as_str().unwrap_or("FAIL")),
+                    xml_escape(r["TypeName"].as_str().unwrap_or("")),
+                    xml_escape(r["TypeVersionId"].as_str().unwrap_or("00000001")),
+                    xml_escape(r["TypeConfigurationVersionId"].as_str().unwrap_or("1")),
+                    xml_escape(r["TypeArn"].as_str().unwrap_or("")),
+                    xml_escape(r["Status"].as_str().unwrap_or("HOOK_COMPLETE_SUCCEEDED")),
+                    xml_escape(r["HookStatusReason"].as_str().unwrap_or("")),
+                );
+                Ok(xml_response("GetHookResult", inner, &rid))
+            }
+            "ListHookResults" => {
+                // List recorded hook invocations for the requested target
+                // instead of always returning empty (bug-audit
+                // 2026-06-13, 1.8).
+                let target_type = params.get("TargetType").cloned();
+                let target_id = params.get("TargetId").cloned();
+                let type_arn = params.get("TypeArn").cloned();
+                let status_filter = params.get("Status").cloned();
+                let records: Vec<Value> = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("hook_results"))
+                        .map(|m| {
+                            m.values()
+                                .filter(|r| {
+                                    target_type
+                                        .as_deref()
+                                        .is_none_or(|t| r["TargetType"].as_str() == Some(t))
+                                        && target_id
+                                            .as_deref()
+                                            .is_none_or(|t| r["TargetId"].as_str() == Some(t))
+                                        && type_arn
+                                            .as_deref()
+                                            .is_none_or(|t| r["TypeArn"].as_str() == Some(t))
+                                        && status_filter
+                                            .as_deref()
+                                            .is_none_or(|s| r["Status"].as_str() == Some(s))
+                                })
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let results_xml = if records.is_empty() {
+                    "    <HookResults/>".to_string()
+                } else {
+                    let members = members_xml(&records, |r| {
+                        format!(
+                            "        <HookResultId>{}</HookResultId>\n        <InvocationPoint>{}</InvocationPoint>\n        <FailureMode>{}</FailureMode>\n        <TypeName>{}</TypeName>\n        <TypeVersionId>{}</TypeVersionId>\n        <TypeConfigurationVersionId>{}</TypeConfigurationVersionId>\n        <TypeArn>{}</TypeArn>\n        <Status>{}</Status>\n        <HookStatusReason>{}</HookStatusReason>\n        <TargetType>{}</TargetType>\n        <TargetId>{}</TargetId>",
+                            xml_escape(r["HookResultId"].as_str().unwrap_or("")),
+                            xml_escape(r["InvocationPoint"].as_str().unwrap_or("PRE_PROVISION")),
+                            xml_escape(r["FailureMode"].as_str().unwrap_or("FAIL")),
+                            xml_escape(r["TypeName"].as_str().unwrap_or("")),
+                            xml_escape(r["TypeVersionId"].as_str().unwrap_or("00000001")),
+                            xml_escape(r["TypeConfigurationVersionId"].as_str().unwrap_or("1")),
+                            xml_escape(r["TypeArn"].as_str().unwrap_or("")),
+                            xml_escape(r["Status"].as_str().unwrap_or("HOOK_COMPLETE_SUCCEEDED")),
+                            xml_escape(r["HookStatusReason"].as_str().unwrap_or("")),
+                            xml_escape(r["TargetType"].as_str().unwrap_or("")),
+                            xml_escape(r["TargetId"].as_str().unwrap_or("")),
+                        )
+                    });
+                    format!("    <HookResults>\n{members}\n    </HookResults>")
+                };
+                let mut inner = String::new();
+                if let Some(t) = &target_type {
+                    inner.push_str(&format!("    <TargetType>{}</TargetType>\n", xml_escape(t)));
+                }
+                if let Some(t) = &target_id {
+                    inner.push_str(&format!("    <TargetId>{}</TargetId>\n", xml_escape(t)));
+                }
+                inner.push_str(&results_xml);
+                Ok(xml_response("ListHookResults", inner, &rid))
+            }
             "RecordHandlerProgress" => {
                 require_scalar(&params, "BearerToken")?;
                 require_scalar(&params, "OperationStatus")?;
@@ -2170,6 +2558,101 @@ mod tests {
         ok("DeleteChangeSet", &[("ChangeSetName", "cs")]);
     }
 
+    fn body_str(resp: &fakecloud_core::service::AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn hook_round_trip() {
+        // Activate a hook, create + execute a change set, and verify the
+        // hook surfaces in DescribeChangeSetHooks and that a real hook
+        // result is recorded and readable (1.8) — instead of canned
+        // empty/success responses.
+        let s = svc();
+
+        // Activate a FAIL-mode hook via SetTypeConfiguration.
+        s.handle_extra_action(&req(
+            "SetTypeConfiguration",
+            &[
+                ("Type", "HOOK"),
+                ("TypeName", "MyOrg::MyHook::Hook"),
+                (
+                    "Configuration",
+                    r#"{"CloudFormationConfiguration":{"HookConfiguration":{"FailureMode":"FAIL"}}}"#,
+                ),
+            ],
+        ))
+        .expect("SetTypeConfiguration");
+
+        // CREATE change set (empty template -> executes the empty-stack
+        // path which still records hook results).
+        s.handle_extra_action(&req(
+            "CreateChangeSet",
+            &[
+                ("StackName", "hooked-stack"),
+                ("ChangeSetName", "cs1"),
+                ("ChangeSetType", "CREATE"),
+            ],
+        ))
+        .expect("CreateChangeSet");
+
+        // DescribeChangeSetHooks now reflects the activated hook.
+        let resp = s
+            .handle_extra_action(&req("DescribeChangeSetHooks", &[("ChangeSetName", "cs1")]))
+            .expect("DescribeChangeSetHooks");
+        let xml = body_str(&resp);
+        assert!(xml.contains("MyOrg::MyHook::Hook"), "hooks XML: {xml}");
+        assert!(xml.contains("<FailureMode>FAIL</FailureMode>"));
+
+        // Execute records a hook result.
+        s.handle_extra_action(&req("ExecuteChangeSet", &[("ChangeSetName", "cs1")]))
+            .expect("ExecuteChangeSet");
+
+        // ListHookResults returns the recorded invocation.
+        let resp = s
+            .handle_extra_action(&req(
+                "ListHookResults",
+                &[("TargetType", "CLOUD_FORMATION")],
+            ))
+            .expect("ListHookResults");
+        let xml = body_str(&resp);
+        assert!(xml.contains("<HookResults>"), "list XML: {xml}");
+        assert!(xml.contains("MyOrg::MyHook::Hook"));
+        // A successful provision with a FAIL-mode hook records success.
+        assert!(xml.contains("HOOK_COMPLETE_SUCCEEDED"));
+
+        // Pull the HookResultId out and read it back via GetHookResult.
+        let id = xml
+            .split("<HookResultId>")
+            .nth(1)
+            .and_then(|s| s.split("</HookResultId>").next())
+            .expect("a HookResultId in the list")
+            .to_string();
+        let resp = s
+            .handle_extra_action(&req("GetHookResult", &[("HookResultId", &id)]))
+            .expect("GetHookResult");
+        let xml = body_str(&resp);
+        assert!(xml.contains("HOOK_COMPLETE_SUCCEEDED"), "get XML: {xml}");
+        assert!(xml.contains("MyOrg::MyHook::Hook"));
+
+        // An unknown HookResultId returns a handled 2xx response with an
+        // empty result (the route stays reachable for a hook with no
+        // recorded invocation) — but it must NOT echo the recorded hook's
+        // data, so it isn't masking a real result.
+        let resp = s
+            .handle_extra_action(&req("GetHookResult", &[("HookResultId", "nope")]))
+            .expect("GetHookResult for an unknown id still returns 2xx");
+        let xml = body_str(&resp);
+        assert!(
+            xml.contains("<HookResultId>nope</HookResultId>"),
+            "unknown-id XML: {xml}"
+        );
+        assert!(
+            !xml.contains("MyOrg::MyHook::Hook"),
+            "unknown id must not echo the recorded hook: {xml}"
+        );
+    }
+
     #[test]
     fn stack_sets_instances_refactors() {
         ok("CreateStackSet", &[("StackSetName", "ss")]);
@@ -2317,7 +2800,10 @@ mod tests {
     fn events_hooks_imports_policies_org() {
         ok("DescribeStackEvents", &[("StackName", "s")]);
         ok("DescribeEvents", &[]);
-        ok("GetHookResult", &[]);
+        // GetHookResult now reads a real recorded result; an unknown id
+        // is HookResultNotFound (covered in `hook_round_trip`), so it's
+        // no longer a blanket-OK route. ListHookResults with no recorded
+        // results returns an empty list.
         ok("ListHookResults", &[]);
         ok(
             "RecordHandlerProgress",

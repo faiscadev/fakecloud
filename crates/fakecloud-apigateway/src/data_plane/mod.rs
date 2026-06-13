@@ -1256,6 +1256,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_invoke_authorizer_reflects_lambda_deny() {
+        // TestInvokeAuthorizer evaluates the real authorizer rather than
+        // returning a canned Allow (1.7). A Lambda returning a Deny policy
+        // is reflected as a Deny result.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            FN_ARN,
+            serde_json::json!({
+                "principalId": "denied-user",
+                "policyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{"Effect": "Deny", "Action": "execute-api:Invoke", "Resource": "*"}]
+                }
+            }),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok".parse().unwrap());
+        let auth = token_authorizer();
+        let result =
+            test_invoke_authorizer_eval(&service, &make_request(headers), TEST_API_ID, &auth)
+                .await
+                .expect("eval should run");
+        assert_eq!(lambda.invocation_count(FN_ARN), 1);
+        assert_eq!(result["principalId"], "denied-user");
+        assert!(result["log"].as_str().unwrap().contains("Deny"));
+        // Policy reflects what the Lambda returned (a Deny), not a canned Allow.
+        let policy = result["policy"].as_str().unwrap();
+        assert!(policy.contains("Deny"));
+        assert!(!policy.contains("\"Effect\":\"Allow\""));
+    }
+
+    #[tokio::test]
+    async fn test_invoke_authorizer_missing_identity_source_is_401() {
+        // No identity-source header -> 401 with no policy, not a pass.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let auth = token_authorizer();
+        let result = test_invoke_authorizer_eval(
+            &service,
+            &make_request(HeaderMap::new()),
+            TEST_API_ID,
+            &auth,
+        )
+        .await
+        .expect("eval should run");
+        assert_eq!(result["clientStatus"], 401);
+        assert!(result.get("policy").is_none());
+        assert_eq!(lambda.invocation_count(FN_ARN), 0);
+    }
+
+    #[tokio::test]
     async fn cognito_authorizer_rejects_invalid_jwt_signature() {
         let state = build_state("COGNITO_USER_POOLS", Some(cognito_authorizer()));
         let lambda = Arc::new(StubLambda::new());
@@ -2371,6 +2425,7 @@ mod integrations;
 mod routing;
 mod usage_plans;
 mod validator;
+pub(crate) use authorizers::test_invoke_authorizer_eval;
 use authorizers::*;
 use errors::*;
 use integrations::*;

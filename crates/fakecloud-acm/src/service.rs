@@ -1074,6 +1074,13 @@ impl AcmService {
                 .unwrap_or_default()
         };
         let key_types = filter_values("KeyTypes");
+        // ExtendedKeyUsages / KeyUsage were silently dropped before (the
+        // comment claimed pass-through but nothing applied them — bug-audit
+        // 2026-06-13, 1.11). fakecloud-issued certs carry the canonical ACM
+        // EKU/KeyUsage sets (mirrored in the response JSON below), so a cert
+        // matches a leaf filter when its set intersects the requested values.
+        let extended_key_usages = filter_values("ExtendedKeyUsages");
+        let key_usage = filter_values("KeyUsage");
 
         // CertificateStatuses is a top-level filter on the certificate status.
         let statuses: Vec<String> = body
@@ -1099,6 +1106,29 @@ impl AcmService {
         }
         if !statuses.is_empty() {
             all.retain(|c| statuses.contains(&c.status.to_ascii_uppercase()));
+        }
+        // Canonical EKU/KeyUsage sets carried by every fakecloud-issued
+        // cert (kept in sync with certificate_search_result_json /
+        // describe output). A cert matches when the requested filter
+        // intersects its set; `ANY` is the AWS wildcard sentinel.
+        const CERT_EKUS: [&str; 2] = [
+            "TLS_WEB_SERVER_AUTHENTICATION",
+            "TLS_WEB_CLIENT_AUTHENTICATION",
+        ];
+        const CERT_KEY_USAGES: [&str; 2] = ["DIGITAL_SIGNATURE", "KEY_ENCIPHERMENT"];
+        if !extended_key_usages.is_empty() {
+            all.retain(|_| {
+                extended_key_usages
+                    .iter()
+                    .any(|f| f == "ANY" || CERT_EKUS.contains(&f.as_str()))
+            });
+        }
+        if !key_usage.is_empty() {
+            all.retain(|_| {
+                key_usage
+                    .iter()
+                    .any(|f| f == "ANY" || CERT_KEY_USAGES.contains(&f.as_str()))
+            });
         }
 
         // Apply SortBy/SortOrder (validated above but previously never applied,
@@ -2401,5 +2431,50 @@ mod tests {
                 arn["a.example.com"].clone(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn search_certificates_extended_key_usage_filter() {
+        // EKU filtering was silently dropped (1.11). fakecloud certs carry
+        // the canonical TLS server/client auth EKUs, so a matching filter
+        // narrows to all certs and a non-matching one drops them all.
+        let svc = AcmService::default();
+        for d in ["a.example.com", "b.example.com"] {
+            svc.handle(make_req("RequestCertificate", json!({ "DomainName": d })))
+                .await
+                .unwrap();
+        }
+
+        let count = |body: &Value| body["Results"].as_array().unwrap().len();
+
+        // Matching EKU -> both certs returned.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "ExtendedKeyUsages": ["TLS_WEB_SERVER_AUTHENTICATION"] }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(count(&body), 2, "matching EKU should return all certs");
+
+        // Non-matching EKU -> filtered out entirely.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "ExtendedKeyUsages": ["CODE_SIGNING"] }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(count(&body), 0, "non-matching EKU should drop all certs");
     }
 }

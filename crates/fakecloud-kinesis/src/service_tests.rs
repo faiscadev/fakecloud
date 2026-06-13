@@ -478,6 +478,32 @@ fn get_records_rejects_unknown_iterator() {
     );
 }
 
+#[test]
+fn get_records_rejects_limit_zero() {
+    // Limit < 1 is InvalidArgumentException (validated before iterator
+    // resolution) — 1.14.
+    let (svc, _) = make_service();
+    assert_code_kinesis(
+        svc.get_records(&request(
+            "GetRecords",
+            json!({ "ShardIterator": "any", "Limit": 0 }),
+        )),
+        "InvalidArgumentException",
+    );
+}
+
+#[test]
+fn get_records_rejects_limit_over_10000() {
+    let (svc, _) = make_service();
+    assert_code_kinesis(
+        svc.get_records(&request(
+            "GetRecords",
+            json!({ "ShardIterator": "any", "Limit": 20000 }),
+        )),
+        "InvalidArgumentException",
+    );
+}
+
 // ── Tags ─────────────────────────────────────────────────────────
 
 #[test]
