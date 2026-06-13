@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// Insert a response header from a possibly-untrusted string, silently
+/// skipping it when the value isn't a legal HTTP header value rather than
+/// panicking. Object-lock mode / legal-hold originate from XML request
+/// bodies (and persisted state), so a crafted value must never crash the
+/// read path. AWS itself only ever stores the validated enum values, so a
+/// well-behaved object always round-trips its header.
+fn insert_str_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    if let Ok(v) = value.parse::<http::header::HeaderValue>() {
+        headers.insert(name, v);
+    }
+}
+
 impl S3Service {
     pub(crate) fn get_object(
         &self,
@@ -137,7 +149,7 @@ impl S3Service {
 
         // Object lock headers
         if let Some(ref mode) = obj.lock_mode {
-            headers.insert("x-amz-object-lock-mode", mode.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-object-lock-mode", mode);
         }
         if let Some(ref until) = obj.lock_retain_until {
             headers.insert(
@@ -146,7 +158,7 @@ impl S3Service {
             );
         }
         if let Some(ref hold) = obj.lock_legal_hold {
-            headers.insert("x-amz-object-lock-legal-hold", hold.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-object-lock-legal-hold", hold);
         }
         if let Some(ongoing) = obj.restore_ongoing {
             let rv = if ongoing {
@@ -483,7 +495,7 @@ impl S3Service {
 
         // Object lock headers
         if let Some(ref mode) = obj.lock_mode {
-            headers.insert("x-amz-object-lock-mode", mode.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-object-lock-mode", mode);
         }
         if let Some(ref until) = obj.lock_retain_until {
             headers.insert(
@@ -492,7 +504,7 @@ impl S3Service {
             );
         }
         if let Some(ref hold) = obj.lock_legal_hold {
-            headers.insert("x-amz-object-lock-legal-hold", hold.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-object-lock-legal-hold", hold);
         }
         if let Some(ongoing) = obj.restore_ongoing {
             let restore_val = if ongoing {
