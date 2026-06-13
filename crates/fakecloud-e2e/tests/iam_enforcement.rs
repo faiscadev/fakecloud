@@ -109,11 +109,10 @@ async fn unknown_access_key_rejected_under_strict_iam_without_sigv4() {
 
     let cfg = sdk_config_with(&server, "AKIABOGUS000000000000", "bogus-secret").await;
     let iam = IamClient::new(&cfg);
-    let err = iam
-        .list_users()
-        .send()
-        .await
-        .expect_err("unknown access key under strict IAM must be rejected, not silently allowed");
+    let err =
+        iam.list_users().send().await.expect_err(
+            "unknown access key under strict IAM must be rejected, not silently allowed",
+        );
     let msg = format!("{err:?}");
     assert!(
         msg.contains("InvalidClientTokenId"),
