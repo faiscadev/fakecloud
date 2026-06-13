@@ -767,14 +767,43 @@ impl ApiGatewayV2Service {
             "GetPortal" => self.get_keyed(resource_id, "portals", aid, &region),
             "ListPortals" => self.list_keyed("portals", aid, &region),
             "DeletePortal" => self.delete_keyed(resource_id, "portals", aid),
-            "DisablePortal" | "PreviewPortal" => {
-                resource_id.ok_or_else(|| missing("PortalId"))?;
+            "DisablePortal" => {
+                let id = resource_id.ok_or_else(|| missing("PortalId"))?;
+                // Persist the disable so GetPortal reflects it instead of
+                // no-op'ing (bug-audit 2026-06-13, 1.12).
+                self.mutate_portal(aid, id, |portal| {
+                    portal["PublishStatus"] = json!("DISABLED");
+                })?;
+                empty_ok()
+            }
+            "PreviewPortal" => {
+                let id = resource_id.ok_or_else(|| missing("PortalId"))?;
+                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                self.mutate_portal(aid, id, |portal| {
+                    portal["Preview"] = json!({
+                        "PreviewStatus": "PREVIEW_AVAILABLE",
+                        "PreviewUrl": format!("https://{id}.preview.portal.example.com"),
+                        "StatusException": {},
+                        "LastModified": now,
+                    });
+                })?;
                 empty_ok()
             }
             "PublishPortal" => {
-                resource_id.ok_or_else(|| missing("PortalId"))?;
+                let id = resource_id.ok_or_else(|| missing("PortalId"))?;
                 let b = body(req);
                 check_length(&b, "Description", None, Some(1024))?;
+                let description = b
+                    .get("Description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                self.mutate_portal(aid, id, |portal| {
+                    portal["PublishStatus"] = json!("PUBLISHED");
+                    portal["LastPublished"] = json!(now);
+                    portal["LastPublishedDescription"] = json!(description);
+                })?;
                 empty_ok()
             }
 
@@ -1221,6 +1250,26 @@ impl ApiGatewayV2Service {
             return Err(not_found("Response", &id));
         }
         no_content()
+    }
+
+    /// Apply an in-place mutation to a stored portal so the portal
+    /// lifecycle ops (Disable/Preview/Publish) persist their effect and
+    /// GetPortal reflects it. Returns `NotFound` when the portal is
+    /// unknown.
+    fn mutate_portal(
+        &self,
+        account_id: &str,
+        id: &str,
+        f: impl FnOnce(&mut Value),
+    ) -> Result<(), AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        let portal = state
+            .portals
+            .get_mut(id)
+            .ok_or_else(|| not_found("portals", id))?;
+        f(portal);
+        Ok(())
     }
 
     fn put_keyed(
@@ -2074,5 +2123,80 @@ mod tests {
             Some("a1"),
             Some("prod"),
         );
+    }
+
+    #[test]
+    fn portal_lifecycle_reflected_on_get() {
+        // Disable / Publish / Preview persist state and GetPortal
+        // reflects it instead of no-op'ing (1.12).
+        let s = svc();
+        s.handle_extra_action(
+            "CreatePortal",
+            &req(
+                "CreatePortal",
+                r#"{"Authorization":{},"EndpointConfiguration":{},"PortalContent":{}}"#,
+                &["v2", "portals"],
+            ),
+            None,
+            Some("p"),
+        )
+        .expect("CreatePortal");
+
+        let get = |s: &ApiGatewayV2Service| -> serde_json::Value {
+            let resp = s
+                .handle_extra_action(
+                    "GetPortal",
+                    &req("GetPortal", "", &["v2", "portals", "p"]),
+                    None,
+                    Some("p"),
+                )
+                .expect("GetPortal");
+            serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+        };
+
+        // Fresh portal starts UNPUBLISHED. Response keys are camelCased.
+        assert_eq!(get(&s)["publishStatus"].as_str(), Some("UNPUBLISHED"));
+
+        // Publish -> PUBLISHED + description recorded.
+        s.handle_extra_action(
+            "PublishPortal",
+            &req(
+                "PublishPortal",
+                r#"{"Description":"v1 release"}"#,
+                &["v2", "portals", "p", "publish"],
+            ),
+            None,
+            Some("p"),
+        )
+        .expect("PublishPortal");
+        let body = get(&s);
+        assert_eq!(body["publishStatus"].as_str(), Some("PUBLISHED"));
+        assert_eq!(
+            body["lastPublishedDescription"].as_str(),
+            Some("v1 release")
+        );
+
+        // Preview -> Preview block populated.
+        s.handle_extra_action(
+            "PreviewPortal",
+            &req("PreviewPortal", "", &["v2", "portals", "p", "preview"]),
+            None,
+            Some("p"),
+        )
+        .expect("PreviewPortal");
+        assert_eq!(
+            get(&s)["preview"]["previewStatus"].as_str(),
+            Some("PREVIEW_AVAILABLE")
+        );
+
+        // Disable -> DISABLED.
+        s.handle_extra_action(
+            "DisablePortal",
+            &req("DisablePortal", "", &["v2", "portals", "p", "disable"]),
+            None,
+            Some("p"),
+        )
+        .expect("DisablePortal");
+        assert_eq!(get(&s)["publishStatus"].as_str(), Some("DISABLED"));
     }
 }

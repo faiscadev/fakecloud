@@ -186,7 +186,12 @@ pub(crate) fn process_batch_send_entry(
         )));
     };
 
-    if message_body.len() > cfg.max_message_size {
+    // AWS measures body + message-attribute size (name + type + value)
+    // against MaximumMessageSize, not the body alone (bug-audit
+    // 2026-06-13, 1.13).
+    let entry_attributes = parse_message_attributes(entry);
+    let entry_size = message_body.len() + message_attributes_size(&entry_attributes);
+    if entry_size > cfg.max_message_size {
         return Ok(BatchEntryOutcome::Failure(batch_failure(
             &id,
             "InvalidParameterValue",
@@ -242,7 +247,7 @@ pub(crate) fn process_batch_send_entry(
         None
     };
 
-    let message_attributes = parse_message_attributes(entry);
+    let message_attributes = entry_attributes;
     let system_attributes = parse_message_system_attributes(entry);
 
     let sequence_number = if cfg.is_fifo {
@@ -1080,6 +1085,29 @@ pub(crate) fn md5_of_message_attributes(attrs: &BTreeMap<String, MessageAttribut
         }
     }
     format!("{:032x}", hasher.finalize())
+}
+
+/// Total wire size, in bytes, of a set of message attributes as AWS
+/// accounts it against `MaximumMessageSize` and the batch ceiling. AWS
+/// counts, per attribute: the UTF-8 byte length of the attribute name,
+/// the UTF-8 byte length of the data type, and the byte length of the
+/// value (UTF-8 for String/Number, raw bytes for Binary). Used so the
+/// size check matches AWS, which measures body + attributes together
+/// rather than the body alone (bug-audit 2026-06-13, 1.13).
+pub(crate) fn message_attributes_size(attrs: &BTreeMap<String, MessageAttribute>) -> usize {
+    attrs
+        .iter()
+        .map(|(name, attr)| {
+            let value_len = if let Some(ref sv) = attr.string_value {
+                sv.len()
+            } else if let Some(ref bv) = attr.binary_value {
+                bv.len()
+            } else {
+                0
+            };
+            name.len() + attr.data_type.len() + value_len
+        })
+        .sum()
 }
 
 /// Same as md5_of_message_attributes but works with borrowed references

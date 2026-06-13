@@ -219,13 +219,16 @@ impl SqsService {
                 }
             }
 
-            // MaximumMessageSize validation
+            // MaximumMessageSize validation. AWS measures body +
+            // message-attribute size (name + type + value) against the
+            // limit, not the body alone (bug-audit 2026-06-13, 1.13).
             let max_message_size: usize = queue
                 .attributes
                 .get("MaximumMessageSize")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(262144);
-            if message_body.len() > max_message_size {
+            let total_size = message_body.len() + message_attributes_size(&message_attributes);
+            if total_size > max_message_size {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterValue",
@@ -989,18 +992,24 @@ impl SqsService {
             }
         }
 
-        // Validate total batch size
+        // Validate total batch size. AWS counts each entry's body plus
+        // its message attributes (name + type + value) toward the
+        // 256 KiB batch ceiling, not the bodies alone (bug-audit
+        // 2026-06-13, 1.13).
         let total_size: usize = entries
             .iter()
-            .filter_map(|e| e["MessageBody"].as_str())
-            .map(|b| b.len())
+            .map(|e| {
+                let body_len = e["MessageBody"].as_str().map(str::len).unwrap_or(0);
+                let attrs = parse_message_attributes(e);
+                body_len + message_attributes_size(&attrs)
+            })
             .sum();
-        if total_size > 1_048_576 {
+        if total_size > 262_144 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "AWS.SimpleQueueService.BatchRequestTooLong",
                 format!(
-                    "Batch requests cannot be longer than 1048576 bytes. You have sent {} bytes.",
+                    "Batch requests cannot be longer than 262144 bytes. You have sent {} bytes.",
                     total_size
                 ),
             ));
@@ -1034,7 +1043,9 @@ impl SqsService {
         if kms_key_id.is_some() && self.kms_hook.is_some() {
             for entry in &entries {
                 let body = entry["MessageBody"].as_str();
-                let body_size_ok = body.is_some_and(|b| b.len() <= cfg.max_message_size);
+                let attrs_size = message_attributes_size(&parse_message_attributes(entry));
+                let body_size_ok =
+                    body.is_some_and(|b| b.len() + attrs_size <= cfg.max_message_size);
                 let id_ok = entry["Id"].as_str().is_some_and(is_valid_batch_id);
                 let delay_ok = match val_as_i64(&entry["DelaySeconds"]) {
                     Some(d) => (0..=900).contains(&d),

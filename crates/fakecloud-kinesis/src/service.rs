@@ -434,6 +434,22 @@ impl KinesisService {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| invalid_argument("ShardIterator is required"))?
             .to_string();
+        // GetRecords Limit targets GetRecordsInputLimit @range(1, 10000).
+        // AWS rejects out-of-range values with InvalidArgumentException
+        // (not ValidationException — that's why this uses the crate's
+        // Kinesis-specific error rather than validate_optional_json_range).
+        if !body["Limit"].is_null() {
+            let n = body["Limit"]
+                .as_i64()
+                .ok_or_else(|| invalid_argument("Limit must be an integer between 1 and 10000"))?;
+            if !(1..=10_000).contains(&n) {
+                return Err(invalid_argument(format!(
+                    "1 validation error detected: Value '{n}' at 'limit' failed to \
+                     satisfy constraint: Member must have value less than or equal to \
+                     10000 and greater than or equal to 1"
+                )));
+            }
+        }
         let limit = body["Limit"].as_u64().unwrap_or(10_000) as usize;
 
         let lease = state

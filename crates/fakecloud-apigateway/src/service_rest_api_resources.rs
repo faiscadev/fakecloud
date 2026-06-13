@@ -53,7 +53,7 @@ impl ApiGatewayService {
             "DeleteIntegrationResponse" => self.delete_integration_response(req, &params),
             "UpdateIntegrationResponse" => self.update_integration_response(req, &params),
             "TestInvokeMethod" => self.test_invoke_method(req, &params).await,
-            "TestInvokeAuthorizer" => self.test_invoke_authorizer(req, &params),
+            "TestInvokeAuthorizer" => self.test_invoke_authorizer(req, &params).await,
             "CreateDeployment" => self.create_deployment(req, &params),
             "GetDeployment" => self.get_deployment(req, &params),
             "GetDeployments" => self.get_deployments(req, &params),

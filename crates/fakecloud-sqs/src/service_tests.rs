@@ -2387,3 +2387,94 @@ fn send_message_batch_over_max_entries_errors() {
     );
     assert!(svc.send_message_batch(&req).is_err());
 }
+
+// ── MaximumMessageSize default + attribute-inclusive sizing (1.3 / 1.13) ──
+
+fn queue_attribute(svc: &SqsService, queue_url: &str, name: &str) -> String {
+    let req = make_request(
+        "GetQueueAttributes",
+        json!({ "QueueUrl": queue_url, "AttributeNames": ["All"] }),
+    );
+    let resp = svc.get_queue_attributes(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    body["Attributes"][name].as_str().unwrap_or("").to_string()
+}
+
+#[test]
+fn default_queue_max_message_size_is_256kib() {
+    let svc = make_service();
+    let url = create_queue(&svc, "default-size");
+    // AWS default is 262144 (256 KiB), not 1 MiB (1.3).
+    assert_eq!(queue_attribute(&svc, &url, "MaximumMessageSize"), "262144");
+}
+
+#[test]
+fn default_queue_rejects_300kb_body() {
+    let svc = make_service();
+    let url = create_queue(&svc, "reject-300kb");
+    let big = "x".repeat(300 * 1024); // 307200 bytes > 262144
+    let req = make_request(
+        "SendMessage",
+        json!({ "QueueUrl": url, "MessageBody": big }),
+    );
+    let err = expect_err(svc.send_message(&req));
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+#[test]
+fn explicit_max_message_size_is_preserved() {
+    let svc = make_service();
+    let req = make_request(
+        "CreateQueue",
+        json!({
+            "QueueName": "explicit-size",
+            "Attributes": { "MaximumMessageSize": "1024" }
+        }),
+    );
+    let resp = svc.create_queue(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let url = body["QueueUrl"].as_str().unwrap().to_string();
+    assert_eq!(queue_attribute(&svc, &url, "MaximumMessageSize"), "1024");
+}
+
+#[test]
+fn message_size_includes_attributes() {
+    let svc = make_service();
+    // AWS enforces MaximumMessageSize in [1024, 1 MiB], so use the
+    // minimum and craft a body just under it.
+    let req = make_request(
+        "CreateQueue",
+        json!({
+            "QueueName": "attr-size",
+            "Attributes": { "MaximumMessageSize": "1024" }
+        }),
+    );
+    let resp = svc.create_queue(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let url = body["QueueUrl"].as_str().unwrap().to_string();
+
+    // A 1020-byte body alone is under 1024 and accepted.
+    let body_text = "x".repeat(1020);
+    let ok_req = make_request(
+        "SendMessage",
+        json!({ "QueueUrl": url, "MessageBody": body_text }),
+    );
+    assert!(svc.send_message(&ok_req).is_ok());
+
+    // Same 1020-byte body + attr name "k" (1) + type "String" (6) +
+    // value "abcdefghij" (10) = 1037 > 1024 -> rejected. Without
+    // attribute accounting this would have been accepted (1.13).
+    let body_text = "x".repeat(1020);
+    let big_req = make_request(
+        "SendMessage",
+        json!({
+            "QueueUrl": url,
+            "MessageBody": body_text,
+            "MessageAttributes": {
+                "k": { "DataType": "String", "StringValue": "abcdefghij" }
+            }
+        }),
+    );
+    let err = expect_err(svc.send_message(&big_req));
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
