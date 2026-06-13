@@ -638,41 +638,6 @@ pub async fn dispatch(
                         );
                     }
                 }
-            } else if !aws_request
-                .access_key_id
-                .as_deref()
-                .unwrap_or("")
-                .is_empty()
-            {
-                // IAM enforcement is on but the presented (non-test,
-                // non-root) access key id resolved to no principal — an
-                // unknown credential. This branch previously didn't exist,
-                // so such a request fell straight through to the handler
-                // with no policy evaluation, silently bypassing enforcement
-                // whenever SigV4 verification was off (a user could defeat
-                // their own deny policies just by sending a bogus AKID).
-                // Bug-hunt 2026-06-13, finding 5.1. Real AWS rejects an
-                // unknown access key id with InvalidClientTokenId before any
-                // authorization. Mirror that in strict mode; in soft mode
-                // audit and fall through so observation-only stays
-                // non-disruptive.
-                tracing::warn!(
-                    target: "fakecloud::iam::audit",
-                    service = %detected.service,
-                    akid = %aws_request.access_key_id.as_deref().unwrap_or(""),
-                    mode = %config.iam_mode,
-                    request_id = %request_id,
-                    "IAM enforcement on but access key id resolved to no principal (unknown credential)"
-                );
-                if config.iam_mode.is_strict() {
-                    return build_error_response(
-                        StatusCode::FORBIDDEN,
-                        "InvalidClientTokenId",
-                        "The security token included in the request is invalid",
-                        &request_id,
-                        detected.protocol,
-                    );
-                }
             }
         }
     }

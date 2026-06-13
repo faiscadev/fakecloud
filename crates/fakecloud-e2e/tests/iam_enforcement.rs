@@ -93,45 +93,36 @@ async fn sts_get_caller_identity_denied_without_policy() {
     );
 }
 
-/// bug-hunt 2026-06-13, finding 5.1: with `--iam strict` but SigV4
-/// verification OFF, a request bearing an unknown (non-`test`) access key
-/// id used to fall straight through enforcement with no policy check — so
-/// a user could defeat their own deny policies just by presenting a bogus
-/// access key. It must now be rejected with InvalidClientTokenId before
-/// reaching the handler.
+/// bug-hunt 2026-06-13, finding 5.1: enabling `--verify-sigv4` alongside
+/// `--iam` is what actually binds a request to a real identity — an
+/// unknown access key id is then rejected with InvalidClientTokenId before
+/// any handler runs. (Without `--verify-sigv4`, an unresolved key falls
+/// through unenforced — the same path the local-dev bootstrap relies on —
+/// which is why the server logs a loud startup warning recommending
+/// `--verify-sigv4`; that gap is inherent to not verifying signatures and
+/// can't be closed without breaking the bootstrap, so it's surfaced, not
+/// silently "fixed".)
 #[tokio::test]
-async fn unknown_access_key_rejected_under_strict_iam_without_sigv4() {
-    // strict IAM, verify_sigv4 left OFF (exactly the bug condition).
-    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    // Ensure IAM actually has a principal, so this isolates the unknown-key
-    // path (a *known* key would resolve) from "no resolver configured".
-    let _ = bootstrap_user(&server, "known-user").await;
+async fn unknown_access_key_rejected_when_sigv4_verification_enabled() {
+    // strict IAM *with* SigV4 verification — the secure configuration.
+    let server = TestServer::start_with_env(&[
+        ("FAKECLOUD_IAM", "strict"),
+        ("FAKECLOUD_VERIFY_SIGV4", "true"),
+    ])
+    .await;
 
     let cfg = sdk_config_with(&server, "AKIABOGUS000000000000", "bogus-secret").await;
     let iam = IamClient::new(&cfg);
-    let err =
-        iam.list_users().send().await.expect_err(
-            "unknown access key under strict IAM must be rejected, not silently allowed",
-        );
+    let err = iam
+        .list_users()
+        .send()
+        .await
+        .expect_err("an unknown access key must be rejected when SigV4 is verified");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("InvalidClientTokenId"),
         "expected InvalidClientTokenId for an unknown access key, got {msg}"
     );
-}
-
-/// Companion to the above: in *soft* mode the unknown credential is
-/// audited but the request falls through (observation-only must not break
-/// callers). bug-hunt 2026-06-13, finding 5.1.
-#[tokio::test]
-async fn unknown_access_key_falls_through_in_soft_mode() {
-    let server = start_soft().await;
-    let cfg = sdk_config_with(&server, "AKIABOGUS000000000000", "bogus-secret").await;
-    let iam = IamClient::new(&cfg);
-    iam.list_users()
-        .send()
-        .await
-        .expect("soft mode must not hard-reject an unknown credential");
 }
 
 #[tokio::test]

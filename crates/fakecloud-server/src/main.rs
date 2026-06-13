@@ -2841,14 +2841,16 @@ async fn main() {
         );
     }
     if iam_mode.is_enabled() && !cli.verify_sigv4 {
-        // Without SigV4 verification, a request is authenticated by its
-        // access key id alone — no secret or signature is checked. Unknown
-        // access key ids are now rejected (InvalidClientTokenId), but any
-        // caller that presents a *known* principal's access key id assumes
-        // that identity. Enable --verify-sigv4 alongside --iam to bind the
-        // identity to the signing secret. (bug-hunt 2026-06-13, finding 5.1)
+        // Without SigV4 verification a request is authenticated by its
+        // access key id alone — no secret or signature is checked, and an
+        // access key id that doesn't resolve to a principal falls through
+        // unenforced (the same path the local-dev bootstrap relies on). So
+        // policy enforcement can be bypassed with an unrecognized key, and a
+        // *known* principal's key can be used without its secret. Enable
+        // --verify-sigv4 alongside --iam to bind identity to the signing
+        // secret and reject unknown keys. (bug-hunt 2026-06-13, finding 5.1)
         tracing::warn!(
-            "IAM enforcement is on but SigV4 verification is off: identities are trusted from the access key id alone, so a known access key id can be used without its secret — enable --verify-sigv4 to verify signatures"
+            "IAM enforcement is on but SigV4 verification is off: identities are trusted from the access key id alone — enforcement can be bypassed with an unrecognized key, and a known access key id can be used without its secret. Enable --verify-sigv4 to verify signatures and reject unknown keys."
         );
     }
     if iam_mode.is_enabled() {
