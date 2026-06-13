@@ -345,11 +345,25 @@ impl LambdaService {
         let prefix = format!("{function_name}:");
         state.aliases.retain(|k, _| !k.starts_with(&prefix));
 
-        // Clean up any running container for this function
+        // Release the state lock before touching the runtime's warm-instance
+        // map. Holding `state` while acquiring the facade `instances` lock
+        // would nest the two in the opposite order from the invoke path and
+        // risk a deadlock.
+        drop(accounts);
+
+        // Clean up any running container for this function. Snapshot the
+        // warm pool *synchronously* (the map removal is atomic and runs with
+        // no await in between), then terminate those exact instances
+        // off-thread. Previously the whole stop ran in the spawned task, so
+        // a CreateFunction + warm-up of the same name racing ahead of the
+        // task had its fresh container reaped by this delete (bug-hunt
+        // 2026-06-13, finding 4.2). Terminating the snapshot — not whatever
+        // pool exists when the task eventually runs — means a recreated
+        // function keeps its new container.
         if let Some(ref runtime) = self.runtime {
             let rt = runtime.clone();
-            let name = function_name.to_string();
-            tokio::spawn(async move { rt.stop_container(&name).await });
+            let pool = rt.take_warm_instances(function_name);
+            tokio::spawn(async move { rt.terminate_instances(pool).await });
         }
 
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""))

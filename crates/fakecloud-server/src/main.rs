@@ -2840,6 +2840,17 @@ async fn main() {
             "opt-in security features enabled: access keys with the `test` prefix bypass SigV4 verification and IAM enforcement — see /docs/reference/security"
         );
     }
+    if iam_mode.is_enabled() && !cli.verify_sigv4 {
+        // Without SigV4 verification, a request is authenticated by its
+        // access key id alone — no secret or signature is checked. Unknown
+        // access key ids are now rejected (InvalidClientTokenId), but any
+        // caller that presents a *known* principal's access key id assumes
+        // that identity. Enable --verify-sigv4 alongside --iam to bind the
+        // identity to the signing secret. (bug-hunt 2026-06-13, finding 5.1)
+        tracing::warn!(
+            "IAM enforcement is on but SigV4 verification is off: identities are trusted from the access key id alone, so a known access key id can be used without its secret — enable --verify-sigv4 to verify signatures"
+        );
+    }
     if iam_mode.is_enabled() {
         let (enforced, skipped) = registry.iam_enforcement_split();
         tracing::info!(

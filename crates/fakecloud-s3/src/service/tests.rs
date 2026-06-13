@@ -903,6 +903,74 @@ async fn mpu_full_lifecycle_creates_object() {
     assert!(!bucket.multipart_uploads.contains_key(&upload_id));
 }
 
+/// bug-hunt 2026-06-13, finding 4.1: CompleteMultipartUpload assembles
+/// parts off-lock from a cloned snapshot. In disk mode a concurrent
+/// UploadPart of the same part number rewrites the fixed `part-NNNNN.bin`
+/// file *after* the snapshot, so the bytes read no longer match the
+/// snapshot's recorded etag. Complete must fail closed (InvalidPart)
+/// rather than assemble bytes that don't match the parts the client
+/// committed. We reproduce the divergence directly by mutating the stored
+/// part body so it no longer hashes to the recorded etag, then completing
+/// with that (now-stale) etag — which passes the submitted-etag check but
+/// must be caught by the body re-verification.
+#[tokio::test]
+async fn mpu_complete_fails_closed_when_part_bytes_diverge_from_etag() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let upload_id = initiate_mpu(&svc, "b", "k");
+
+    let req = make_request(
+        Method::PUT,
+        "/b/k",
+        &[("partNumber", "1")],
+        b"original-bytes",
+    );
+    let resp = svc
+        .upload_part("123456789012", &req, "b", "k", &upload_id, 1)
+        .await
+        .unwrap();
+    let etag = resp
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Simulate a concurrent same-part overwrite that lands after the upload
+    // recorded its etag: the stored bytes change, the etag stays stale.
+    {
+        let mut mas = svc.state.write();
+        let part = mas
+            .default_mut()
+            .buckets
+            .get_mut("b")
+            .unwrap()
+            .multipart_uploads
+            .get_mut(&upload_id)
+            .unwrap()
+            .parts
+            .get_mut(&1u32)
+            .unwrap();
+        part.body =
+            fakecloud_persistence::BodyRef::Memory(Bytes::from_static(b"DIFFERENT-tampered-bytes"));
+    }
+
+    let complete_xml = format!(
+        r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"#,
+    );
+    let complete_req = make_request(
+        Method::POST,
+        "/b/k",
+        &[("uploadId", &upload_id)],
+        complete_xml.as_bytes(),
+    );
+    assert_aws_err(
+        svc.complete_multipart_upload("123456789012", &complete_req, "b", "k", &upload_id),
+        "InvalidPart",
+    );
+}
+
 #[tokio::test]
 async fn mpu_complete_rejects_small_non_last_part() {
     let svc = make_service();

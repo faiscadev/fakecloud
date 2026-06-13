@@ -370,9 +370,21 @@ impl RdsService {
                 let account_id = state.account_id.clone();
                 let region = state.region.clone();
                 for (id, inst) in state.instances.iter_mut() {
+                    // "creating" is included so an instance whose background
+                    // create task hadn't finished (and re-saved it as
+                    // "available") when the process crashed is resumed rather
+                    // than silently dropped on restart — the API already
+                    // returned it to the client, so DescribeDBInstances must
+                    // not lose it (bug-hunt 2026-06-13, finding 4.3). Recovery
+                    // re-drives it through `ensure_*` to a live container.
                     if !matches!(
                         inst.db_instance_status.as_str(),
-                        "available" | "starting" | "modifying" | "rebooting" | "backing-up"
+                        "creating"
+                            | "available"
+                            | "starting"
+                            | "modifying"
+                            | "rebooting"
+                            | "backing-up"
                     ) {
                         continue;
                     }

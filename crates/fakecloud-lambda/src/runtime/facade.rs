@@ -19,7 +19,7 @@ use super::docker::DockerBackend;
 use crate::state::LambdaFunction;
 
 /// A running runtime instance kept warm for reuse.
-struct WarmEntry {
+pub(crate) struct WarmEntry {
     instance: WarmInstance,
     last_used: RwLock<Instant>,
     /// Combined fingerprint of the function's code SHA-256 plus the
@@ -502,21 +502,36 @@ impl LambdaRuntime {
         }
     }
 
-    /// Stop and remove every warm instance for a specific function.
-    pub async fn stop_container(&self, function_name: &str) {
-        let pool = self
-            .instances
+    /// Remove and return the warm pool for a function **without**
+    /// terminating it. Lets DeleteFunction snapshot exactly the instances
+    /// that exist at delete time and terminate those, so a concurrent
+    /// recreate of the same name (whose fresh warm instance is keyed
+    /// identically) is not reaped by the deferred stop. Synchronous so the
+    /// caller can take the snapshot while still ordered before any recreate
+    /// (bug-hunt 2026-06-13, finding 4.2).
+    pub(crate) fn take_warm_instances(&self, function_name: &str) -> Vec<Arc<WarmEntry>> {
+        self.instances
             .write()
             .remove(function_name)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// Terminate a previously-snapshotted set of warm instances. Pairs with
+    /// [`take_warm_instances`] for the delete path.
+    pub(crate) async fn terminate_instances(&self, pool: Vec<Arc<WarmEntry>>) {
         for entry in pool {
             tracing::info!(
-                function = %function_name,
                 handle = ?entry.instance.handle,
                 "stopping Lambda runtime instance"
             );
             self.backend.terminate(&entry.instance.handle).await;
         }
+    }
+
+    /// Stop and remove every warm instance for a specific function.
+    pub async fn stop_container(&self, function_name: &str) {
+        let pool = self.take_warm_instances(function_name);
+        self.terminate_instances(pool).await;
     }
 
     /// Stop and remove all warm instances (used on server shutdown or reset).
@@ -941,5 +956,56 @@ mod tests {
         // Exactly one current instance remains in the pool.
         let pool_len = rt.instances.read().get("upd").map_or(0, |v| v.len());
         assert_eq!(pool_len, 1);
+    }
+
+    /// bug-hunt 2026-06-13, finding 4.2: DeleteFunction must snapshot the
+    /// warm pool and terminate *that snapshot*, not whatever pool exists
+    /// when the deferred stop runs. Otherwise a CreateFunction + warm-up of
+    /// the same name racing ahead of the stop has its fresh container
+    /// reaped. This exercises the snapshot primitives directly.
+    #[tokio::test]
+    async fn take_warm_instances_snapshot_does_not_reap_recreated_pool() {
+        let backend = CountingBackend::new("127.0.0.1:1");
+        let rt = runtime_with(backend.clone(), 10);
+        let mk = |id: &str| {
+            Arc::new(super::WarmEntry {
+                instance: WarmInstance {
+                    endpoint: "127.0.0.1:1".to_string(),
+                    handle: BackendHandle::Container { id: id.to_string() },
+                },
+                last_used: RwLock::new(std::time::Instant::now()),
+                deploy_id: "d".to_string(),
+                busy: Arc::new(tokio::sync::Mutex::new(())),
+            })
+        };
+
+        // A function "f" with one warm instance.
+        rt.instances
+            .write()
+            .insert("f".to_string(), vec![mk("old")]);
+
+        // Delete snapshots the pool synchronously and removes it from the map.
+        let snapshot = rt.take_warm_instances("f");
+        assert_eq!(snapshot.len(), 1);
+        assert!(rt.instances.read().get("f").is_none());
+
+        // A recreate + warm-up of the same name wins the race ahead of the
+        // deferred terminate.
+        rt.instances
+            .write()
+            .insert("f".to_string(), vec![mk("new")]);
+
+        // Terminating the snapshot must touch only the old instance.
+        rt.terminate_instances(snapshot).await;
+        assert_eq!(
+            backend.terminates.load(SeqCst),
+            1,
+            "only the snapshotted instance is terminated"
+        );
+
+        // The recreated function keeps its fresh warm instance.
+        let pool = rt.instances.read();
+        let f = pool.get("f").expect("recreated function pool must survive");
+        assert_eq!(f.len(), 1);
     }
 }
