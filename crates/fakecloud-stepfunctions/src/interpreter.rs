@@ -1096,7 +1096,24 @@ async fn invoke_resource(
         } else {
             input.clone()
         };
-        return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds).await;
+        // The optimized `lambda:invoke` integration returns the AWS Invoke API
+        // response envelope, not the bare function output — `ResultSelector`
+        // expressions like `{"value.$": "$.Payload"}` depend on it. Wrap only
+        // the successful result; error results (function errors and transport
+        // failures) pass through unchanged, since a failed lambda:invoke task
+        // has no result envelope on AWS. The direct-ARN path above
+        // intentionally stays unwrapped — there real AWS returns the bare
+        // payload. `SdkHttpMetadata`/`SdkResponseMetadata` are omitted; real
+        // templates select `Payload`/`StatusCode`.
+        return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds)
+            .await
+            .map(|payload| {
+                json!({
+                    "ExecutedVersion": "$LATEST",
+                    "Payload": payload,
+                    "StatusCode": 200,
+                })
+            });
     }
 
     if resource.starts_with("arn:aws:states:::sqs:sendMessage") {

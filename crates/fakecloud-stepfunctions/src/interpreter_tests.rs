@@ -1586,3 +1586,77 @@ fn lambda_transport_error_fails_as_lambda_unknown() {
         assert_eq!(exec.error.as_deref(), Some("Lambda.Unknown"));
     });
 }
+
+// Case 5: lambda:invoke wraps the function output in the AWS response
+// envelope, so a ResultSelector picking `$.Payload` sees the function output
+// and the raw task result carries StatusCode: 200.
+#[test]
+fn lambda_invoke_wraps_result_in_envelope() {
+    let state = make_state();
+    let arn = arn_for("lambda-envelope");
+    let (bus, _calls) = StubLambda::bus(vec![Ok(br#"{"answer":42}"#.to_vec())]);
+    let def = lambda_invoke_def(json!({
+        "ResultSelector": { "value.$": "$.Payload", "status.$": "$.StatusCode" }
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["value"]["answer"], json!(42));
+        assert_eq!(output["status"], json!(200));
+    });
+}
+
+// Case 6: the direct-ARN path returns the bare payload (no envelope), matching
+// real AWS where only the optimized lambda:invoke integration wraps the result.
+#[test]
+fn lambda_direct_arn_is_not_wrapped() {
+    let state = make_state();
+    let arn = arn_for("lambda-direct");
+    let (bus, _calls) = StubLambda::bus(vec![Ok(br#"{"answer":42}"#.to_vec())]);
+    let def = json!({
+        "StartAt": "T",
+        "States": {
+            "T": {
+                "Type": "Task",
+                "Resource": "arn:aws:lambda:us-east-1:123456789012:function:fn",
+                "End": true
+            }
+        }
+    });
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output, json!({ "answer": 42 }));
+    });
+}
+
+// Case 7: plain success payloads still pass through — objects lacking both
+// error keys, and non-object (string) payloads.
+#[test]
+fn lambda_plain_payloads_pass_through() {
+    // Object containing only one of the error field names is NOT an error.
+    let state = make_state();
+    let arn = arn_for("lambda-one-key");
+    let (bus, _c) = StubLambda::bus(vec![Ok(br#"{"errorType":"NotReallyAnError"}"#.to_vec())]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["Payload"]["errorType"], json!("NotReallyAnError"));
+    });
+
+    // A bare string payload passes through inside the envelope.
+    let state = make_state();
+    let arn = arn_for("lambda-string");
+    let (bus, _c) = StubLambda::bus(vec![Ok(b"\"hello\"".to_vec())]);
+    drive_with_delivery(&state, &arn, lambda_invoke_def(json!({})), Some("{}"), bus);
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["Payload"], json!("hello"));
+    });
+}
