@@ -562,8 +562,25 @@ impl S3Service {
             }
             let part_bytes =
                 crate::state::S3State::read_body_uncached(&part.body).map_err(super::io_to_aws)?;
-            combined_data.extend_from_slice(&part_bytes);
             let part_md5 = Md5::digest(&part_bytes);
+            // Fail closed if the bytes just read no longer hash to the part's
+            // recorded etag. We snapshot (clone) the upload — including each
+            // part's fixed disk path and etag — then read bodies off-lock. In
+            // disk mode a concurrent UploadPart of the same part number
+            // rewrites part-NNNNN.bin after the snapshot, so without this
+            // check Complete would assemble the *new* bytes while validating
+            // them against the *old* cloned etag, producing an object whose
+            // content doesn't match the parts the client committed (bug-hunt
+            // 2026-06-13, finding 4.1). Memory-mode parts are immutable, so
+            // this never trips for them.
+            if format!("{:x}", part_md5) != part.etag {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPart",
+                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's etag.",
+                ));
+            }
+            combined_data.extend_from_slice(&part_bytes);
             md5_digests.extend_from_slice(&part_md5);
             part_sizes.push((*part_num, part_bytes.len() as u64));
         }

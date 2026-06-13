@@ -93,6 +93,38 @@ async fn sts_get_caller_identity_denied_without_policy() {
     );
 }
 
+/// bug-hunt 2026-06-13, finding 5.1: enabling `--verify-sigv4` alongside
+/// `--iam` is what actually binds a request to a real identity — an
+/// unknown access key id is then rejected with InvalidClientTokenId before
+/// any handler runs. (Without `--verify-sigv4`, an unresolved key falls
+/// through unenforced — the same path the local-dev bootstrap relies on —
+/// which is why the server logs a loud startup warning recommending
+/// `--verify-sigv4`; that gap is inherent to not verifying signatures and
+/// can't be closed without breaking the bootstrap, so it's surfaced, not
+/// silently "fixed".)
+#[tokio::test]
+async fn unknown_access_key_rejected_when_sigv4_verification_enabled() {
+    // strict IAM *with* SigV4 verification — the secure configuration.
+    let server = TestServer::start_with_env(&[
+        ("FAKECLOUD_IAM", "strict"),
+        ("FAKECLOUD_VERIFY_SIGV4", "true"),
+    ])
+    .await;
+
+    let cfg = sdk_config_with(&server, "AKIABOGUS000000000000", "bogus-secret").await;
+    let iam = IamClient::new(&cfg);
+    let err = iam
+        .list_users()
+        .send()
+        .await
+        .expect_err("an unknown access key must be rejected when SigV4 is verified");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("InvalidClientTokenId"),
+        "expected InvalidClientTokenId for an unknown access key, got {msg}"
+    );
+}
+
 #[tokio::test]
 async fn sts_get_caller_identity_allowed_with_explicit_policy() {
     let server = start_strict().await;
