@@ -465,7 +465,7 @@ impl CloudFormationService {
     /// Sync `state.exports` and `state.imports` after a stack create or
     /// update. Removes any exports / imports the stack used to own and
     /// re-adds the current-revision set.
-    fn sync_exports_imports(
+    pub(crate) fn sync_exports_imports(
         state: &mut CloudFormationState,
         stack_id: &str,
         stack_name: &str,
@@ -514,7 +514,7 @@ impl CloudFormationService {
     /// has been provisioned. `resources` is the post-create / post-update
     /// vec; we rebuild the physical-id and attribute maps from it before
     /// invoking the template parser.
-    fn resolve_template_outputs(
+    pub(crate) fn resolve_template_outputs(
         template_body: &str,
         parameters: &BTreeMap<String, String>,
         resources: &[StackResource],
