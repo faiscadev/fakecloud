@@ -534,6 +534,21 @@ impl CloudFormationService {
                                     outputs: Vec::new(),
                                 },
                             );
+                            // Real CloudFormation emits a stack event when a
+                            // CREATE change set puts a new stack into
+                            // `REVIEW_IN_PROGRESS`. Record it so the event log
+                            // is non-empty between CreateChangeSet and
+                            // ExecuteChangeSet: `sam deploy` reads the most
+                            // recent event as a marker (`get_last_event_time`)
+                            // and unconditionally indexes `[0]`, throwing an
+                            // `IndexError` if the list is empty.
+                            crate::service::record_stack_status_event(
+                                state,
+                                &stack_id_str,
+                                &stack_name,
+                                "AWS::CloudFormation::Stack",
+                                "REVIEW_IN_PROGRESS",
+                            );
                         }
                         // Already in review (an earlier CREATE change set):
                         // additional CREATE change sets are allowed; keep the
@@ -2651,6 +2666,50 @@ mod tests {
             !xml.contains("MyOrg::MyHook::Hook"),
             "unknown id must not echo the recorded hook: {xml}"
         );
+    }
+
+    // A minimal CREATE-type change set template with one resource and one
+    // output, used by the changeset bookkeeping test below.
+    const CS_TEMPLATE: &str = r#"{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cs-q"}}},"Outputs":{"QUrl":{"Value":{"Ref":"Q"}}}}"#;
+
+    // Gap #2: a CREATE change set that mints a new REVIEW_IN_PROGRESS stack must
+    // record a stack event, so `DescribeStackEvents` is non-empty before the
+    // change set is executed (sam's `get_last_event_time` indexes `[0]`).
+    #[test]
+    fn create_change_set_records_review_in_progress_event() {
+        let svc = svc();
+        svc.handle_extra_action(&req(
+            "CreateChangeSet",
+            &[
+                ("StackName", "cs-events"),
+                ("ChangeSetName", "cs1"),
+                ("ChangeSetType", "CREATE"),
+                ("TemplateBody", CS_TEMPLATE),
+            ],
+        ))
+        .expect("create change set");
+
+        // The event log must carry exactly the REVIEW_IN_PROGRESS stack event.
+        {
+            let accounts = svc.state.read();
+            let acct = accounts.get("000000000000").unwrap();
+            let total: usize = acct.events.values().map(|v| v.len()).sum();
+            assert_eq!(total, 1, "expected one event after CreateChangeSet");
+            let ev = acct.events.values().next().unwrap().last().unwrap();
+            assert_eq!(ev["ResourceStatus"].as_str(), Some("REVIEW_IN_PROGRESS"));
+            assert_eq!(
+                ev["ResourceType"].as_str(),
+                Some("AWS::CloudFormation::Stack")
+            );
+        }
+
+        // And DescribeStackEvents surfaces it rather than an empty list.
+        let resp = svc
+            .handle_extra_action(&req("DescribeStackEvents", &[("StackName", "cs-events")]))
+            .expect("describe stack events");
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(!body.contains("<StackEvents/>"), "events list was empty");
+        assert!(body.contains("REVIEW_IN_PROGRESS"), "body: {body}");
     }
 
     #[test]
