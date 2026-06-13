@@ -280,7 +280,7 @@ impl LambdaService {
         ))
     }
 
-    pub(super) fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {
+    pub(crate) fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {
         // EventSourceMappingArn is the EventSourceArn variant prefixed with
         // the mapping uuid; AWS started returning it in 2024 so newer SDKs
         // expect to round-trip it.

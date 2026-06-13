@@ -518,3 +518,221 @@ async fn table_in_missing_database_returns_not_found() {
         .expect_err("missing db");
     assert!(err.into_service_error().is_entity_not_found_exception());
 }
+
+#[tokio::test]
+async fn create_script_reflects_dag_nodes() {
+    use aws_sdk_glue::types::{CodeGenEdge, CodeGenNode, CodeGenNodeArg};
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    let resp = glue
+        .create_script()
+        .dag_nodes(
+            CodeGenNode::builder()
+                .id("datasource0")
+                .node_type("DataSource")
+                .args(
+                    CodeGenNodeArg::builder()
+                        .name("database")
+                        .value("warehouse")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .dag_nodes(
+            CodeGenNode::builder()
+                .id("datasink0")
+                .node_type("DataSink")
+                .args(
+                    CodeGenNodeArg::builder()
+                        .name("name")
+                        .value("sink")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .dag_edges(
+            CodeGenEdge::builder()
+                .source("datasource0")
+                .target("datasink0")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create script");
+
+    let py = resp.python_script().unwrap_or_default();
+    // Script must reference the actual nodes, not be a constant.
+    assert!(py.contains("datasource0 = DataSource.apply"), "py=\n{py}");
+    assert!(py.contains("datasink0 = DataSink.apply"), "py=\n{py}");
+    assert!(py.contains("database = \"warehouse\""), "py=\n{py}");
+    // The edge must wire the sink to its upstream source.
+    assert!(py.contains("frame = datasource0"), "py=\n{py}");
+    assert!(resp.scala_code().unwrap_or_default().contains("val datasink0"));
+}
+
+#[tokio::test]
+async fn get_dataflow_graph_round_trips_script() {
+    use aws_sdk_glue::types::{CodeGenNode, CodeGenNodeArg};
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    // Generate a script, then parse it back into a DAG.
+    let script = glue
+        .create_script()
+        .dag_nodes(
+            CodeGenNode::builder()
+                .id("src")
+                .node_type("DataSource")
+                .args(
+                    CodeGenNodeArg::builder()
+                        .name("database")
+                        .value("db")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .python_script()
+        .unwrap()
+        .to_string();
+
+    let graph = glue
+        .get_dataflow_graph()
+        .python_script(script)
+        .send()
+        .await
+        .expect("dataflow graph");
+    let ids: Vec<&str> = graph.dag_nodes().iter().map(|n| n.id()).collect();
+    assert!(ids.contains(&"src"), "ids={ids:?}");
+}
+
+#[tokio::test]
+async fn get_mapping_derives_from_table_schema() {
+    use aws_sdk_glue::types::CatalogEntry;
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("m_db").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+    glue.create_table()
+        .database_name("m_db")
+        .table_input(table_input("orders"))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = glue
+        .get_mapping()
+        .source(
+            CatalogEntry::builder()
+                .database_name("m_db")
+                .table_name("orders")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("get mapping");
+    let paths: Vec<&str> = resp
+        .mapping()
+        .iter()
+        .filter_map(|m| m.source_path())
+        .collect();
+    // Mapping must reflect the table's columns, not be empty.
+    assert!(paths.contains(&"id"), "paths={paths:?}");
+    assert!(paths.contains(&"amount"), "paths={paths:?}");
+}
+
+#[tokio::test]
+async fn list_and_describe_entity_reflect_catalog() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("e_db").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+    glue.create_table()
+        .database_name("e_db")
+        .table_input(table_input("orders"))
+        .send()
+        .await
+        .unwrap();
+
+    // ListEntities reflects catalog tables.
+    let listed = glue.list_entities().send().await.expect("list entities");
+    let names: Vec<&str> = listed
+        .entities()
+        .iter()
+        .filter_map(|e| e.entity_name())
+        .collect();
+    assert!(names.contains(&"orders"), "names={names:?}");
+
+    // DescribeEntity returns the table's columns as fields.
+    let described = glue
+        .describe_entity()
+        .connection_name("conn")
+        .entity_name("orders")
+        .send()
+        .await
+        .expect("describe entity");
+    let field_names: Vec<&str> = described
+        .fields()
+        .iter()
+        .filter_map(|f| f.field_name())
+        .collect();
+    assert!(field_names.contains(&"id"), "fields={field_names:?}");
+    assert!(field_names.contains(&"amount"), "fields={field_names:?}");
+}
+
+#[tokio::test]
+async fn test_connection_named_must_exist() {
+    use aws_sdk_glue::types::ConnectionInput;
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    // A missing connection is a real error, not a fake empty success.
+    let err = glue
+        .test_connection()
+        .connection_name("nope")
+        .send()
+        .await
+        .expect_err("missing connection");
+    assert!(err.into_service_error().is_entity_not_found_exception());
+
+    // After creating it, the test succeeds.
+    glue.create_connection()
+        .connection_input(
+            ConnectionInput::builder()
+                .name("real-conn")
+                .connection_type(aws_sdk_glue::types::ConnectionType::Jdbc)
+                .connection_properties(
+                    aws_sdk_glue::types::ConnectionPropertyKey::JdbcConnectionUrl,
+                    "jdbc:postgresql://host:5432/db",
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    glue.test_connection()
+        .connection_name("real-conn")
+        .send()
+        .await
+        .expect("test existing connection");
+}

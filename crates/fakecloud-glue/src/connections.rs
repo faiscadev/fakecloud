@@ -144,8 +144,31 @@ impl GlueService {
 
     pub(crate) fn test_connection(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // AWS accepts either a named, already-created connection
+        // (`ConnectionName`) or an inline `TestConnectionInput`. Validate that
+        // one of them is present and resolvable, then return the empty success
+        // body AWS sends. A missing named connection is a real error.
+        let body = req.json_body();
+        if let Some(name) = body.get("ConnectionName").and_then(|v| v.as_str()) {
+            let accounts = self.state.read();
+            let exists = accounts
+                .get(&req.account_id)
+                .map(|s| s.connections.contains_key(name))
+                .unwrap_or(false);
+            if !exists {
+                return Err(entity_not_found(format!("Connection {name} not found")));
+            }
+        } else {
+            // Inline test input: require the connection type + properties that
+            // a real connection attempt needs, mirroring AWS validation.
+            let input = req_present(&body, "TestConnectionInput")?;
+            if input.get("ConnectionType").and_then(|v| v.as_str()).is_none() {
+                return Err(missing("TestConnectionInput.ConnectionType"));
+            }
+            req_present(input, "ConnectionProperties")?;
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 

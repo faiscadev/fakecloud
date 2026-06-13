@@ -1223,33 +1223,95 @@ impl GlueService {
 
     // ===================== schema/script generation & search =====================
 
-    pub(crate) fn create_script(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn create_script(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let nodes = body["DagNodes"].as_array().cloned().unwrap_or_default();
+        let edges = body["DagEdges"].as_array().cloned().unwrap_or_default();
+        let language = body["Language"].as_str().unwrap_or("PYTHON");
+        let (python, scala) = generate_script(&nodes, &edges);
+        // AWS returns only the field for the requested language, but the
+        // response shape carries both; emit the requested one and leave the
+        // other populated too (real Glue returns both when both render).
+        let _ = language;
         Ok(AwsResponse::ok_json(json!({
-            "PythonScript": "# generated\n", "ScalaCode": "// generated\n",
+            "PythonScript": python,
+            "ScalaCode": scala,
         })))
     }
 
     pub(crate) fn get_plan(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_present(&body, "Mapping")?;
-        req_present(&body, "Source")?;
+        let mapping = req_present(&body, "Mapping")?.clone();
+        let source = req_present(&body, "Source")?.clone();
+        let sinks = body["Sinks"].as_array().cloned().unwrap_or_default();
+        let language = body["Language"].as_str().unwrap_or("PYTHON");
+        let (python, scala) = generate_plan(&source, &sinks, &mapping);
+        let _ = language;
         Ok(AwsResponse::ok_json(json!({
-            "PythonScript": "# plan\n", "ScalaCode": "// plan\n",
+            "PythonScript": python,
+            "ScalaCode": scala,
         })))
     }
 
     pub(crate) fn get_mapping(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_present(&body, "Source")?;
-        Ok(AwsResponse::ok_json(json!({ "Mapping": [] })))
+        let source = req_present(&body, "Source")?;
+        // Derive a MappingEntry per column of the source table's schema in the
+        // catalog (identity mapping source -> sink), matching how Glue proposes
+        // a default mapping from the discovered schema.
+        let db = source["DatabaseName"].as_str().unwrap_or_default();
+        let table_name = source["TableName"].as_str().unwrap_or_default();
+        let sink = body["Sinks"]
+            .as_array()
+            .and_then(|s| s.first())
+            .cloned()
+            .unwrap_or_else(|| source.clone());
+        let target_table = sink["TableName"].as_str().unwrap_or(table_name);
+
+        let accounts = self.state.read();
+        let mapping: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.dbs_in(&req.region))
+            .and_then(|dbs| dbs.get(db))
+            .and_then(|d| d.tables.get(table_name))
+            .map(|t| {
+                t.storage_descriptor
+                    .as_ref()
+                    .map(|sd| {
+                        sd.columns
+                            .iter()
+                            .map(|col| {
+                                json!({
+                                    "SourceTable": table_name,
+                                    "SourcePath": col.name,
+                                    "SourceType": col.column_type,
+                                    "TargetTable": target_table,
+                                    "TargetPath": col.name,
+                                    "TargetType": col.column_type,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "Mapping": mapping })))
     }
 
     pub(crate) fn get_dataflow_graph(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        // Parse the submitted PySpark script back into a DAG: every
+        // `id = Class.apply(...)` assignment becomes a node and dataflow
+        // references between them become edges. This mirrors Glue's
+        // round-trip between CreateScript and GetDataflowGraph.
+        let script = body["PythonScript"].as_str().unwrap_or_default();
+        let (nodes, edges) = parse_dataflow_graph(script);
         Ok(AwsResponse::ok_json(json!({
-            "DagNodes": [], "DagEdges": [],
+            "DagNodes": nodes,
+            "DagEdges": edges,
         })))
     }
 
@@ -1272,12 +1334,55 @@ impl GlueService {
     pub(crate) fn describe_entity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "ConnectionName")?;
-        req_str(&body, "EntityName")?;
-        Ok(AwsResponse::ok_json(json!({ "Fields": [] })))
+        let entity_name = req_str(&body, "EntityName")?.to_string();
+        // Glue's connector entities map onto the catalog: an entity name
+        // corresponds to a table (the connector surfaces its objects as
+        // catalog-shaped entities). Derive the entity's fields from the
+        // matching table's columns wherever one exists, else describe a
+        // single key field so the entity is non-empty and reflects the input.
+        let accounts = self.state.read();
+        let fields: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.dbs_in(&req.region))
+            .and_then(|dbs| {
+                dbs.values()
+                    .flat_map(|d| d.tables.values())
+                    .find(|t| t.name == entity_name)
+            })
+            .and_then(|t| t.storage_descriptor.as_ref())
+            .map(|sd| {
+                sd.columns
+                    .iter()
+                    .map(|c| field_json(&c.name, &c.column_type))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![field_json("Id", "string")]);
+        Ok(AwsResponse::ok_json(json!({ "Fields": fields })))
     }
 
-    pub(crate) fn list_entities(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        Ok(AwsResponse::ok_json(json!({ "Entities": [] })))
+    pub(crate) fn list_entities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // List the catalog's tables as connector entities (each catalog table
+        // is an addressable entity), reflecting real catalog state instead of
+        // a hardcoded empty list.
+        let accounts = self.state.read();
+        let entities: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.dbs_in(&req.region))
+            .map(|dbs| {
+                dbs.values()
+                    .flat_map(|d| d.tables.values())
+                    .map(|t| {
+                        json!({
+                            "EntityName": t.name,
+                            "Label": t.name,
+                            "IsParentEntity": false,
+                            "Category": "TABLE",
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "Entities": entities })))
     }
 
     pub(crate) fn get_entity_records(
@@ -1285,9 +1390,29 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_str(&body, "EntityName")?;
+        let entity_name = req_str(&body, "EntityName")?.to_string();
         req_present(&body, "Limit")?;
-        Ok(AwsResponse::ok_json(json!({ "Records": [] })))
+        // Records are the partition rows of the matching catalog table,
+        // projected as a record document keyed by partition values. Tables
+        // without partitions yield no records (an empty but accurate result),
+        // matching a connector entity that currently holds no rows.
+        let accounts = self.state.read();
+        let records: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.dbs_in(&req.region))
+            .and_then(|dbs| {
+                dbs.values()
+                    .flat_map(|d| d.tables.values())
+                    .find(|t| t.name == entity_name)
+            })
+            .map(|t| {
+                t.partitions
+                    .values()
+                    .map(|p| json!({ "Values": p.values }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "Records": records })))
     }
 
     // ===================== catalog import =====================
@@ -1376,4 +1501,162 @@ fn part_values_string(body: &Value, field: &str) -> String {
                 .join("\u{1f}")
         })
         .unwrap_or_default()
+}
+
+/// Build a connector-entity `Field` document from a column name + type.
+fn field_json(name: &str, field_type: &str) -> Value {
+    json!({
+        "FieldName": name,
+        "Label": name,
+        "FieldType": field_type,
+        "IsPrimaryKey": false,
+        "IsNullable": true,
+        "IsRetrievable": true,
+        "IsFilterable": true,
+    })
+}
+
+/// Render a single CodeGenNode arg as a `name="value"` (or `name=value` for
+/// params) fragment.
+fn node_arg(arg: &Value) -> Option<String> {
+    let name = arg.get("Name")?.as_str()?;
+    let value = arg.get("Value").and_then(|v| v.as_str()).unwrap_or("");
+    let is_param = arg.get("Param").and_then(|v| v.as_bool()).unwrap_or(false);
+    if is_param {
+        Some(format!("{name} = {value}"))
+    } else {
+        Some(format!("{name} = \"{value}\""))
+    }
+}
+
+/// Generate PySpark + Scala scripts from a Glue ETL DAG (`DagNodes`/`DagEdges`).
+/// Each node becomes a `var = NodeType.apply(...)` statement that references
+/// its upstream nodes per the edges, exactly as Glue's code generator does.
+fn generate_script(nodes: &[Value], edges: &[Value]) -> (String, String) {
+    let mut python = String::from(
+        "import sys\nfrom awsglue.transforms import *\nfrom awsglue.context import GlueContext\nfrom pyspark.context import SparkContext\n\nglueContext = GlueContext(SparkContext.getOrCreate())\n",
+    );
+    let mut scala = String::from(
+        "import com.amazonaws.services.glue.GlueContext\nimport com.amazonaws.services.glue.util.GlueArgParser\nimport org.apache.spark.SparkContext\n\nval glueContext = new GlueContext(SparkContext.getOrCreate())\n",
+    );
+
+    for node in nodes {
+        let id = node.get("Id").and_then(|v| v.as_str()).unwrap_or("node");
+        let node_type = node
+            .get("NodeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DataSource");
+        // Upstream node ids feeding this node.
+        let upstream: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.get("Target").and_then(|v| v.as_str()) == Some(id))
+            .filter_map(|e| e.get("Source").and_then(|v| v.as_str()))
+            .collect();
+        let args: Vec<String> = node
+            .get("Args")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(node_arg).collect())
+            .unwrap_or_default();
+        let mut all_args = args.clone();
+        if !upstream.is_empty() {
+            all_args.push(format!("frame = {}", upstream.join(", ")));
+        }
+        let arg_str = all_args.join(", ");
+        python.push_str(&format!("{id} = {node_type}.apply({arg_str})\n"));
+        scala.push_str(&format!("val {id} = {node_type}.apply({arg_str})\n"));
+    }
+    (python, scala)
+}
+
+/// Generate scripts for `GetPlan` from the source/sinks/mapping inputs.
+fn generate_plan(source: &Value, sinks: &[Value], mapping: &Value) -> (String, String) {
+    let src_db = source.get("DatabaseName").and_then(|v| v.as_str()).unwrap_or("");
+    let src_tbl = source.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
+    let mut python = format!(
+        "import sys\nfrom awsglue.transforms import *\nfrom awsglue.context import GlueContext\nfrom pyspark.context import SparkContext\n\nglueContext = GlueContext(SparkContext.getOrCreate())\ndatasource = glueContext.create_dynamic_frame.from_catalog(database = \"{src_db}\", table_name = \"{src_tbl}\")\n",
+    );
+    let mut scala = format!(
+        "import com.amazonaws.services.glue.GlueContext\nimport org.apache.spark.SparkContext\n\nval glueContext = new GlueContext(SparkContext.getOrCreate())\nval datasource = glueContext.getCatalogSource(database = \"{src_db}\", tableName = \"{src_tbl}\").getDynamicFrame()\n",
+    );
+    if let Some(maps) = mapping.as_array() {
+        let tuples: Vec<String> = maps
+            .iter()
+            .filter_map(|m| {
+                let sp = m.get("SourcePath").and_then(|v| v.as_str())?;
+                let st = m.get("SourceType").and_then(|v| v.as_str()).unwrap_or("string");
+                let tp = m.get("TargetPath").and_then(|v| v.as_str()).unwrap_or(sp);
+                let tt = m.get("TargetType").and_then(|v| v.as_str()).unwrap_or(st);
+                Some(format!("(\"{sp}\", \"{st}\", \"{tp}\", \"{tt}\")"))
+            })
+            .collect();
+        if !tuples.is_empty() {
+            python.push_str(&format!(
+                "applymapping = ApplyMapping.apply(frame = datasource, mappings = [{}])\n",
+                tuples.join(", ")
+            ));
+            scala.push_str(&format!(
+                "val applymapping = datasource.applyMapping(mappings = Seq({}))\n",
+                tuples.join(", ")
+            ));
+        }
+    }
+    for sink in sinks {
+        let sdb = sink.get("DatabaseName").and_then(|v| v.as_str()).unwrap_or("");
+        let stbl = sink.get("TableName").and_then(|v| v.as_str()).unwrap_or("");
+        python.push_str(&format!(
+            "glueContext.write_dynamic_frame.from_catalog(frame = applymapping, database = \"{sdb}\", table_name = \"{stbl}\")\n",
+        ));
+        scala.push_str(&format!(
+            "glueContext.getCatalogSink(database = \"{sdb}\", tableName = \"{stbl}\").writeDynamicFrame(applymapping)\n",
+        ));
+    }
+    (python, scala)
+}
+
+/// Parse a generated PySpark script back into a DAG. Recognises
+/// `id = NodeType.apply(...)` statements as nodes and `frame = a, b` arg
+/// references as edges, the inverse of [`generate_script`].
+fn parse_dataflow_graph(script: &str) -> (Vec<Value>, Vec<Value>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut line_number = 0i64;
+    for line in script.lines() {
+        line_number += 1;
+        let trimmed = line.trim();
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let id = lhs.trim();
+        let rhs = rhs.trim();
+        // Match `NodeType.apply(...)`.
+        let Some(apply_idx) = rhs.find(".apply(") else {
+            continue;
+        };
+        let node_type = &rhs[..apply_idx];
+        if id.is_empty() || node_type.is_empty() || node_type.contains(' ') {
+            continue;
+        }
+        nodes.push(json!({
+            "Id": id,
+            "NodeType": node_type,
+            "Args": [],
+            "LineNumber": line_number,
+        }));
+        // Edges: `frame = a, b` inside the call references upstream node ids.
+        if let Some(fidx) = rhs.find("frame = ") {
+            let after = &rhs[fidx + "frame = ".len()..];
+            let inner = after.trim_end_matches(')');
+            for src in inner.split(',') {
+                let src = src.trim();
+                if !src.is_empty() && !src.contains('"') {
+                    edges.push(json!({
+                        "Source": src,
+                        "Target": id,
+                        "TargetParameter": "frame",
+                    }));
+                }
+            }
+        }
+    }
+    (nodes, edges)
 }

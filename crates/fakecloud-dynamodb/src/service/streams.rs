@@ -53,11 +53,20 @@ impl DynamoDbService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
         let table = get_table(&state.tables, table_name)?;
 
+        // Replicas come from the global-table replication group (created via
+        // CreateGlobalTable / UpdateTable ReplicaUpdates). The global-table
+        // name equals the table name in AWS.
+        let replicas = state
+            .global_tables
+            .get(table_name)
+            .map(|gt| replica_auto_scaling_list(&gt.replication_group))
+            .unwrap_or_default();
+
         Self::ok_json(json!({
             "TableAutoScalingDescription": {
                 "TableName": table.name,
                 "TableStatus": table.status,
-                "Replicas": []
+                "Replicas": replicas
             }
         }))
     }
@@ -69,16 +78,57 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
 
-        let accounts = self.state.read();
-        let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let table = get_table(&state.tables, table_name)?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // Validate the table exists (returns ResourceNotFound otherwise).
+        let (name, status) = {
+            let table = get_table(&state.tables, table_name)?;
+            (table.name.clone(), table.status.clone())
+        };
+
+        // Persist the supplied autoscaling settings onto the matching replicas
+        // in the global-table replication group, then reflect them on read.
+        if let Some(gt) = state.global_tables.get_mut(table_name) {
+            if let Some(updates) = body["ReplicaUpdates"].as_array() {
+                for update in updates {
+                    let region = update["RegionName"].as_str().unwrap_or_default();
+                    if let Some(replica) = gt
+                        .replication_group
+                        .iter_mut()
+                        .find(|r| r.region_name == region)
+                    {
+                        if let Some(read) =
+                            update.get("ReplicaProvisionedReadCapacityAutoScalingUpdate")
+                        {
+                            replica.read_capacity_auto_scaling =
+                                Some(auto_scaling_description(read));
+                        }
+                    }
+                }
+            }
+        }
+        // A table-level write-capacity autoscaling update applies to every
+        // replica per AWS semantics.
+        if let Some(write) = body.get("ProvisionedWriteCapacityAutoScalingUpdate") {
+            if let Some(gt) = state.global_tables.get_mut(table_name) {
+                let desc = auto_scaling_description(write);
+                for replica in gt.replication_group.iter_mut() {
+                    replica.write_capacity_auto_scaling = Some(desc.clone());
+                }
+            }
+        }
+
+        let replicas = state
+            .global_tables
+            .get(table_name)
+            .map(|gt| replica_auto_scaling_list(&gt.replication_group))
+            .unwrap_or_default();
 
         Self::ok_json(json!({
             "TableAutoScalingDescription": {
-                "TableName": table.name,
-                "TableStatus": table.status,
-                "Replicas": []
+                "TableName": name,
+                "TableStatus": status,
+                "Replicas": replicas
             }
         }))
     }
@@ -315,4 +365,71 @@ impl DynamoDbService {
             "ContributorInsightsSummaries": summaries
         }))
     }
+}
+
+/// Build the `Replicas` list (`ReplicaAutoScalingDescription[]`) from a
+/// global-table replication group, emitting any persisted autoscaling
+/// settings.
+fn replica_auto_scaling_list(
+    replicas: &[crate::state::ReplicaDescription],
+) -> Vec<Value> {
+    replicas
+        .iter()
+        .map(|r| {
+            let mut item = json!({
+                "RegionName": r.region_name,
+                "ReplicaStatus": r.replica_status,
+            });
+            let obj = item.as_object_mut().expect("json object");
+            if let Some(read) = &r.read_capacity_auto_scaling {
+                obj.insert(
+                    "ReplicaProvisionedReadCapacityAutoScalingSettings".into(),
+                    read.clone(),
+                );
+            }
+            if let Some(write) = &r.write_capacity_auto_scaling {
+                obj.insert(
+                    "ReplicaProvisionedWriteCapacityAutoScalingSettings".into(),
+                    write.clone(),
+                );
+            }
+            item
+        })
+        .collect()
+}
+
+/// Convert an `AutoScalingSettingsUpdate` (from the request) into the
+/// `AutoScalingSettingsDescription` shape returned on read.
+fn auto_scaling_description(update: &Value) -> Value {
+    let mut desc = serde_json::Map::new();
+    if let Some(v) = update.get("MinimumUnits") {
+        desc.insert("MinimumUnits".into(), v.clone());
+    }
+    if let Some(v) = update.get("MaximumUnits") {
+        desc.insert("MaximumUnits".into(), v.clone());
+    }
+    if let Some(v) = update.get("AutoScalingDisabled") {
+        desc.insert("AutoScalingDisabled".into(), v.clone());
+    }
+    if let Some(v) = update.get("AutoScalingRoleArn") {
+        desc.insert("AutoScalingRoleArn".into(), v.clone());
+    }
+    // Echo the scaling policy configuration as a description entry.
+    if let Some(policy) = update.get("ScalingPolicyUpdate") {
+        let mut p = serde_json::Map::new();
+        if let Some(name) = policy.get("PolicyName") {
+            p.insert("PolicyName".into(), name.clone());
+        }
+        if let Some(cfg) = policy.get("TargetTrackingScalingPolicyConfiguration") {
+            p.insert(
+                "TargetTrackingScalingPolicyConfiguration".into(),
+                cfg.clone(),
+            );
+        }
+        desc.insert(
+            "ScalingPolicies".into(),
+            Value::Array(vec![Value::Object(p)]),
+        );
+    }
+    Value::Object(desc)
 }

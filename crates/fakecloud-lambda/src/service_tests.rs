@@ -1359,6 +1359,71 @@ async fn create_event_source_mapping_round_trips_advanced_fields() {
     assert_eq!(v["Topics"][0], "t1");
 }
 
+#[tokio::test]
+async fn update_event_source_mapping_persists_enabled_and_sac() {
+    // Disabling via Update must flip State to "Disabled" (was hardcoded
+    // "Enabled") and SourceAccessConfigurations must persist + reflect on Get
+    // (1.1). KMSKeyArn/DestinationConfig must round-trip via Update too.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-upd").await;
+
+    let create = json!({
+        "FunctionName": "esm-upd",
+        "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:queue1",
+        "BatchSize": 10,
+        "Enabled": true,
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &create.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = v["UUID"].as_str().unwrap().to_string();
+    assert_eq!(v["State"], "Enabled");
+
+    // Update: disable + set SourceAccessConfigurations + KMSKeyArn.
+    let update = json!({
+        "Enabled": false,
+        "SourceAccessConfigurations": [
+            {"Type": "BASIC_AUTH", "URI": "arn:aws:secretsmanager:us-east-1:123456789012:secret:x"}
+        ],
+        "KMSKeyArn": "arn:aws:kms:us-east-1:123456789012:key/upd",
+    });
+    let req = make_request(
+        Method::PUT,
+        &format!("/2015-03-31/event-source-mappings/{uuid}"),
+        &update.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["State"], "Disabled");
+    assert_eq!(v["SourceAccessConfigurations"][0]["Type"], "BASIC_AUTH");
+    assert_eq!(v["KMSKeyArn"], "arn:aws:kms:us-east-1:123456789012:key/upd");
+
+    // Get back: changes must have persisted.
+    let req = make_request(
+        Method::GET,
+        &format!("/2015-03-31/event-source-mappings/{uuid}"),
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["State"], "Disabled");
+    assert_eq!(v["SourceAccessConfigurations"][0]["URI"], "arn:aws:secretsmanager:us-east-1:123456789012:secret:x");
+
+    // Re-enable round-trips back to Enabled.
+    let req = make_request(
+        Method::PUT,
+        &format!("/2015-03-31/event-source-mappings/{uuid}"),
+        &json!({"Enabled": true}).to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["State"], "Enabled");
+}
+
 struct StubS3 {
     object: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 }

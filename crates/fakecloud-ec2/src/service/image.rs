@@ -39,7 +39,7 @@ fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
         ec2_elem("virtualizationType", "hvm"),
         ec2_elem("hypervisor", "xen"),
         ec2_elem("platformDetails", "Linux/UNIX"),
-        ec2_elem("bootMode", "uefi"),
+        ec2_elem("bootMode", i.boot_mode.as_deref().unwrap_or("uefi")),
         format_args!(
             "<deregistrationProtection>{}</deregistrationProtection>",
             if i.deregistration_protection {
@@ -66,6 +66,9 @@ fn build_image(name: String, description: String, source_instance_id: Option<Str
         in_recycle_bin: false,
         deprecation_time: None,
         deregistration_protection: false,
+        launch_permission_users: Vec::new(),
+        launch_permission_groups: Vec::new(),
+        boot_mode: None,
     }
 }
 
@@ -262,20 +265,100 @@ const IMG_ATTRS: &[&str] = &[
     "deregistrationProtection",
 ];
 
+/// XML for a single `launchPermission` item.
+fn launch_permission_item(user_id: Option<&str>, group: Option<&str>) -> String {
+    let mut inner = String::new();
+    if let Some(u) = user_id {
+        inner.push_str(&ec2_elem("userId", u));
+    }
+    if let Some(g) = group {
+        inner.push_str(&ec2_elem("group", g));
+    }
+    format!("<item>{inner}</item>")
+}
+
+/// Collect `LaunchPermission.{Add,Remove}.N.{UserId,Group}` modifications.
+/// Returns (added_users, added_groups, removed_users, removed_groups).
+fn launch_permission_mods(
+    params: &std::collections::HashMap<String, String>,
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let collect = |op: &str| -> (Vec<String>, Vec<String>) {
+        let mut users = Vec::new();
+        let mut groups = Vec::new();
+        let mut i = 1usize;
+        loop {
+            let base = format!("LaunchPermission.{op}.{i}");
+            let user = params.get(&format!("{base}.UserId")).filter(|v| !v.is_empty());
+            let group = params.get(&format!("{base}.Group")).filter(|v| !v.is_empty());
+            if user.is_none() && group.is_none() {
+                break;
+            }
+            if let Some(u) = user {
+                users.push(u.clone());
+            }
+            if let Some(g) = group {
+                groups.push(g.clone());
+            }
+            i += 1;
+        }
+        (users, groups)
+    };
+    let (add_u, add_g) = collect("Add");
+    let (rem_u, rem_g) = collect("Remove");
+    (add_u, add_g, rem_u, rem_g)
+}
+
 pub(crate) fn describe_image_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ImageId")?;
     let attr = require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", IMG_ATTRS)?;
+
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let img = state
+        .images
+        .get(&id)
+        .ok_or_else(|| crate::service_helpers::not_found("InvalidAMIID.NotFound", &id))?;
+
     let attr_xml = match attr.as_str() {
-        "description" => "<description><value>ami</value></description>".to_string(),
-        "launchPermission" => ec2_list("launchPermission", &[]),
+        "description" => format!(
+            "<description>{}</description>",
+            ec2_elem("value", &img.description)
+        ),
+        "launchPermission" => {
+            let mut items: Vec<String> = img
+                .launch_permission_users
+                .iter()
+                .map(|u| launch_permission_item(Some(u), None))
+                .collect();
+            items.extend(
+                img.launch_permission_groups
+                    .iter()
+                    .map(|g| launch_permission_item(None, Some(g))),
+            );
+            format!("<launchPermission>{}</launchPermission>", items.join(""))
+        }
         "productCodes" => ec2_list("productCodes", &[]),
         "blockDeviceMapping" => ec2_list("blockDeviceMapping", &[]),
-        "bootMode" => "<bootMode><value>uefi</value></bootMode>".to_string(),
-        _ => String::new(),
+        "bootMode" => format!(
+            "<bootMode><value>{}</value></bootMode>",
+            img.boot_mode.as_deref().unwrap_or("uefi")
+        ),
+        // kernel/ramdisk/sriovNetSupport/tpmSupport/uefiData/lastLaunchedTime/
+        // imdsSupport: AWS returns the element with no inner <value> when unset.
+        "deregistrationProtection" => format!(
+            "<deregistrationProtection><value>{}</value></deregistrationProtection>",
+            if img.deregistration_protection {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ),
+        other => format!("<{other}/>"),
     };
     Ok(Ec2Service::respond(
         "DescribeImageAttribute",
@@ -285,11 +368,89 @@ pub(crate) fn describe_image_attribute(
 }
 
 pub(crate) fn modify_image_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ImageId")?;
-    validate_enum(&req.query_params, "OperationType", &["add", "remove"])?;
+    let id = require(&req.query_params, "ImageId")?;
+
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let img = state
+        .images
+        .get_mut(&id)
+        .ok_or_else(|| crate::service_helpers::not_found("InvalidAMIID.NotFound", &id))?;
+
+    // The `Attribute` form (Attribute + Value + OperationType) and the
+    // structured `LaunchPermission`/`Description` forms are mutually
+    // exclusive in a single call; support both.
+    let attribute = req.query_params.get("Attribute").map(String::as_str);
+
+    // ── launchPermission ──
+    let (add_u, add_g, rem_u, rem_g) = launch_permission_mods(&req.query_params);
+    let legacy_lp = attribute == Some("launchPermission");
+    if !add_u.is_empty()
+        || !add_g.is_empty()
+        || !rem_u.is_empty()
+        || !rem_g.is_empty()
+        || legacy_lp
+    {
+        validate_enum(&req.query_params, "OperationType", &["add", "remove"])?;
+        // Legacy UserId.N / UserGroup.N form keyed by OperationType.
+        let (mut add_users, mut add_groups, mut rem_users, mut rem_groups) =
+            (add_u, add_g, rem_u, rem_g);
+        if legacy_lp {
+            let users = indexed_list(&req.query_params, "UserId");
+            let groups = indexed_list(&req.query_params, "UserGroup");
+            match req.query_params.get("OperationType").map(String::as_str) {
+                Some("remove") => {
+                    rem_users.extend(users);
+                    rem_groups.extend(groups);
+                }
+                _ => {
+                    add_users.extend(users);
+                    add_groups.extend(groups);
+                }
+            }
+        }
+        for u in add_users {
+            if !img.launch_permission_users.contains(&u) {
+                img.launch_permission_users.push(u);
+            }
+        }
+        for g in add_groups {
+            if !img.launch_permission_groups.contains(&g) {
+                img.launch_permission_groups.push(g);
+            }
+        }
+        img.launch_permission_users.retain(|u| !rem_users.contains(u));
+        img.launch_permission_groups
+            .retain(|g| !rem_groups.contains(g));
+        // The `all` group makes the AMI public, matching AWS.
+        img.public = img.launch_permission_groups.iter().any(|g| g == "all");
+    }
+
+    // ── description ──
+    if let Some(d) = req
+        .query_params
+        .get("Description.Value")
+        .or_else(|| req.query_params.get("Description"))
+    {
+        img.description = d.clone();
+    } else if attribute == Some("description") {
+        if let Some(v) = req.query_params.get("Value") {
+            img.description = v.clone();
+        }
+    }
+
+    // ── bootMode ──
+    if let Some(b) = req.query_params.get("BootMode.Value") {
+        img.boot_mode = Some(b.clone());
+    } else if attribute == Some("bootMode") {
+        if let Some(v) = req.query_params.get("Value") {
+            img.boot_mode = Some(v.clone());
+        }
+    }
+
     Ok(Ec2Service::respond(
         "ModifyImageAttribute",
         &req.request_id,
@@ -298,12 +459,20 @@ pub(crate) fn modify_image_attribute(
 }
 
 pub(crate) fn reset_image_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ImageId")?;
+    let id = require(&req.query_params, "ImageId")?;
     require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", &["launchPermission"])?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(img) = accounts.get_or_create(&req.account_id).images.get_mut(&id) {
+            img.launch_permission_users.clear();
+            img.launch_permission_groups.clear();
+            img.public = false;
+        }
+    }
     Ok(Ec2Service::respond(
         "ResetImageAttribute",
         &req.request_id,
