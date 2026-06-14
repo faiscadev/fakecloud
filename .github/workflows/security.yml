@@ -44,7 +44,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo install cargo-audit
+      - name: Install cargo-audit
+        run: |
+          for i in 1 2 3; do
+            cargo install cargo-audit && ok=1 && break
+            echo "cargo install cargo-audit attempt $i failed; retrying"; sleep $((i * 5))
+          done
+          [ "${ok:-}" = 1 ] || { echo "cargo install cargo-audit failed after 3 attempts"; exit 1; }
       # RUSTSEC-2026-0098/0099/0104 (rustls-webpki 0.101.x) reach us only
       # through rustls 0.21 -> aws-smithy-http-client. Our own rustls-webpki
       # 0.103.x is already on the patched release (0.103.13+); we can't drop
