@@ -225,7 +225,15 @@ pub async fn dispatch(
         None
     };
     let sigv4_info = header_info.or(presigned_info);
-    let access_key_id = sigv4_info.as_ref().map(|info| info.access_key.clone());
+    // SigV2 presigned URLs (`AWSAccessKeyId` + `Signature` + `Expires` query
+    // parameters) carry the access key outside the SigV4 grammar, so the SigV4
+    // parsers above return None. Recover the key here so a SigV2-presigned
+    // request is attributed to its caller instead of being treated as
+    // anonymous (which would deny it under the object read auth gate).
+    let access_key_id = sigv4_info
+        .as_ref()
+        .map(|info| info.access_key.clone())
+        .or_else(|| sigv2_presigned_access_key(&query_params));
 
     // Host-header routing hint: LocalStack-shaped
     // `<svc>.<region>.localhost.localstack.cloud[:port]`, real-AWS
@@ -1109,6 +1117,19 @@ fn sanitize_header_value(s: &str) -> String {
 /// fall through to the apigateway catch-all. Uses the already-wired
 /// `resource_policy_provider`, which resolves S3 bucket ownership from state
 /// (`Some` => the bucket exists). Returns `None` when no provider is wired.
+/// Recover the access key from a SigV2 presigned URL. AWS SigV2 presigning
+/// puts the key in the `AWSAccessKeyId` query parameter alongside `Signature`
+/// and `Expires`; all three must be present for the URL to be a SigV2 presign.
+/// Returns None for SigV4 presigns (which use `X-Amz-Credential`) or unsigned
+/// requests.
+fn sigv2_presigned_access_key(query_params: &HashMap<String, String>) -> Option<String> {
+    if query_params.contains_key("Signature") && query_params.contains_key("Expires") {
+        query_params.get("AWSAccessKeyId").cloned()
+    } else {
+        None
+    }
+}
+
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
     let provider = config.resource_policy_provider.as_ref()?;
     let segment = uri.path().split('/').find(|s| !s.is_empty())?.to_string();
@@ -1211,6 +1232,39 @@ mod tests {
         // public function caches via OnceLock so only the first call
         // in the process matters; we assert the constant directly.
         assert_eq!(DEFAULT_MAX_REQUEST_BODY_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn sigv2_presigned_access_key_extracted_with_signature_and_expires() {
+        let mut q = HashMap::new();
+        q.insert("AWSAccessKeyId".to_string(), "AKIAEXAMPLE".to_string());
+        q.insert("Signature".to_string(), "abc%2Bdef".to_string());
+        q.insert("Expires".to_string(), "1700000000".to_string());
+        assert_eq!(
+            sigv2_presigned_access_key(&q).as_deref(),
+            Some("AKIAEXAMPLE")
+        );
+    }
+
+    #[test]
+    fn sigv2_presigned_access_key_none_without_signature_or_expires() {
+        // AWSAccessKeyId alone (e.g. a stray query param) is not a SigV2
+        // presign and must not be treated as a credential.
+        let mut q = HashMap::new();
+        q.insert("AWSAccessKeyId".to_string(), "AKIAEXAMPLE".to_string());
+        assert_eq!(sigv2_presigned_access_key(&q), None);
+
+        q.insert("Expires".to_string(), "1700000000".to_string());
+        assert_eq!(
+            sigv2_presigned_access_key(&q),
+            None,
+            "missing Signature must not qualify"
+        );
+    }
+
+    #[test]
+    fn sigv2_presigned_access_key_none_for_unsigned_request() {
+        assert_eq!(sigv2_presigned_access_key(&HashMap::new()), None);
     }
 
     #[test]

@@ -105,6 +105,46 @@ async fn anonymous_get_object_iam_strict_bucket_policy() {
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello");
 }
 
+/// IAM strict mode: a SigV2-presigned request carries its access key in the
+/// `AWSAccessKeyId` query parameter (outside the SigV4 grammar). dispatch must
+/// recover it so the caller is attributed instead of being treated as
+/// anonymous. Without the fix (#1709) the request falls through the
+/// anonymous-read gate and is denied 403 even with a valid key.
+#[tokio::test]
+async fn sigv2_presigned_request_is_attributed_to_its_caller() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = server.s3_client().await;
+
+    s3.create_bucket().bucket("probe").send().await.unwrap();
+    s3.put_object()
+        .bucket("probe")
+        .key("a.txt")
+        .body(b"hello".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let base = format!("{}/probe/a.txt", server.endpoint());
+
+    // Sanity: an unsigned anonymous GET of this private object is denied.
+    let resp = http.get(&base).send().await.unwrap();
+    assert_eq!(resp.status(), 403, "anonymous GET must be denied");
+
+    // A SigV2-presigned URL (AWSAccessKeyId + Signature + Expires) for the
+    // bucket-owning account's key is attributed to that caller and allowed.
+    // The default test credentials resolve to the default account's root.
+    let signed =
+        format!("{base}?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Signature=dummysig&Expires=9999999999");
+    let resp = http.get(&signed).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "SigV2-presigned GET with a valid AWSAccessKeyId must be authorized"
+    );
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"hello");
+}
+
 /// IAM strict mode: a public-read object ACL grants anonymous access, while a
 /// sibling private object in the same bucket stays denied.
 #[tokio::test]
