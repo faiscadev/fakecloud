@@ -7,9 +7,11 @@
 //! tagging subsystem, and the region/AZ/account-attribute describe primitives
 //! that almost every SDK client calls implicitly.
 
+pub mod runtime;
 pub mod service;
 pub mod service_helpers;
 pub mod state;
 
+pub use runtime::Ec2Runtime;
 pub use service::Ec2Service;
 pub use state::{Ec2State, SharedEc2State};

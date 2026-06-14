@@ -40,6 +40,7 @@ use std::sync::Arc;
 use fakecloud_core::multi_account::MultiAccountState;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use crate::runtime::Ec2Runtime;
 use crate::state::SharedEc2State;
 
 /// Every EC2 action this build implements. The conformance audit cross-checks
@@ -861,6 +862,9 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
 /// Amazon EC2 service.
 pub struct Ec2Service {
     pub(crate) state: SharedEc2State,
+    /// Optional container runtime backing instances with real containers.
+    /// `None` runs the metadata-only control plane (no Docker/Podman/k8s).
+    pub(crate) runtime: Option<Arc<Ec2Runtime>>,
 }
 
 impl Ec2Service {
@@ -872,13 +876,24 @@ impl Ec2Service {
                 "us-east-1",
                 "",
             ))),
+            runtime: None,
         }
     }
 
     /// Construct a service over a shared state handle (used by the server so
     /// persistence/snapshots can be wired in later batches).
     pub fn with_state(state: SharedEc2State) -> Self {
-        Self { state }
+        Self {
+            state,
+            runtime: None,
+        }
+    }
+
+    /// Attach a container runtime so `RunInstances` boots real containers.
+    /// Passing `None` leaves the service in metadata-only mode.
+    pub fn with_runtime(mut self, runtime: Option<Arc<Ec2Runtime>>) -> Self {
+        self.runtime = runtime;
+        self
     }
 
     /// Clone the shared state handle so the server can expose read-only
@@ -1049,11 +1064,11 @@ impl AwsService for Ec2Service {
             "UnassignPrivateIpAddresses" => eni::unassign_private_ip_addresses(self, &request),
             "AssignIpv6Addresses" => eni::assign_ipv6_addresses(self, &request),
             "UnassignIpv6Addresses" => eni::unassign_ipv6_addresses(self, &request),
-            "RunInstances" => instance::run_instances(self, &request),
-            "StartInstances" => instance::start_instances(self, &request),
-            "StopInstances" => instance::stop_instances(self, &request),
-            "RebootInstances" => instance::reboot_instances(self, &request),
-            "TerminateInstances" => instance::terminate_instances(self, &request),
+            "RunInstances" => instance::run_instances(self, &request).await,
+            "StartInstances" => instance::start_instances(self, &request).await,
+            "StopInstances" => instance::stop_instances(self, &request).await,
+            "RebootInstances" => instance::reboot_instances(self, &request).await,
+            "TerminateInstances" => instance::terminate_instances(self, &request).await,
             "MonitorInstances" => instance::monitor_instances(self, &request),
             "UnmonitorInstances" => instance::unmonitor_instances(self, &request),
             "DescribeInstances" => instance::describe_instances(self, &request),

@@ -47,6 +47,8 @@ pub(crate) struct ResetState {
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    pub ec2: fakecloud_ec2::SharedEc2State,
+    pub ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
 }
 
 impl ResetState {
@@ -124,6 +126,13 @@ impl ResetState {
             "elasticache" => {
                 self.elasticache.write().reset();
                 if let Some(ref rt) = self.elasticache_runtime {
+                    let rt = rt.clone();
+                    tokio::spawn(async move { rt.stop_all().await });
+                }
+            }
+            "ec2" => {
+                self.ec2.write().reset();
+                if let Some(ref rt) = self.ec2_runtime {
                     let rt = rt.clone();
                     tokio::spawn(async move { rt.stop_all().await });
                 }
@@ -866,8 +875,17 @@ mod tests {
             rds_runtime: None,
             elasticache_runtime: None,
             ecs_runtime: None,
+            ec2: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            ec2_runtime: None,
         };
 
+        state.reset_service("ec2").expect("reset ec2");
         state.reset_service("rds").expect("reset rds");
 
         assert!(state.rds.read().default_ref().instances.is_empty());

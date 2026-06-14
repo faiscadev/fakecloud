@@ -95,7 +95,7 @@ fn reservation_xml(reservation_id: &str, owner: &str, instances: &[String]) -> S
     )
 }
 
-pub(crate) fn run_instances(
+pub(crate) async fn run_instances(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -124,6 +124,7 @@ pub(crate) fn run_instances(
     let key_name = req.query_params.get("KeyName").cloned();
     let subnet_id = req.query_params.get("SubnetId").cloned();
     let sg_ids = indexed_list(&req.query_params, "SecurityGroupId");
+    let user_data = req.query_params.get("UserData").map(String::as_str);
     let owner = req.account_id.clone();
     let az = format!(
         "{}a",
@@ -134,19 +135,42 @@ pub(crate) fn run_instances(
         }
     );
 
+    // Generate instance ids first, then boot a backing container per id
+    // (without holding the state lock across the awaits). When no runtime is
+    // configured, or a container fails to start, the instance falls back to a
+    // synthesized private IP and no container handle — the API still succeeds.
+    let ids: Vec<String> = (0..count).map(|_| gen_id("i")).collect();
+    let mut backing: HashMap<String, crate::runtime::RunningInstance> = HashMap::new();
+    if let Some(rt) = &svc.runtime {
+        for id in &ids {
+            match rt.run_instance(id, user_data).await {
+                Ok(running) => {
+                    backing.insert(id.clone(), running);
+                }
+                Err(e) => {
+                    tracing::warn!(instance_id = %id, error = %e, "EC2 instance container failed to start; serving metadata-only");
+                }
+            }
+        }
+    }
+
     let mut rendered = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        for idx in 0..count {
-            let id = gen_id("i");
+        for (idx, id) in ids.iter().enumerate() {
+            let running = backing.remove(id);
+            let private_ip = running
+                .as_ref()
+                .map(|r| r.private_ip.clone())
+                .unwrap_or_else(|| format!("10.0.0.{}", 10 + idx));
             let inst = Instance {
                 instance_id: id.clone(),
                 image_id: image_id.clone(),
                 instance_type: instance_type.clone(),
                 state_code: 16,
                 state_name: "running".to_string(),
-                private_ip: format!("10.0.0.{}", 10 + idx),
+                private_ip,
                 public_ip: Some(format!("52.0.0.{}", 10 + idx)),
                 subnet_id: subnet_id.clone(),
                 vpc_id: None,
@@ -157,16 +181,17 @@ pub(crate) fn run_instances(
                 monitoring: false,
                 az: az.clone(),
                 launch_time: LAUNCH_TIME.to_string(),
+                container_id: running.map(|r| r.container_id),
             };
             crate::service::tags::apply_tag_specifications(
                 state,
                 &req.query_params,
-                &id,
+                id,
                 "instance",
             );
-            let tags = state.tags_for(&id).to_vec();
+            let tags = state.tags_for(id).to_vec();
             rendered.push(instance_xml(&inst, &tags, &owner));
-            state.instances.insert(id, inst);
+            state.instances.insert(id.clone(), inst);
         }
     }
     let body = reservation_xml(&reservation_id, &owner, &rendered);
@@ -190,7 +215,7 @@ fn validate_enum_instance_type(req: &AwsRequest) -> Result<(), AwsServiceError> 
     Ok(())
 }
 
-fn change_state(
+async fn change_state(
     svc: &Ec2Service,
     req: &AwsRequest,
     action: &str,
@@ -199,6 +224,9 @@ fn change_state(
 ) -> Result<AwsResponse, AwsServiceError> {
     let ids = indexed_list(&req.query_params, "InstanceId");
     let mut changes = Vec::new();
+    // Container handles of affected instances, collected under the lock and
+    // acted on afterwards so no await happens while the state lock is held.
+    let mut affected: Vec<(String, String)> = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -214,6 +242,13 @@ fn change_state(
                 if new_code == 80 {
                     inst.public_ip = None;
                 }
+                if let Some(cid) = &inst.container_id {
+                    affected.push((id.clone(), cid.clone()));
+                }
+                // A terminated instance no longer has a backing container.
+                if new_code == 48 {
+                    inst.container_id = None;
+                }
             }
             changes.push(format!(
                 "{}{}{}",
@@ -223,6 +258,29 @@ fn change_state(
             ));
         }
     }
+
+    // Map the state transition onto the backing container's lifecycle.
+    if let Some(rt) = &svc.runtime {
+        for (id, cid) in &affected {
+            match new_code {
+                16 => {
+                    // StartInstances: the container may come back with a new
+                    // address; reflect it in describe output.
+                    if let Some(new_ip) = rt.start_instance(cid).await {
+                        let mut accounts = svc.state.write();
+                        let state = accounts.get_or_create(&req.account_id);
+                        if let Some(inst) = state.instances.get_mut(id) {
+                            inst.private_ip = new_ip;
+                        }
+                    }
+                }
+                80 => rt.stop_instance(cid).await,
+                48 => rt.terminate_instance(cid).await,
+                _ => {}
+            }
+        }
+    }
+
     Ok(Ec2Service::respond(
         action,
         &req.request_id,
@@ -230,29 +288,46 @@ fn change_state(
     ))
 }
 
-pub(crate) fn start_instances(
+pub(crate) async fn start_instances(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    change_state(svc, req, "StartInstances", 16, "running")
+    change_state(svc, req, "StartInstances", 16, "running").await
 }
-pub(crate) fn stop_instances(
+pub(crate) async fn stop_instances(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    change_state(svc, req, "StopInstances", 80, "stopped")
+    change_state(svc, req, "StopInstances", 80, "stopped").await
 }
-pub(crate) fn terminate_instances(
+pub(crate) async fn terminate_instances(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    change_state(svc, req, "TerminateInstances", 48, "terminated")
+    change_state(svc, req, "TerminateInstances", 48, "terminated").await
 }
 
-pub(crate) fn reboot_instances(
-    _svc: &Ec2Service,
+pub(crate) async fn reboot_instances(
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let ids = indexed_list(&req.query_params, "InstanceId");
+    let container_ids: Vec<String> = {
+        let accounts = svc.state.read();
+        match accounts.get(&req.account_id) {
+            Some(state) => ids
+                .iter()
+                .filter_map(|id| state.instances.get(id))
+                .filter_map(|i| i.container_id.clone())
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+    if let Some(rt) = &svc.runtime {
+        for cid in &container_ids {
+            rt.reboot_instance(cid).await;
+        }
+    }
     Ok(Ec2Service::respond(
         "RebootInstances",
         &req.request_id,

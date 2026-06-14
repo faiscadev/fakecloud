@@ -288,6 +288,10 @@ pub struct Instance {
     pub monitoring: bool,
     pub az: String,
     pub launch_time: String,
+    /// Id of the backing container/Pod, when this instance is backed by a
+    /// real container runtime. `None` in metadata-only mode.
+    #[serde(default)]
+    pub container_id: Option<String>,
 }
 
 /// An EBS volume attachment.

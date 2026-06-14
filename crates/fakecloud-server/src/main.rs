@@ -55,7 +55,7 @@ use fakecloud_cloudformation::CloudFormationService;
 use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::CognitoService;
 use fakecloud_dynamodb::DynamoDbService;
-use fakecloud_ec2::Ec2Service;
+use fakecloud_ec2::{Ec2Service, SharedEc2State};
 use fakecloud_ecr::EcrService;
 use fakecloud_ecs::EcsService;
 use fakecloud_elasticache::ElastiCacheService;
@@ -364,6 +364,11 @@ async fn main() {
     let cloudfront_state: fakecloud_cloudfront::SharedCloudFrontState = Arc::new(
         parking_lot::RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new()),
     );
+    // EC2 state, created up-front so it can join `ResetState` and be cleared by
+    // `/_fakecloud/reset/ec2` (which also tears down the backing containers).
+    let ec2_state: SharedEc2State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+    ));
     let route53_state: fakecloud_route53::SharedRoute53State = Arc::new(parking_lot::RwLock::new(
         fakecloud_route53::Route53Accounts::new(),
     ));
@@ -662,6 +667,21 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
     }
+    // EC2 instance backing runtime (Docker/Podman). Optional: when no
+    // container CLI is present, RunInstances serves metadata-only instances so
+    // the control plane still works everywhere.
+    let ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>> =
+        fakecloud_ec2::runtime::Ec2Runtime::new().map(Arc::new);
+    if let Some(ref rt) = ec2_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "EC2 instance execution enabled via container runtime"
+        );
+    } else {
+        tracing::info!(
+            "Docker/Podman not available — EC2 RunInstances will serve metadata-only instances"
+        );
+    }
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();
     let ses_emails_state = ses_state.clone();
@@ -752,6 +772,8 @@ async fn main() {
         rds_runtime: rds_runtime.clone(),
         elasticache_runtime: elasticache_runtime.clone(),
         ecs_runtime: ecs_runtime.clone(),
+        ec2: ec2_state.clone(),
+        ec2_runtime: ec2_runtime.clone(),
     };
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
     let delivery_for_cf = {
@@ -1516,12 +1538,12 @@ async fn main() {
     registry.register(Arc::new(OrganizationsService::new(
         organizations_state.clone(),
     )));
-    // EC2 (ec2Query protocol). State is self-contained for now; persistence
-    // and the Docker-backed instance runtime are wired in later batches. We
-    // keep a clone of the shared state so the introspection router can expose
+    // EC2 (ec2Query protocol). Instances are backed by the optional container
+    // runtime (Docker/Podman); persistence is wired in later batches. We keep a
+    // clone of the shared state so the introspection router can expose
     // `GET /_fakecloud/ec2/instances`.
-    let ec2_service = Ec2Service::new();
-    let ec2_introspection_state = ec2_service.shared_state();
+    let ec2_service = Ec2Service::with_state(ec2_state.clone()).with_runtime(ec2_runtime.clone());
+    let ec2_introspection_state = ec2_state.clone();
     registry.register(Arc::new(ec2_service));
     let mut shared_body_cache: Option<Arc<fakecloud_persistence::cache::BodyCache>> = None;
     let s3_store: Arc<dyn fakecloud_persistence::S3Store> = match persistence_config.mode {
@@ -7398,6 +7420,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = elasticache_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = ec2_runtime {
         rt.stop_all().await;
     }
 }
