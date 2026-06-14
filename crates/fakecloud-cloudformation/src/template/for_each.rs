@@ -110,6 +110,26 @@ pub(super) fn expand_sam(value: &Value) -> Value {
         return value.clone();
     }
 
+    // SAM `Globals` supply default properties for every resource of a given
+    // type; per-resource Properties override them per key. Real `sam`/
+    // samtranslator applies these during the transform, so without merging them
+    // here a function that sets Handler/Runtime only in `Globals.Function`
+    // deploys with the bare Lambda defaults (index.handler / python3.12) and
+    // fails every invoke with `Runtime.HandlerNotFound`.
+    let global = |section: &str| {
+        value
+            .get("Globals")
+            .and_then(|g| g.get(section))
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let global_function = global("Function");
+    let global_api = global("Api");
+    let global_http_api = global("HttpApi");
+    let global_simple_table = global("SimpleTable");
+    let global_state_machine = global("StateMachine");
+
     let mut value = value.clone();
     let Some(resources) = value.get_mut("Resources") else {
         return value;
@@ -135,11 +155,7 @@ pub(super) fn expand_sam(value: &Value) -> Value {
 
         match ty {
             "AWS::Serverless::Function" => {
-                let mut lambda_props = if let Some(p) = properties.as_object() {
-                    p.clone()
-                } else {
-                    serde_json::Map::new()
-                };
+                let mut lambda_props = merge_global_properties(&global_function, &properties);
                 // Map CodeUri / InlineCode to Code
                 if let Some(code_uri) = lambda_props.get("CodeUri").cloned() {
                     lambda_props.remove("CodeUri");
@@ -173,11 +189,7 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 new_resources.insert(logical_id.clone(), Value::Object(lambda_resource));
             }
             "AWS::Serverless::Api" => {
-                let mut api_props = if let Some(p) = properties.as_object() {
-                    p.clone()
-                } else {
-                    serde_json::Map::new()
-                };
+                let mut api_props = merge_global_properties(&global_api, &properties);
                 if let Some(def) = api_props.get("DefinitionBody").cloned() {
                     api_props.remove("DefinitionBody");
                     api_props.insert("Body".to_string(), def);
@@ -193,9 +205,10 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 new_resources.insert(logical_id.clone(), Value::Object(api_resource));
             }
             "AWS::Serverless::HttpApi" => {
+                let httpapi_props = merge_global_properties(&global_http_api, &properties);
                 let mut httpapi_resource = serde_json::Map::new();
                 httpapi_resource.insert("Type".to_string(), json!("AWS::ApiGatewayV2::Api"));
-                httpapi_resource.insert("Properties".to_string(), properties);
+                httpapi_resource.insert("Properties".to_string(), Value::Object(httpapi_props));
                 for (k, v) in resource_obj {
                     if k != "Type" && k != "Properties" {
                         httpapi_resource.insert(k.clone(), v.clone());
@@ -204,11 +217,7 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 new_resources.insert(logical_id.clone(), Value::Object(httpapi_resource));
             }
             "AWS::Serverless::SimpleTable" => {
-                let mut table_props = if let Some(p) = properties.as_object() {
-                    p.clone()
-                } else {
-                    serde_json::Map::new()
-                };
+                let mut table_props = merge_global_properties(&global_simple_table, &properties);
                 if let Some(pk) = table_props.get("PrimaryKey") {
                     if let Some(pk_obj) = pk.as_object() {
                         let name = pk_obj.get("Name").cloned().unwrap_or_else(|| json!("id"));
@@ -278,11 +287,7 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 new_resources.insert(logical_id.clone(), Value::Object(layer_resource));
             }
             "AWS::Serverless::StateMachine" => {
-                let mut sfn_props = if let Some(p) = properties.as_object() {
-                    p.clone()
-                } else {
-                    serde_json::Map::new()
-                };
+                let mut sfn_props = merge_global_properties(&global_state_machine, &properties);
                 // `Definition` (inline ASL object) passes through unchanged —
                 // the native provisioner's resolve_sfn_definition reads it
                 // directly. `DefinitionSubstitutions` likewise passes through.
@@ -309,15 +314,15 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                     };
                     sfn_props.insert("DefinitionS3Location".to_string(), location);
                 }
-                // `Role` (ARN) → `RoleArn`.
+                // `Role` (ARN) -> `RoleArn`.
                 if let Some(role) = sfn_props.remove("Role") {
                     sfn_props.insert("RoleArn".to_string(), role);
                 }
-                // `Name` → `StateMachineName`.
+                // `Name` -> `StateMachineName`.
                 if let Some(name) = sfn_props.remove("Name") {
                     sfn_props.insert("StateMachineName".to_string(), name);
                 }
-                // SAM `Type` (STANDARD|EXPRESS) → native `StateMachineType`.
+                // SAM `Type` (STANDARD|EXPRESS) -> native `StateMachineType`.
                 if let Some(machine_type) = sfn_props.remove("Type") {
                     sfn_props.insert("StateMachineType".to_string(), machine_type);
                 }
@@ -350,6 +355,69 @@ pub(super) fn expand_sam(value: &Value) -> Value {
         resources_map.insert(k, v);
     }
     value
+}
+
+/// Merge SAM `Globals.<Section>` defaults under a resource's own `Properties`,
+/// following AWS SAM's combination rules:
+/// - **Scalars** (`Handler`, `Runtime`, `Timeout`, ...): the resource value
+///   overrides the global.
+/// - **Maps** (`Environment.Variables`, `Tags`): deep-merged, so global entries
+///   survive unless the resource sets the same sub-key.
+/// - **Additive lists** (`Layers`, `Policies`): the global list is prepended to
+///   the resource list rather than replaced.
+fn merge_global_properties(
+    globals: &serde_json::Map<String, Value>,
+    properties: &Value,
+) -> serde_json::Map<String, Value> {
+    let mut merged = globals.clone();
+    if let Some(p) = properties.as_object() {
+        for (k, v) in p {
+            match merged.remove(k) {
+                Some(global_v) => {
+                    merged.insert(k.clone(), merge_global_value(k, global_v, v.clone()));
+                }
+                None => {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// SAM list-typed Globals that are combined (global ++ resource) rather than
+/// overridden. Per the SAM Globals spec these are additive.
+const ADDITIVE_GLOBAL_LISTS: &[&str] = &["Layers", "Policies"];
+
+/// Combine a single global value with its resource counterpart per SAM rules.
+/// `key` is the property name, used to decide whether a list is additive.
+fn merge_global_value(key: &str, global_v: Value, resource_v: Value) -> Value {
+    match (global_v, resource_v) {
+        // Maps deep-merge: walk shared keys recursively, resource wins on leaves.
+        (Value::Object(global_map), Value::Object(resource_map)) => {
+            let mut out = global_map;
+            for (k, v) in resource_map {
+                match out.remove(&k) {
+                    Some(existing) => {
+                        out.insert(k.clone(), merge_global_value(&k, existing, v));
+                    }
+                    None => {
+                        out.insert(k, v);
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        // Additive lists (Layers, Policies) combine global first, then resource.
+        (Value::Array(mut global_list), Value::Array(resource_list))
+            if ADDITIVE_GLOBAL_LISTS.contains(&key) =>
+        {
+            global_list.extend(resource_list);
+            Value::Array(global_list)
+        }
+        // Everything else: the resource value wins.
+        (_, resource_v) => resource_v,
+    }
 }
 
 /// Resolve the `items` argument of an `Fn::ForEach` macro. Accepts:
@@ -427,6 +495,175 @@ pub(super) fn substitute_loop_vars_in_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Gap #4: Handler/Runtime set only in `Globals.Function` must land on the
+    // expanded Lambda; otherwise the function deploys with the bare defaults
+    // (index.handler / python3.12) and every invoke raises Runtime.HandlerNotFound.
+    #[test]
+    fn expand_sam_applies_function_globals() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Function": {
+                    "Handler": "index.lambda_handler",
+                    "Runtime": "python3.13",
+                    "Timeout": 300,
+                    "MemorySize": 256
+                }
+            },
+            "Resources": {
+                "Dispatcher": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {
+                        "FunctionName": "workflow_dispatcher_v2",
+                        "InlineCode": "def lambda_handler(e, c): return e"
+                    }
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["Dispatcher"]["Properties"];
+        assert_eq!(props["Handler"], json!("index.lambda_handler"));
+        assert_eq!(props["Runtime"], json!("python3.13"));
+        assert_eq!(props["Timeout"], json!(300));
+        assert_eq!(props["MemorySize"], json!(256));
+        // Per-function properties are preserved alongside the merged globals.
+        assert_eq!(props["FunctionName"], json!("workflow_dispatcher_v2"));
+    }
+
+    // Per-function Properties override Globals per key.
+    #[test]
+    fn expand_sam_function_overrides_globals() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {"Function": {"Handler": "index.lambda_handler", "Runtime": "python3.13"}},
+            "Resources": {
+                "F": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {"Handler": "app.main", "InlineCode": "x"}
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        assert_eq!(
+            props["Handler"],
+            json!("app.main"),
+            "per-function Handler wins"
+        );
+        assert_eq!(
+            props["Runtime"],
+            json!("python3.13"),
+            "global Runtime still applies"
+        );
+    }
+
+    // Map-typed Globals (Environment.Variables, Tags) deep-merge instead of
+    // being wholesale-replaced by a resource that sets the same property.
+    #[test]
+    fn expand_sam_function_globals_deep_merge_maps() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Function": {
+                    "Environment": {"Variables": {"STAGE": "prod", "REGION": "us-east-1"}},
+                    "Tags": {"team": "core", "env": "prod"}
+                }
+            },
+            "Resources": {
+                "F": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {
+                        "Handler": "app.main",
+                        "Runtime": "python3.13",
+                        "Environment": {"Variables": {"REGION": "eu-west-1", "DEBUG": "1"}},
+                        "Tags": {"env": "staging"}
+                    }
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        // Global var survives, resource var overrides shared key, resource adds new.
+        assert_eq!(props["Environment"]["Variables"]["STAGE"], json!("prod"));
+        assert_eq!(
+            props["Environment"]["Variables"]["REGION"],
+            json!("eu-west-1")
+        );
+        assert_eq!(props["Environment"]["Variables"]["DEBUG"], json!("1"));
+        // Tags merge the same way.
+        assert_eq!(props["Tags"]["team"], json!("core"));
+        assert_eq!(props["Tags"]["env"], json!("staging"));
+    }
+
+    // List-typed additive Globals (Layers, Policies) combine global ++ resource.
+    #[test]
+    fn expand_sam_function_globals_additive_lists() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Function": {
+                    "Layers": ["arn:aws:lambda:::layer:global:1"],
+                    "Policies": ["AWSLambdaBasicExecutionRole"]
+                }
+            },
+            "Resources": {
+                "F": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {
+                        "Handler": "app.main",
+                        "Runtime": "python3.13",
+                        "Layers": ["arn:aws:lambda:::layer:local:2"],
+                        "Policies": ["AmazonS3ReadOnlyAccess"]
+                    }
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        assert_eq!(
+            props["Layers"],
+            json!([
+                "arn:aws:lambda:::layer:global:1",
+                "arn:aws:lambda:::layer:local:2"
+            ])
+        );
+        assert_eq!(
+            props["Policies"],
+            json!(["AWSLambdaBasicExecutionRole", "AmazonS3ReadOnlyAccess"])
+        );
+    }
+
+    // Globals on the non-Function sections (Api/HttpApi/SimpleTable/StateMachine)
+    // are applied too.
+    #[test]
+    fn expand_sam_applies_non_function_globals() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Api": {"Cors": "'*'"},
+                "SimpleTable": {"SSESpecification": {"SSEEnabled": true}}
+            },
+            "Resources": {
+                "Gw": {"Type": "AWS::Serverless::Api", "Properties": {"StageName": "prod"}},
+                "Tbl": {"Type": "AWS::Serverless::SimpleTable", "Properties": {}}
+            }
+        });
+
+        let expanded = expand_sam(&template);
+        assert_eq!(
+            expanded["Resources"]["Gw"]["Properties"]["Cors"],
+            json!("'*'")
+        );
+        assert_eq!(
+            expanded["Resources"]["Gw"]["Properties"]["StageName"],
+            json!("prod")
+        );
+        assert_eq!(
+            expanded["Resources"]["Tbl"]["Properties"]["SSESpecification"]["SSEEnabled"],
+            json!(true)
+        );
+    }
 
     #[test]
     fn expand_sam_statemachine_inline_definition() {
