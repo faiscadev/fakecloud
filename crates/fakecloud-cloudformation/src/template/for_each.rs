@@ -314,15 +314,15 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                     };
                     sfn_props.insert("DefinitionS3Location".to_string(), location);
                 }
-                // `Role` (ARN) → `RoleArn`.
+                // `Role` (ARN) -> `RoleArn`.
                 if let Some(role) = sfn_props.remove("Role") {
                     sfn_props.insert("RoleArn".to_string(), role);
                 }
-                // `Name` → `StateMachineName`.
+                // `Name` -> `StateMachineName`.
                 if let Some(name) = sfn_props.remove("Name") {
                     sfn_props.insert("StateMachineName".to_string(), name);
                 }
-                // SAM `Type` (STANDARD|EXPRESS) → native `StateMachineType`.
+                // SAM `Type` (STANDARD|EXPRESS) -> native `StateMachineType`.
                 if let Some(machine_type) = sfn_props.remove("Type") {
                     sfn_props.insert("StateMachineType".to_string(), machine_type);
                 }
@@ -357,12 +357,14 @@ pub(super) fn expand_sam(value: &Value) -> Value {
     value
 }
 
-/// Merge SAM `Globals.<Section>` defaults under a resource's own `Properties`.
-/// Per-resource keys win (plain per-key override). AWS appends a few list-typed
-/// Globals (e.g. `Layers`, `Policies`) rather than replacing; per-key override
-/// is sufficient for the templates we target and matches the common case where
-/// the relevant keys (Handler, Runtime, Timeout, MemorySize, Environment) are
-/// set in exactly one place.
+/// Merge SAM `Globals.<Section>` defaults under a resource's own `Properties`,
+/// following AWS SAM's combination rules:
+/// - **Scalars** (`Handler`, `Runtime`, `Timeout`, ...): the resource value
+///   overrides the global.
+/// - **Maps** (`Environment.Variables`, `Tags`): deep-merged, so global entries
+///   survive unless the resource sets the same sub-key.
+/// - **Additive lists** (`Layers`, `Policies`): the global list is prepended to
+///   the resource list rather than replaced.
 fn merge_global_properties(
     globals: &serde_json::Map<String, Value>,
     properties: &Value,
@@ -370,10 +372,52 @@ fn merge_global_properties(
     let mut merged = globals.clone();
     if let Some(p) = properties.as_object() {
         for (k, v) in p {
-            merged.insert(k.clone(), v.clone());
+            match merged.remove(k) {
+                Some(global_v) => {
+                    merged.insert(k.clone(), merge_global_value(k, global_v, v.clone()));
+                }
+                None => {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
         }
     }
     merged
+}
+
+/// SAM list-typed Globals that are combined (global ++ resource) rather than
+/// overridden. Per the SAM Globals spec these are additive.
+const ADDITIVE_GLOBAL_LISTS: &[&str] = &["Layers", "Policies"];
+
+/// Combine a single global value with its resource counterpart per SAM rules.
+/// `key` is the property name, used to decide whether a list is additive.
+fn merge_global_value(key: &str, global_v: Value, resource_v: Value) -> Value {
+    match (global_v, resource_v) {
+        // Maps deep-merge: walk shared keys recursively, resource wins on leaves.
+        (Value::Object(global_map), Value::Object(resource_map)) => {
+            let mut out = global_map;
+            for (k, v) in resource_map {
+                match out.remove(&k) {
+                    Some(existing) => {
+                        out.insert(k.clone(), merge_global_value(&k, existing, v));
+                    }
+                    None => {
+                        out.insert(k, v);
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        // Additive lists (Layers, Policies) combine global first, then resource.
+        (Value::Array(mut global_list), Value::Array(resource_list))
+            if ADDITIVE_GLOBAL_LISTS.contains(&key) =>
+        {
+            global_list.extend(resource_list);
+            Value::Array(global_list)
+        }
+        // Everything else: the resource value wins.
+        (_, resource_v) => resource_v,
+    }
 }
 
 /// Resolve the `items` argument of an `Fn::ForEach` macro. Accepts:
@@ -511,6 +555,113 @@ mod tests {
             props["Runtime"],
             json!("python3.13"),
             "global Runtime still applies"
+        );
+    }
+
+    // Map-typed Globals (Environment.Variables, Tags) deep-merge instead of
+    // being wholesale-replaced by a resource that sets the same property.
+    #[test]
+    fn expand_sam_function_globals_deep_merge_maps() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Function": {
+                    "Environment": {"Variables": {"STAGE": "prod", "REGION": "us-east-1"}},
+                    "Tags": {"team": "core", "env": "prod"}
+                }
+            },
+            "Resources": {
+                "F": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {
+                        "Handler": "app.main",
+                        "Runtime": "python3.13",
+                        "Environment": {"Variables": {"REGION": "eu-west-1", "DEBUG": "1"}},
+                        "Tags": {"env": "staging"}
+                    }
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        // Global var survives, resource var overrides shared key, resource adds new.
+        assert_eq!(props["Environment"]["Variables"]["STAGE"], json!("prod"));
+        assert_eq!(
+            props["Environment"]["Variables"]["REGION"],
+            json!("eu-west-1")
+        );
+        assert_eq!(props["Environment"]["Variables"]["DEBUG"], json!("1"));
+        // Tags merge the same way.
+        assert_eq!(props["Tags"]["team"], json!("core"));
+        assert_eq!(props["Tags"]["env"], json!("staging"));
+    }
+
+    // List-typed additive Globals (Layers, Policies) combine global ++ resource.
+    #[test]
+    fn expand_sam_function_globals_additive_lists() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Function": {
+                    "Layers": ["arn:aws:lambda:::layer:global:1"],
+                    "Policies": ["AWSLambdaBasicExecutionRole"]
+                }
+            },
+            "Resources": {
+                "F": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": {
+                        "Handler": "app.main",
+                        "Runtime": "python3.13",
+                        "Layers": ["arn:aws:lambda:::layer:local:2"],
+                        "Policies": ["AmazonS3ReadOnlyAccess"]
+                    }
+                }
+            }
+        });
+
+        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        assert_eq!(
+            props["Layers"],
+            json!([
+                "arn:aws:lambda:::layer:global:1",
+                "arn:aws:lambda:::layer:local:2"
+            ])
+        );
+        assert_eq!(
+            props["Policies"],
+            json!(["AWSLambdaBasicExecutionRole", "AmazonS3ReadOnlyAccess"])
+        );
+    }
+
+    // Globals on the non-Function sections (Api/HttpApi/SimpleTable/StateMachine)
+    // are applied too.
+    #[test]
+    fn expand_sam_applies_non_function_globals() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Globals": {
+                "Api": {"Cors": "'*'"},
+                "SimpleTable": {"SSESpecification": {"SSEEnabled": true}}
+            },
+            "Resources": {
+                "Gw": {"Type": "AWS::Serverless::Api", "Properties": {"StageName": "prod"}},
+                "Tbl": {"Type": "AWS::Serverless::SimpleTable", "Properties": {}}
+            }
+        });
+
+        let expanded = expand_sam(&template);
+        assert_eq!(
+            expanded["Resources"]["Gw"]["Properties"]["Cors"],
+            json!("'*'")
+        );
+        assert_eq!(
+            expanded["Resources"]["Gw"]["Properties"]["StageName"],
+            json!("prod")
+        );
+        assert_eq!(
+            expanded["Resources"]["Tbl"]["Properties"]["SSESpecification"]["SSEEnabled"],
+            json!(true)
         );
     }
 
