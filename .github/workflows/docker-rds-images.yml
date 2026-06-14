@@ -29,6 +29,12 @@ on:
       - crates/fakecloud-rds/assets/mariadb/**
   workflow_dispatch:
 
+# Serialize builds of the same ref so concurrent runs never race to push the
+# same per-engine image tag / merged manifest into GHCR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
