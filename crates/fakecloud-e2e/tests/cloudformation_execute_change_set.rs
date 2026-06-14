@@ -428,6 +428,76 @@ async fn create_type_change_set_creates_stack_on_execute() {
     );
 }
 
+/// A stack created via the change-set path must resolve its `Outputs` on
+/// execute, exactly like `CreateStack`/`UpdateStack` do. `sam deploy
+/// --resolve-s3` reads these Outputs back after the changeset executes; an
+/// empty Outputs list there fails the deploy health check (#1716).
+#[tokio::test]
+async fn create_type_change_set_resolves_outputs_on_execute() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+
+    let template = r#"{
+        "Resources": {
+            "OutQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-output-queue"}
+            }
+        },
+        "Outputs": {
+            "QueueUrl": {
+                "Value": {"Ref": "OutQueue"},
+                "Description": "URL of the provisioned queue"
+            }
+        }
+    }"#;
+
+    cf.create_change_set()
+        .stack_name("cs-output-stack")
+        .change_set_name("create-out-cs")
+        .change_set_type(ChangeSetType::Create)
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    cf.execute_change_set()
+        .stack_name("cs-output-stack")
+        .change_set_name("create-out-cs")
+        .send()
+        .await
+        .unwrap();
+
+    let described = cf
+        .describe_stacks()
+        .stack_name("cs-output-stack")
+        .send()
+        .await
+        .unwrap();
+    let stack = &described.stacks()[0];
+    assert_eq!(
+        stack.stack_status().map(|s| s.as_str()),
+        Some("CREATE_COMPLETE")
+    );
+
+    let outputs = stack.outputs();
+    let queue_out = outputs
+        .iter()
+        .find(|o| o.output_key() == Some("QueueUrl"))
+        .expect("changeset-executed stack must expose its Outputs");
+    assert!(
+        queue_out
+            .output_value()
+            .is_some_and(|v| v.contains("cs-output-queue")),
+        "Ref output should resolve to the provisioned queue URL, got {:?}",
+        queue_out.output_value()
+    );
+    assert_eq!(
+        queue_out.description(),
+        Some("URL of the provisioned queue")
+    );
+}
+
 /// SAM always — and `aws cloudformation deploy`/CDK for large templates —
 /// pass the template by `TemplateURL` pointing at an object in S3. The
 /// change set must fetch it (issue #1646, gap 2) rather than store an
