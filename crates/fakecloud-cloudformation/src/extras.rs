@@ -924,7 +924,7 @@ impl CloudFormationService {
                 // every resource as an Add when the stack starts empty, so the
                 // same code path serves both create and update; only the
                 // surfaced status differs (CREATE_* vs UPDATE_*).
-                let (update_result, sid, stack_name_owned, was_review) = {
+                let (update_result, sid, stack_name_owned, was_review, resources_snapshot) = {
                     let stack = state
                         .stacks
                         .values_mut()
@@ -968,10 +968,11 @@ impl CloudFormationService {
                         stack.notification_arns = cs_notif;
                     }
                     stack.updated_at = Some(Utc::now());
-                    if result.is_ok() {
-                        stack.outputs.clear();
-                    }
-                    (result, sid, sname, was_review)
+                    // Outputs are resolved below from the provisioned resources;
+                    // clear stale values now so a failed run leaves none behind.
+                    stack.outputs.clear();
+                    let resources_snapshot = stack.resources.clone();
+                    (result, sid, sname, was_review, resources_snapshot)
                 };
 
                 // Emit lifecycle events on the per-stack event log.
@@ -1048,6 +1049,40 @@ impl CloudFormationService {
                         "ValidationError",
                         msg,
                     ));
+                }
+
+                // Resolve the template's `Outputs` for the newly provisioned
+                // stack and persist them, mirroring CreateStack/UpdateStack.
+                // Without this, a changeset-created stack reports empty Outputs
+                // — SAM's `--resolve-s3` managed-bucket health check requires
+                // the template's `SourceBucket` output to be present in
+                // `DescribeStacks`. Resolution reads cross-stack exports, so it
+                // runs after the write lock is dropped.
+                let outputs = CloudFormationService::resolve_template_outputs(
+                    &template_body,
+                    &cs_params,
+                    &resources_snapshot,
+                    &self.state,
+                );
+                {
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(stack) = state
+                        .stacks
+                        .values_mut()
+                        .find(|s| s.stack_id == sid && s.status != "DELETE_COMPLETE")
+                    {
+                        stack.outputs = outputs.clone();
+                    }
+                    // Re-register this stack's exports so other stacks can
+                    // `Fn::ImportValue` them, as CreateStack/UpdateStack do.
+                    CloudFormationService::sync_exports_imports(
+                        state,
+                        &sid,
+                        &stack_name_owned,
+                        &outputs,
+                        &[],
+                    );
                 }
 
                 Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
@@ -2669,7 +2704,7 @@ mod tests {
     }
 
     // A minimal CREATE-type change set template with one resource and one
-    // output, used by the changeset bookkeeping test below.
+    // output, used by the changeset bookkeeping tests below.
     const CS_TEMPLATE: &str = r#"{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cs-q"}}},"Outputs":{"QUrl":{"Value":{"Ref":"Q"}}}}"#;
 
     // Gap #2: a CREATE change set that mints a new REVIEW_IN_PROGRESS stack must
@@ -2763,6 +2798,48 @@ mod tests {
         for w in ts.windows(2) {
             assert!(w[1] > w[0], "timestamps not strictly increasing: {w:?}");
         }
+    }
+
+    // Gap #1: tags set on CreateChangeSet and outputs declared in the template
+    // must both survive ExecuteChangeSet and appear on the created stack (sam's
+    // managed-bucket health check requires Tags + Outputs in DescribeStacks).
+    #[test]
+    fn execute_change_set_persists_tags_and_outputs() {
+        let svc = svc();
+        svc.handle_extra_action(&req(
+            "CreateChangeSet",
+            &[
+                ("StackName", "cs-stack"),
+                ("ChangeSetName", "cs1"),
+                ("ChangeSetType", "CREATE"),
+                ("TemplateBody", CS_TEMPLATE),
+                ("Tags.member.1.Key", "ManagedStackSource"),
+                ("Tags.member.1.Value", "AwsSamCli"),
+            ],
+        ))
+        .expect("create change set");
+        svc.handle_extra_action(&req(
+            "ExecuteChangeSet",
+            &[("StackName", "cs-stack"), ("ChangeSetName", "cs1")],
+        ))
+        .expect("execute change set");
+
+        let accounts = svc.state.read();
+        let stack = accounts
+            .get("000000000000")
+            .unwrap()
+            .stacks
+            .get("cs-stack")
+            .unwrap();
+        assert_eq!(stack.status, "CREATE_COMPLETE");
+        assert_eq!(
+            stack.tags.get("ManagedStackSource").map(String::as_str),
+            Some("AwsSamCli"),
+            "changeset Tags dropped on execute"
+        );
+        assert_eq!(stack.outputs.len(), 1, "changeset Outputs not resolved");
+        assert_eq!(stack.outputs[0].key, "QUrl");
+        assert!(!stack.outputs[0].value.is_empty());
     }
 
     #[test]
