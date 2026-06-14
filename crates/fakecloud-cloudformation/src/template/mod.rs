@@ -2250,4 +2250,6 @@ pub use parser::{
     collect_import_value_names, parse_outputs, parse_template, parse_template_with_physical_ids,
     parse_template_with_resolution,
 };
-pub use resolution::{resolve_resource_properties, resolve_resource_properties_with_attrs};
+pub use resolution::{
+    dependency_order, resolve_resource_properties, resolve_resource_properties_with_attrs,
+};

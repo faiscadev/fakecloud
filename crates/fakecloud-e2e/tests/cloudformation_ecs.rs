@@ -284,8 +284,17 @@ async fn cfn_provisions_ecs_cluster_taskdef_service_capacity_provider() {
     assert_eq!(svc.platform_version(), Some("LATEST"));
     assert_eq!(svc.health_check_grace_period_seconds(), Some(120));
     assert!(!svc.enable_execute_command());
-    // TaskDefinition stayed at revision 1 across update.
-    assert!(svc.task_definition().unwrap().contains("cfn-task:1"));
+    // The task definition's properties changed (EphemeralStorage and
+    // RuntimePlatform were removed), so CloudFormation registers a new
+    // revision and updates the service — which `Ref`s the task definition —
+    // to point at it. With dependency-ordered provisioning the service is
+    // resolved after the task definition, so it picks up the new revision
+    // (cfn-task:2) rather than the stale cfn-task:1.
+    assert!(
+        svc.task_definition().unwrap().contains("cfn-task:2"),
+        "service should reference the re-registered task definition revision, got {:?}",
+        svc.task_definition()
+    );
 
     // Cluster Tag was rewritten by update.
     let after_clusters = ecs

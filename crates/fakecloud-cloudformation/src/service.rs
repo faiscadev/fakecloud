@@ -68,7 +68,13 @@ pub(crate) fn provision_stack_resources(
     let mut resources = Vec::new();
     let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
     let mut attributes: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut pending: Vec<&template::ResourceDefinition> = resource_defs.iter().collect();
+    // Seed the work list in dependency order so a referenced resource is
+    // provisioned before its referrer and `Ref`/`GetAtt`/`Fn::Sub` resolve to
+    // physical ids. The fixed-point retry loop below still recovers from any
+    // residual ordering the graph can't express.
+    let order = template::dependency_order(template_body, parameters, resource_defs);
+    let mut pending: Vec<&template::ResourceDefinition> =
+        order.iter().map(|&i| &resource_defs[i]).collect();
     let max_passes = pending.len() + 1;
 
     for _ in 0..max_passes {
@@ -1759,8 +1765,14 @@ pub(crate) fn apply_resource_updates(
         .map(|r| (r.logical_id.clone(), r.attributes.clone()))
         .collect();
 
-    // Create new resources / update resources that already exist
-    for resource_def in new_resource_defs {
+    // Create new resources / update resources that already exist. Provision in
+    // dependency order so a `Ref`/`GetAtt`/`Fn::Sub`/`DependsOn` to another
+    // resource resolves to that resource's physical id rather than its bare
+    // logical id (which would otherwise get baked into derived state — e.g. a
+    // Step Functions ASL referencing a Lambda declared later in the template).
+    let order = template::dependency_order(template_body, parameters, new_resource_defs);
+    for &idx in &order {
+        let resource_def = &new_resource_defs[idx];
         let resolved_def = template::resolve_resource_properties_with_attrs(
             resource_def,
             template_body,
