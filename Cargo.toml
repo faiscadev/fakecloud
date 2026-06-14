@@ -43,6 +43,17 @@ sqlparser = "0.61"
 [profile.test]
 debug = "line-tables-only"
 
+# Third-party dependencies (every `aws-sdk-*` and friends — ~210 crates) dominate
+# the `target` dir size and CI compile time. We don't debug into them, so strip
+# their debuginfo entirely while keeping line tables for our own crates. This is
+# the root-cause fix for the recurring "No space left on device" CI flake, where
+# the test `target` dir alone reached 45G and filled the 72G runner disk.
+[profile.test.package."*"]
+debug = false
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.dependencies.tokio]
 version = "1"
 features = [ "macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "process", "fs",]
