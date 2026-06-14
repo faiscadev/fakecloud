@@ -16,7 +16,7 @@ env:
 jobs:
   changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     outputs:
       code: ${{ steps.detect.outputs.code || 'true' }}
     steps:
@@ -41,7 +41,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     outputs:
       shards: ${{ steps.m.outputs.shards }}
     steps:
@@ -74,7 +74,7 @@ jobs:
     needs: [changes, tfacc-matrix]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

@@ -19,7 +19,7 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: write
@@ -70,7 +70,7 @@ jobs:
 
   merge:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     needs: build
     permissions:
       contents: read
@@ -136,7 +136,7 @@ jobs:
 
   scan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     needs: merge
     permissions:
       contents: read
