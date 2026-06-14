@@ -267,6 +267,21 @@ pub fn pod_name_for(function_name: &str, deploy_id: &str) -> String {
     fakecloud_k8s::names::pod_name("fakecloud-lambda", function_name, deploy_id)
 }
 
+/// Build a per-launch *unique* DNS-1123-safe Pod name. The deterministic
+/// [`pod_name_for`] name collides whenever the warm pool needs more than one
+/// concurrent instance of a function (the RIE serves one invocation at a time),
+/// and a still-terminating Pod blocks its replacement (`AlreadyExists` /
+/// "object is being deleted" / `NotFound` races). Salting the hashed id with a
+/// process-monotonic counter yields a fresh, length-bounded name per launch, so
+/// instances never collide and a dying Pod never wedges a new one.
+pub fn unique_pod_name(function_name: &str, deploy_id: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let salted = format!("{deploy_id}-{n}");
+    fakecloud_k8s::names::pod_name("fakecloud-lambda", function_name, &salted)
+}
+
 /// Map the function's `memory_size` (MiB) onto both `requests` and
 /// `limits`. Mirrors real Lambda: CPU is implicitly proportional to
 /// memory, but k8s requires explicit values, so we set memory only and
@@ -553,6 +568,32 @@ mod tests {
         let a = pod_name_for("fn", "deploy-1");
         let b = pod_name_for("fn", "deploy-2");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unique_pod_name_differs_across_calls() {
+        // Same function + deploy_id must still yield distinct names so the
+        // warm pool can run more than one concurrent instance and a
+        // still-terminating Pod never blocks its replacement.
+        let a = unique_pod_name("fn", "deploy");
+        let b = unique_pod_name("fn", "deploy");
+        let c = unique_pod_name("fn", "deploy");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn unique_pod_name_is_dns1123_safe_and_bounded() {
+        // Hostile inputs and a large counter must stay DNS-1123-safe and
+        // within the 63-char Pod-name limit.
+        for _ in 0..1000 {
+            let name = unique_pod_name("My_Awesome_Function", "abc/123+def==");
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+            assert!(!name.starts_with('-'));
+            assert!(!name.ends_with('-'));
+            assert!(name.len() <= 63);
+        }
     }
 
     #[test]
