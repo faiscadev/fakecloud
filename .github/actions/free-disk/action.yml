@@ -1,0 +1,42 @@
+name: Free disk space
+description: >-
+  Frees disk on the GitHub-hosted runner and relocates the cargo `target`
+  directory onto the larger ephemeral `/mnt` disk. Prevents the recurring
+  "No space left on device" CI flake where the Rust `target` dir fills the
+  72G root filesystem. Run this AFTER actions/checkout and BEFORE
+  Swatinem/rust-cache so the restored cache and all build output land on /mnt
+  while every existing `target/...` path keeps working through the symlink.
+runs:
+  using: composite
+  steps:
+    - name: Reclaim runner disk
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        # Keep docker images: jobs that need them pull on demand, and removing
+        # the preinstalled set costs more time than it reclaims here.
+        docker-images: false
+        swap-storage: true
+
+    - name: Relocate cargo target dir to /mnt
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "=== disk before target relocation ==="
+        df -h / /mnt || df -h /
+        target="$GITHUB_WORKSPACE/target"
+        # If a real target dir already exists (e.g. from a partial restore),
+        # move its contents so nothing is lost, then replace it with a symlink.
+        sudo mkdir -p /mnt/target
+        sudo chown "$USER" /mnt/target
+        if [ -d "$target" ] && [ ! -L "$target" ]; then
+          rsync -a "$target/" /mnt/target/ || true
+          rm -rf "$target"
+        fi
+        ln -sfn /mnt/target "$target"
+        echo "target -> $(readlink -f "$target")"
+        df -h / /mnt || df -h /
