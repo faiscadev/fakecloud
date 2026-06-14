@@ -49,14 +49,17 @@ jobs:
 
       - name: Pre-pull images into the cluster
         run: |
-          docker pull registry.k8s.io/pause:3.10
-          kind load docker-image registry.k8s.io/pause:3.10 --name fakecloud-k8s-test
-          docker pull redis:7-alpine
-          kind load docker-image redis:7-alpine --name fakecloud-k8s-test
-          docker pull postgres:16-alpine
-          kind load docker-image postgres:16-alpine --name fakecloud-k8s-test
-          docker pull busybox:1.36
-          kind load docker-image busybox:1.36 --name fakecloud-k8s-test
+          pull() {
+            for i in 1 2 3; do
+              docker pull "$1" && return 0
+              echo "docker pull $1 attempt $i failed; retrying"; sleep $((i * 5))
+            done
+            echo "docker pull $1 failed after 3 attempts"; return 1
+          }
+          for img in registry.k8s.io/pause:3.10 redis:7-alpine postgres:16-alpine busybox:1.36; do
+            pull "$img"
+            kind load docker-image "$img" --name fakecloud-k8s-test
+          done
 
       - name: Lambda K8s integration tests
         env:

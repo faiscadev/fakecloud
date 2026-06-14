@@ -25,7 +25,12 @@ jobs:
 
       - name: Install Zola
         run: |
-          curl -fsSL https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          url=https://github.com/getzola/zola/releases/download/v0.22.1/zola-v0.22.1-x86_64-unknown-linux-gnu.tar.gz
+          for i in 1 2 3; do
+            curl -fsSL "$url" | tar xz && ok=1 && break
+            echo "zola download attempt $i failed; retrying"; sleep $((i * 5))
+          done
+          [ "${ok:-}" = 1 ] || { echo "zola download failed after 3 attempts"; exit 1; }
           sudo mv zola /usr/local/bin/
 
       - name: Build
