@@ -267,6 +267,21 @@ pub fn pod_name_for(function_name: &str, deploy_id: &str) -> String {
     fakecloud_k8s::names::pod_name("fakecloud-lambda", function_name, deploy_id)
 }
 
+/// Build a per-launch *unique* DNS-1123-safe Pod name. The deterministic
+/// [`pod_name_for`] name collides whenever the warm pool needs more than one
+/// concurrent instance of a function (the RIE serves one invocation at a time),
+/// and a still-terminating Pod blocks its replacement (`AlreadyExists` /
+/// "object is being deleted" / `NotFound` races). Salting the hashed id with a
+/// process-monotonic counter yields a fresh, length-bounded name per launch, so
+/// instances never collide and a dying Pod never wedges a new one.
+pub fn unique_pod_name(function_name: &str, deploy_id: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let salted = format!("{deploy_id}-{n}");
+    fakecloud_k8s::names::pod_name("fakecloud-lambda", function_name, &salted)
+}
+
 /// Map the function's `memory_size` (MiB) onto both `requests` and
 /// `limits`. Mirrors real Lambda: CPU is implicitly proportional to
 /// memory, but k8s requires explicit values, so we set memory only and

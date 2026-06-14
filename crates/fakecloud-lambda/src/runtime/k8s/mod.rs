@@ -22,7 +22,7 @@ use fakecloud_k8s::{K8sClient, K8sEnv, K8sEnvError};
 
 use super::backend::{BackendHandle, LambdaBackend, RuntimeError, WarmInstance};
 use crate::state::LambdaFunction;
-use spec::{build_pod_spec, pod_name_for, PodSpecContext};
+use spec::{build_pod_spec, unique_pod_name, PodSpecContext};
 
 /// Which `fakecloud-service` label Lambda Pods carry, so reaping only
 /// touches Lambda Pods.
@@ -124,13 +124,14 @@ impl LambdaBackend for K8sBackend {
             account_id,
             pull_secret: self.pull_secret.as_deref(),
         };
-        let pod =
+        let mut pod =
             build_pod_spec(func, deploy_id, &ctx).map_err(RuntimeError::ContainerStartFailed)?;
-        let pod_name = pod
-            .metadata
-            .name
-            .clone()
-            .unwrap_or_else(|| pod_name_for(&func.function_name, deploy_id));
+        // Override the deterministic function+deploy name with a per-launch
+        // unique one so concurrent instances of the same function don't collide
+        // and a terminating Pod never blocks its replacement (see
+        // `unique_pod_name`).
+        let pod_name = unique_pod_name(&func.function_name, deploy_id);
+        pod.metadata.name = Some(pod_name.clone());
 
         self.client
             .create_pod(&pod)

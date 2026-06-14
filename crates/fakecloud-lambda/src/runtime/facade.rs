@@ -44,6 +44,18 @@ pub(crate) struct WarmEntry {
 /// on a busy instance rather than starting a new one.
 const DEFAULT_MAX_CONCURRENCY: usize = 10;
 
+/// Max attempts per invocation when a reserved warm instance turns out to be
+/// unreachable. Each failover is a fast probe (or connect error) plus a cold
+/// start; the connection provably never reached the handler, so retrying can't
+/// double-execute. Bounded so an all-dead pool can't spin forever.
+const MAX_INVOKE_ATTEMPTS: u32 = 5;
+
+/// Timeout for the pre-invoke TCP reachability probe. A black-holed Pod IP (a
+/// killed pod / drained node that drops packets with no RST) would otherwise
+/// hang the full invoke timeout (~`func.timeout + 5s`); this detects it in ~1s
+/// so the state-machine retry can succeed within its window.
+const REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// A reserved invocation slot: a warm instance plus the held busy guard
 /// that grants exclusive use of it until the guard drops.
 struct Slot {
@@ -77,6 +89,18 @@ fn deploy_id_from(code_sha256: &str, layers: &[Vec<u8>]) -> String {
         hasher.update(layer_hasher.finalize());
     }
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+/// Quick liveness check: can a TCP connection to `endpoint` (`host:port`) be
+/// opened within `timeout`? Used before forwarding a payload to a warm instance
+/// so a dead/black-holed Pod is detected in ~1s instead of hanging the full
+/// invoke timeout. A failed connect provably never reached the handler, so the
+/// caller can safely evict and retry.
+async fn endpoint_reachable(endpoint: &str, timeout: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint)).await,
+        Ok(Ok(_))
+    )
 }
 
 pub struct LambdaRuntime {
@@ -181,20 +205,49 @@ impl LambdaRuntime {
     /// Reserves a warm instance for the call (one in-flight invocation
     /// per instance — the RIE crashes on overlap, issue #1644). If the
     /// instance is unreachable (dead Pod/container from a node drain, OOM,
-    /// or prior crash) it is evicted and the call retried once against a
-    /// freshly cold-started instance, so a dead instance can't wedge the
-    /// function permanently.
+    /// or prior crash) it is evicted and the call retried (up to twice)
+    /// against a freshly cold-started instance, so a dead instance can't
+    /// wedge the function permanently.
     pub async fn invoke(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
         layers: &[Vec<u8>],
     ) -> Result<Vec<u8>, RuntimeError> {
-        let client = reqwest::Client::new();
-        let mut attempt = 0;
+        let client = reqwest::Client::builder()
+            .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             let slot = self.acquire_slot(func, layers).await?;
+
+            // Fast reachability probe before forwarding the payload. A warm Pod
+            // that was killed (FakeCloud recreating it, OOM, node reclaim) often
+            // black-holes its old IP, so the POST would hang the full invoke
+            // timeout. A short TCP probe detects the dead instance in ~1s; the
+            // connection never reached the handler, so we can safely evict and
+            // fail over to a cold start.
+            if !endpoint_reachable(&slot.entry.instance.endpoint, REACHABILITY_PROBE_TIMEOUT).await
+            {
+                let entry = slot.entry.clone();
+                drop(slot);
+                self.evict_entry(&func.function_name, &entry).await;
+                if attempt < MAX_INVOKE_ATTEMPTS {
+                    tracing::warn!(
+                        function = %func.function_name,
+                        endpoint = %entry.instance.endpoint,
+                        "warm Lambda instance failed reachability probe; evicted, retrying with a cold start"
+                    );
+                    continue;
+                }
+                return Err(RuntimeError::InvocationFailed(format!(
+                    "no reachable warm instance for {} after {attempt} attempts",
+                    func.function_name
+                )));
+            }
+
             let url = format!(
                 "http://{}/2015-03-31/functions/function/invocations",
                 slot.entry.instance.endpoint
@@ -234,7 +287,7 @@ impl LambdaRuntime {
                     let entry = slot.entry.clone();
                     drop(slot);
                     self.evict_entry(&func.function_name, &entry).await;
-                    if attempt < 2 && e.is_connect() {
+                    if attempt < MAX_INVOKE_ATTEMPTS && e.is_connect() {
                         tracing::warn!(
                             function = %func.function_name,
                             error = %e,
@@ -264,11 +317,31 @@ impl LambdaRuntime {
         payload: &[u8],
         layers: &[Vec<u8>],
     ) -> Result<StreamingInvocation, RuntimeError> {
-        let client = reqwest::Client::new();
-        let mut attempt = 0;
+        let client = reqwest::Client::builder()
+            .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let mut attempt: u32 = 0;
         loop {
             attempt += 1;
             let slot = self.acquire_slot(func, layers).await?;
+
+            // Same fast reachability probe as `invoke`: detect a dead/black-holed
+            // warm instance in ~1s and fail over instead of hanging.
+            if !endpoint_reachable(&slot.entry.instance.endpoint, REACHABILITY_PROBE_TIMEOUT).await
+            {
+                let entry = slot.entry.clone();
+                drop(slot);
+                self.evict_entry(&func.function_name, &entry).await;
+                if attempt < MAX_INVOKE_ATTEMPTS {
+                    continue;
+                }
+                return Err(RuntimeError::InvocationFailed(format!(
+                    "no reachable warm instance for {} after {attempt} attempts",
+                    func.function_name
+                )));
+            }
+
             let url = format!(
                 "http://{}/2015-03-31/functions/function/invocations",
                 slot.entry.instance.endpoint
@@ -298,7 +371,7 @@ impl LambdaRuntime {
                     let entry = slot.entry.clone();
                     drop(slot);
                     self.evict_entry(&func.function_name, &entry).await;
-                    if attempt < 2 && e.is_connect() {
+                    if attempt < MAX_INVOKE_ATTEMPTS && e.is_connect() {
                         continue;
                     }
                     return Err(RuntimeError::InvocationFailed(e.to_string()));
@@ -781,10 +854,18 @@ mod tests {
                 let peak = peak.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Only connections that actually send a request count as an
+                    // invocation. A bare reachability probe (TCP connect, no
+                    // bytes) reads EOF and is ignored — it neither overlaps a
+                    // real invoke nor inflates the concurrency peak, mirroring
+                    // the real RIE, which only starts an event on a request.
+                    let mut buf = [0u8; 1024];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
                     let now = cur.fetch_add(1, SeqCst) + 1;
                     peak.fetch_max(now, SeqCst);
-                    let mut buf = [0u8; 1024];
-                    let _ = sock.read(&mut buf).await;
                     tokio::time::sleep(delay).await;
                     let _ = sock
                         .write_all(
@@ -908,8 +989,13 @@ mod tests {
     async fn dead_instance_is_evicted_and_retried() {
         let peak = Arc::new(AtomicUsize::new(0));
         let live = spawn_rie(Duration::from_millis(5), peak.clone()).await;
-        // First launch hands back a refused port; the retry gets the live one.
-        let backend = CountingBackend::with_queue(live, vec!["127.0.0.1:1".to_string()]);
+        // Two launches in a row hand back refused ports; the third gets the
+        // live one. Connect-refused provably never reached a handler, so the
+        // extra retry budget can't double-execute.
+        let backend = CountingBackend::with_queue(
+            live,
+            vec!["127.0.0.1:1".to_string(), "127.0.0.1:1".to_string()],
+        );
         let rt = runtime_with(backend.clone(), 1);
 
         let out = rt
@@ -919,12 +1005,51 @@ mod tests {
         assert_eq!(out, b"ok");
         assert_eq!(
             backend.launches.load(SeqCst),
+            3,
+            "expected two dead instances plus one cold-start replacement"
+        );
+        assert!(
+            backend.terminates.load(SeqCst) >= 2,
+            "both dead instances should have been terminated on eviction"
+        );
+    }
+
+    /// A black-holed warm instance (a killed Pod whose IP now drops packets,
+    /// rather than refusing with an RST) must be detected by the fast
+    /// reachability probe and failed over in seconds — not hang the full invoke
+    /// timeout (~`func.timeout + 5s`). This is the failure mode that flaked the
+    /// LOE workflows: a dead pod cost ~305s, blowing the test window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn black_holed_instance_fails_over_fast() {
+        let peak = Arc::new(AtomicUsize::new(0));
+        let live = spawn_rie(Duration::from_millis(5), peak.clone()).await;
+        // 192.0.2.1 is RFC 5737 TEST-NET-1: unrouted, so a connect black-holes
+        // (caught by the probe's ~1.5s timeout) instead of getting a fast RST.
+        let backend = CountingBackend::with_queue(live, vec!["192.0.2.1:9".to_string()]);
+        let rt = runtime_with(backend.clone(), 1);
+
+        // test_func timeout is 5 → the pre-fix hang would be ~10s.
+        let func = test_func("blackhole", "sha-A");
+        let started = std::time::Instant::now();
+        let out = rt
+            .invoke(&func, b"{}", &[])
+            .await
+            .expect("should recover via cold-start retry");
+        let elapsed = started.elapsed();
+
+        assert_eq!(out, b"ok");
+        assert_eq!(
+            backend.launches.load(SeqCst),
             2,
-            "expected the dead instance plus one cold-start replacement"
+            "expected one black-holed instance plus one cold-start replacement"
         );
         assert!(
             backend.terminates.load(SeqCst) >= 1,
-            "the dead instance should have been terminated on eviction"
+            "the black-holed instance should have been evicted"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "failover took {elapsed:?}; must be far below the ~10s invoke timeout"
         );
     }
 
