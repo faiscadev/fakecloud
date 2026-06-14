@@ -4,3 +4,9 @@ failure-output = "immediate-final"
 status-level = "fail"
 final-status-level = "slow"
 retries = 2
+# Mark a test slow after 120s and hard-kill it after 4 periods (8 min). A
+# genuinely wedged/deadlocked test (e.g. an awaited resource that never becomes
+# ready) previously hung to GitHub's 6h ceiling; now it is terminated and, with
+# retries above, re-run. The 8 min ceiling sits well above the slowest legit
+# test (kms_rsa_sign_verifies_outside_fakecloud ~276s) so it never trips real work.
+slow-timeout = { period = "120s", terminate-after = 4 }
