@@ -2951,15 +2951,12 @@ async fn sfn_task_sqs_send_message() {
     let status = wait_for_execution(&sfn, start.execution_arn()).await;
     assert_eq!(status, "SUCCEEDED");
 
-    // Verify the message was delivered to SQS
-    let receive = sqs
-        .receive_message()
-        .queue_url(queue_url)
-        .send()
-        .await
-        .unwrap();
-
-    let messages = receive.messages();
+    // Verify the message was delivered to SQS. Poll rather than a single
+    // short-poll receive: SendMessage completes before the execution reports
+    // SUCCEEDED, but a one-shot receive can still race the enqueue under
+    // parallel CI load.
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, queue_url, 1, std::time::Duration::from_secs(5)).await;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].body().unwrap(), "hello from step functions");
 }
@@ -3326,15 +3323,10 @@ async fn sfn_task_sqs_with_dynamic_parameters() {
     let status = wait_for_execution(&sfn, start.execution_arn()).await;
     assert_eq!(status, "SUCCEEDED");
 
-    // Verify the dynamic message was sent
-    let receive = sqs
-        .receive_message()
-        .queue_url(queue_url)
-        .send()
-        .await
-        .unwrap();
-
-    let messages = receive.messages();
+    // Verify the dynamic message was sent. Poll rather than a one-shot receive
+    // to avoid racing the enqueue under parallel CI load.
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, queue_url, 1, std::time::Duration::from_secs(5)).await;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].body().unwrap(), "dynamic message content");
 }
@@ -3480,25 +3472,18 @@ async fn sfn_cross_service_workflow_sqs_then_choice() {
     let status = wait_for_execution(&sfn, start.execution_arn()).await;
     assert_eq!(status, "SUCCEEDED");
 
-    // Verify high-priority queue got the right message
-    let receive = sqs
-        .receive_message()
-        .queue_url(high_url)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(receive.messages().len(), 1);
-    assert_eq!(receive.messages()[0].body().unwrap(), "urgent order");
+    // Verify high-priority queue got the right message. Poll to avoid racing
+    // the enqueue under parallel CI load.
+    let high =
+        helpers::sqs_receive_at_least(&sqs, high_url, 1, std::time::Duration::from_secs(5)).await;
+    assert_eq!(high.len(), 1);
+    assert_eq!(high[0].body().unwrap(), "urgent order");
 
-    // Verify low-priority queue got the right message
-    let receive = sqs
-        .receive_message()
-        .queue_url(low_url)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(receive.messages().len(), 1);
-    assert_eq!(receive.messages()[0].body().unwrap(), "regular order");
+    // Verify low-priority queue got the right message.
+    let low =
+        helpers::sqs_receive_at_least(&sqs, low_url, 1, std::time::Duration::from_secs(5)).await;
+    assert_eq!(low.len(), 1);
+    assert_eq!(low[0].body().unwrap(), "regular order");
 }
 
 /// Kick off an execution whose interpreter path previously panicked (empty
@@ -3895,13 +3880,8 @@ async fn sfn_aws_sdk_sqs_send_message() {
         "expected MessageId in output, got {output:?}"
     );
 
-    let receive = sqs
-        .receive_message()
-        .queue_url(queue_url)
-        .send()
-        .await
-        .unwrap();
-    let messages = receive.messages();
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, queue_url, 1, std::time::Duration::from_secs(5)).await;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].body().unwrap(), "hello-via-aws-sdk-sqs");
 }

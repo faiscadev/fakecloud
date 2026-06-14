@@ -1078,17 +1078,11 @@ async fn logs_subscription_filter_delivers_to_sqs() {
         .await
         .unwrap();
 
-    // Receive message from SQS
-    let recv = sqs
-        .receive_message()
-        .queue_url(&queue_url)
-        .max_number_of_messages(10)
-        .wait_time_seconds(1)
-        .send()
-        .await
-        .unwrap();
-
-    let messages = recv.messages().to_vec();
+    // Receive message from SQS. Poll up to a deadline rather than a single
+    // 1s receive so delivery latency under parallel CI load can't flake the
+    // assertion.
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 1, std::time::Duration::from_secs(5)).await;
     assert_eq!(messages.len(), 1, "expected exactly one SQS message");
 
     // Decode the payload: base64 -> gzip -> JSON
