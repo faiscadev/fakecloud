@@ -1096,7 +1096,24 @@ async fn invoke_resource(
         } else {
             input.clone()
         };
-        return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds).await;
+        // The optimized `lambda:invoke` integration returns the AWS Invoke API
+        // response envelope, not the bare function output — `ResultSelector`
+        // expressions like `{"value.$": "$.Payload"}` depend on it. Wrap only
+        // the successful result; error results (function errors and transport
+        // failures) pass through unchanged, since a failed lambda:invoke task
+        // has no result envelope on AWS. The direct-ARN path above
+        // intentionally stays unwrapped — there real AWS returns the bare
+        // payload. `SdkHttpMetadata`/`SdkResponseMetadata` are omitted; real
+        // templates select `Payload`/`StatusCode`.
+        return invoke_lambda_direct(function_name, &payload, delivery, timeout_seconds)
+            .await
+            .map(|payload| {
+                json!({
+                    "ExecutedVersion": "$LATEST",
+                    "Payload": payload,
+                    "StatusCode": 200,
+                })
+            });
     }
 
     if resource.starts_with("arn:aws:states:::sqs:sendMessage") {
@@ -1862,9 +1879,51 @@ async fn invoke_lambda_direct(
             let response_str = String::from_utf8_lossy(&bytes);
             let value: Value =
                 serde_json::from_str(&response_str).unwrap_or(json!(response_str.to_string()));
+
+            // The Lambda runtime returns HTTP 200 even for unhandled function
+            // errors, encoding the failure in the payload as
+            // `{"errorMessage", "errorType", "stackTrace"}`. The delivery trait
+            // only conveys bytes, so the payload is the only available signal —
+            // the same heuristic the Lambda service uses for async destination
+            // routing. Mirror real AWS: a function error fails the task with the
+            // function's `errorType` as the Error and the serialized payload as
+            // the Cause, which is exactly what makes Retry/Catch on custom
+            // exception names work.
+            //
+            // Require BOTH `errorType` and `errorMessage` (not either) to avoid
+            // misreading a legitimate success payload that merely happens to
+            // contain one of those field names as a function error.
+            if let Some(obj) = value.as_object() {
+                if obj.contains_key("errorType") && obj.contains_key("errorMessage") {
+                    let error_type = obj
+                        .get("errorType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Exception")
+                        .to_string();
+                    let cause = serde_json::to_string(&value)
+                        .expect("serde_json::Value serialization is infallible");
+                    return Err((error_type, cause));
+                }
+            }
+
             Ok(value)
         }
-        Some(Err(e)) => Err(("States.TaskFailed".to_string(), e)),
+        Some(Err(e)) => {
+            // Failures of the Lambda Invoke API call itself surface on real AWS
+            // with `Lambda.`-prefixed error names (`Lambda.ServiceException`,
+            // `Lambda.SdkClientException`, `Lambda.Unknown`, ...) — never
+            // `States.TaskFailed` — and those are the names AWS documents for
+            // Retry rules. The delivery error is an unstructured string with
+            // the outcome flattened, so the honest default is `Lambda.Unknown`
+            // ("outcome unknown"). The one case we can cheaply distinguish is a
+            // missing function, which AWS reports as
+            // `Lambda.ResourceNotFoundException`.
+            if e.starts_with("Function not found") {
+                Err(("Lambda.ResourceNotFoundException".to_string(), e))
+            } else {
+                Err(("Lambda.Unknown".to_string(), e))
+            }
+        }
         None => {
             // No runtime available — return empty result
             Ok(json!({}))
