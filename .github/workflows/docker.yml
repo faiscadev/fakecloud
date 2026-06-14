@@ -5,6 +5,13 @@ on:
     branches: [main]
     tags: ["v*"]
 
+# Serialize builds of the same ref so two runs never race to push the same
+# image tag / manifest list into GHCR. Different refs (main vs a release tag)
+# push different tags, so they may still run concurrently.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -12,6 +19,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
