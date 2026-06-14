@@ -365,7 +365,7 @@ mod dependency_order_tests {
             }
         }"#;
         let defs = vec![rd("A", "X"), rd("B", "X")];
-        // No real edge → original order preserved.
+        // No real edge -> original order preserved.
         assert_eq!(
             dependency_order(template, &BTreeMap::new(), &defs),
             vec![0, 1]
