@@ -571,6 +571,32 @@ mod tests {
     }
 
     #[test]
+    fn unique_pod_name_differs_across_calls() {
+        // Same function + deploy_id must still yield distinct names so the
+        // warm pool can run more than one concurrent instance and a
+        // still-terminating Pod never blocks its replacement.
+        let a = unique_pod_name("fn", "deploy");
+        let b = unique_pod_name("fn", "deploy");
+        let c = unique_pod_name("fn", "deploy");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn unique_pod_name_is_dns1123_safe_and_bounded() {
+        // Hostile inputs and a large counter must stay DNS-1123-safe and
+        // within the 63-char Pod-name limit.
+        for _ in 0..1000 {
+            let name = unique_pod_name("My_Awesome_Function", "abc/123+def==");
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+            assert!(!name.starts_with('-'));
+            assert!(!name.ends_with('-'));
+            assert!(name.len() <= 63);
+        }
+    }
+
+    #[test]
     fn restart_policy_never() {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();

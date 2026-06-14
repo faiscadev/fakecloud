@@ -205,8 +205,8 @@ impl LambdaRuntime {
     /// Reserves a warm instance for the call (one in-flight invocation
     /// per instance — the RIE crashes on overlap, issue #1644). If the
     /// instance is unreachable (dead Pod/container from a node drain, OOM,
-    /// or prior crash) it is evicted and the call retried (up to twice)
-    /// against a freshly cold-started instance, so a dead instance can't
+    /// or prior crash) it is evicted and the call retried (up to four
+    /// times) against a freshly cold-started instance, so a dead instance can't
     /// wedge the function permanently.
     pub async fn invoke(
         &self,
@@ -1028,7 +1028,7 @@ mod tests {
         let backend = CountingBackend::with_queue(live, vec!["192.0.2.1:9".to_string()]);
         let rt = runtime_with(backend.clone(), 1);
 
-        // test_func timeout is 5 → the pre-fix hang would be ~10s.
+        // test_func timeout is 5 -> the pre-fix hang would be ~10s.
         let func = test_func("blackhole", "sha-A");
         let started = std::time::Instant::now();
         let out = rt
