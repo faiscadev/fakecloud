@@ -10,7 +10,7 @@
 
 mod k8s;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -174,6 +174,7 @@ impl ElastiCacheRuntime {
         &self,
         resource_id: &str,
         rdb_path: Option<&str>,
+        tags: &BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let running = match &self.backend {
             CacheBackend::Docker(d) => {
@@ -181,7 +182,7 @@ impl ElastiCacheRuntime {
                     .await?
             }
             CacheBackend::K8s(k) => {
-                k.spawn_pod(resource_id, CacheEngineKind::Redis, rdb_path)
+                k.spawn_pod(resource_id, CacheEngineKind::Redis, rdb_path, tags)
                     .await?
             }
         };
@@ -194,6 +195,7 @@ impl ElastiCacheRuntime {
     pub async fn ensure_memcached(
         &self,
         resource_id: &str,
+        tags: &BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let running = match &self.backend {
             CacheBackend::Docker(d) => {
@@ -201,7 +203,7 @@ impl ElastiCacheRuntime {
                     .await?
             }
             CacheBackend::K8s(k) => {
-                k.spawn_pod(resource_id, CacheEngineKind::Memcached, None)
+                k.spawn_pod(resource_id, CacheEngineKind::Memcached, None, tags)
                     .await?
             }
         };
@@ -224,7 +226,11 @@ impl ElastiCacheRuntime {
     /// Restart the underlying backing instance, mirroring real
     /// ElastiCache's RebootCacheCluster behaviour. Returns `Unavailable`
     /// if the resource has no live instance tracked here.
-    pub async fn restart_container(&self, resource_id: &str) -> Result<(), RuntimeError> {
+    pub async fn restart_container(
+        &self,
+        resource_id: &str,
+        tags: &BTreeMap<String, String>,
+    ) -> Result<(), RuntimeError> {
         let running = {
             let containers = self.containers.read();
             containers.get(resource_id).cloned()
@@ -236,7 +242,9 @@ impl ElastiCacheRuntime {
                 // A Pod can't be restarted in place; recreate it,
                 // preserving Redis data by snapshotting it across the
                 // recreate. The new Pod keeps the same deterministic name.
-                let updated = k.reboot_pod(resource_id, &running).await?;
+                // Per-instance scheduling tags are re-applied to the fresh
+                // Pod so a reboot keeps the resource's node placement.
+                let updated = k.reboot_pod(resource_id, &running, tags).await?;
                 self.containers
                     .write()
                     .insert(resource_id.to_string(), updated);

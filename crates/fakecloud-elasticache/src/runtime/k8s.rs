@@ -101,6 +101,7 @@ impl K8sCache {
         resource_id: &str,
         engine: CacheEngineKind,
         rdb_path: Option<&str>,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let rdb = match rdb_path {
             Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
@@ -108,7 +109,7 @@ impl K8sCache {
             })?),
             None => None,
         };
-        self.spawn_pod_bytes(resource_id, engine, rdb).await
+        self.spawn_pod_bytes(resource_id, engine, rdb, tags).await
     }
 
     async fn spawn_pod_bytes(
@@ -116,6 +117,7 @@ impl K8sCache {
         resource_id: &str,
         engine: CacheEngineKind,
         rdb: Option<Vec<u8>>,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let pod_name = names::pod_name(POD_PREFIX, resource_id, resource_id);
         let port = engine.port();
@@ -148,10 +150,15 @@ impl K8sCache {
             internal_token: &self.internal_token,
             pull_secret: self.pull_secret.as_deref(),
         });
-        // Operator-configured global + ElastiCache-service scheduling /
-        // metadata. Every spawn path (create, serverless, replication,
-        // recovery, reboot) funnels through here, so this covers them all.
-        self.pod_config.apply(&mut pod);
+        // Operator-configured global + ElastiCache-service base, with this
+        // resource's reserved `fakecloud-k8s/*` tag overrides merged over it
+        // (per-instance wins). Every spawn path (create, serverless,
+        // replication, recovery, reboot) funnels through here, so this
+        // covers them all.
+        self.pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(tags))
+            .apply(&mut pod);
 
         let result = self.launch(&pod, &pod_name, port, engine).await;
         // Whatever happened, the staged RDB is no longer needed: a
@@ -265,6 +272,7 @@ impl K8sCache {
         &self,
         resource_id: &str,
         running: &RunningCacheContainer,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let preserved = if matches!(running.engine, CacheEngineKind::Redis) {
             self.snapshot_live_rdb(&running.container_id).await
@@ -272,7 +280,7 @@ impl K8sCache {
             None
         };
         self.client.delete_pod(&running.container_id).await;
-        self.spawn_pod_bytes(resource_id, running.engine, preserved)
+        self.spawn_pod_bytes(resource_id, running.engine, preserved, tags)
             .await
     }
 
@@ -504,6 +512,44 @@ mod tests {
                 .get("team")
                 .map(String::as_str),
             Some("platform")
+        );
+    }
+
+    #[test]
+    fn pod_config_overrides_apply_to_built_pod() {
+        use std::collections::BTreeMap;
+        // Mirrors the spawn_pod_bytes wiring: ElastiCache-service base
+        // merged with the resource's reserved-tag overrides, applied to the
+        // built cache Pod.
+        let mut pod = build_cache_pod(ctx(None));
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "cache".to_string())]),
+            ..Default::default()
+        };
+        let tags = BTreeMap::from([
+            (
+                "fakecloud-k8s/node-selector".to_string(),
+                "pool=spot,disktype=ssd".to_string(),
+            ),
+            (
+                "fakecloud-k8s/annotations".to_string(),
+                "team=data".to_string(),
+            ),
+        ]);
+        base.merge(K8sPodConfig::from_tags(&tags)).apply(&mut pod);
+
+        let spec = pod.spec.unwrap();
+        let sel = spec.node_selector.unwrap();
+        // Per-instance tag overrides the base on `pool`; base-only keys survive.
+        assert_eq!(sel.get("pool").map(String::as_str), Some("spot"));
+        assert_eq!(sel.get("disktype").map(String::as_str), Some("ssd"));
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("data")
         );
     }
 }

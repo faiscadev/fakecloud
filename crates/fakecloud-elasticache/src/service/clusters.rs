@@ -265,11 +265,17 @@ impl ElastiCacheService {
             let account_id = request.account_id.clone();
             let id = cache_cluster_id.clone();
             let is_memcached = engine == ENGINE_MEMCACHED;
+            // Reserved `fakecloud-k8s/*` scheduling tags for this cluster's
+            // Pod, from the create-time tags (ignored on the Docker backend).
+            let pod_tags: std::collections::BTreeMap<String, String> =
+                tags.iter().cloned().collect();
             tokio::spawn(async move {
                 let result = if is_memcached {
-                    runtime.ensure_memcached(&id).await
+                    runtime.ensure_memcached(&id, &pod_tags).await
                 } else {
-                    runtime.ensure_redis(&id, rdb_path.as_deref()).await
+                    runtime
+                        .ensure_redis(&id, rdb_path.as_deref(), &pod_tags)
+                        .await
                 };
                 let mut stop_container = false;
                 {
@@ -491,7 +497,7 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "CacheClusterId")?;
-        let xml = {
+        let (xml, pod_tags) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
@@ -502,14 +508,23 @@ impl ElastiCacheService {
                 )
             })?;
             cluster.cache_cluster_status = "rebooting cache cluster nodes".to_string();
-            cache_cluster_xml(cluster, true)
+            let arn = cluster.arn.clone();
+            let xml = cache_cluster_xml(cluster, true);
+            // Re-apply this cluster's reserved `fakecloud-k8s/*` scheduling
+            // tags to the recreated Pod (ignored on the Docker backend).
+            let pod_tags: std::collections::BTreeMap<String, String> = state
+                .tags
+                .get(&arn)
+                .map(|t| t.iter().cloned().collect())
+                .unwrap_or_default();
+            (xml, pod_tags)
         };
         // Restart the underlying engine container so a real client
         // observes the reboot. Best-effort: if no runtime is wired up
         // (eg. tests, environments without docker) the API call still
         // reflects the rebooting state.
         if let Some(runtime) = &self.runtime {
-            if let Err(error) = runtime.restart_container(&id).await {
+            if let Err(error) = runtime.restart_container(&id, &pod_tags).await {
                 tracing::warn!(
                     cluster_id = %id,
                     %error,
