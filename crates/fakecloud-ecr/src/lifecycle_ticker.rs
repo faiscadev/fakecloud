@@ -14,11 +14,15 @@
 //!
 //! The ticker is wired up at server startup in `fakecloud-server` via
 //! `tokio::spawn(LifecycleTicker::new(state).run())`.
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use tokio::sync::Mutex as AsyncMutex;
 
-use crate::service::evaluate_lifecycle_policy;
+use fakecloud_persistence::SnapshotStore;
+
+use crate::service::{evaluate_lifecycle_policy, EcrService};
 use crate::state::SharedEcrState;
 
 /// Default tick interval. AWS itself doesn't publish a guaranteed
@@ -31,6 +35,13 @@ pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(300);
 pub struct LifecycleTicker {
     state: SharedEcrState,
     interval: Duration,
+    /// Snapshot store + lock so a pruning tick is persisted. Without it the
+    /// ticker evicted images only in memory; on restart the snapshot (last
+    /// written by some unrelated mutating op, or never) resurrected them —
+    /// permanently if the policy had since been deleted. bug-audit
+    /// 2026-06-15, 4.6.
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl LifecycleTicker {
@@ -38,6 +49,8 @@ impl LifecycleTicker {
         Self {
             state,
             interval: DEFAULT_TICK_INTERVAL,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -45,6 +58,19 @@ impl LifecycleTicker {
     /// uses the default.
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
+        self
+    }
+
+    /// Wire the snapshot store + lock so a pruning tick persists. Pass the
+    /// same lock the [`EcrService`] uses so ticker and request-path saves
+    /// serialize against each other. bug-audit 4.6.
+    pub fn with_snapshot(
+        mut self,
+        store: Option<Arc<dyn SnapshotStore>>,
+        lock: Arc<AsyncMutex<()>>,
+    ) -> Self {
+        self.snapshot_store = store;
+        self.snapshot_lock = lock;
         self
     }
 
@@ -56,7 +82,17 @@ impl LifecycleTicker {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            tick_once(&self.state);
+            // Persist whenever a tick changed state (pruned images and/or
+            // stamped last_evaluated_at); otherwise the eviction lives only in
+            // memory and is undone by the next snapshot load. bug-audit 4.6.
+            if tick_once(&self.state) {
+                EcrService::save_snapshot_with(
+                    self.state.clone(),
+                    self.snapshot_store.clone(),
+                    self.snapshot_lock.clone(),
+                )
+                .await;
+            }
         }
     }
 }
@@ -65,7 +101,12 @@ impl LifecycleTicker {
 /// lifecycle policy and applies the resulting prune set. Cheap when
 /// no policies are set: a read-only scan that bails before touching
 /// the write lock.
-pub fn tick_once(state: &SharedEcrState) {
+///
+/// Returns `true` when the pass mutated state (evaluated at least one policy,
+/// which prunes images and/or stamps `lifecycle_policy_last_evaluated_at`), so
+/// the caller knows it must persist a snapshot. Returns `false` on the cheap
+/// no-policy early-out. bug-audit 4.6.
+pub fn tick_once(state: &SharedEcrState) -> bool {
     // Collect (account_id, repo_name, policy) under the read lock so
     // we don't hold the writer while parsing JSON. Doubles as the
     // cheap precheck — when no repo has a policy, `plans` is empty
@@ -84,7 +125,7 @@ pub fn tick_once(state: &SharedEcrState) {
     };
 
     if plans.is_empty() {
-        return;
+        return false;
     }
 
     let mut accounts = state.write();
@@ -111,6 +152,7 @@ pub fn tick_once(state: &SharedEcrState) {
         }
         repo.lifecycle_policy_last_evaluated_at = Some(now);
     }
+    true
 }
 
 #[cfg(test)]
@@ -211,6 +253,56 @@ mod tests {
             repo.image_tags.is_empty(),
             "tags pointing at pruned image should be gone"
         );
+    }
+
+    // bug-audit 2026-06-15, 4.6: a pruning tick must be persisted. Before the
+    // fix the ticker evicted images only in memory, so a snapshot load (on
+    // restart) resurrected them. Here we prune, persist via the same writer the
+    // ticker uses, then load the snapshot and confirm the image is gone.
+    #[tokio::test]
+    async fn pruning_tick_is_persisted_and_survives_reload() {
+        use fakecloud_persistence::{DiskSnapshotStore, SnapshotStore};
+        use std::sync::Arc;
+        use tokio::sync::Mutex as AsyncMutex;
+
+        let mut repo = make_repo_with_old_image();
+        repo.lifecycle_policy = Some(
+            r#"{"rules":[{
+                "rulePriority":1,
+                "selection":{
+                    "tagStatus":"any",
+                    "countType":"sinceImagePushed",
+                    "countUnit":"days",
+                    "countNumber":7
+                }
+            }]}"#
+                .to_string(),
+        );
+        let state = shared_state_with_repo(repo);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SnapshotStore> =
+            Arc::new(DiskSnapshotStore::new(dir.path().join("snapshot.json")));
+        let lock = Arc::new(AsyncMutex::new(()));
+
+        // A pruning tick reports it mutated state; persist exactly as run() does.
+        assert!(tick_once(&state), "tick should report it pruned");
+        EcrService::save_snapshot_with(state.clone(), Some(store.clone()), lock.clone()).await;
+
+        let bytes = store.load().unwrap().expect("snapshot written");
+        let snapshot: crate::state::EcrSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("multi-account snapshot");
+        let repo = accounts
+            .get(ACCOUNT)
+            .unwrap()
+            .repositories
+            .get("svc")
+            .unwrap();
+        assert!(
+            repo.images.is_empty(),
+            "pruned image must stay gone after reload, not resurrect"
+        );
+        assert!(repo.lifecycle_policy_last_evaluated_at.is_some());
     }
 
     #[test]

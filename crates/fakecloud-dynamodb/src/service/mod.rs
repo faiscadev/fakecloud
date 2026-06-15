@@ -229,7 +229,11 @@ impl DynamoDbService {
             "awsRegion": target.arn.split(':').nth(3).unwrap_or("us-east-1"),
             "dynamodb": {
                 "Keys": keys,
-                "SequenceNumber": chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
+                // Use the shared atomic monotonic counter (not wall-clock
+                // nanoseconds): a single BatchWriteItem fires up to 25
+                // deliveries with no delay, which collide on coarse clocks
+                // and invert on NTP steps. bug-audit 2026-06-15, 4.5.
+                "SequenceNumber": crate::streams::next_stream_sequence(),
                 "SizeBytes": serde_json::to_string(keys).map(|s| s.len()).unwrap_or(0),
                 "StreamViewType": "NEW_AND_OLD_IMAGES",
             },

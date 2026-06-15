@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -9,11 +10,33 @@ use crate::state::SharedKinesisState;
 /// Kinesis delivery implementation for cross-service integrations.
 pub struct KinesisDeliveryImpl {
     state: SharedKinesisState,
+    /// Set whenever a cross-service delivery appends a record. The
+    /// `KinesisDelivery` trait is synchronous and cannot reach the async
+    /// snapshot writer the service handler uses, so DynamoDB-streaming /
+    /// Logs-subscription / EventBridge-target records used to vanish on
+    /// restart while direct PutRecord survived. A background flusher in the
+    /// server polls this flag and persists. bug-audit 2026-06-15, 4.8.
+    dirty: Option<Arc<AtomicBool>>,
 }
 
 impl KinesisDeliveryImpl {
     pub fn new(state: SharedKinesisState) -> Arc<Self> {
-        Arc::new(Self { state })
+        Arc::new(Self { state, dirty: None })
+    }
+
+    /// Construct with a dirty flag a background flusher watches to persist
+    /// cross-service deliveries. bug-audit 4.8.
+    pub fn with_dirty_flag(state: SharedKinesisState, dirty: Arc<AtomicBool>) -> Arc<Self> {
+        Arc::new(Self {
+            state,
+            dirty: Some(dirty),
+        })
+    }
+
+    fn mark_dirty(&self) {
+        if let Some(flag) = &self.dirty {
+            flag.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -33,6 +56,7 @@ impl KinesisDelivery for KinesisDeliveryImpl {
             .nth(4)
             .filter(|s| !s.is_empty())
             .unwrap_or(&default_id);
+        let mut delivered = false;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(target_account);
         if let Some(stream) = state.streams.get_mut(stream_name) {
@@ -59,6 +83,7 @@ impl KinesisDelivery for KinesisDeliveryImpl {
                     sequence_number = %sequence_number,
                     "Delivered record to Kinesis stream"
                 );
+                delivered = true;
             }
         } else {
             tracing::warn!(
@@ -66,6 +91,66 @@ impl KinesisDelivery for KinesisDeliveryImpl {
                 stream_name = %stream_name,
                 "Stream not found for Kinesis delivery"
             );
+        }
+        drop(accounts);
+        if delivered {
+            self.mark_dirty();
+        }
+    }
+}
+
+/// Persist `state` as a Kinesis snapshot. Shared by the background flusher and
+/// exposed for tests so the durability of cross-service deliveries can be
+/// verified with a real save+load round-trip. bug-audit 2026-06-15, 4.8.
+pub fn persist_kinesis_state(
+    state: &SharedKinesisState,
+    store: &Arc<dyn fakecloud_persistence::SnapshotStore>,
+) -> std::io::Result<()> {
+    let snapshot = crate::state::KinesisSnapshot {
+        schema_version: crate::state::KINESIS_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+        state: None,
+    };
+    let bytes = serde_json::to_vec(&snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    store.save(&bytes)
+}
+
+/// Background loop that persists cross-service Kinesis deliveries.
+///
+/// The `KinesisDelivery` trait is synchronous and cannot reach the async
+/// snapshot writer the request handler uses, so DynamoDB-streaming /
+/// Logs-subscription / EventBridge-target records were never checkpointed.
+/// This loop watches the shared `dirty` flag the delivery impl sets and
+/// persists whenever it flips, bounding the data-loss window to one poll
+/// interval. bug-audit 2026-06-15, 4.8.
+pub async fn run_delivery_flusher(
+    state: SharedKinesisState,
+    store: Arc<dyn fakecloud_persistence::SnapshotStore>,
+    dirty: Arc<AtomicBool>,
+    interval: std::time::Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        if dirty.swap(false, Ordering::AcqRel) {
+            let state = state.clone();
+            let store = store.clone();
+            let dirty = dirty.clone();
+            let join =
+                tokio::task::spawn_blocking(move || persist_kinesis_state(&state, &store)).await;
+            match join {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, "kinesis delivery flush failed; will retry");
+                    dirty.store(true, Ordering::Release);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "kinesis delivery flush task panicked");
+                    dirty.store(true, Ordering::Release);
+                }
+            }
         }
     }
 }
@@ -145,6 +230,54 @@ mod tests {
         let rec = &stream.shards[0].records[0];
         assert_eq!(rec.data, b"hello");
         assert_eq!(rec.partition_key, "pk-1");
+    }
+
+    // bug-audit 2026-06-15, 4.8: a cross-service Kinesis delivery (e.g. a
+    // DynamoDB streaming record) must survive a save+load round-trip. Before
+    // the dirty-flag + flusher, only the service handler persisted, so these
+    // records vanished on restart while direct PutRecord survived.
+    #[test]
+    fn delivered_record_survives_save_and_load() {
+        use fakecloud_persistence::SnapshotStore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stream = make_stream("durable", 1);
+        let arn = stream.stream_arn.clone();
+        let state = make_state(stream);
+        let dirty = Arc::new(AtomicBool::new(false));
+        let delivery = KinesisDeliveryImpl::with_dirty_flag(state.clone(), dirty.clone());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"ddb-change");
+        delivery.put_record(&arn, &encoded, "pk");
+        assert!(
+            dirty.load(Ordering::Acquire),
+            "delivery must mark state dirty for the flusher"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SnapshotStore> = Arc::new(
+            fakecloud_persistence::DiskSnapshotStore::new(dir.path().join("snapshot.json")),
+        );
+        super::persist_kinesis_state(&state, &store).unwrap();
+
+        let bytes = store.load().unwrap().expect("snapshot written");
+        let snapshot: crate::state::KinesisSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("multi-account snapshot");
+        let restored = accounts.default_ref();
+        let s = restored
+            .streams
+            .get("durable")
+            .expect("stream after reload");
+        let total: usize = s.shards.iter().map(|sh| sh.records.len()).sum();
+        assert_eq!(total, 1, "delivered record must survive restart");
+        assert_eq!(
+            s.shards
+                .iter()
+                .flat_map(|sh| &sh.records)
+                .next()
+                .unwrap()
+                .data,
+            b"ddb-change"
+        );
     }
 
     #[test]

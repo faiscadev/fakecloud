@@ -37,7 +37,7 @@ fn stream_sequence_counter() -> &'static AtomicU64 {
     })
 }
 
-fn next_stream_sequence() -> String {
+pub fn next_stream_sequence() -> String {
     format!(
         "{:021}",
         stream_sequence_counter().fetch_add(1, Ordering::Relaxed)
