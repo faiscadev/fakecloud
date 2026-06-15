@@ -19,7 +19,7 @@ use std::time::Duration;
 use k8s_openapi::api::core::v1::{Container, LocalObjectReference, Pod, PodSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-use fakecloud_k8s::{labels, names, K8sClient, K8sEnv};
+use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::{boot_command, BackendInitError, RunningInstance, RuntimeError};
 
@@ -36,6 +36,9 @@ pub(super) struct K8sInstances {
     client: K8sClient,
     /// Optional `imagePullSecrets` name for private registries.
     pull_secret: Option<String>,
+    /// Global + EC2-service node selector / tolerations / annotations
+    /// applied to every instance Pod.
+    pod_config: K8sPodConfig,
     /// Monotonic counter making each spawned Pod name unique. `Start`/`Reboot`
     /// recreate an instance's Pod while the previous one may still be
     /// `Terminating`; a fresh name avoids a name collision with it (the old
@@ -62,9 +65,11 @@ impl K8sInstances {
             self_url = %env.self_url,
             "K8s EC2 backend initialized"
         );
+        let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_EC2_K8S")?;
         Ok(Self {
             client,
             pull_secret: env.pull_secret,
+            pod_config,
             spawn_seq: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -80,7 +85,7 @@ impl K8sInstances {
     ) -> Result<RunningInstance, RuntimeError> {
         let seq = self.spawn_seq.fetch_add(1, Ordering::Relaxed);
         let pod_name = names::pod_name(POD_PREFIX, instance_id, &format!("{instance_id}-{seq}"));
-        let pod = build_instance_pod(InstancePodContext {
+        let mut pod = build_instance_pod(InstancePodContext {
             pod_name: &pod_name,
             namespace: self.client.namespace(),
             instance_id_label: self.client.instance_id(),
@@ -89,6 +94,10 @@ impl K8sInstances {
             user_data,
             pull_secret: self.pull_secret.as_deref(),
         });
+        // Operator-configured global + EC2-service scheduling / metadata.
+        // Every spawn (RunInstances, and Start/Reboot recreate) goes
+        // through here, so this covers them all.
+        self.pod_config.apply(&mut pod);
 
         self.client
             .create_pod(&pod)
@@ -270,5 +279,33 @@ mod tests {
         let pod = build_instance_pod(c);
         let secrets = pod.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(secrets[0].name, "reg-secret");
+    }
+
+    #[test]
+    fn pod_config_base_applies_to_built_pod() {
+        use std::collections::BTreeMap;
+        // The global + service env base (resolved at from_env) is applied
+        // to every instance Pod in spawn_pod; this asserts the apply
+        // contract over a built instance Pod.
+        let mut pod = build_instance_pod(ctx(None));
+        let cfg = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "ec2".to_string())]),
+            annotations: BTreeMap::from([("team".to_string(), "infra".to_string())]),
+            ..Default::default()
+        };
+        cfg.apply(&mut pod);
+        let spec = pod.spec.unwrap();
+        assert_eq!(
+            spec.node_selector.unwrap().get("pool").map(String::as_str),
+            Some("ec2")
+        );
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("infra")
+        );
     }
 }
