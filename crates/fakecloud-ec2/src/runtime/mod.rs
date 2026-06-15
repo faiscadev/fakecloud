@@ -20,7 +20,7 @@
 
 mod k8s;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -75,6 +75,11 @@ struct InstanceRecord {
     image: String,
     /// Base64 user-data to re-run on recreate, if any.
     user_data: Option<String>,
+    /// The instance's tags, captured at `RunInstances`. Reserved
+    /// `fakecloud-k8s/*` entries drive per-instance Pod scheduling and must
+    /// survive a k8s `Start`/`Reboot` recreate, so they're stored here
+    /// rather than re-read from the control plane.
+    tags: BTreeMap<String, String>,
 }
 
 /// The selected backing-container backend.
@@ -133,11 +138,12 @@ impl Ec2Runtime {
         &self,
         instance_id: &str,
         user_data: Option<&str>,
+        tags: &BTreeMap<String, String>,
     ) -> Result<RunningInstance, RuntimeError> {
         let image = default_image();
         let running = match &self.backend {
             InstanceBackend::Docker(d) => d.run_instance(instance_id, &image, user_data).await?,
-            InstanceBackend::K8s(k) => k.spawn_pod(instance_id, &image, user_data).await?,
+            InstanceBackend::K8s(k) => k.spawn_pod(instance_id, &image, user_data, tags).await?,
         };
         self.instances.write().insert(
             instance_id.to_string(),
@@ -145,6 +151,7 @@ impl Ec2Runtime {
                 handle: running.container_id.clone(),
                 image,
                 user_data: user_data.map(str::to_string),
+                tags: tags.clone(),
             },
         );
         Ok(running)
@@ -180,7 +187,12 @@ impl Ec2Runtime {
             }
             InstanceBackend::K8s(k) => {
                 let running = k
-                    .spawn_pod(instance_id, &record.image, record.user_data.as_deref())
+                    .spawn_pod(
+                        instance_id,
+                        &record.image,
+                        record.user_data.as_deref(),
+                        &record.tags,
+                    )
                     .await
                     .ok()?;
                 self.update_handle(instance_id, &running.container_id);
@@ -203,7 +215,12 @@ impl Ec2Runtime {
             InstanceBackend::K8s(k) => {
                 k.delete_pod(&record.handle).await;
                 let running = k
-                    .spawn_pod(instance_id, &record.image, record.user_data.as_deref())
+                    .spawn_pod(
+                        instance_id,
+                        &record.image,
+                        record.user_data.as_deref(),
+                        &record.tags,
+                    )
                     .await
                     .ok()?;
                 self.update_handle(instance_id, &running.container_id);

@@ -82,6 +82,7 @@ impl K8sInstances {
         instance_id: &str,
         image: &str,
         user_data: Option<&str>,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningInstance, RuntimeError> {
         let seq = self.spawn_seq.fetch_add(1, Ordering::Relaxed);
         let pod_name = names::pod_name(POD_PREFIX, instance_id, &format!("{instance_id}-{seq}"));
@@ -94,10 +95,14 @@ impl K8sInstances {
             user_data,
             pull_secret: self.pull_secret.as_deref(),
         });
-        // Operator-configured global + EC2-service scheduling / metadata.
-        // Every spawn (RunInstances, and Start/Reboot recreate) goes
-        // through here, so this covers them all.
-        self.pod_config.apply(&mut pod);
+        // Operator-configured global + EC2-service base, with this
+        // instance's reserved `fakecloud-k8s/*` tag overrides merged over it
+        // (per-instance wins). Every spawn (RunInstances, and Start/Reboot
+        // recreate) goes through here, so this covers them all.
+        self.pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(tags))
+            .apply(&mut pod);
 
         self.client
             .create_pod(&pod)
@@ -299,6 +304,43 @@ mod tests {
             spec.node_selector.unwrap().get("pool").map(String::as_str),
             Some("ec2")
         );
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("infra")
+        );
+    }
+
+    #[test]
+    fn pod_config_overrides_apply_to_built_pod() {
+        use std::collections::BTreeMap;
+        // Mirrors the spawn_pod wiring: EC2-service base merged with the
+        // instance's reserved-tag overrides, applied to the built Pod.
+        let mut pod = build_instance_pod(ctx(None));
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "ec2".to_string())]),
+            ..Default::default()
+        };
+        let tags = BTreeMap::from([
+            (
+                "fakecloud-k8s/node-selector".to_string(),
+                "pool=spot,disktype=ssd".to_string(),
+            ),
+            (
+                "fakecloud-k8s/annotations".to_string(),
+                "team=infra".to_string(),
+            ),
+        ]);
+        base.merge(K8sPodConfig::from_tags(&tags)).apply(&mut pod);
+
+        let spec = pod.spec.unwrap();
+        let sel = spec.node_selector.unwrap();
+        // Per-instance tag overrides the base on `pool`; base-only keys survive.
+        assert_eq!(sel.get("pool").map(String::as_str), Some("spot"));
+        assert_eq!(sel.get("disktype").map(String::as_str), Some("ssd"));
         assert_eq!(
             pod.metadata
                 .annotations

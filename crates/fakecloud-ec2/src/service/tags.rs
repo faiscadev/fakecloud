@@ -53,6 +53,33 @@ pub(crate) fn apply_tag_specifications(
     }
 }
 
+/// Read-only counterpart of `apply_tag_specifications`: collect the tags a
+/// request's `TagSpecification.N` blocks target at `resource_type` into a
+/// map, without writing them to state. Used by `RunInstances` to resolve an
+/// instance's reserved `fakecloud-k8s/*` scheduling tags before the backing
+/// Pod is built — create-time tags are only persisted to state after the
+/// container boots, so the boot path can't read them back from `Ec2State`.
+pub(crate) fn tag_specifications_for(
+    params: &HashMap<String, String>,
+    resource_type: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut i = 1usize;
+    loop {
+        let rt_key = format!("TagSpecification.{i}.ResourceType");
+        let Some(rt) = params.get(&rt_key) else {
+            break;
+        };
+        if rt == resource_type {
+            for (key, value) in parse_tag_pairs(params, &format!("TagSpecification.{i}.Tag")) {
+                out.insert(key, value.unwrap_or_default());
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 pub(crate) fn create_tags(
     svc: &Ec2Service,
     req: &AwsRequest,
