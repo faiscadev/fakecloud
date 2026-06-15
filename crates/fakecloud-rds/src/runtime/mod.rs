@@ -142,6 +142,28 @@ impl RdsRuntime {
         }
     }
 
+    /// Test-only runtime that needs no container daemon. Handler tests that
+    /// only assert the synchronously-stored "creating" placeholder (e.g.
+    /// create-time tag persistence) just need `require_runtime` to return
+    /// `Some`; the async container-start that follows fails harmlessly in
+    /// the background and never touches the asserted fields.
+    #[cfg(test)]
+    pub(crate) fn new_stub() -> Self {
+        Self {
+            cli: "true".to_string(),
+            containers: RwLock::new(HashMap::new()),
+            instance_id: format!("fakecloud-{}", std::process::id()),
+            net: HostNetworking {
+                host_alias: String::new(),
+                add_host_arg: None,
+                sibling_host: "127.0.0.1".to_string(),
+            },
+            server_port: 0,
+            image_cache: RwLock::new(HashMap::new()),
+            k8s: None,
+        }
+    }
+
     /// Sweep DB Pods orphaned by a previous process (k8s only; no-op on
     /// the Docker backend, which the shared container reaper handles).
     pub async fn reap_stale(&self) {

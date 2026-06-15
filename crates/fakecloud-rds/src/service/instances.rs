@@ -79,6 +79,11 @@ impl RdsService {
         let copy_tags_to_snapshot =
             parse_optional_bool(optional_query_param(request, "CopyTagsToSnapshot").as_deref())?;
         let db_cluster_identifier = optional_query_param(request, "DBClusterIdentifier");
+        // Tags supplied at create time. Real RDS applies these to the new
+        // instance immediately (they show up in DescribeDBInstances /
+        // ListTagsForResource without a follow-up AddTagsToResource call),
+        // so persist them on the instance rather than dropping them.
+        let request_tags = parse_tags(request)?;
 
         validate_create_request(
             &db_instance_identifier,
@@ -146,7 +151,7 @@ impl RdsService {
                 master_user_password: master_user_password.clone(),
                 container_id: String::new(),
                 host_port: 0,
-                tags: Vec::new(),
+                tags: request_tags,
                 read_replica_source_db_instance_identifier: None,
                 read_replica_db_instance_identifiers: Vec::new(),
                 vpc_security_group_ids,

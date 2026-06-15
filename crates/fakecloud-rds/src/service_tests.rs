@@ -2152,6 +2152,51 @@ async fn create_db_instance_unsupported_engine_errors() {
     assert!(svc.create_db_instance(&req).await.is_err());
 }
 
+#[tokio::test]
+async fn create_db_instance_persists_request_tags() {
+    // Real RDS applies create-time `Tags` immediately. The stub runtime
+    // lets the handler reach the synchronously-stored "creating"
+    // placeholder without a container daemon; the background start fails
+    // harmlessly and never touches `tags`.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "tagged-db"),
+            ("Engine", "postgres"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "prod"),
+            ("Tags.Tag.2.Key", "owner"),
+            ("Tags.Tag.2.Value", "platform"),
+        ],
+    );
+    svc.create_db_instance(&req).await.expect("create ok");
+
+    let accounts = svc.state.read();
+    let state = accounts.default_ref();
+    let inst = state
+        .instances
+        .get("tagged-db")
+        .expect("placeholder stored");
+    assert_eq!(
+        inst.tags,
+        vec![
+            RdsTag {
+                key: "env".to_string(),
+                value: "prod".to_string()
+            },
+            RdsTag {
+                key: "owner".to_string(),
+                value: "platform".to_string()
+            },
+        ]
+    );
+}
+
 // ── restore_db_instance_from_db_snapshot ──
 
 #[tokio::test]
