@@ -231,6 +231,7 @@ impl RdsService {
             let snapshot_store = self.snapshot_store.clone();
             let snapshot_lock = self.snapshot_lock.clone();
             let cluster_id_for_attach = db_cluster_identifier.clone();
+            let instance_tags = instance.tags.clone();
             tokio::spawn(async move {
                 match runtime
                     .ensure_postgres(
@@ -242,6 +243,7 @@ impl RdsService {
                         &logical_db_name_task,
                         &account_id,
                         &region,
+                        &instance_tags,
                     )
                     .await
                 {

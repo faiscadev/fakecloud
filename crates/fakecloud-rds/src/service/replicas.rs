@@ -101,6 +101,9 @@ impl RdsService {
                 &db_name,
                 &request.account_id,
                 &request.region,
+                // A read replica inherits the source instance's Pod
+                // scheduling (no separate replica tag input here).
+                &source_instance.tags,
             )
             .await
         {

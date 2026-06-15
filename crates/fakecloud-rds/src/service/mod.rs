@@ -361,6 +361,7 @@ impl RdsService {
             username: String,
             password: String,
             db_name: String,
+            tags: Vec<crate::state::RdsTag>,
         }
 
         let pending: Vec<Pending> = {
@@ -402,6 +403,7 @@ impl RdsService {
                             .db_name
                             .clone()
                             .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                        tags: inst.tags.clone(),
                     });
                 }
             }
@@ -433,6 +435,7 @@ impl RdsService {
                         &p.db_name,
                         &p.account_id,
                         &p.region,
+                        &p.tags,
                     )
                     .await
                 {
@@ -594,6 +597,7 @@ impl RdsService {
                         .unwrap_or(default_db_name(&instance.engine)),
                     &request.account_id,
                     &request.region,
+                    &instance.tags,
                 )
                 .await
             {

@@ -29,7 +29,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use parking_lot::RwLock;
 use tokio_postgres::NoTls;
 
-use fakecloud_k8s::{labels, names, K8sClient, K8sEnv};
+use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::{bridge_image_tag, BackendInitError, RunningDbContainer, RuntimeError};
 
@@ -67,6 +67,10 @@ pub(super) struct K8sDb {
     /// fakecloud.
     self_url: String,
     pull_secret: Option<String>,
+    /// Global + RDS-service node selector / tolerations / annotations
+    /// applied to every DB Pod. Per-instance tag overrides are merged over
+    /// this when the Pod is built.
+    pod_config: K8sPodConfig,
     /// Built Pod spec + port per instance id, so a reboot can recreate the
     /// Pod without re-deriving the engine config.
     specs: Arc<RwLock<HashMap<String, (Pod, u16)>>>,
@@ -84,6 +88,7 @@ impl std::fmt::Debug for K8sDb {
 impl K8sDb {
     pub(super) async fn from_env(server_port: u16) -> Result<Self, BackendInitError> {
         let env = K8sEnv::from_env(server_port)?;
+        let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_RDS_K8S")?;
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| BackendInitError::Connect(e.to_string()))?;
@@ -96,6 +101,7 @@ impl K8sDb {
             client,
             self_url: env.self_url,
             pull_secret: env.pull_secret,
+            pod_config,
             specs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -111,6 +117,7 @@ impl K8sDb {
         db_name: &str,
         account_id: &str,
         region: &str,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningDbContainer, RuntimeError> {
         let cfg = engine_config(
             &self.self_url,
@@ -123,7 +130,7 @@ impl K8sDb {
             region,
         )?;
         let pod_name = names::pod_name(POD_PREFIX, db_instance_identifier, db_instance_identifier);
-        let pod = build_pod(
+        let mut pod = build_pod(
             self.client.namespace(),
             self.client.instance_id(),
             self.pull_secret.as_deref(),
@@ -131,6 +138,13 @@ impl K8sDb {
             db_instance_identifier,
             &cfg,
         );
+        // Global + service base with this instance's reserved-tag
+        // overrides merged over it (per-instance tags win). Applied before
+        // the spec is cached so reboots reuse the same scheduling.
+        self.pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(tags))
+            .apply(&mut pod);
 
         self.specs
             .write()
@@ -785,6 +799,45 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(sc.privileged, Some(true));
+    }
+
+    #[test]
+    fn pod_config_overrides_apply_to_built_pod() {
+        use std::collections::BTreeMap;
+        // Mirrors the `ensure` wiring: service base merged with the
+        // instance's reserved-tag overrides, applied to the built Pod.
+        let cfg =
+            engine_config("http://fc:4566", "postgres", "16", "u", "p", "db", "0", "r").unwrap();
+        let mut pod = build_pod("ns", "i", None, "fakecloud-rds-x", "db1", &cfg);
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "db".to_string())]),
+            ..Default::default()
+        };
+        let tags = BTreeMap::from([
+            (
+                "fakecloud-k8s/node-selector".to_string(),
+                "pool=spot,disktype=ssd".to_string(),
+            ),
+            (
+                "fakecloud-k8s/annotations".to_string(),
+                "team=data".to_string(),
+            ),
+        ]);
+        base.merge(K8sPodConfig::from_tags(&tags)).apply(&mut pod);
+
+        let spec = pod.spec.unwrap();
+        let sel = spec.node_selector.unwrap();
+        // Per-instance tag overrides the base on `pool`; base-only keys survive.
+        assert_eq!(sel.get("pool").map(String::as_str), Some("spot"));
+        assert_eq!(sel.get("disktype").map(String::as_str), Some("ssd"));
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("data")
+        );
     }
 
     #[test]
