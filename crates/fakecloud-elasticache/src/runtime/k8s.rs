@@ -22,7 +22,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use parking_lot::RwLock;
 
-use fakecloud_k8s::{labels, names, K8sClient, K8sEnv};
+use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::{BackendInitError, CacheEngineKind, CacheExec, RunningCacheContainer, RuntimeError};
 
@@ -50,6 +50,9 @@ pub(super) struct K8sCache {
     internal_token: String,
     /// Optional `imagePullSecrets` name for private registries.
     pull_secret: Option<String>,
+    /// Global + ElastiCache-service node selector / tolerations /
+    /// annotations applied to every cache Pod.
+    pod_config: K8sPodConfig,
     pending_rdb: PendingRdb,
 }
 
@@ -68,6 +71,7 @@ impl K8sCache {
         internal_token: String,
     ) -> Result<Self, BackendInitError> {
         let env = K8sEnv::from_env(server_port)?;
+        let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_ELASTICACHE_K8S")?;
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| BackendInitError::Connect(e.to_string()))?;
@@ -81,6 +85,7 @@ impl K8sCache {
             self_url: env.self_url,
             internal_token,
             pull_secret: env.pull_secret,
+            pod_config,
             pending_rdb: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -132,7 +137,7 @@ impl K8sCache {
             None
         };
 
-        let pod = build_cache_pod(CachePodContext {
+        let mut pod = build_cache_pod(CachePodContext {
             pod_name: &pod_name,
             namespace: self.client.namespace(),
             instance_id: self.client.instance_id(),
@@ -143,6 +148,10 @@ impl K8sCache {
             internal_token: &self.internal_token,
             pull_secret: self.pull_secret.as_deref(),
         });
+        // Operator-configured global + ElastiCache-service scheduling /
+        // metadata. Every spawn path (create, serverless, replication,
+        // recovery, reboot) funnels through here, so this covers them all.
+        self.pod_config.apply(&mut pod);
 
         let result = self.launch(&pod, &pod_name, port, engine).await;
         // Whatever happened, the staged RDB is no longer needed: a
@@ -468,5 +477,33 @@ mod tests {
         let pod = build_cache_pod(c);
         let secrets = pod.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(secrets[0].name, "reg-secret");
+    }
+
+    #[test]
+    fn pod_config_base_applies_to_built_pod() {
+        use std::collections::BTreeMap;
+        // The global + service env base (resolved at from_env) is applied
+        // to every cache Pod in spawn_pod_bytes; this asserts the apply
+        // contract over a built cache Pod.
+        let mut pod = build_cache_pod(ctx(None));
+        let cfg = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "cache".to_string())]),
+            annotations: BTreeMap::from([("team".to_string(), "platform".to_string())]),
+            ..Default::default()
+        };
+        cfg.apply(&mut pod);
+        let spec = pod.spec.unwrap();
+        assert_eq!(
+            spec.node_selector.unwrap().get("pool").map(String::as_str),
+            Some("cache")
+        );
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("platform")
+        );
     }
 }

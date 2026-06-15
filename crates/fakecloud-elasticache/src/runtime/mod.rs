@@ -89,6 +89,8 @@ pub enum RuntimeError {
 pub enum BackendInitError {
     #[error(transparent)]
     Env(#[from] fakecloud_k8s::K8sEnvError),
+    #[error(transparent)]
+    PodConfig(#[from] fakecloud_k8s::K8sPodConfigError),
     #[error("failed to connect to the Kubernetes cluster: {0}")]
     Connect(String),
 }
