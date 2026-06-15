@@ -265,8 +265,14 @@ impl ElastiCacheService {
             let account_id = request.account_id.clone();
             let id = replication_group_id.clone();
             let cluster_enabled_flag = cluster_enabled;
+            // Reserved `fakecloud-k8s/*` scheduling tags from the create
+            // request (ignored on the Docker backend).
+            let pod_tags: std::collections::BTreeMap<String, String> =
+                tags.iter().cloned().collect();
             tokio::spawn(async move {
-                let result = runtime.ensure_redis(&id, rdb_path.as_deref()).await;
+                let result = runtime
+                    .ensure_redis(&id, rdb_path.as_deref(), &pod_tags)
+                    .await;
                 let mut stop_container = false;
                 {
                     let mut accounts = state.write();

@@ -22,7 +22,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use parking_lot::RwLock;
 
-use fakecloud_k8s::{labels, names, K8sClient, K8sEnv};
+use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::{BackendInitError, CacheEngineKind, CacheExec, RunningCacheContainer, RuntimeError};
 
@@ -50,6 +50,9 @@ pub(super) struct K8sCache {
     internal_token: String,
     /// Optional `imagePullSecrets` name for private registries.
     pull_secret: Option<String>,
+    /// Global + ElastiCache-service node selector / tolerations /
+    /// annotations applied to every cache Pod.
+    pod_config: K8sPodConfig,
     pending_rdb: PendingRdb,
 }
 
@@ -68,6 +71,7 @@ impl K8sCache {
         internal_token: String,
     ) -> Result<Self, BackendInitError> {
         let env = K8sEnv::from_env(server_port)?;
+        let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_ELASTICACHE_K8S")?;
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| BackendInitError::Connect(e.to_string()))?;
@@ -81,6 +85,7 @@ impl K8sCache {
             self_url: env.self_url,
             internal_token,
             pull_secret: env.pull_secret,
+            pod_config,
             pending_rdb: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -96,6 +101,7 @@ impl K8sCache {
         resource_id: &str,
         engine: CacheEngineKind,
         rdb_path: Option<&str>,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let rdb = match rdb_path {
             Some(path) => Some(tokio::fs::read(path).await.map_err(|e| {
@@ -103,7 +109,7 @@ impl K8sCache {
             })?),
             None => None,
         };
-        self.spawn_pod_bytes(resource_id, engine, rdb).await
+        self.spawn_pod_bytes(resource_id, engine, rdb, tags).await
     }
 
     async fn spawn_pod_bytes(
@@ -111,6 +117,7 @@ impl K8sCache {
         resource_id: &str,
         engine: CacheEngineKind,
         rdb: Option<Vec<u8>>,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let pod_name = names::pod_name(POD_PREFIX, resource_id, resource_id);
         let port = engine.port();
@@ -132,7 +139,7 @@ impl K8sCache {
             None
         };
 
-        let pod = build_cache_pod(CachePodContext {
+        let mut pod = build_cache_pod(CachePodContext {
             pod_name: &pod_name,
             namespace: self.client.namespace(),
             instance_id: self.client.instance_id(),
@@ -143,6 +150,15 @@ impl K8sCache {
             internal_token: &self.internal_token,
             pull_secret: self.pull_secret.as_deref(),
         });
+        // Operator-configured global + ElastiCache-service base, with this
+        // resource's reserved `fakecloud-k8s/*` tag overrides merged over it
+        // (per-instance wins). Every spawn path (create, serverless,
+        // replication, recovery, reboot) funnels through here, so this
+        // covers them all.
+        self.pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(tags))
+            .apply(&mut pod);
 
         let result = self.launch(&pod, &pod_name, port, engine).await;
         // Whatever happened, the staged RDB is no longer needed: a
@@ -256,6 +272,7 @@ impl K8sCache {
         &self,
         resource_id: &str,
         running: &RunningCacheContainer,
+        tags: &std::collections::BTreeMap<String, String>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         let preserved = if matches!(running.engine, CacheEngineKind::Redis) {
             self.snapshot_live_rdb(&running.container_id).await
@@ -263,7 +280,7 @@ impl K8sCache {
             None
         };
         self.client.delete_pod(&running.container_id).await;
-        self.spawn_pod_bytes(resource_id, running.engine, preserved)
+        self.spawn_pod_bytes(resource_id, running.engine, preserved, tags)
             .await
     }
 
@@ -468,5 +485,71 @@ mod tests {
         let pod = build_cache_pod(c);
         let secrets = pod.spec.unwrap().image_pull_secrets.unwrap();
         assert_eq!(secrets[0].name, "reg-secret");
+    }
+
+    #[test]
+    fn pod_config_base_applies_to_built_pod() {
+        use std::collections::BTreeMap;
+        // The global + service env base (resolved at from_env) is applied
+        // to every cache Pod in spawn_pod_bytes; this asserts the apply
+        // contract over a built cache Pod.
+        let mut pod = build_cache_pod(ctx(None));
+        let cfg = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "cache".to_string())]),
+            annotations: BTreeMap::from([("team".to_string(), "platform".to_string())]),
+            ..Default::default()
+        };
+        cfg.apply(&mut pod);
+        let spec = pod.spec.unwrap();
+        assert_eq!(
+            spec.node_selector.unwrap().get("pool").map(String::as_str),
+            Some("cache")
+        );
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("platform")
+        );
+    }
+
+    #[test]
+    fn pod_config_overrides_apply_to_built_pod() {
+        use std::collections::BTreeMap;
+        // Mirrors the spawn_pod_bytes wiring: ElastiCache-service base
+        // merged with the resource's reserved-tag overrides, applied to the
+        // built cache Pod.
+        let mut pod = build_cache_pod(ctx(None));
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "cache".to_string())]),
+            ..Default::default()
+        };
+        let tags = BTreeMap::from([
+            (
+                "fakecloud-k8s/node-selector".to_string(),
+                "pool=spot,disktype=ssd".to_string(),
+            ),
+            (
+                "fakecloud-k8s/annotations".to_string(),
+                "team=data".to_string(),
+            ),
+        ]);
+        base.merge(K8sPodConfig::from_tags(&tags)).apply(&mut pod);
+
+        let spec = pod.spec.unwrap();
+        let sel = spec.node_selector.unwrap();
+        // Per-instance tag overrides the base on `pool`; base-only keys survive.
+        assert_eq!(sel.get("pool").map(String::as_str), Some("spot"));
+        assert_eq!(sel.get("disktype").map(String::as_str), Some("ssd"));
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("data")
+        );
     }
 }

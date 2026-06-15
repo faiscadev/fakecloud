@@ -284,10 +284,25 @@ impl ElastiCacheService {
             let snapshot_store = self.snapshot_store.clone();
             let snapshot_lock = self.snapshot_lock.clone();
             tokio::spawn(async move {
+                // Re-derive this cluster's reserved `fakecloud-k8s/*`
+                // scheduling tags from persisted state so the recreated Pod
+                // keeps its node placement across a restart.
+                let pod_tags: std::collections::BTreeMap<String, String> = {
+                    let accounts = state.read();
+                    accounts
+                        .get(&c.account_id)
+                        .and_then(|s| {
+                            s.cache_clusters
+                                .get(&c.id)
+                                .and_then(|cl| s.tags.get(&cl.arn))
+                        })
+                        .map(|t| t.iter().cloned().collect())
+                        .unwrap_or_default()
+                };
                 let result = if c.engine == "memcached" {
-                    runtime.ensure_memcached(&c.id).await
+                    runtime.ensure_memcached(&c.id, &pod_tags).await
                 } else {
-                    runtime.ensure_redis(&c.id, None).await
+                    runtime.ensure_redis(&c.id, None, &pod_tags).await
                 };
                 match result {
                     Ok(running) => {
@@ -332,10 +347,24 @@ impl ElastiCacheService {
             let snapshot_store = self.snapshot_store.clone();
             let snapshot_lock = self.snapshot_lock.clone();
             tokio::spawn(async move {
+                // Re-derive this group's reserved `fakecloud-k8s/*`
+                // scheduling tags from persisted state for the recreated Pod.
+                let pod_tags: std::collections::BTreeMap<String, String> = {
+                    let accounts = state.read();
+                    accounts
+                        .get(&r.account_id)
+                        .and_then(|s| {
+                            s.replication_groups
+                                .get(&r.id)
+                                .and_then(|rg| s.tags.get(&rg.arn))
+                        })
+                        .map(|t| t.iter().cloned().collect())
+                        .unwrap_or_default()
+                };
                 let result = if r.engine == "memcached" {
-                    runtime.ensure_memcached(&r.id).await
+                    runtime.ensure_memcached(&r.id, &pod_tags).await
                 } else {
-                    runtime.ensure_redis(&r.id, None).await
+                    runtime.ensure_redis(&r.id, None, &pod_tags).await
                 };
                 match result {
                     Ok(running) => {
@@ -379,7 +408,21 @@ impl ElastiCacheService {
             let snapshot_store = self.snapshot_store.clone();
             let snapshot_lock = self.snapshot_lock.clone();
             tokio::spawn(async move {
-                match runtime.ensure_redis(&s.name, None).await {
+                // Re-derive this serverless cache's reserved `fakecloud-k8s/*`
+                // scheduling tags from persisted state for the recreated Pod.
+                let pod_tags: std::collections::BTreeMap<String, String> = {
+                    let accounts = state.read();
+                    accounts
+                        .get(&s.account_id)
+                        .and_then(|st| {
+                            st.serverless_caches
+                                .get(&s.name)
+                                .and_then(|c| st.tags.get(&c.arn))
+                        })
+                        .map(|t| t.iter().cloned().collect())
+                        .unwrap_or_default()
+                };
+                match runtime.ensure_redis(&s.name, None, &pod_tags).await {
                     Ok(running) => {
                         {
                             let mut accounts = state.write();
