@@ -234,6 +234,144 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
 /// unchanged. The qualifier (version or alias) is dropped because most
 /// callers look up the function by name and resolve qualifier
 /// separately.
+/// Map a dispatched Lambda operation name (as returned by
+/// [`LambdaService::resolve_action`]) to its AWS IAM action string.
+///
+/// Lambda is `iam_enforceable`, so every op the dispatcher can route MUST
+/// resolve here — an op that returned `None` would run with no policy
+/// evaluation at all (a silent auth bypass). The mapping is driven from
+/// the same op-name strings the dispatcher uses so the two can never
+/// drift; `iam_action_name_for_exhaustiveness` (see tests) asserts every
+/// dispatchable op resolves to `Some`.
+///
+/// Almost all IAM actions equal the operation name. The exceptions come
+/// straight from the Smithy model's `aws.iam#iamAction.name` overrides:
+///   - `Invoke`                     -> `lambda:InvokeFunction`
+///   - `InvokeWithResponseStream`   -> `lambda:InvokeFunction`
+///   - `GetLayerVersionByArn`       -> `lambda:GetLayerVersion`
+pub(crate) fn iam_action_name_for(op: &str) -> Option<&'static str> {
+    let action = match op {
+        // --- Smithy IAM-action name overrides ---
+        "Invoke" => "InvokeFunction",
+        "InvokeWithResponseStream" => "InvokeFunction",
+        "GetLayerVersionByArn" => "GetLayerVersion",
+
+        // --- functions ---
+        "CreateFunction" => "CreateFunction",
+        "ListFunctions" => "ListFunctions",
+        "GetFunction" => "GetFunction",
+        "DeleteFunction" => "DeleteFunction",
+        "InvokeAsync" => "InvokeAsync",
+        "UpdateFunctionCode" => "UpdateFunctionCode",
+        "UpdateFunctionConfiguration" => "UpdateFunctionConfiguration",
+        "GetFunctionConfiguration" => "GetFunctionConfiguration",
+        "PublishVersion" => "PublishVersion",
+        "ListVersionsByFunction" => "ListVersionsByFunction",
+        "GetAccountSettings" => "GetAccountSettings",
+
+        // --- resource policy / permissions ---
+        "AddPermission" => "AddPermission",
+        "RemovePermission" => "RemovePermission",
+        "GetPolicy" => "GetPolicy",
+
+        // --- aliases ---
+        "CreateAlias" => "CreateAlias",
+        "GetAlias" => "GetAlias",
+        "UpdateAlias" => "UpdateAlias",
+        "DeleteAlias" => "DeleteAlias",
+        "ListAliases" => "ListAliases",
+
+        // --- concurrency ---
+        "PutFunctionConcurrency" => "PutFunctionConcurrency",
+        "GetFunctionConcurrency" => "GetFunctionConcurrency",
+        "DeleteFunctionConcurrency" => "DeleteFunctionConcurrency",
+        "PutProvisionedConcurrencyConfig" => "PutProvisionedConcurrencyConfig",
+        "GetProvisionedConcurrencyConfig" => "GetProvisionedConcurrencyConfig",
+        "DeleteProvisionedConcurrencyConfig" => "DeleteProvisionedConcurrencyConfig",
+        "ListProvisionedConcurrencyConfigs" => "ListProvisionedConcurrencyConfigs",
+
+        // --- event invoke config ---
+        "PutFunctionEventInvokeConfig" => "PutFunctionEventInvokeConfig",
+        "GetFunctionEventInvokeConfig" => "GetFunctionEventInvokeConfig",
+        "UpdateFunctionEventInvokeConfig" => "UpdateFunctionEventInvokeConfig",
+        "DeleteFunctionEventInvokeConfig" => "DeleteFunctionEventInvokeConfig",
+        "ListFunctionEventInvokeConfigs" => "ListFunctionEventInvokeConfigs",
+
+        // --- runtime / scaling / recursion config ---
+        "PutRuntimeManagementConfig" => "PutRuntimeManagementConfig",
+        "GetRuntimeManagementConfig" => "GetRuntimeManagementConfig",
+        "PutFunctionScalingConfig" => "PutFunctionScalingConfig",
+        "GetFunctionScalingConfig" => "GetFunctionScalingConfig",
+        "PutFunctionRecursionConfig" => "PutFunctionRecursionConfig",
+        "GetFunctionRecursionConfig" => "GetFunctionRecursionConfig",
+
+        // --- function URL config ---
+        "CreateFunctionUrlConfig" => "CreateFunctionUrlConfig",
+        "GetFunctionUrlConfig" => "GetFunctionUrlConfig",
+        "UpdateFunctionUrlConfig" => "UpdateFunctionUrlConfig",
+        "DeleteFunctionUrlConfig" => "DeleteFunctionUrlConfig",
+        "ListFunctionUrlConfigs" => "ListFunctionUrlConfigs",
+
+        // --- event source mappings ---
+        "CreateEventSourceMapping" => "CreateEventSourceMapping",
+        "ListEventSourceMappings" => "ListEventSourceMappings",
+        "GetEventSourceMapping" => "GetEventSourceMapping",
+        "UpdateEventSourceMapping" => "UpdateEventSourceMapping",
+        "DeleteEventSourceMapping" => "DeleteEventSourceMapping",
+
+        // --- layers ---
+        "PublishLayerVersion" => "PublishLayerVersion",
+        "ListLayers" => "ListLayers",
+        "ListLayerVersions" => "ListLayerVersions",
+        "GetLayerVersion" => "GetLayerVersion",
+        "DeleteLayerVersion" => "DeleteLayerVersion",
+        "GetLayerVersionPolicy" => "GetLayerVersionPolicy",
+        "AddLayerVersionPermission" => "AddLayerVersionPermission",
+        "RemoveLayerVersionPermission" => "RemoveLayerVersionPermission",
+
+        // --- code signing config ---
+        "CreateCodeSigningConfig" => "CreateCodeSigningConfig",
+        "GetCodeSigningConfig" => "GetCodeSigningConfig",
+        "UpdateCodeSigningConfig" => "UpdateCodeSigningConfig",
+        "DeleteCodeSigningConfig" => "DeleteCodeSigningConfig",
+        "ListCodeSigningConfigs" => "ListCodeSigningConfigs",
+        "PutFunctionCodeSigningConfig" => "PutFunctionCodeSigningConfig",
+        "GetFunctionCodeSigningConfig" => "GetFunctionCodeSigningConfig",
+        "DeleteFunctionCodeSigningConfig" => "DeleteFunctionCodeSigningConfig",
+        "ListFunctionsByCodeSigningConfig" => "ListFunctionsByCodeSigningConfig",
+
+        // --- tags ---
+        "TagResource" => "TagResource",
+        "UntagResource" => "UntagResource",
+        "ListTags" => "ListTags",
+
+        // --- capacity providers (Lambda Workflows) ---
+        "CreateCapacityProvider" => "CreateCapacityProvider",
+        "GetCapacityProvider" => "GetCapacityProvider",
+        "ListCapacityProviders" => "ListCapacityProviders",
+        "UpdateCapacityProvider" => "UpdateCapacityProvider",
+        "DeleteCapacityProvider" => "DeleteCapacityProvider",
+        "ListFunctionVersionsByCapacityProvider" => "ListFunctionVersionsByCapacityProvider",
+
+        // --- durable executions ---
+        // The Smithy model carries no `aws.iam#iamAction` annotation for
+        // these preview ops, so the IAM action equals the op name (AWS's
+        // default convention when no override is present).
+        "GetDurableExecution" => "GetDurableExecution",
+        "GetDurableExecutionHistory" => "GetDurableExecutionHistory",
+        "GetDurableExecutionState" => "GetDurableExecutionState",
+        "ListDurableExecutionsByFunction" => "ListDurableExecutionsByFunction",
+        "CheckpointDurableExecution" => "CheckpointDurableExecution",
+        "StopDurableExecution" => "StopDurableExecution",
+        "SendDurableExecutionCallbackSuccess" => "SendDurableExecutionCallbackSuccess",
+        "SendDurableExecutionCallbackFailure" => "SendDurableExecutionCallbackFailure",
+        "SendDurableExecutionCallbackHeartbeat" => "SendDurableExecutionCallbackHeartbeat",
+
+        _ => return None,
+    };
+    Some(action)
+}
+
 pub(crate) fn normalize_function_name(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -1349,35 +1487,67 @@ impl AwsService for LambdaService {
         // `handle()`. Reuse the same resolver so the two can never
         // drift.
         let (action_str, resource_name) = Self::resolve_action(request)?;
-        let action: &'static str = match action_str {
-            "CreateFunction" => "CreateFunction",
-            "ListFunctions" => "ListFunctions",
-            "GetFunction" => "GetFunction",
-            "DeleteFunction" => "DeleteFunction",
-            "Invoke" => "InvokeFunction",
-            "InvokeWithResponseStream" => "InvokeFunctionWithResponseStream",
-            "PublishVersion" => "PublishVersion",
-            "AddPermission" => "AddPermission",
-            "RemovePermission" => "RemovePermission",
-            "GetPolicy" => "GetPolicy",
-            "CreateEventSourceMapping" => "CreateEventSourceMapping",
-            "ListEventSourceMappings" => "ListEventSourceMappings",
-            "GetEventSourceMapping" => "GetEventSourceMapping",
-            "DeleteEventSourceMapping" => "DeleteEventSourceMapping",
-            _ => return None,
-        };
+        // Every op that `resolve_action` (and therefore `handle`) can
+        // dispatch MUST map to an IAM action here. Lambda is
+        // `iam_enforceable`, so an unmapped op returning `None` would run
+        // with zero policy evaluation — a silent auth bypass. We drive
+        // this from the same op-name strings the dispatcher uses so the
+        // two can't drift; the exhaustiveness test asserts every
+        // dispatchable op resolves to `Some`.
+        let action = iam_action_name_for(action_str)?;
         let accounts = self.state.read();
         let empty = LambdaState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let resource = match action {
+        let resource = match action_str {
+            // Function-scoped ops: the path identifier is a function name
+            // (or ARN/partial-ARN). Normalize it to a bare name and build
+            // the canonical function ARN so policy evaluation matches the
+            // real function regardless of how the caller spelled it.
             "GetFunction"
             | "DeleteFunction"
-            | "InvokeFunction"
-            | "InvokeFunctionWithResponseStream"
+            | "Invoke"
+            | "InvokeAsync"
+            | "InvokeWithResponseStream"
             | "PublishVersion"
+            | "ListVersionsByFunction"
             | "AddPermission"
             | "RemovePermission"
-            | "GetPolicy" => {
+            | "GetPolicy"
+            | "GetFunctionConfiguration"
+            | "UpdateFunctionConfiguration"
+            | "UpdateFunctionCode"
+            | "CreateAlias"
+            | "GetAlias"
+            | "UpdateAlias"
+            | "DeleteAlias"
+            | "ListAliases"
+            | "PutFunctionConcurrency"
+            | "GetFunctionConcurrency"
+            | "DeleteFunctionConcurrency"
+            | "PutProvisionedConcurrencyConfig"
+            | "GetProvisionedConcurrencyConfig"
+            | "DeleteProvisionedConcurrencyConfig"
+            | "ListProvisionedConcurrencyConfigs"
+            | "PutFunctionEventInvokeConfig"
+            | "GetFunctionEventInvokeConfig"
+            | "UpdateFunctionEventInvokeConfig"
+            | "DeleteFunctionEventInvokeConfig"
+            | "ListFunctionEventInvokeConfigs"
+            | "PutRuntimeManagementConfig"
+            | "GetRuntimeManagementConfig"
+            | "PutFunctionScalingConfig"
+            | "GetFunctionScalingConfig"
+            | "PutFunctionRecursionConfig"
+            | "GetFunctionRecursionConfig"
+            | "PutFunctionCodeSigningConfig"
+            | "GetFunctionCodeSigningConfig"
+            | "DeleteFunctionCodeSigningConfig"
+            | "CreateFunctionUrlConfig"
+            | "GetFunctionUrlConfig"
+            | "UpdateFunctionUrlConfig"
+            | "DeleteFunctionUrlConfig"
+            | "ListFunctionUrlConfigs"
+            | "ListDurableExecutionsByFunction" => {
                 let raw = resource_name.unwrap_or_default();
                 if raw.is_empty() {
                     "*".to_string()

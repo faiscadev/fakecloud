@@ -4443,6 +4443,27 @@ fn create_open_id_connect_provider_missing_url_emits_invalid_input() {
 }
 
 #[test]
+fn get_security_token_service_preferences_is_iam_enforceable() {
+    // §5.4: GetSecurityTokenServicePreferences was dispatched but absent
+    // from SUPPORTED_ACTIONS, so iam_action_for returned None and the op
+    // ran with zero policy evaluation under --iam strict. Its sibling
+    // Set... was already enforced — assert both now resolve.
+    let svc = make_service();
+    let get_req = make_request("GetSecurityTokenServicePreferences", vec![]);
+    let action = svc
+        .iam_action_for(&get_req)
+        .expect("GetSecurityTokenServicePreferences must be IAM-enforced");
+    assert_eq!(action.service, "iam");
+    assert_eq!(action.action, "GetSecurityTokenServicePreferences");
+
+    let set_req = make_request("SetSecurityTokenServicePreferences", vec![]);
+    assert_eq!(
+        svc.iam_action_for(&set_req).map(|a| a.action),
+        Some("SetSecurityTokenServicePreferences")
+    );
+}
+
+#[test]
 fn create_virtual_mfa_device_bad_path_emits_invalid_input() {
     let svc = make_service();
     let err = svc

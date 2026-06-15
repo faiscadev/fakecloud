@@ -979,6 +979,89 @@ mod tests {
         assert!(body.contains("<AccessKeyId>"));
     }
 
+    #[tokio::test]
+    async fn assume_role_with_web_identity_nonexistent_role_denied() {
+        // §5.2: a missing role must NOT fall through to credential minting.
+        // AWS returns AccessDenied for AssumeRoleWithWebIdentity on a role
+        // it cannot resolve.
+        let (svc, _state) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoleWithWebIdentity",
+            vec![
+                ("RoleArn", "arn:aws:iam::123456789012:role/does-not-exist"),
+                ("RoleSessionName", "web-session"),
+                ("WebIdentityToken", "fake-jwt-token"),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied for phantom role, got success"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(
+            format!("{err:?}").contains("AccessDenied"),
+            "expected AccessDenied, got {err:?}"
+        );
+    }
+
+    // ── AssumeRoleWithSAML ──
+
+    fn make_saml_assertion() -> String {
+        use base64::Engine;
+        // Minimal SAML XML carrying a RoleSessionName attribute value.
+        let xml = r#"<saml:Assertion><saml:AttributeStatement><saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><saml:AttributeValue>saml-user</saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#;
+        base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_saml_existing_role_succeeds() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/idp"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
+        let assertion = make_saml_assertion();
+        let req = sts_request(
+            "AssumeRoleWithSAML",
+            vec![
+                ("RoleArn", &role_arn),
+                (
+                    "PrincipalArn",
+                    "arn:aws:iam::123456789012:saml-provider/idp",
+                ),
+                ("SAMLAssertion", &assertion),
+            ],
+        );
+        let resp = svc.handle(req).await.expect("existing role should succeed");
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<AccessKeyId>"));
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_saml_nonexistent_role_denied() {
+        // §5.2: a missing role must NOT fall through to credential minting.
+        let (svc, _state) = make_sts_service();
+        let assertion = make_saml_assertion();
+        let req = sts_request(
+            "AssumeRoleWithSAML",
+            vec![
+                ("RoleArn", "arn:aws:iam::123456789012:role/does-not-exist"),
+                (
+                    "PrincipalArn",
+                    "arn:aws:iam::123456789012:saml-provider/idp",
+                ),
+                ("SAMLAssertion", &assertion),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied for phantom role, got success"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(
+            format!("{err:?}").contains("AccessDenied"),
+            "expected AccessDenied, got {err:?}"
+        );
+    }
+
     // ── GetSessionToken ──
 
     #[tokio::test]
