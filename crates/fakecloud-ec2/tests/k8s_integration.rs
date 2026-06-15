@@ -177,15 +177,16 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
     let stopped = poll_until(120, || pod_deleting_or_gone(&api, &pod)).await;
     assert!(stopped, "Pod should be deleting/gone after StopInstances");
 
-    // StartInstances recreates the Pod (same name; create_pod replaces any
-    // still-terminating one) and re-runs user-data.
-    let new_ip = rt.start_instance(instance_id).await;
-    assert!(
-        new_ip.is_some(),
-        "start should report the recreated Pod's IP"
-    );
+    // StartInstances recreates the instance under a NEW unique Pod name (so it
+    // never collides with the still-terminating old one) and re-runs user-data.
+    let started = rt
+        .start_instance(instance_id)
+        .await
+        .expect("start should recreate the Pod and report it");
+    let new_pod = started.container_id.clone();
+    assert_ne!(new_pod, pod, "start should use a fresh Pod name");
     let restarted = poll_until(60, || async {
-        read_marker(&c, &pod).await.as_deref() == Some("ran")
+        read_marker(&c, &new_pod).await.as_deref() == Some("ran")
     })
     .await;
     assert!(
@@ -193,8 +194,8 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
         "Pod should be running again after StartInstances"
     );
 
-    // TerminateInstances removes the Pod for good.
+    // TerminateInstances removes the (current) Pod for good.
     rt.terminate_instance(instance_id).await;
-    let removed = poll_until(120, || pod_absent(&api, &pod)).await;
+    let removed = poll_until(120, || pod_absent(&api, &new_pod)).await;
     assert!(removed, "Pod should be gone after TerminateInstances");
 }

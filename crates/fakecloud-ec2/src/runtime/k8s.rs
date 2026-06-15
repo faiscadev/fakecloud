@@ -12,6 +12,8 @@
 //! into the container command (decoded and run at boot, backgrounded), the
 //! same script the Docker backend runs.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::{Container, LocalObjectReference, Pod, PodSpec};
@@ -34,6 +36,11 @@ pub(super) struct K8sInstances {
     client: K8sClient,
     /// Optional `imagePullSecrets` name for private registries.
     pull_secret: Option<String>,
+    /// Monotonic counter making each spawned Pod name unique. `Start`/`Reboot`
+    /// recreate an instance's Pod while the previous one may still be
+    /// `Terminating`; a fresh name avoids a name collision with it (the old
+    /// Pod terminates on its own).
+    spawn_seq: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for K8sInstances {
@@ -58,19 +65,21 @@ impl K8sInstances {
         Ok(Self {
             client,
             pull_secret: env.pull_secret,
+            spawn_seq: Arc::new(AtomicU64::new(0)),
         })
     }
 
-    /// Spawn (or recreate) the Pod backing an instance. The Pod name is
-    /// derived deterministically from the instance id, so recreating after a
-    /// `Stop` reuses the same name.
+    /// Spawn (or recreate) the Pod backing an instance. Each spawn gets a
+    /// unique Pod name (instance-id slug + a per-spawn sequence hash) so a
+    /// recreate never collides with the previous, still-`Terminating` Pod.
     pub(super) async fn spawn_pod(
         &self,
         instance_id: &str,
         image: &str,
         user_data: Option<&str>,
     ) -> Result<RunningInstance, RuntimeError> {
-        let pod_name = names::pod_name(POD_PREFIX, instance_id, instance_id);
+        let seq = self.spawn_seq.fetch_add(1, Ordering::Relaxed);
+        let pod_name = names::pod_name(POD_PREFIX, instance_id, &format!("{instance_id}-{seq}"));
         let pod = build_instance_pod(InstancePodContext {
             pod_name: &pod_name,
             namespace: self.client.namespace(),

@@ -266,13 +266,14 @@ async fn change_state(
             match new_code {
                 16 => {
                     // StartInstances: the container may come back with a new
-                    // address (always so on k8s, which recreates the Pod);
-                    // reflect it in describe output, along with the Pod name.
-                    if let Some(new_ip) = rt.start_instance(id).await {
+                    // address and handle (always so on k8s, which recreates the
+                    // Pod under a new name); reflect both in describe output.
+                    if let Some(running) = rt.start_instance(id).await {
                         let mut accounts = svc.state.write();
                         let state = accounts.get_or_create(&req.account_id);
                         if let Some(inst) = state.instances.get_mut(id) {
-                            inst.private_ip = new_ip;
+                            inst.private_ip = running.private_ip;
+                            inst.container_id = Some(running.container_id);
                         }
                     }
                 }
@@ -333,7 +334,16 @@ pub(crate) async fn reboot_instances(
     };
     if let Some(rt) = &svc.runtime {
         for id in &backed {
-            rt.reboot_instance(id).await;
+            // k8s reboot recreates the Pod under a new name/IP; persist them so
+            // describe/introspection stay accurate (Docker returns None).
+            if let Some(running) = rt.reboot_instance(id).await {
+                let mut accounts = svc.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                if let Some(inst) = state.instances.get_mut(id) {
+                    inst.private_ip = running.private_ip;
+                    inst.container_id = Some(running.container_id);
+                }
+            }
         }
     }
     Ok(Ec2Service::respond(

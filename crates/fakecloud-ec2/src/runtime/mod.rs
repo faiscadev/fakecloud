@@ -162,40 +162,50 @@ impl Ec2Runtime {
     }
 
     /// Start a previously-stopped instance (maps to `StartInstances`).
-    /// Returns the (possibly new) private IP. Docker starts the existing
-    /// container; k8s recreates the Pod under the same deterministic name.
-    pub async fn start_instance(&self, instance_id: &str) -> Option<String> {
+    /// Returns the running container's (possibly new) handle and private IP.
+    /// Docker starts the existing container; k8s recreates the Pod under a new
+    /// unique name, so the handle changes — callers should persist it.
+    pub async fn start_instance(&self, instance_id: &str) -> Option<RunningInstance> {
         let record = self.instances.read().get(instance_id)?.clone();
-        let new_ip = match &self.backend {
-            InstanceBackend::Docker(d) => d.start(&record.handle).await,
+        match &self.backend {
+            InstanceBackend::Docker(d) => {
+                // Same container; only the IP may change.
+                let private_ip = d.start(&record.handle).await?;
+                Some(RunningInstance {
+                    container_id: record.handle,
+                    private_ip,
+                })
+            }
             InstanceBackend::K8s(k) => {
                 let running = k
                     .spawn_pod(instance_id, &record.image, record.user_data.as_deref())
                     .await
                     .ok()?;
                 self.update_handle(instance_id, &running.container_id);
-                Some(running.private_ip)
+                Some(running)
             }
-        };
-        new_ip
+        }
     }
 
     /// Restart an instance's backing container (maps to `RebootInstances`).
-    /// Docker restarts in place; k8s recreates the Pod.
-    pub async fn reboot_instance(&self, instance_id: &str) {
-        let Some(record) = self.instances.read().get(instance_id).cloned() else {
-            return;
-        };
+    /// Docker restarts in place; k8s deletes and recreates the Pod under a new
+    /// name. Returns the running container's handle + IP when it changed (k8s),
+    /// so callers can persist the new handle; `None` when nothing to update.
+    pub async fn reboot_instance(&self, instance_id: &str) -> Option<RunningInstance> {
+        let record = self.instances.read().get(instance_id).cloned()?;
         match &self.backend {
-            InstanceBackend::Docker(d) => d.reboot(&record.handle).await,
+            InstanceBackend::Docker(d) => {
+                d.reboot(&record.handle).await;
+                None
+            }
             InstanceBackend::K8s(k) => {
                 k.delete_pod(&record.handle).await;
-                if let Ok(running) = k
+                let running = k
                     .spawn_pod(instance_id, &record.image, record.user_data.as_deref())
                     .await
-                {
-                    self.update_handle(instance_id, &running.container_id);
-                }
+                    .ok()?;
+                self.update_handle(instance_id, &running.container_id);
+                Some(running)
             }
         }
     }
