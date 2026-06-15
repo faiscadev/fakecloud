@@ -160,6 +160,7 @@ impl RdsService {
                 &db_name,
                 &request.account_id,
                 &request.region,
+                &tags,
             )
             .await
         {
@@ -330,6 +331,7 @@ impl RdsService {
                 &db_name,
                 &request.account_id,
                 &request.region,
+                &tags,
             )
             .await
         {

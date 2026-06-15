@@ -85,6 +85,8 @@ pub enum RuntimeError {
 pub enum BackendInitError {
     #[error(transparent)]
     Env(#[from] fakecloud_k8s::K8sEnvError),
+    #[error(transparent)]
+    PodConfig(#[from] fakecloud_k8s::K8sPodConfigError),
     #[error("failed to connect to the Kubernetes cluster: {0}")]
     Connect(String),
 }
@@ -161,8 +163,16 @@ impl RdsRuntime {
         db_name: &str,
         account_id: &str,
         region: &str,
+        tags: &[crate::state::RdsTag],
     ) -> Result<RunningDbContainer, RuntimeError> {
         if let Some(k) = &self.k8s {
+            // Per-instance Pod scheduling overrides come from the
+            // resource's reserved `fakecloud-k8s/*` tags. Ignored on the
+            // Docker backend below.
+            let tag_map: std::collections::BTreeMap<String, String> = tags
+                .iter()
+                .map(|t| (t.key.clone(), t.value.clone()))
+                .collect();
             let running = k
                 .ensure(
                     db_instance_identifier,
@@ -173,6 +183,7 @@ impl RdsRuntime {
                     db_name,
                     account_id,
                     region,
+                    &tag_map,
                 )
                 .await?;
             self.containers
