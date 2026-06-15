@@ -37,7 +37,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use parking_lot::RwLock;
 
-use fakecloud_k8s::{labels, names, K8sClient, K8sEnv};
+use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::{
     build_container_plans, finalize_stopped_multi, mark_pull_started, mark_pull_stopped,
@@ -54,6 +54,8 @@ const POD_PREFIX: &str = "fakecloud-ecs";
 pub enum BackendInitError {
     #[error(transparent)]
     Env(#[from] fakecloud_k8s::K8sEnvError),
+    #[error(transparent)]
+    PodConfig(#[from] fakecloud_k8s::K8sPodConfigError),
     #[error("failed to connect to the Kubernetes cluster: {0}")]
     Connect(String),
 }
@@ -65,6 +67,10 @@ pub(super) struct K8sTaskBackend {
     ecr_host: String,
     ecr_port: u16,
     pull_secret: Option<String>,
+    /// Global + ECS-service node selector / tolerations / annotations
+    /// applied to every task Pod. Per-task tag overrides are merged over
+    /// this when the Pod is built.
+    pod_config: K8sPodConfig,
     /// task_id -> Pod name, so StopTask/stop_all can find the Pod.
     pods: RwLock<HashMap<String, String>>,
 }
@@ -81,6 +87,7 @@ impl std::fmt::Debug for K8sTaskBackend {
 impl K8sTaskBackend {
     pub(super) async fn from_env(server_port: u16) -> Result<Self, BackendInitError> {
         let env = K8sEnv::from_env(server_port)?;
+        let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_ECS_K8S")?;
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| BackendInitError::Connect(e.to_string()))?;
@@ -95,6 +102,7 @@ impl K8sTaskBackend {
             ecr_host: env.ecr_host,
             ecr_port: env.ecr_port,
             pull_secret: env.pull_secret,
+            pod_config,
             pods: RwLock::new(HashMap::new()),
         })
     }
@@ -179,8 +187,24 @@ impl EcsRuntime {
             resolved.push((plan, env));
         }
 
+        // Per-task Pod scheduling overrides come from the task's reserved
+        // `fakecloud-k8s/*` tags, merged over the global + ECS-service base.
+        let task_tags: std::collections::BTreeMap<String, String> = {
+            let accounts = state.read();
+            accounts
+                .get(account_id)
+                .and_then(|s| s.tasks.get(task_id))
+                .map(|t| {
+                    t.tags
+                        .iter()
+                        .map(|tag| (tag.key.clone(), tag.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
         let pod_name = names::pod_name(POD_PREFIX, task_id, task_id);
-        let (pod, container_map) = build_task_pod(
+        let (mut pod, container_map) = build_task_pod(
             &pod_name,
             backend.client.namespace(),
             backend.client.instance_id(),
@@ -190,6 +214,11 @@ impl EcsRuntime {
             task_id,
             &resolved,
         );
+        backend
+            .pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(&task_tags))
+            .apply(&mut pod);
 
         backend
             .pods
@@ -751,6 +780,43 @@ mod tests {
             "task-1",
             resolved,
         )
+    }
+
+    #[test]
+    fn pod_config_overrides_apply_to_built_task_pod() {
+        use std::collections::BTreeMap;
+        // Mirrors the k8s_run_task_inner wiring: ECS-service base merged
+        // with the task's reserved-tag overrides, applied to the task Pod.
+        let (mut pod, _map) = build(&[(plan("app", true), vec![])]);
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([("pool".to_string(), "tasks".to_string())]),
+            ..Default::default()
+        };
+        let tags = BTreeMap::from([
+            (
+                "fakecloud-k8s/node-selector".to_string(),
+                "pool=spot".to_string(),
+            ),
+            (
+                "fakecloud-k8s/annotations".to_string(),
+                "team=batch".to_string(),
+            ),
+        ]);
+        base.merge(K8sPodConfig::from_tags(&tags)).apply(&mut pod);
+
+        let spec = pod.spec.unwrap();
+        assert_eq!(
+            spec.node_selector.unwrap().get("pool").map(String::as_str),
+            Some("spot")
+        );
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("batch")
+        );
     }
 
     fn rc(name: &str, essential: bool, exit: Option<i64>) -> RunningContainer {
