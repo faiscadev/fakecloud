@@ -186,6 +186,8 @@ aws lambda create-function \
 
 A malformed env value (e.g. invalid tolerations JSON) fails fast at fakecloud startup so a typo is loud. A malformed per-instance *tag* is logged and ignored for that field, so a bad tag never makes a single resource un-runnable. Per-instance tags only take effect when present at the resource's creation time; tags added later (`TagResource` / `add-tags-to-resource`) don't retroactively re-schedule a running Pod — recreate the resource to pick them up.
 
+The `fakecloud-k8s/*` tags are ordinary resource tags — fakecloud reads them but does not strip them, so they remain visible in `ListTags` / `list-tags-for-resource` output and count toward the resource's AWS tag limit (e.g. 50 for Lambda) like any other tag.
+
 ## ElastiCache backend
 
 Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run cache clusters, replication groups, and serverless caches as native Pods instead of Docker containers.
