@@ -1777,7 +1777,7 @@ async fn register_daemon_td_arn(client: &aws_sdk_ecs::Client, family: &str) -> S
     resp.daemon_task_definition_arn().unwrap().to_string()
 }
 
-#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "d0a5705c")]
+#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "b10b17f6")]
 #[tokio::test]
 async fn ecs_register_daemon_task_definition() {
     let server = TestServer::start().await;
@@ -1786,7 +1786,7 @@ async fn ecs_register_daemon_task_definition() {
     assert!(arn.contains(":daemon-task-definition/"));
 }
 
-#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "ae657c0d")]
+#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "11721ffd")]
 #[tokio::test]
 async fn ecs_describe_daemon_task_definition() {
     let server = TestServer::start().await;

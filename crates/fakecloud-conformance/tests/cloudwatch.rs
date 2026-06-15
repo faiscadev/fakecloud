@@ -620,3 +620,66 @@ async fn cloudwatch_sdkless_surfaces() {
     let server = TestServer::start().await;
     let _client = server.cloudwatch_client().await;
 }
+
+// ---------------------------------------------------------------------------
+// Dataset KMS key management — absent from the vendored aws-sdk-cloudwatch, so
+// exercised via a raw awsQuery POST. They graduate to typed SDK calls on the
+// next SDK refresh.
+// ---------------------------------------------------------------------------
+
+const CW_RAW_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/monitoring/aws4_request, SignedHeaders=host, Signature=0";
+
+async fn cw_raw(server: &TestServer, body: &str) -> String {
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("Authorization", CW_RAW_AUTH)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "raw monitoring query returned {}",
+        resp.status()
+    );
+    resp.text().await.unwrap()
+}
+
+#[test_action("monitoring", "AssociateDatasetKmsKey", checksum = "db4a4c9c")]
+#[test_action("monitoring", "GetDataset", checksum = "66ac6ee9")]
+#[test_action("monitoring", "DisassociateDatasetKmsKey", checksum = "3defd5b6")]
+#[tokio::test]
+async fn cloudwatch_dataset_kms_key() {
+    let server = TestServer::start().await;
+    let key = "arn:aws:kms:us-east-1:123456789012:key/abc";
+
+    // Associating a KMS key materializes the dataset.
+    cw_raw(
+        &server,
+        &format!("Action=AssociateDatasetKmsKey&Version=2010-08-01&DatasetIdentifier=ds-1&KmsKeyArn={key}"),
+    )
+    .await;
+
+    // GetDataset surfaces the id, arn, and associated key.
+    let got = cw_raw(
+        &server,
+        "Action=GetDataset&Version=2010-08-01&DatasetIdentifier=ds-1",
+    )
+    .await;
+    assert!(got.contains("<DatasetId>"), "missing DatasetId: {got}");
+    assert!(got.contains(key), "missing KmsKeyArn: {got}");
+
+    // Disassociating clears the key but leaves the dataset.
+    cw_raw(
+        &server,
+        "Action=DisassociateDatasetKmsKey&Version=2010-08-01&DatasetIdentifier=ds-1",
+    )
+    .await;
+    let after = cw_raw(
+        &server,
+        "Action=GetDataset&Version=2010-08-01&DatasetIdentifier=ds-1",
+    )
+    .await;
+    assert!(!after.contains("<KmsKeyArn>"), "key not cleared: {after}");
+}

@@ -76,6 +76,9 @@ pub struct CloudWatchState {
     /// region -> rule_name -> AlarmMuteRule
     #[serde(default)]
     pub mute_rules: BTreeMap<String, BTreeMap<String, AlarmMuteRule>>,
+    /// region -> dataset_identifier -> Dataset (KMS key association)
+    #[serde(default)]
+    pub datasets: BTreeMap<String, BTreeMap<String, Dataset>>,
     /// resource_arn -> tag_key -> tag_value (tags are account-global by ARN)
     #[serde(default)]
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
@@ -91,6 +94,16 @@ pub struct Dashboard {
     pub body: String,
     pub last_modified: DateTime<Utc>,
     pub size_bytes: i64,
+}
+
+/// A CloudWatch dataset and its optional KMS key association. Datasets are
+/// referenced by an identifier; there is no Create API, so an entry is
+/// materialized the first time a KMS key is associated with an identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dataset {
+    pub id: String,
+    pub arn: String,
+    pub kms_key_arn: Option<String>,
 }
 
 impl CloudWatchState {
@@ -174,6 +187,14 @@ impl CloudWatchState {
 
     pub fn mute_rules_in_mut(&mut self, region: &str) -> &mut BTreeMap<String, AlarmMuteRule> {
         self.mute_rules.entry(region.to_string()).or_default()
+    }
+
+    pub fn datasets_in(&self, region: &str) -> Option<&BTreeMap<String, Dataset>> {
+        self.datasets.get(region)
+    }
+
+    pub fn datasets_in_mut(&mut self, region: &str) -> &mut BTreeMap<String, Dataset> {
+        self.datasets.entry(region.to_string()).or_default()
     }
 }
 

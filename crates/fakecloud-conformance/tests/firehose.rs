@@ -25,8 +25,8 @@ async fn create_stream(client: &aws_sdk_firehose::Client, name: &str) {
         .unwrap();
 }
 
-#[test_action("firehose", "CreateDeliveryStream", checksum = "81405501")]
-#[test_action("firehose", "DescribeDeliveryStream", checksum = "9ef1ebe3")]
+#[test_action("firehose", "CreateDeliveryStream", checksum = "54dca75c")]
+#[test_action("firehose", "DescribeDeliveryStream", checksum = "21eb5183")]
 #[test_action("firehose", "ListDeliveryStreams", checksum = "2fdf2601")]
 #[test_action("firehose", "DeleteDeliveryStream", checksum = "6a6b2508")]
 #[tokio::test]
@@ -187,7 +187,7 @@ async fn firehose_update_destination() {
         .unwrap();
 }
 
-#[test_action("firehose", "StartDeliveryStreamEncryption", checksum = "2c192123")]
+#[test_action("firehose", "StartDeliveryStreamEncryption", checksum = "af14587d")]
 #[test_action("firehose", "StopDeliveryStreamEncryption", checksum = "53c9d850")]
 #[tokio::test]
 async fn firehose_encryption_lifecycle() {

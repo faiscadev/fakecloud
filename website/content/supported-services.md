@@ -1,10 +1,10 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,710 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,717 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,710 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,717 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 41
@@ -15,7 +15,7 @@ fakecloud provides 100% API conformance across 3,710 operations. Unlike mocks, f
 ## Supported Services
 
 ### Compute & Containers
-- **EC2**: 767 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instance control plane is metadata-faithful; Docker-backed execution is a roadmap follow-up.
+- **EC2**: 769 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instance control plane is metadata-faithful; Docker-backed execution is a roadmap follow-up.
 - **Lambda**: 70 operations. Full execution environment in real Docker containers across 23 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
 - **ECR**: 58 operations. Full OCI v2 Distribution protocol support for `docker push` and `docker pull`.
 - **ECS**: 77 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.

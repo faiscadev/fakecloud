@@ -258,6 +258,8 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "ResetImageAttribute",
     "EnableImage",
     "DisableImage",
+    "AttachImageWatermark",
+    "DetachImageWatermark",
     "EnableImageDeprecation",
     "DisableImageDeprecation",
     "EnableImageDeregistrationProtection",
@@ -1188,6 +1190,8 @@ impl AwsService for Ec2Service {
             "ResetImageAttribute" => image::reset_image_attribute(self, &request),
             "EnableImage" => image::enable_image(self, &request),
             "DisableImage" => image::disable_image(self, &request),
+            "AttachImageWatermark" => image::attach_image_watermark(self, &request),
+            "DetachImageWatermark" => image::detach_image_watermark(self, &request),
             "EnableImageDeprecation" => image::enable_image_deprecation(self, &request),
             "DisableImageDeprecation" => image::disable_image_deprecation(self, &request),
             "EnableImageDeregistrationProtection" => {
