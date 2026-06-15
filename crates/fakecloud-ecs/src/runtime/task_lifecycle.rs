@@ -167,6 +167,7 @@ impl EcsRuntime {
                     // Ownership label so the startup reaper can prune the
                     // per-task awsvpc network after an ungraceful restart,
                     // matching the container label.
+                    "--label",
                     &super::fakecloud_instance_label(),
                     &network_name,
                 ])
