@@ -60,8 +60,10 @@ async fn run_instances_boots_real_container_with_user_data() {
     let c = server.ec2_client().await;
 
     // User-data the runtime decodes (`base64 -d`) and runs as a root shell
-    // script at boot, exactly as cloud-init would.
-    let user_data = base64::engine::general_purpose::STANDARD.encode("echo ran > /tmp/marker\n");
+    // script at boot, exactly as cloud-init would. It echoes to stdout (which
+    // GetConsoleOutput surfaces) and writes a marker file (exec'd to verify).
+    let user_data = base64::engine::general_purpose::STANDARD
+        .encode("echo CONSOLE_HELLO_FROM_USERDATA\necho ran > /tmp/marker\n");
 
     let resp = c
         .run_instances()
@@ -110,6 +112,32 @@ async fn run_instances_boots_real_container_with_user_data() {
     assert_eq!(
         marker, "ran",
         "user-data script did not run in the container"
+    );
+
+    // GetConsoleOutput returns the container's console log (base64), which must
+    // include what user-data printed to stdout at boot.
+    let mut console = String::new();
+    for _ in 0..40 {
+        let out = c
+            .get_console_output()
+            .instance_id(&instance_id)
+            .send()
+            .await
+            .unwrap();
+        if let Some(b64) = out.output() {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("console output is valid base64");
+            console = String::from_utf8_lossy(&decoded).into_owned();
+            if console.contains("CONSOLE_HELLO_FROM_USERDATA") {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        console.contains("CONSOLE_HELLO_FROM_USERDATA"),
+        "GetConsoleOutput should surface user-data stdout, got: {console:?}"
     );
 
     // StopInstances stops the container.

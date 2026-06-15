@@ -19,7 +19,7 @@ fakecloud implements **767 of 767** AWS EC2 operations at 100% Smithy conformanc
 - **Verified Access** — instances, trust providers (+ attach/detach), groups, endpoints, policies (group + endpoint), logging configuration, and client-config export.
 - **Network Insights** — reachability paths + analyses and access scopes + scope analyses (content, findings).
 - **Outpost / hybrid** — carrier gateways, CoIP pools + CIDRs, local-gateway route tables, routes, VPC + virtual-interface-group associations, virtual interfaces, and groups.
-- **Access & diagnostics** — EC2 Instance Connect endpoints, fast launch, serial-console access, console output / screenshot, and password data.
+- **Access & diagnostics** — EC2 Instance Connect endpoints, fast launch, serial-console access, console output / screenshot, and password data. `GetConsoleOutput` returns the instance container's real console log (its combined stdout/stderr, including anything user-data printed at boot), base64-encoded as on AWS.
 - **Cross-cutting** — tag specifications on create, `CreateTags` / `DeleteTags` / `DescribeTags`, `Filter.N` filtering, and `MaxResults` / `NextToken` pagination across every `Describe*`.
 
 ## Protocol

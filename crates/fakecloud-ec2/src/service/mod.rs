@@ -2001,7 +2001,7 @@ impl AwsService for Ec2Service {
             "EnableSerialConsoleAccess" => ice::enable_serial_console_access(self, &request),
             "DisableSerialConsoleAccess" => ice::disable_serial_console_access(self, &request),
             "GetSerialConsoleAccessStatus" => ice::get_serial_console_access_status(self, &request),
-            "GetConsoleOutput" => ice::get_console_output(self, &request),
+            "GetConsoleOutput" => ice::get_console_output(self, &request).await,
             "GetConsoleScreenshot" => ice::get_console_screenshot(self, &request),
             "GetPasswordData" => ice::get_password_data(self, &request),
             "AdvertiseByoipCidr" => rest::advertise_byoip_cidr(self, &request),

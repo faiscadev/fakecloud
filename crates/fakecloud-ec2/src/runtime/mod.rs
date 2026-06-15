@@ -245,6 +245,17 @@ impl Ec2Runtime {
         }
     }
 
+    /// The backing container's console log — its combined stdout/stderr, which
+    /// includes anything user-data printed at boot (maps to `GetConsoleOutput`).
+    /// `None` for an unbacked instance or when logs can't be read.
+    pub async fn console_output(&self, instance_id: &str) -> Option<Vec<u8>> {
+        let handle = self.handle_of(instance_id)?;
+        match &self.backend {
+            InstanceBackend::Docker(d) => d.logs(&handle).await,
+            InstanceBackend::K8s(k) => k.logs(&handle).await,
+        }
+    }
+
     fn handle_of(&self, instance_id: &str) -> Option<String> {
         self.instances
             .read()
@@ -387,5 +398,23 @@ impl DockerInstances {
             .args(["rm", "-f", container_id])
             .output()
             .await;
+    }
+
+    /// The container's combined stdout+stderr (`docker logs`). `None` if the
+    /// command fails; an empty log is `Some(vec![])`.
+    async fn logs(&self, container_id: &str) -> Option<Vec<u8>> {
+        let output = tokio::process::Command::new(&self.cli)
+            .args(["logs", container_id])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        // `docker logs` writes the container's stdout to ours and its stderr to
+        // ours; concatenate so the console output carries both streams.
+        let mut buf = output.stdout;
+        buf.extend_from_slice(&output.stderr);
+        Some(buf)
     }
 }
