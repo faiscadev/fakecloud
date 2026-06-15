@@ -156,7 +156,8 @@ impl IamService {
     }
 
     pub(super) fn list_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let _ = validate_list_pagination(req)?;
+        let max_items = validate_list_pagination(req)? as usize;
+        let marker = req.query_params.get("Marker").cloned();
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -165,8 +166,32 @@ impl IamService {
         if let Some(prefix) = &path_prefix {
             groups.retain(|g| g.path.starts_with(prefix));
         }
+        groups.sort_by(|a, b| a.group_name.cmp(&b.group_name));
 
-        let members: String = groups
+        // Marker-based pagination: resume after the marked item.
+        let start_idx = marker
+            .as_ref()
+            .and_then(|m| {
+                groups
+                    .iter()
+                    .position(|g| g.group_name == *m)
+                    .map(|p| p + 1)
+            })
+            .unwrap_or(0);
+        let page = groups.get(start_idx..).unwrap_or(&[]);
+        let is_truncated = page.len() > max_items;
+        let page = if is_truncated {
+            &page[..max_items]
+        } else {
+            page
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|g| g.group_name.clone())
+        } else {
+            None
+        };
+
+        let members: String = page
             .iter()
             .map(|g| {
                 format!(
@@ -177,11 +202,16 @@ impl IamService {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let marker_section = match next_marker {
+            Some(m) => format!("\n    <Marker>{m}</Marker>"),
+            None => String::new(),
+        };
+
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListGroupsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListGroupsResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <Groups>
 {members}
     </Groups>

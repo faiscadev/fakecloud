@@ -2809,3 +2809,82 @@ fn re_encrypt_rejects_mismatched_source_encryption_context() {
         .expect("source EC mismatch must abort ReEncrypt");
     assert!(format!("{err:?}").contains("InvalidCiphertextException"));
 }
+
+#[test]
+fn decrypt_with_correct_key_id_succeeds() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"top-secret");
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({ "KeyId": key_id, "Plaintext": plaintext }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // Passing the SAME KeyId that produced the blob must succeed.
+    let dec = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({ "CiphertextBlob": ciphertext, "KeyId": key_id }),
+        ))
+        .unwrap();
+    let dec_body: Value = serde_json::from_slice(dec.body.expect_bytes()).unwrap();
+    assert_eq!(dec_body["Plaintext"].as_str().unwrap(), plaintext);
+}
+
+#[test]
+fn decrypt_with_wrong_key_id_returns_incorrect_key_exception() {
+    let svc = make_service();
+    let producing_key = create_key(&svc);
+    let other_key = create_key(&svc);
+
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"top-secret");
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({ "KeyId": producing_key, "Plaintext": plaintext }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // Supplying a DIFFERENT KeyId must be rejected, not silently decrypted.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({ "CiphertextBlob": ciphertext, "KeyId": other_key }),
+        ))
+        .err()
+        .expect("wrong KeyId must be rejected");
+    assert_eq!(err.code(), "IncorrectKeyException");
+}
+
+#[test]
+fn decrypt_without_key_id_still_succeeds() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"hi");
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({ "KeyId": key_id, "Plaintext": plaintext }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // KeyId is optional for symmetric decrypt; omitting it works.
+    let dec = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({ "CiphertextBlob": ciphertext }),
+        ))
+        .unwrap();
+    let dec_body: Value = serde_json::from_slice(dec.body.expect_bytes()).unwrap();
+    assert_eq!(dec_body["Plaintext"].as_str().unwrap(), plaintext);
+}

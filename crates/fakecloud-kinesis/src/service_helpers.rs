@@ -184,30 +184,56 @@ pub(crate) fn decode_record_data(value: &Value) -> Result<Vec<u8>, AwsServiceErr
         .map_err(|_| invalid_argument("Data must be valid base64"))
 }
 
+/// Compute the 128-bit hash key for a partition key exactly as AWS does:
+/// the big-endian unsigned integer value of `MD5(partitionKey)`.
+pub(crate) fn partition_key_hash(partition_key: &str) -> u128 {
+    let digest = Md5::digest(partition_key.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(bytes)
+}
+
+/// Resolve the routing hash for a record. When `ExplicitHashKey` is supplied
+/// it overrides the partition-key hash (AWS allows a base-10 string in
+/// `[0, 2^128-1]`); otherwise we hash the partition key with MD5.
+pub(crate) fn routing_hash(
+    partition_key: &str,
+    explicit_hash_key: Option<&str>,
+) -> Result<u128, AwsServiceError> {
+    if let Some(raw) = explicit_hash_key.filter(|value| !value.is_empty()) {
+        return raw
+            .parse::<u128>()
+            .map_err(|_| invalid_argument("ExplicitHashKey must be a valid 128-bit integer"));
+    }
+    Ok(partition_key_hash(partition_key))
+}
+
+/// Locate the open shard whose `[StartingHashKey, EndingHashKey]` range
+/// contains `hash`. Falls back to the last open shard (or the last shard
+/// overall when none are open) so a routing hash can never fail to land.
+pub(crate) fn select_shard_index_for_hash(stream: &KinesisStream, hash: u128) -> usize {
+    let mut fallback: Option<usize> = None;
+    for (idx, shard) in stream.shards.iter().enumerate() {
+        if !shard.is_open {
+            continue;
+        }
+        fallback = Some(idx);
+        let (start, end) = shard_hash_range(shard);
+        if hash >= start && hash <= end {
+            return idx;
+        }
+    }
+    fallback.unwrap_or_else(|| stream.shards.len().saturating_sub(1))
+}
+
 pub(crate) fn select_shard_mut<'a>(
     stream: &'a mut KinesisStream,
     partition_key: &str,
-) -> &'a mut KinesisShard {
-    let open_indices: Vec<usize> = stream
-        .shards
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.is_open)
-        .map(|(i, _)| i)
-        .collect();
-    if open_indices.is_empty() {
-        let idx = partition_key_to_shard_index(partition_key, stream.shards.len());
-        return &mut stream.shards[idx];
-    }
-    let idx = partition_key_to_shard_index(partition_key, open_indices.len());
-    &mut stream.shards[open_indices[idx]]
-}
-
-pub(crate) fn partition_key_to_shard_index(partition_key: &str, shard_count: usize) -> usize {
-    let digest = Md5::digest(partition_key.as_bytes());
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    (u64::from_be_bytes(bytes) as usize) % shard_count
+    explicit_hash_key: Option<&str>,
+) -> Result<&'a mut KinesisShard, AwsServiceError> {
+    let hash = routing_hash(partition_key, explicit_hash_key)?;
+    let idx = select_shard_index_for_hash(stream, hash);
+    Ok(&mut stream.shards[idx])
 }
 
 pub(crate) fn append_record(
@@ -240,7 +266,9 @@ pub(crate) fn put_records_entry(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "PartitionKey is required".to_string())?;
     let data = decode_record_data(&entry["Data"]).map_err(|error| error.message())?;
-    let shard = select_shard_mut(stream, partition_key);
+    let explicit_hash_key = entry["ExplicitHashKey"].as_str();
+    let shard = select_shard_mut(stream, partition_key, explicit_hash_key)
+        .map_err(|error| error.message())?;
     let sequence_number = append_record(shard, partition_key, data);
     Ok((shard.shard_id.clone(), sequence_number))
 }
@@ -304,6 +332,30 @@ pub(crate) fn find_record_index_by_sequence_number(
         .iter()
         .position(|record| record.sequence_number == sequence_number)
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+}
+
+/// Encode a `ListShards` continuation token. AWS returns an opaque base64
+/// cursor; we wrap the last-returned shard id so that a paginator feeding the
+/// token back resumes immediately after it.
+pub(crate) fn encode_list_shards_token(last_shard_id: &str) -> String {
+    let payload = json!({ "ExclusiveStartShardId": last_shard_id });
+    base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes())
+}
+
+/// Decode a `ListShards` continuation token back into the exclusive-start
+/// shard id. Rejects malformed tokens with `InvalidArgumentException`, the
+/// same shape AWS uses for an expired/garbage `NextToken`.
+pub(crate) fn decode_list_shards_token(token: &str) -> Result<String, AwsServiceError> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .map_err(|_| invalid_argument("Invalid NextToken"))?;
+    let parsed: Value =
+        serde_json::from_slice(&raw).map_err(|_| invalid_argument("Invalid NextToken"))?;
+    parsed["ExclusiveStartShardId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| invalid_argument("Invalid NextToken"))
 }
 
 pub(crate) fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {

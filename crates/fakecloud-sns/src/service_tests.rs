@@ -154,6 +154,7 @@ fn add_permission_with_invalid_policy_returns_error_not_panic() {
                 created_at: Utc::now(),
                 subscriptions_deleted: 0,
                 fifo_sequence: 0,
+                dedup_cache: std::collections::BTreeMap::new(),
             },
         );
     }
@@ -246,6 +247,187 @@ fn assert_ok(result: &Result<AwsResponse, AwsServiceError>) {
 
 fn response_body(result: &Result<AwsResponse, AwsServiceError>) -> String {
     String::from_utf8(result.as_ref().unwrap().body.expect_bytes().to_vec()).unwrap()
+}
+
+fn message_id_from(body: &str) -> String {
+    let start = body.find("<MessageId>").unwrap() + "<MessageId>".len();
+    let end = body[start..].find("</MessageId>").unwrap() + start;
+    body[start..end].to_string()
+}
+
+#[test]
+fn json_structure_delivers_per_protocol_body_to_each_subscriber() {
+    let (svc, state) = make_sns();
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:proto";
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "proto")])));
+
+    for (proto, endpoint) in [
+        ("email", "plain@example.com"),
+        ("email-json", "json@example.com"),
+        ("sms", "+15551234567"),
+    ] {
+        assert_ok(&svc.subscribe(&sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", proto),
+                ("Endpoint", endpoint),
+            ],
+        )));
+    }
+
+    let structured = r#"{"default":"DEFAULT-BODY","email":"EMAIL-BODY","email-json":"EMAILJSON-BODY","sms":"SMS-BODY"}"#;
+    assert_ok(&svc.publish(&sns_request(
+        "Publish",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Message", structured),
+            ("MessageStructure", "json"),
+        ],
+    )));
+
+    let guard = state.read();
+    let s = guard.default_ref();
+    let plain = s
+        .sent_emails
+        .iter()
+        .find(|e| e.email_address == "plain@example.com")
+        .unwrap();
+    assert_eq!(plain.message, "EMAIL-BODY");
+    let json_sub = s
+        .sent_emails
+        .iter()
+        .find(|e| e.email_address == "json@example.com")
+        .unwrap();
+    assert_eq!(json_sub.message, "EMAILJSON-BODY");
+    let sms = s
+        .sms_messages
+        .iter()
+        .find(|(num, _)| num == "+15551234567")
+        .unwrap();
+    assert_eq!(sms.1, "SMS-BODY");
+}
+
+#[test]
+fn json_structure_falls_back_to_default_when_protocol_key_absent() {
+    let (svc, state) = make_sns();
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:fallback";
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "fallback")])));
+    assert_ok(&svc.subscribe(&sns_request(
+        "Subscribe",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Protocol", "email"),
+            ("Endpoint", "fb@example.com"),
+        ],
+    )));
+
+    let structured = r#"{"default":"ONLY-DEFAULT","sms":"SMS-ONLY"}"#;
+    assert_ok(&svc.publish(&sns_request(
+        "Publish",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Message", structured),
+            ("MessageStructure", "json"),
+        ],
+    )));
+
+    let guard = state.read();
+    let s = guard.default_ref();
+    let email = s
+        .sent_emails
+        .iter()
+        .find(|e| e.email_address == "fb@example.com")
+        .unwrap();
+    assert_eq!(email.message, "ONLY-DEFAULT");
+}
+
+#[test]
+fn fifo_publish_deduplicates_within_window() {
+    let (svc, state) = make_sns();
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:dedup.fifo";
+    assert_ok(&svc.create_topic(&sns_request(
+        "CreateTopic",
+        vec![
+            ("Name", "dedup.fifo"),
+            ("Attributes.entry.1.key", "FifoTopic"),
+            ("Attributes.entry.1.value", "true"),
+        ],
+    )));
+
+    let publish = || {
+        svc.publish(&sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "hello"),
+                ("MessageGroupId", "g1"),
+                ("MessageDeduplicationId", "dup-1"),
+            ],
+        ))
+    };
+
+    let first = publish();
+    assert_ok(&first);
+    let id1 = message_id_from(&response_body(&first));
+
+    let second = publish();
+    assert_ok(&second);
+    let id2 = message_id_from(&response_body(&second));
+
+    assert_eq!(
+        id1, id2,
+        "duplicate publish should replay original MessageId"
+    );
+
+    let guard = state.read();
+    let s = guard.default_ref();
+    let count = s
+        .published
+        .iter()
+        .filter(|m| m.topic_arn == topic_arn)
+        .count();
+    assert_eq!(count, 1, "duplicate should not be re-published");
+}
+
+#[test]
+fn fifo_content_based_dedup_suppresses_identical_body() {
+    let (svc, state) = make_sns();
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:cbd.fifo";
+    assert_ok(&svc.create_topic(&sns_request(
+        "CreateTopic",
+        vec![
+            ("Name", "cbd.fifo"),
+            ("Attributes.entry.1.key", "FifoTopic"),
+            ("Attributes.entry.1.value", "true"),
+            ("Attributes.entry.2.key", "ContentBasedDeduplication"),
+            ("Attributes.entry.2.value", "true"),
+        ],
+    )));
+
+    let publish = || {
+        svc.publish(&sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "same-body"),
+                ("MessageGroupId", "g1"),
+            ],
+        ))
+    };
+
+    let id1 = message_id_from(&response_body(&publish()));
+    let id2 = message_id_from(&response_body(&publish()));
+    assert_eq!(id1, id2);
+
+    let guard = state.read();
+    let s = guard.default_ref();
+    let count = s
+        .published
+        .iter()
+        .filter(|m| m.topic_arn == topic_arn)
+        .count();
+    assert_eq!(count, 1);
 }
 
 // --- Subscribe / Unsubscribe / ListSubscriptions / ListSubscriptionsByTopic ---

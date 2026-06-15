@@ -134,6 +134,21 @@ pub(crate) fn validate_message_structure_json(message: &str) -> Result<(), AwsSe
     Ok(())
 }
 
+/// Lowercase hex SHA-256 of the input, used for SNS FIFO
+/// content-based deduplication (1.4).
+pub(crate) fn sns_sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 pub(crate) fn not_found(entity: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
@@ -459,6 +474,7 @@ pub(crate) fn collect_topic_subscribers(
         .map(|s| crate::service::HttpSubscriber {
             endpoint: s.endpoint.clone(),
             subscription_arn: s.subscription_arn.clone(),
+            protocol: s.protocol.clone(),
             delivery_policy: s.attributes.get("DeliveryPolicy").cloned(),
             redrive_policy: s.attributes.get("RedrivePolicy").cloned(),
         })
@@ -477,7 +493,7 @@ pub(crate) fn collect_topic_subscribers(
         .values()
         .filter(|s| s.protocol == "email" || s.protocol == "email-json")
         .filter(confirmed_for_topic)
-        .map(|s| s.endpoint.clone())
+        .map(|s| (s.endpoint.clone(), s.protocol.clone()))
         .collect();
 
     let sms = state

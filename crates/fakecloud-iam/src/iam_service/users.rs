@@ -298,11 +298,43 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let path_prefix = req.query_params.get("PathPrefix").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let marker = req.query_params.get("Marker").cloned();
+
         let mut users: Vec<IamUser> = state.users.values().cloned().collect();
         if let Some(prefix) = path_prefix {
             users.retain(|u| u.path.starts_with(&prefix));
         }
-        let xml = xml_responses::list_users_response(&users, &req.request_id);
+        users.sort_by(|a, b| a.user_name.cmp(&b.user_name));
+
+        // Marker-based pagination: resume after the marked item.
+        let start_idx = marker
+            .as_ref()
+            .and_then(|m| users.iter().position(|u| u.user_name == *m).map(|p| p + 1))
+            .unwrap_or(0);
+        let page = users.get(start_idx..).unwrap_or(&[]);
+        let is_truncated = page.len() > max_items;
+        let page = if is_truncated {
+            &page[..max_items]
+        } else {
+            page
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|u| u.user_name.clone())
+        } else {
+            None
+        };
+
+        let xml = xml_responses::list_users_response(
+            page,
+            is_truncated,
+            next_marker.as_deref(),
+            &req.request_id,
+        );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 

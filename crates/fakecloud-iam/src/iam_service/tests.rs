@@ -1722,6 +1722,141 @@ fn list_users_basic() {
     assert!(body.contains("<UserName>u2</UserName>"));
 }
 
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+fn extract_marker(body: &str) -> Option<String> {
+    let start = body.find("<Marker>")? + "<Marker>".len();
+    let end = body[start..].find("</Marker>")? + start;
+    Some(body[start..end].to_string())
+}
+
+#[test]
+fn list_users_paginates_via_marker() {
+    let svc = make_service();
+    for i in 0..5 {
+        svc.create_user(&make_request(
+            "CreateUser",
+            vec![("UserName", &format!("user-{i:02}"))],
+        ))
+        .unwrap();
+    }
+
+    // Page 1: MaxItems=2 -> 2 users, IsTruncated true, a Marker.
+    let body1 = String::from_utf8_lossy(
+        svc.list_users(&make_request("ListUsers", vec![("MaxItems", "2")]))
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body1, "<member>"), 2);
+    assert!(body1.contains("<IsTruncated>true</IsTruncated>"));
+    let marker = extract_marker(&body1).expect("Marker on page 1");
+
+    // Page 2: feed the Marker back -> next 2 users.
+    let body2 = String::from_utf8_lossy(
+        svc.list_users(&make_request(
+            "ListUsers",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body2, "<member>"), 2);
+    assert!(body2.contains("<IsTruncated>true</IsTruncated>"));
+    let marker = extract_marker(&body2).expect("Marker on page 2");
+
+    // Page 3: last user, not truncated, no Marker.
+    let body3 = String::from_utf8_lossy(
+        svc.list_users(&make_request(
+            "ListUsers",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body3, "<member>"), 1);
+    assert!(body3.contains("<IsTruncated>false</IsTruncated>"));
+    assert!(extract_marker(&body3).is_none());
+}
+
+#[test]
+fn list_groups_paginates_via_marker() {
+    let svc = make_service();
+    for i in 0..3 {
+        svc.create_group(&make_request(
+            "CreateGroup",
+            vec![("GroupName", &format!("grp-{i}"))],
+        ))
+        .unwrap();
+    }
+    let body1 = String::from_utf8_lossy(
+        svc.list_groups(&make_request("ListGroups", vec![("MaxItems", "2")]))
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body1, "<member>"), 2);
+    assert!(body1.contains("<IsTruncated>true</IsTruncated>"));
+    let marker = extract_marker(&body1).expect("Marker");
+
+    let body2 = String::from_utf8_lossy(
+        svc.list_groups(&make_request(
+            "ListGroups",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body2, "<member>"), 1);
+    assert!(body2.contains("<IsTruncated>false</IsTruncated>"));
+}
+
+#[test]
+fn list_policies_paginates_via_marker() {
+    let svc = make_service();
+    let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    for i in 0..3 {
+        svc.create_policy(&make_request(
+            "CreatePolicy",
+            vec![("PolicyName", &format!("pol-{i}")), ("PolicyDocument", doc)],
+        ))
+        .unwrap();
+    }
+    let body1 = String::from_utf8_lossy(
+        svc.list_policies(&make_request("ListPolicies", vec![("MaxItems", "2")]))
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body1, "<member>"), 2);
+    assert!(body1.contains("<IsTruncated>true</IsTruncated>"));
+    let marker = extract_marker(&body1).expect("Marker");
+
+    let body2 = String::from_utf8_lossy(
+        svc.list_policies(&make_request(
+            "ListPolicies",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
+    )
+    .to_string();
+    assert_eq!(count_occurrences(&body2, "<member>"), 1);
+    assert!(body2.contains("<IsTruncated>false</IsTruncated>"));
+}
+
 #[test]
 fn create_user_with_path_and_tags() {
     let svc = make_service();

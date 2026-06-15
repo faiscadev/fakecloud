@@ -27,6 +27,27 @@ fn request(action: &str, body: Value) -> AwsRequest {
     }
 }
 
+fn test_stream(name: &str) -> KinesisStream {
+    KinesisStream {
+        stream_name: name.to_string(),
+        stream_arn: format!("arn:aws:kinesis:us-east-1:123456789012:stream/{name}"),
+        stream_status: "ACTIVE".to_string(),
+        stream_creation_timestamp: Utc::now(),
+        retention_period_hours: 24,
+        stream_mode: "PROVISIONED".to_string(),
+        encryption_type: "NONE".to_string(),
+        key_id: None,
+        shard_count: 0,
+        open_shard_count: 0,
+        tags: Default::default(),
+        shards: Vec::new(),
+        next_shard_index: 0,
+        enhanced_metrics: Vec::new(),
+        warm_throughput_mibps: None,
+        max_record_size_kib: None,
+    }
+}
+
 fn test_shard() -> KinesisShard {
     KinesisShard {
         shard_id: "shardId-000000000000".to_string(),
@@ -125,12 +146,64 @@ fn update_retention_period_validates_direction() {
 
 #[test]
 fn partition_keys_route_deterministically() {
-    let shard_a = partition_key_to_shard_index("customer-1", 4);
-    let shard_b = partition_key_to_shard_index("customer-1", 4);
-    let shard_c = partition_key_to_shard_index("customer-2", 4);
+    // The same partition key always yields the same 128-bit hash.
+    let hash_a = partition_key_hash("customer-1");
+    let hash_b = partition_key_hash("customer-1");
+    assert_eq!(hash_a, hash_b);
+}
 
-    assert_eq!(shard_a, shard_b);
-    assert!(shard_c < 4);
+#[test]
+fn partition_key_routes_into_containing_hash_range() {
+    // Build a 4-shard stream and verify every partition key lands in the
+    // open shard whose [start, end] range contains MD5(partitionKey).
+    let shards = build_stream_shards(4);
+    let stream = KinesisStream {
+        shards,
+        ..test_stream("orders")
+    };
+    for key in ["customer-1", "customer-2", "alpha", "beta", "gamma", "zeta"] {
+        let hash = partition_key_hash(key);
+        let idx = select_shard_index_for_hash(&stream, hash);
+        let (start, end) = shard_hash_range(&stream.shards[idx]);
+        assert!(
+            hash >= start && hash <= end,
+            "key {key} hash {hash} not in shard {idx} range [{start}, {end}]"
+        );
+        assert!(stream.shards[idx].is_open);
+    }
+}
+
+#[test]
+fn explicit_hash_key_overrides_partition_key() {
+    let shards = build_stream_shards(4);
+    let mut stream = KinesisStream {
+        shards,
+        ..test_stream("orders")
+    };
+    // ExplicitHashKey points at the very top of the keyspace -> last shard.
+    let top = MAX_HASH_KEY.to_string();
+    let shard = select_shard_mut(&mut stream, "ignored-partition-key", Some(&top)).unwrap();
+    assert_eq!(shard.shard_id, "shardId-000000000003");
+
+    // ExplicitHashKey of 0 -> first shard regardless of partition key.
+    let shard = select_shard_mut(&mut stream, "ignored-partition-key", Some("0")).unwrap();
+    assert_eq!(shard.shard_id, "shardId-000000000000");
+}
+
+#[test]
+fn routing_skips_closed_shards() {
+    let mut shards = build_stream_shards(2);
+    // Close the first shard; everything must route to the open one.
+    shards[0].is_open = false;
+    let mut stream = KinesisStream {
+        shards,
+        ..test_stream("orders")
+    };
+    // A hash that falls in the (now closed) first shard's range still routes
+    // to an open shard.
+    let shard = select_shard_mut(&mut stream, "x", Some("0")).unwrap();
+    assert!(shard.is_open);
+    assert_eq!(shard.shard_id, "shardId-000000000001");
 }
 
 #[test]
@@ -1284,6 +1357,161 @@ fn list_shards_unknown_stream_errors() {
     let (svc, _) = make_service();
     let req = request("ListShards", json!({"StreamName": "ghost"}));
     assert!(svc.list_shards(&req).is_err());
+}
+
+#[test]
+fn list_shards_next_token_paginates_through_all_shards() {
+    let (svc, _) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({ "StreamName": "paged", "ShardCount": 5 }),
+    ))
+    .unwrap();
+
+    // Page 1: MaxResults=2 -> 2 shards + a NextToken.
+    let resp = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "paged", "MaxResults": 2 }),
+        ))
+        .unwrap();
+    let v = json_response(resp);
+    let page1: Vec<String> = v["Shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["ShardId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(page1.len(), 2);
+    let token = v["NextToken"].as_str().expect("NextToken on page 1");
+
+    // Page 2: feed the token back -> next 2 distinct shards.
+    let resp = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "paged", "MaxResults": 2, "NextToken": token }),
+        ))
+        .unwrap();
+    let v = json_response(resp);
+    let page2: Vec<String> = v["Shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["ShardId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(page2.len(), 2);
+    let token = v["NextToken"].as_str().expect("NextToken on page 2");
+    // Pages must advance, not loop on page 1 (the bug).
+    assert!(page2.iter().all(|s| !page1.contains(s)), "pages overlap");
+
+    // Page 3: final shard, no NextToken.
+    let resp = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "paged", "MaxResults": 2, "NextToken": token }),
+        ))
+        .unwrap();
+    let v = json_response(resp);
+    let page3: Vec<String> = v["Shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["ShardId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(page3.len(), 1);
+    assert!(v.get("NextToken").is_none() || v["NextToken"].is_null());
+
+    // All 5 shards seen exactly once across the three pages.
+    let mut all: Vec<String> = page1;
+    all.extend(page2);
+    all.extend(page3);
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 5);
+}
+
+#[test]
+fn list_shards_rejects_garbage_next_token() {
+    let (svc, _) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({ "StreamName": "paged", "ShardCount": 2 }),
+    ))
+    .unwrap();
+    let err = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "paged", "NextToken": "not-a-real-token" }),
+        ))
+        .err()
+        .expect("garbage NextToken should fail");
+    assert_eq!(err.code(), "InvalidArgumentException");
+}
+
+#[test]
+fn put_record_routes_into_shard_whose_range_contains_the_hash() {
+    let (svc, state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({ "StreamName": "routed", "ShardCount": 4 }),
+    ))
+    .unwrap();
+
+    for key in ["alpha", "beta", "gamma", "delta", "omega"] {
+        let resp = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({
+                    "StreamName": "routed",
+                    "PartitionKey": key,
+                    "Data": base64::engine::general_purpose::STANDARD.encode(b"x"),
+                }),
+            ))
+            .unwrap();
+        let v = json_response(resp);
+        let shard_id = v["ShardId"].as_str().unwrap();
+
+        // Verify the chosen shard's hash range actually contains MD5(key).
+        let hash = partition_key_hash(key);
+        let accts = state.read();
+        let st = accts.default_ref();
+        let stream = st.streams.get("routed").unwrap();
+        let shard = stream
+            .shards
+            .iter()
+            .find(|s| s.shard_id == shard_id)
+            .unwrap();
+        let (start, end) = shard_hash_range(shard);
+        assert!(
+            hash >= start && hash <= end,
+            "key {key} hash {hash} routed to shard {shard_id} range [{start},{end}]"
+        );
+    }
+}
+
+#[test]
+fn put_record_explicit_hash_key_overrides_partition_key() {
+    let (svc, _state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({ "StreamName": "ehk", "ShardCount": 4 }),
+    ))
+    .unwrap();
+
+    // ExplicitHashKey=0 must land in the first shard regardless of key.
+    let resp = svc
+        .put_record(&request(
+            "PutRecord",
+            json!({
+                "StreamName": "ehk",
+                "PartitionKey": "any-key",
+                "ExplicitHashKey": "0",
+                "Data": base64::engine::general_purpose::STANDARD.encode(b"x"),
+            }),
+        ))
+        .unwrap();
+    let v = json_response(resp);
+    assert_eq!(v["ShardId"].as_str().unwrap(), "shardId-000000000000");
 }
 
 #[test]

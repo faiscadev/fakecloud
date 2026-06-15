@@ -45,6 +45,7 @@ impl ResourceProvisioner {
             created_at: Utc::now(),
             subscriptions_deleted: 0,
             fifo_sequence: 0,
+            dedup_cache: BTreeMap::new(),
         };
 
         state.topics.insert(topic_arn.clone(), topic);

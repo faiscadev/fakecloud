@@ -1165,6 +1165,91 @@ fn put_partner_events() {
     assert!(body["Entries"][0]["EventId"].as_str().is_some());
 }
 
+#[test]
+fn put_partner_events_validates_and_records_failed_entries() {
+    let svc = make_service();
+    // Missing DetailType + a valid entry -> one failure, one success.
+    let req = make_request(
+        "PutPartnerEvents",
+        json!({
+            "Entries": [
+                { "Source": "aws.partner/x/y", "Detail": "{}" },
+                { "Source": "aws.partner/x/y", "DetailType": "T", "Detail": "{}" }
+            ]
+        }),
+    );
+    let resp = svc.put_partner_events(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 1);
+    assert!(body["Entries"][0]["ErrorCode"].as_str().is_some());
+    assert!(body["Entries"][1]["EventId"].as_str().is_some());
+}
+
+#[test]
+fn put_partner_events_routes_to_partner_bus_rule_target() {
+    let (svc, messages) = make_service_with_sqs_recorder();
+    let source = "aws.partner/example.com/test-source";
+    let queue_arn = "arn:aws:sqs:us-east-1:123456789012:partner-queue";
+
+    // 1. Create the partner event source.
+    svc.create_partner_event_source(&make_request(
+        "CreatePartnerEventSource",
+        json!({ "Name": source, "Account": "123456789012" }),
+    ))
+    .unwrap();
+
+    // 2. The receiving account creates the partner event bus (name == source).
+    svc.create_event_bus(&make_request(
+        "CreateEventBus",
+        json!({ "Name": source, "EventSourceName": source }),
+    ))
+    .unwrap();
+
+    // 3. Rule on the partner bus matching the source, with an SQS target.
+    svc.put_rule(&make_request(
+        "PutRule",
+        json!({
+            "Name": "partner-rule",
+            "EventBusName": source,
+            "EventPattern": format!(r#"{{"source": ["{source}"]}}"#),
+            "State": "ENABLED"
+        }),
+    ))
+    .unwrap();
+    svc.put_targets(&make_request(
+        "PutTargets",
+        json!({
+            "Rule": "partner-rule",
+            "EventBusName": source,
+            "Targets": [{ "Id": "t1", "Arn": queue_arn }]
+        }),
+    ))
+    .unwrap();
+
+    // 4. PutPartnerEvents with Source == the partner bus name.
+    let resp = svc
+        .put_partner_events(&make_request(
+            "PutPartnerEvents",
+            json!({
+                "Entries": [{
+                    "Source": source,
+                    "DetailType": "OrderCreated",
+                    "Detail": "{\"orderId\":\"42\"}"
+                }]
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 0);
+
+    // 5. The event must have been routed to the rule's SQS target.
+    let delivered = messages.lock();
+    assert_eq!(delivered.len(), 1, "partner event should reach the target");
+    assert_eq!(delivered[0].0, queue_arn);
+    assert!(delivered[0].1.contains("OrderCreated"));
+    assert!(delivered[0].1.contains("42"));
+}
+
 // ---- Archive + Replay delivery tests ----
 
 /// Helper: create a service with a mock SQS delivery that records messages.

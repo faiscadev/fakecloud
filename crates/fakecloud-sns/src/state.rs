@@ -3,6 +3,17 @@ use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// One FIFO dedup-cache entry for an SNS topic: the original (non-duplicate)
+/// publish result, kept until `expiry`. A duplicate within the 5-minute
+/// window replays this MessageId/SequenceNumber instead of fanning out
+/// again, mirroring the SQS FIFO dedup behaviour (bug-audit 2026-06-15, 1.4).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SnsDedupEntry {
+    pub message_id: String,
+    pub sequence_number: Option<String>,
+    pub expiry: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnsTopic {
     pub topic_arn: String,
@@ -23,6 +34,12 @@ pub struct SnsTopic {
     /// to a FIFO topic; non-FIFO topics emit none. (bug-audit 2026-05-28, 1.6)
     #[serde(default)]
     pub fifo_sequence: u64,
+    /// FIFO dedup cache: dedup_id -> the original publish result + expiry, so
+    /// a duplicate within the 5-minute window replays the ORIGINAL
+    /// MessageId/SequenceNumber without re-fanning-out or advancing the
+    /// counter (bug-audit 2026-06-15, 1.4).
+    #[serde(default)]
+    pub dedup_cache: BTreeMap<String, SnsDedupEntry>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

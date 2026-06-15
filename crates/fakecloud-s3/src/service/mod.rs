@@ -2076,6 +2076,18 @@ pub(crate) fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
             let crc = crc32fast::hash(data);
             BASE64.encode(crc.to_be_bytes())
         }
+        // CRC32C and CRC64NVME use the same crates as the streaming path so
+        // CopyObject / CompleteMultipartUpload produce identical results to
+        // a streaming PutObject (1.7).
+        "CRC32C" => {
+            let crc = crc32c::crc32c(data);
+            BASE64.encode(crc.to_be_bytes())
+        }
+        "CRC64NVME" => {
+            let mut hasher = crc64fast_nvme::Digest::new();
+            hasher.write(data);
+            BASE64.encode(hasher.sum64().to_be_bytes())
+        }
         "SHA1" => {
             use sha1::Digest as _;
             let hash = sha1::Sha1::digest(data);
@@ -2744,4 +2756,51 @@ mod extract_xml_value_tests {
     fn open_without_close_is_none() {
         assert_eq!(extract_xml_value("<Key>value", "Key"), None);
     }
+}
+
+#[cfg(test)]
+mod compute_checksum_tests {
+    use super::{compute_checksum, compute_checksum_streaming};
+
+    // bug-audit 2026-06-15, 1.7: CopyObject / CompleteMultipartUpload routed
+    // through the non-streaming compute_checksum, whose `_ =>` arm returned an
+    // empty string for CRC32C / CRC64NVME -> GetObjectAttributes reported an
+    // empty checksum and integrity checks silently broke.
+    #[test]
+    fn crc32c_is_non_empty_and_matches_known_vector() {
+        // CRC32C of "123456789" is 0xE3069283; base64 of those 4 BE bytes.
+        let out = compute_checksum("CRC32C", b"123456789");
+        assert!(!out.is_empty());
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&out)
+            .unwrap();
+        assert_eq!(bytes, 0xE306_9283u32.to_be_bytes());
+    }
+
+    #[test]
+    fn crc64nvme_is_non_empty() {
+        let out = compute_checksum("CRC64NVME", b"hello world");
+        assert!(!out.is_empty());
+        // 8 BE bytes of a u64.
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&out)
+            .unwrap();
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn non_streaming_matches_streaming_for_all_algorithms() {
+        let data = b"the quick brown fox jumps over the lazy dog".repeat(100);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(tmp.path(), &data).await.unwrap();
+
+        for algo in ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"] {
+            let direct = compute_checksum(algo, &data);
+            let streamed = compute_checksum_streaming(algo, tmp.path()).await.unwrap();
+            assert!(!direct.is_empty(), "{algo} direct empty");
+            assert_eq!(direct, streamed, "{algo} direct != streaming");
+        }
+    }
+
+    use base64::Engine as _;
 }
