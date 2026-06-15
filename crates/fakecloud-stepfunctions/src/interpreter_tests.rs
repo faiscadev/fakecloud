@@ -1660,3 +1660,77 @@ fn lambda_plain_payloads_pass_through() {
         assert_eq!(output["Payload"], json!("hello"));
     });
 }
+
+// ── Regression: malformed JSONPath must not panic the interpreter ─────
+//
+// A state machine with a malformed InputPath/OutputPath (e.g. an unterminated
+// `[` bracket or a multibyte char where the close bracket would be) is accepted
+// today and reaches the interpreter. Before hardening, parsing the path sliced
+// `[bracket_pos + 1 .. part.len() - 1]`, which underflowed (panic) or split a
+// multibyte char (panic). A panic here drops the StartSyncExecution connection
+// (EXPRESS, inline) and silently aborts a detached Standard execution so it
+// stays RUNNING forever. The execution must instead complete cleanly.
+
+#[tokio::test]
+async fn malformed_input_path_unclosed_bracket_does_not_panic() {
+    let state = make_state();
+    let arn = arn_for("malformed-unclosed");
+    create_execution(&state, &arn, Some(r#"{"arr":[1,2,3]}"#.to_string()));
+
+    let definition = json!({
+        "StartAt": "P",
+        "States": {
+            "P": { "Type": "Pass", "InputPath": "$.arr[", "End": true }
+        }
+    })
+    .to_string();
+
+    execute_state_machine(
+        state.clone(),
+        arn.clone(),
+        definition,
+        Some(r#"{"arr":[1,2,3]}"#.to_string()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // No panic, and the execution reached a terminal state (did not hang RUNNING).
+    read_exec(&state, &arn, |exec| {
+        assert_ne!(exec.status, ExecutionStatus::Running);
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    });
+}
+
+#[tokio::test]
+async fn malformed_output_path_multibyte_tail_does_not_panic() {
+    let state = make_state();
+    let arn = arn_for("malformed-multibyte");
+    create_execution(&state, &arn, Some(r#"{"x":[1,2,3]}"#.to_string()));
+
+    let definition = json!({
+        "StartAt": "P",
+        "States": {
+            "P": { "Type": "Pass", "OutputPath": "$.x[\u{00e9}", "End": true }
+        }
+    })
+    .to_string();
+
+    execute_state_machine(
+        state.clone(),
+        arn.clone(),
+        definition,
+        Some(r#"{"x":[1,2,3]}"#.to_string()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    read_exec(&state, &arn, |exec| {
+        assert_ne!(exec.status, ExecutionStatus::Running);
+    });
+}

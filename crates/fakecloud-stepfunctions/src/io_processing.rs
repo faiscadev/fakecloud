@@ -103,19 +103,39 @@ enum PathSegment<'a> {
 fn split_path_segments(path: &str) -> Vec<PathSegment<'_>> {
     let mut segments = Vec::new();
     for part in path.split('.') {
-        if let Some(bracket_pos) = part.find('[') {
-            let name = &part[..bracket_pos];
-            let idx_str = &part[bracket_pos + 1..part.len() - 1];
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                segments.push(PathSegment::Index(name, idx));
-            } else {
-                segments.push(PathSegment::Field(part));
-            }
-        } else {
-            segments.push(PathSegment::Field(part));
+        match parse_index_segment(part) {
+            Some(segment) => segments.push(segment),
+            None => segments.push(PathSegment::Field(part)),
         }
     }
     segments
+}
+
+/// Attempt to parse a `name[idx]` segment. Returns `None` (so the caller treats
+/// the part as a plain field) for any malformed bracket expression. This must
+/// never panic on adversarial input such as `"arr["` (no trailing `]`) or
+/// `"x[é"` (multibyte char where the close bracket would be), both of which are
+/// accepted by `CreateStateMachine` today.
+fn parse_index_segment(part: &str) -> Option<PathSegment<'_>> {
+    let open = part.find('[')?;
+    // Must actually be a closed `[...]` ending the segment.
+    if !part.ends_with(']') {
+        return None;
+    }
+    let close = part.len() - 1;
+    // `close` lands on the `]` byte; the index content is between the brackets.
+    // Guard against `[]` (empty) and ranges that would underflow.
+    let inner_start = open + 1;
+    if inner_start > close {
+        return None;
+    }
+    // Both `inner_start` and `close` are at ASCII bracket boundaries, so slicing
+    // here can never split a multibyte char. The slice content itself may still
+    // be non-ASCII, but it only needs to parse as a usize.
+    let idx_str = part.get(inner_start..close)?;
+    let name = part.get(..open)?;
+    let idx = idx_str.parse::<usize>().ok()?;
+    Some(PathSegment::Index(name, idx))
 }
 
 #[cfg(test)]
@@ -203,5 +223,56 @@ mod tests {
         let output = json!({"a": 1, "b": 2});
         assert_eq!(apply_output_path(&output, Some("$.a")), json!(1));
         assert_eq!(apply_output_path(&output, None), output);
+    }
+
+    #[test]
+    fn test_resolve_path_unclosed_bracket_does_not_panic() {
+        // Malformed JSONPath: `[` with no trailing `]`. Previously this sliced
+        // `[bracket_pos + 1 .. part.len() - 1]` which underflows -> panic.
+        let input = json!({"arr": [1, 2, 3]});
+        // No field literally named "arr[" exists, so this resolves to Null,
+        // but the key requirement is that it must NOT panic.
+        assert_eq!(resolve_path(&input, "$.arr["), Value::Null);
+    }
+
+    #[test]
+    fn test_resolve_path_multibyte_after_bracket_does_not_panic() {
+        // Multibyte char where the close bracket would be. `part.len() - 1`
+        // previously landed mid-char -> "byte index is not a char boundary".
+        let input = json!({"x": [1, 2, 3]});
+        assert_eq!(resolve_path(&input, "$.x[é"), Value::Null);
+        // Also the closed-but-multibyte-inner case.
+        assert_eq!(resolve_path(&input, "$.x[é]"), Value::Null);
+    }
+
+    #[test]
+    fn test_resolve_path_empty_brackets_do_not_panic() {
+        let input = json!({"x": [1, 2, 3]});
+        assert_eq!(resolve_path(&input, "$.x[]"), Value::Null);
+    }
+
+    #[test]
+    fn test_resolve_path_bracket_only_segment() {
+        // A bare `[` as an entire segment.
+        let input = json!({"a": 1});
+        assert_eq!(resolve_path(&input, "$.["), Value::Null);
+        assert_eq!(resolve_path(&input, "$.]"), Value::Null);
+    }
+
+    #[test]
+    fn test_split_path_segments_well_formed_index_still_works() {
+        // Ensure the hardening did not break the happy path.
+        let input = json!({"items": [10, 20, 30]});
+        assert_eq!(resolve_path(&input, "$.items[1]"), json!(20));
+        let nested = json!({"a": {"b": [{"c": 7}]}});
+        assert_eq!(resolve_path(&nested, "$.a.b[0].c"), json!(7));
+    }
+
+    #[test]
+    fn test_apply_input_path_malformed_does_not_panic() {
+        let input = json!({"arr": [1, 2, 3]});
+        // Exercised via the public apply_* entrypoints used by the interpreter.
+        let _ = apply_input_path(&input, Some("$.arr["));
+        let _ = apply_output_path(&input, Some("$.x[é"));
     }
 }

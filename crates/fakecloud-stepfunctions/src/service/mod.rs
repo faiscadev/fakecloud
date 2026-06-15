@@ -514,7 +514,106 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
         ));
     }
 
+    // Reject malformed JSONPath reference fields. AWS rejects bad reference
+    // paths at CreateStateMachine; accepting them here lets a panic-inducing
+    // path reach the interpreter at execution time.
+    for (state_name, state_val) in states_obj {
+        validate_state_paths(state_name, state_val)?;
+    }
+
     Ok(())
+}
+
+/// Validate the JSONPath reference fields of a single state. Recurses into the
+/// `Choices` array of Choice states. Returns an `InvalidDefinition` error for
+/// any syntactically malformed path.
+fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServiceError> {
+    for field in ["InputPath", "OutputPath", "ResultPath"] {
+        if let Some(p) = state.get(field).and_then(|v| v.as_str()) {
+            // `InputPath`/`OutputPath` accept the literal "null" to mean "no
+            // value"; `ResultPath` accepts JSON null (handled separately) but
+            // not the string "null". Both accept "$"-rooted reference paths.
+            if (field != "ResultPath" && p == "null") || is_valid_reference_path(p) {
+                continue;
+            }
+            return Err(invalid_reference_path(state_name, field, p));
+        }
+    }
+
+    if state.get("Type").and_then(|v| v.as_str()) == Some("Choice") {
+        if let Some(choices) = state.get("Choices").and_then(|v| v.as_array()) {
+            for rule in choices {
+                validate_choice_variables(state_name, rule)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate `Variable` reference paths inside a Choice rule, recursing through
+/// nested `And` / `Or` / `Not` boolean combinators.
+fn validate_choice_variables(state_name: &str, rule: &Value) -> Result<(), AwsServiceError> {
+    if let Some(v) = rule.get("Variable").and_then(|v| v.as_str()) {
+        if !is_valid_reference_path(v) {
+            return Err(invalid_reference_path(state_name, "Variable", v));
+        }
+    }
+    for combinator in ["And", "Or"] {
+        if let Some(nested) = rule.get(combinator).and_then(|v| v.as_array()) {
+            for n in nested {
+                validate_choice_variables(state_name, n)?;
+            }
+        }
+    }
+    if let Some(n) = rule.get("Not") {
+        validate_choice_variables(state_name, n)?;
+    }
+    Ok(())
+}
+
+/// A reference path must start with `$` and every `[...]` index segment must be
+/// a balanced, non-empty, decimal-integer index. This mirrors the subset of
+/// JSONPath the interpreter understands; anything it cannot parse is rejected.
+fn is_valid_reference_path(path: &str) -> bool {
+    if path != "$" && !path.starts_with("$.") && !path.starts_with("$[") {
+        return false;
+    }
+    let body = path
+        .strip_prefix("$.")
+        .or_else(|| path.strip_prefix('$'))
+        .unwrap_or(path);
+    for part in body.split('.') {
+        if !segment_is_valid(part) {
+            return false;
+        }
+    }
+    true
+}
+
+fn segment_is_valid(part: &str) -> bool {
+    match part.find('[') {
+        None => !part.contains(']'),
+        Some(open) => {
+            if !part.ends_with(']') {
+                return false;
+            }
+            let inner = &part[open + 1..part.len() - 1];
+            // Empty `[]` or non-integer (incl. multibyte/garbage) indices are invalid.
+            !inner.is_empty() && inner.parse::<usize>().is_ok()
+        }
+    }
+}
+
+fn invalid_reference_path(state_name: &str, field: &str, path: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidDefinition",
+        format!(
+            "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED' \
+             (The {field} field of state '{state_name}' is not a valid reference path: '{path}')"
+        ),
+    )
 }
 
 fn execution_not_found(arn: &str) -> AwsServiceError {
@@ -1366,6 +1465,61 @@ mod tests {
         assert!(validate_definition("not json").is_err());
         assert!(validate_definition(r#"{"States":{}}"#).is_err()); // missing StartAt
         assert!(validate_definition(r#"{"StartAt":"S"}"#).is_err()); // missing States
+    }
+
+    #[test]
+    fn test_validate_definition_rejects_malformed_paths() {
+        // Unterminated bracket in InputPath.
+        let def =
+            r#"{"StartAt":"P","States":{"P":{"Type":"Pass","InputPath":"$.arr[","End":true}}}"#;
+        assert!(validate_definition(def).is_err());
+
+        // Multibyte char where the close bracket would be, in OutputPath.
+        let def =
+            "{\"StartAt\":\"P\",\"States\":{\"P\":{\"Type\":\"Pass\",\"OutputPath\":\"$.x[\u{00e9}\",\"End\":true}}}";
+        assert!(validate_definition(def).is_err());
+
+        // Malformed Choice Variable.
+        let def = r#"{"StartAt":"C","States":{"C":{"Type":"Choice","Choices":[{"Variable":"$.n[","NumericEquals":1,"Next":"P"}]},"P":{"Type":"Pass","End":true}}}"#;
+        assert!(validate_definition(def).is_err());
+
+        // Path not rooted at $.
+        let def =
+            r#"{"StartAt":"P","States":{"P":{"Type":"Pass","InputPath":"foo.bar","End":true}}}"#;
+        assert!(validate_definition(def).is_err());
+
+        // Empty index brackets.
+        let def =
+            r#"{"StartAt":"P","States":{"P":{"Type":"Pass","ResultPath":"$.x[]","End":true}}}"#;
+        assert!(validate_definition(def).is_err());
+    }
+
+    #[test]
+    fn test_validate_definition_accepts_well_formed_paths() {
+        // Valid reference paths, the literal "null" for Input/OutputPath, and
+        // nested Choice combinators must all be accepted.
+        let def = r#"{"StartAt":"P","States":{
+            "P":{"Type":"Pass","InputPath":"$.a.b[0].c","OutputPath":"$","ResultPath":"$.out","Next":"C"},
+            "C":{"Type":"Choice","Choices":[
+                {"And":[{"Variable":"$.items[2]","NumericEquals":1},{"Variable":"$.flag","BooleanEquals":true}],"Next":"S"}
+            ],"Default":"S"},
+            "S":{"Type":"Succeed","InputPath":"null"}
+        }}"#;
+        assert!(validate_definition(def).is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_reference_path() {
+        assert!(is_valid_reference_path("$"));
+        assert!(is_valid_reference_path("$.foo"));
+        assert!(is_valid_reference_path("$.foo.bar[3].baz"));
+        assert!(is_valid_reference_path("$[0]"));
+        assert!(!is_valid_reference_path("$.arr["));
+        assert!(!is_valid_reference_path("$.x[\u{00e9}"));
+        assert!(!is_valid_reference_path("$.x[]"));
+        assert!(!is_valid_reference_path("$.x[abc]"));
+        assert!(!is_valid_reference_path("foo.bar"));
+        assert!(!is_valid_reference_path(""));
     }
 
     #[test]
