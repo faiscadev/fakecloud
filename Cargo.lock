@@ -3593,6 +3593,7 @@ name = "fakecloud-ec2"
 version = "0.19.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fakecloud-aws",

@@ -117,6 +117,16 @@ impl K8sInstances {
         self.client.delete_pod(pod_name).await;
     }
 
+    /// The instance container's logs (the k8s equivalent of `docker logs`).
+    /// `None` if the Pod log can't be read.
+    pub(super) async fn logs(&self, pod_name: &str) -> Option<Vec<u8>> {
+        self.client
+            .pod_logs(pod_name, Some(CONTAINER))
+            .await
+            .ok()
+            .map(String::into_bytes)
+    }
+
     pub(super) async fn reap_stale(&self) {
         self.client.reap_stale(SERVICE).await;
     }

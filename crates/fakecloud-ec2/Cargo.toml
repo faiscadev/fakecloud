@@ -12,6 +12,7 @@ fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-k8s = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 http = { workspace = true }
 k8s-openapi = { workspace = true }
 parking_lot = { workspace = true }

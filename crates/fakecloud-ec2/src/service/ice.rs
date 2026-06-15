@@ -236,15 +236,25 @@ pub(crate) fn get_serial_console_access_status(
 
 // ---- console + password ----
 
-pub(crate) fn get_console_output(
-    _svc: &Ec2Service,
+pub(crate) async fn get_console_output(
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    use base64::Engine;
     let id = require(&req.query_params, "InstanceId")?;
+    // Real GetConsoleOutput returns the console log base64-encoded. Back it
+    // with the instance container's logs (which include any user-data boot
+    // output); empty when the instance has no backing container.
+    let output = match &svc.runtime {
+        Some(rt) => rt.console_output(&id).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(output);
     let body = format!(
-        "{}<timestamp>{}</timestamp><output></output>",
+        "{}<timestamp>{}</timestamp><output>{}</output>",
         ec2_elem("instanceId", &id),
-        FIXED_TIME
+        FIXED_TIME,
+        encoded
     );
     Ok(Ec2Service::respond(
         "GetConsoleOutput",
