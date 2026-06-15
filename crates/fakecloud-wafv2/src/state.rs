@@ -41,9 +41,28 @@ pub struct AccountState {
     pub associations: BTreeMap<String, String>,
     /// Tags keyed by ARN.
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// Vendor-published managed rule sets keyed by (scope, name), set via
+    /// PutManagedRuleSetVersions and read by ListManagedRuleSets /
+    /// ListAvailableManagedRuleGroupVersions.
+    #[serde(default)]
+    pub managed_rule_sets: BTreeMap<ScopedKey, ManagedRuleSet>,
 }
 
 pub type ScopedKey = (String, String);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedRuleSet {
+    pub id: String,
+    pub name: String,
+    pub scope: String,
+    pub description: Option<String>,
+    pub lock_token: String,
+    pub label_namespace: String,
+    pub recommended_version: Option<String>,
+    /// Published version names (e.g. "Version_1.0").
+    pub published_versions: Vec<String>,
+    pub created_time: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebAcl {

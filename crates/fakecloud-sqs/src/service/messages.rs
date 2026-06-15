@@ -364,6 +364,14 @@ impl SqsService {
 
         let visibility_timeout = val_as_i64(&body["VisibilityTimeout"]);
 
+        // FIFO receive de-dup: a retried receive carrying the same
+        // ReceiveRequestAttemptId within the visibility window replays the
+        // exact same batch instead of advancing to the next messages.
+        let receive_request_attempt_id = body["ReceiveRequestAttemptId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
         let wait_time_raw = val_as_i64(&body["WaitTimeSeconds"]);
         if let Some(wt) = wait_time_raw {
             if !(0..=20).contains(&wt) {
@@ -414,6 +422,7 @@ impl SqsService {
                 &queue_url,
                 max_messages,
                 visibility_timeout,
+                receive_request_attempt_id.as_deref(),
             )?;
 
             if !result.is_empty() || deadline.is_none() {
@@ -447,6 +456,7 @@ impl SqsService {
         queue_url: &str,
         max_messages: usize,
         req_visibility_timeout: Option<i64>,
+        receive_request_attempt_id: Option<&str>,
     ) -> Result<Vec<SqsMessage>, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
@@ -467,6 +477,38 @@ impl SqsService {
 
         let is_fifo = queue.is_fifo;
         let now = Utc::now();
+
+        // FIFO receive de-dup: a retried receive with a known, unexpired
+        // ReceiveRequestAttemptId replays the exact same batch - the
+        // messages are still inflight (still within the visibility
+        // window), so we re-resolve them by message id rather than
+        // pulling the next ones. Expired entries are pruned.
+        if is_fifo {
+            queue.receive_attempt_cache.retain(|_, e| e.expiry > now);
+            if let Some(attempt_id) = receive_request_attempt_id {
+                if let Some(entry) = queue.receive_attempt_cache.get(attempt_id).cloned() {
+                    let mut replayed: Vec<SqsMessage> = Vec::new();
+                    for mid in &entry.message_ids {
+                        if let Some(msg) = queue.inflight.iter().find(|m| &m.message_id == mid) {
+                            replayed.push(msg.clone());
+                        }
+                    }
+                    if !replayed.is_empty() {
+                        // Decrypt bodies for the replayed batch, same as the
+                        // normal path below.
+                        let queue_arn = queue.arn.clone();
+                        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
+                        if kms_key_id.is_some() && self.kms_hook.is_some() {
+                            for msg in replayed.iter_mut() {
+                                msg.body =
+                                    self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
+                            }
+                        }
+                        return Ok(replayed);
+                    }
+                }
+            }
+        }
 
         // MessageRetentionPeriod expiry: remove messages older than the retention period
         let retention_seconds: i64 = queue
@@ -686,6 +728,24 @@ impl SqsService {
             }
         }
 
+        // Record the FIFO receive attempt so a retry with the same
+        // ReceiveRequestAttemptId within the visibility window replays
+        // this exact batch. The entry expires when the messages become
+        // visible again.
+        if is_fifo && !received.is_empty() {
+            if let Some(attempt_id) = receive_request_attempt_id {
+                if let Some(queue) = state.queues.get_mut(&resolved_url) {
+                    queue.receive_attempt_cache.insert(
+                        attempt_id.to_string(),
+                        crate::state::ReceiveAttemptEntry {
+                            message_ids: received.iter().map(|m| m.message_id.clone()).collect(),
+                            expiry: now + chrono::Duration::seconds(visibility_timeout),
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(received)
     }
 
@@ -835,6 +895,33 @@ impl SqsService {
                 "AWS.SimpleQueueService.EmptyBatchRequest",
                 "There should be at least one entry in the request.",
             ));
+        }
+
+        // AWS caps a batch at 10 entries; over that it returns
+        // TooManyEntriesInBatchRequest (matches SendMessageBatch).
+        if entries.len() > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                format!(
+                    "Maximum number of entries per request are 10. You have sent {}.",
+                    entries.len()
+                ),
+            ));
+        }
+
+        // Reject duplicate batch entry IDs (matches the other batch ops).
+        let mut seen_ids = std::collections::HashSet::new();
+        for entry in &entries {
+            if let Some(id) = entry["Id"].as_str() {
+                if !seen_ids.insert(id.to_string()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
+                        "Two or more batch entries in the operation have the same Id.",
+                    ));
+                }
+            }
         }
 
         let mut accounts = self.state.write();
@@ -1104,6 +1191,19 @@ impl SqsService {
                 StatusCode::BAD_REQUEST,
                 "AWS.SimpleQueueService.EmptyBatchRequest",
                 "There should be at least one DeleteMessageBatchRequestEntry in the request.",
+            ));
+        }
+
+        // AWS caps a batch at 10 entries; over that it returns
+        // TooManyEntriesInBatchRequest (matches SendMessageBatch).
+        if entries.len() > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+                format!(
+                    "Maximum number of entries per request are 10. You have sent {}.",
+                    entries.len()
+                ),
             ));
         }
 

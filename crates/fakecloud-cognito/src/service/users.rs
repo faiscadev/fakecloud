@@ -568,11 +568,37 @@ impl CognitoService {
             0
         };
 
+        // Optional AttributesToGet projection: restrict each user's
+        // Attributes array to the requested names (AWS returns only those).
+        let attributes_to_get: Option<Vec<String>> =
+            body["AttributesToGet"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
         let page: Vec<Value> = users
             .iter()
             .skip(start_idx)
             .take(limit)
-            .map(|u| user_to_json(u))
+            .map(|u| {
+                let mut json = user_to_json(u);
+                if let Some(ref wanted) = attributes_to_get {
+                    if let Some(attrs) = json["Attributes"].as_array() {
+                        let filtered: Vec<Value> = attrs
+                            .iter()
+                            .filter(|a| {
+                                a["Name"]
+                                    .as_str()
+                                    .is_some_and(|n| wanted.iter().any(|w| w == n))
+                            })
+                            .cloned()
+                            .collect();
+                        json["Attributes"] = json!(filtered);
+                    }
+                }
+                json
+            })
             .collect();
 
         let has_more = start_idx + limit < users.len();

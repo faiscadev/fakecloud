@@ -851,6 +851,71 @@ fn publish_batch_rejects_duplicate_ids() {
     assert!(result.is_err(), "Duplicate batch IDs should error");
 }
 
+/// 1.21: PublishBatch with zero entries must return EmptyBatchRequest.
+#[test]
+fn publish_batch_empty_returns_empty_batch_request() {
+    let (svc, _state) = make_sns();
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "empty-batch")])));
+    let req = sns_request(
+        "PublishBatch",
+        vec![("TopicArn", "arn:aws:sns:us-east-1:123456789012:empty-batch")],
+    );
+    let err = svc.publish_batch(&req).err().expect("empty batch errors");
+    assert!(err.to_string().contains("EmptyBatchRequest"), "got {err}");
+}
+
+/// 1.21: PublishBatch on a FIFO topic without ContentBasedDeduplication
+/// must require MessageDeduplicationId on every entry (matches single
+/// Publish).
+#[test]
+fn publish_batch_fifo_requires_dedup_id() {
+    let (svc, _state) = make_sns();
+    let mut req = sns_request("CreateTopic", vec![("Name", "batch.fifo")]);
+    req.query_params.insert(
+        "Attributes.entry.1.key".to_string(),
+        "FifoTopic".to_string(),
+    );
+    req.query_params
+        .insert("Attributes.entry.1.value".to_string(), "true".to_string());
+    assert_ok(&svc.create_topic(&req));
+
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:batch.fifo";
+    // MessageGroupId present but no MessageDeduplicationId -> error.
+    let req = sns_request(
+        "PublishBatch",
+        vec![
+            ("TopicArn", topic_arn),
+            ("PublishBatchRequestEntries.member.1.Id", "m1"),
+            ("PublishBatchRequestEntries.member.1.Message", "hi"),
+            ("PublishBatchRequestEntries.member.1.MessageGroupId", "g1"),
+        ],
+    );
+    let err = svc
+        .publish_batch(&req)
+        .err()
+        .expect("FIFO batch without dedup id errors");
+    assert!(
+        err.to_string().contains("ContentBasedDeduplication"),
+        "got {err}"
+    );
+
+    // With a MessageDeduplicationId it succeeds.
+    let req = sns_request(
+        "PublishBatch",
+        vec![
+            ("TopicArn", topic_arn),
+            ("PublishBatchRequestEntries.member.1.Id", "m1"),
+            ("PublishBatchRequestEntries.member.1.Message", "hi"),
+            ("PublishBatchRequestEntries.member.1.MessageGroupId", "g1"),
+            (
+                "PublishBatchRequestEntries.member.1.MessageDeduplicationId",
+                "d1",
+            ),
+        ],
+    );
+    assert_ok(&svc.publish_batch(&req));
+}
+
 // --- SetSubscriptionAttributes / GetSubscriptionAttributes ---
 
 #[test]

@@ -42,27 +42,64 @@ pub(crate) fn project_item(
     match projection {
         Some(proj) if !proj.is_empty() => {
             let expr_attr_names = parse_expression_attribute_names(body);
-            let mut result = HashMap::new();
-            for raw in proj.split(',') {
-                let raw = raw.trim();
-                // Single-segment: treat as literal top-level attribute even if
-                // the alias resolves to a name containing `.` (e.g. `#sw` ->
-                // `Safety.Warning`).
-                if !raw.contains('.') && !raw.contains('[') {
-                    let key = resolve_attr_name(raw, &expr_attr_names);
-                    if let Some(v) = item.get(&key) {
-                        result.insert(key, v.clone());
-                    }
-                } else {
-                    let segs = resolve_projection_path_segments(raw, &expr_attr_names);
-                    if let Some(v) = resolve_nested_path_segments(item, &segs) {
-                        insert_nested_value_segments(&mut result, &segs, v);
-                    }
-                }
-            }
-            result
+            project_with_expression(item, proj, &expr_attr_names)
         }
-        _ => item.clone(),
+        _ => {
+            // Honor the deprecated `AttributesToGet` parameter the same
+            // way real DynamoDB still does: it is a flat list of
+            // (possibly document-path) attribute names with no `#alias`
+            // substitution. Falls back to the whole item when neither
+            // projection form is present.
+            match body["AttributesToGet"].as_array() {
+                Some(attrs) if !attrs.is_empty() => {
+                    let names = HashMap::new();
+                    let mut result = HashMap::new();
+                    for raw in attrs.iter().filter_map(|v| v.as_str()) {
+                        project_single_path_into(&mut result, item, raw, &names);
+                    }
+                    result
+                }
+                _ => item.clone(),
+            }
+        }
+    }
+}
+
+/// Project an item using a comma-separated `ProjectionExpression`,
+/// resolving `#alias` references via `expr_attr_names`.
+pub(crate) fn project_with_expression(
+    item: &HashMap<String, AttributeValue>,
+    proj: &str,
+    expr_attr_names: &HashMap<String, String>,
+) -> HashMap<String, AttributeValue> {
+    let mut result = HashMap::new();
+    for raw in proj.split(',') {
+        project_single_path_into(&mut result, item, raw.trim(), expr_attr_names);
+    }
+    result
+}
+
+/// Resolve a single projection path against `item` and merge the result
+/// into `result`. Shared by ProjectionExpression and AttributesToGet.
+fn project_single_path_into(
+    result: &mut HashMap<String, AttributeValue>,
+    item: &HashMap<String, AttributeValue>,
+    raw: &str,
+    expr_attr_names: &HashMap<String, String>,
+) {
+    // Single-segment: treat as literal top-level attribute even if the
+    // alias resolves to a name containing `.` (e.g. `#sw` ->
+    // `Safety.Warning`).
+    if !raw.contains('.') && !raw.contains('[') {
+        let key = resolve_attr_name(raw, expr_attr_names);
+        if let Some(v) = item.get(&key) {
+            result.insert(key, v.clone());
+        }
+    } else {
+        let segs = resolve_projection_path_segments(raw, expr_attr_names);
+        if let Some(v) = resolve_nested_path_segments(item, &segs) {
+            insert_nested_value_segments(result, &segs, v);
+        }
     }
 }
 

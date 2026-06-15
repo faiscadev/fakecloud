@@ -1189,6 +1189,127 @@ fn change_message_visibility_batch_updates_multiple() {
     assert_eq!(body["Successful"].as_array().unwrap().len(), 2);
 }
 
+/// 1.20: DeleteMessageBatch must reject >10 entries with
+/// TooManyEntriesInBatchRequest, like SendMessageBatch.
+#[test]
+fn delete_message_batch_rejects_over_10_entries() {
+    let svc = make_service();
+    let url = create_queue_url(&svc, "del-too-many");
+    let entries: Vec<Value> = (0..11)
+        .map(|i| json!({"Id": format!("e{i}"), "ReceiptHandle": format!("rh{i}")}))
+        .collect();
+    let err = expect_err(svc.delete_message_batch(&make_request(
+        "DeleteMessageBatch",
+        json!({ "QueueUrl": url, "Entries": entries }),
+    )));
+    assert!(
+        err.to_string().contains("TooManyEntriesInBatchRequest"),
+        "got {err}"
+    );
+}
+
+/// 1.20: ChangeMessageVisibilityBatch must reject >10 entries.
+#[test]
+fn change_message_visibility_batch_rejects_over_10_entries() {
+    let svc = make_service();
+    let url = create_queue_url(&svc, "vis-too-many");
+    let entries: Vec<Value> = (0..11)
+        .map(|i| {
+            json!({"Id": format!("e{i}"), "ReceiptHandle": format!("rh{i}"), "VisibilityTimeout": 30})
+        })
+        .collect();
+    let err = expect_err(svc.change_message_visibility_batch(&make_request(
+        "ChangeMessageVisibilityBatch",
+        json!({ "QueueUrl": url, "Entries": entries }),
+    )));
+    assert!(
+        err.to_string().contains("TooManyEntriesInBatchRequest"),
+        "got {err}"
+    );
+}
+
+/// 1.20: ChangeMessageVisibilityBatch must reject duplicate batch entry
+/// IDs (matches the other batch ops).
+#[test]
+fn change_message_visibility_batch_rejects_duplicate_ids() {
+    let svc = make_service();
+    let url = create_queue_url(&svc, "vis-dup");
+    let entries = vec![
+        json!({"Id": "dup", "ReceiptHandle": "rh1", "VisibilityTimeout": 30}),
+        json!({"Id": "dup", "ReceiptHandle": "rh2", "VisibilityTimeout": 30}),
+    ];
+    let err = expect_err(svc.change_message_visibility_batch(&make_request(
+        "ChangeMessageVisibilityBatch",
+        json!({ "QueueUrl": url, "Entries": entries }),
+    )));
+    assert!(
+        err.to_string().contains("BatchEntryIdsNotDistinct"),
+        "got {err}"
+    );
+}
+
+/// 1.28: FIFO ReceiveMessage replays the same batch when retried with the
+/// same ReceiveRequestAttemptId within the visibility window, instead of
+/// returning the next messages.
+#[test]
+fn fifo_receive_request_attempt_id_replays_same_batch() {
+    let svc = make_service();
+    let url = create_queue_url(&svc, "rraid.fifo");
+    for i in 0..3 {
+        svc.send_message(&make_request(
+            "SendMessage",
+            json!({
+                "QueueUrl": url,
+                "MessageBody": format!("m{i}"),
+                "MessageGroupId": "g1",
+                "MessageDeduplicationId": format!("d{i}"),
+            }),
+        ))
+        .unwrap();
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let recv = |attempt: &str| -> Vec<Value> {
+        let resp = rt
+            .block_on(svc.receive_message(&make_request(
+                "ReceiveMessage",
+                json!({
+                    "QueueUrl": url,
+                    "MaxNumberOfMessages": 1,
+                    "VisibilityTimeout": 300,
+                    "ReceiveRequestAttemptId": attempt,
+                }),
+            )))
+            .unwrap();
+        body_json(resp)["Messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let first = recv("attempt-A");
+    assert_eq!(first.len(), 1);
+    let first_id = first[0]["MessageId"].as_str().unwrap().to_string();
+
+    // Same attempt id -> same message replayed (not the next one).
+    let replay = recv("attempt-A");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0]["MessageId"].as_str().unwrap(), first_id);
+
+    // A different attempt id is blocked by FIFO group locking (the group
+    // still has an inflight message), so it returns nothing - which proves
+    // the replay above was the cache, not just a fresh receive.
+    let other = recv("attempt-B");
+    assert!(
+        other.is_empty(),
+        "FIFO group is locked by the inflight message"
+    );
+}
+
 // ── ListDeadLetterSourceQueues ───────────────────────────────────
 
 #[test]

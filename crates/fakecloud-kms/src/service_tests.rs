@@ -1877,6 +1877,56 @@ fn create_alias_rejects_unknown_target() {
     assert_eq!(err.code(), "NotFoundException");
 }
 
+/// 1.22: ListAliases must honor Limit/Marker with correct
+/// Truncated/NextMarker instead of hardcoding Truncated:false.
+#[test]
+fn list_aliases_paginates_with_limit_and_marker() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    for i in 0..5 {
+        create_alias(&svc, &format!("alias/cust-{i}"), &key_id);
+    }
+
+    // First page: Limit=2 -> 2 aliases (plus any AWS-managed) and a marker.
+    let resp = svc
+        .list_aliases(&make_request("ListAliases", json!({ "Limit": 2 })))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let page1 = body["Aliases"].as_array().unwrap();
+    assert_eq!(page1.len(), 2, "Limit must cap the page size");
+    assert_eq!(body["Truncated"].as_bool(), Some(true));
+    let marker = body["NextMarker"]
+        .as_str()
+        .expect("NextMarker present")
+        .to_string();
+    assert_eq!(
+        marker,
+        page1.last().unwrap()["AliasName"].as_str().unwrap(),
+        "NextMarker is the last alias on the page"
+    );
+
+    // Second page: resume after the marker, no overlap.
+    let resp = svc
+        .list_aliases(&make_request(
+            "ListAliases",
+            json!({ "Limit": 2, "Marker": marker }),
+        ))
+        .unwrap();
+    let body2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let page2 = body2["Aliases"].as_array().unwrap();
+    assert!(!page2.is_empty());
+    let p1_names: Vec<&str> = page1
+        .iter()
+        .map(|a| a["AliasName"].as_str().unwrap())
+        .collect();
+    for a in page2 {
+        assert!(
+            !p1_names.contains(&a["AliasName"].as_str().unwrap()),
+            "second page must not repeat the first"
+        );
+    }
+}
+
 #[test]
 fn create_alias_duplicate_errors() {
     let svc = make_service();

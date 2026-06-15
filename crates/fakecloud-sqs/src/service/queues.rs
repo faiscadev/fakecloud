@@ -198,6 +198,7 @@ impl SqsService {
             next_sequence_number: 0,
             permission_labels: Vec::new(),
             receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
         };
 
         state.name_to_url.insert(queue_name, queue_url.clone());

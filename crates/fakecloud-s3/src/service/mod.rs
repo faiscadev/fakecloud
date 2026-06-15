@@ -2071,10 +2071,28 @@ pub(crate) fn compute_md5(data: &[u8]) -> String {
 }
 
 pub(crate) fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
+    let raw = compute_checksum_raw(algorithm, data);
+    if raw.is_empty() {
+        String::new()
+    } else {
+        BASE64.encode(raw)
+    }
+}
+
+/// Compute the raw (un-base64'd) checksum digest bytes for `data`.
+///
+/// Returns the network-order digest bytes so callers can either base64
+/// them ([`compute_checksum`]) or concatenate them when computing an S3
+/// multipart COMPOSITE checksum (which hashes the concatenation of each
+/// part's raw digest, then base64s the result and appends `-N`).
+pub(crate) fn compute_checksum_raw(algorithm: &str, data: &[u8]) -> Vec<u8> {
     match algorithm {
-        "CRC32" => {
-            let crc = crc32fast::hash(data);
-            BASE64.encode(crc.to_be_bytes())
+        "CRC32" => crc32fast::hash(data).to_be_bytes().to_vec(),
+        "CRC32C" => crc32c::crc32c(data).to_be_bytes().to_vec(),
+        "CRC64NVME" => {
+            let mut hasher = crc64fast_nvme::Digest::new();
+            hasher.write(data);
+            hasher.sum64().to_be_bytes().to_vec()
         }
         // CRC32C and CRC64NVME use the same crates as the streaming path so
         // CopyObject / CompleteMultipartUpload produce identical results to
@@ -2090,16 +2108,41 @@ pub(crate) fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
         }
         "SHA1" => {
             use sha1::Digest as _;
-            let hash = sha1::Sha1::digest(data);
-            BASE64.encode(hash)
+            sha1::Sha1::digest(data).to_vec()
         }
         "SHA256" => {
             use sha2::Digest as _;
-            let hash = sha2::Sha256::digest(data);
-            BASE64.encode(hash)
+            sha2::Sha256::digest(data).to_vec()
         }
-        _ => String::new(),
+        _ => Vec::new(),
     }
+}
+
+/// Compute an S3 multipart COMPOSITE additional checksum from each
+/// part's raw digest bytes (in part-number order). AWS defines this as
+/// `base64(HASH(concat(raw_part_digests)))-N` where HASH is the chosen
+/// algorithm and N is the part count. Returns `None` for an unsupported
+/// algorithm or empty part list.
+pub(crate) fn compute_composite_checksum(
+    algorithm: &str,
+    part_raw_digests: &[Vec<u8>],
+) -> Option<String> {
+    if part_raw_digests.is_empty() {
+        return None;
+    }
+    let mut concat = Vec::new();
+    for d in part_raw_digests {
+        concat.extend_from_slice(d);
+    }
+    let digest = compute_checksum_raw(algorithm, &concat);
+    if digest.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}-{}",
+        BASE64.encode(digest),
+        part_raw_digests.len()
+    ))
 }
 
 /// Streaming variant of [`compute_checksum`] for spool files. Reads

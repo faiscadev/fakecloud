@@ -97,7 +97,7 @@ impl ApiGatewayService {
             "GetUsagePlanKeys" => self.get_usage_plan_keys(req, &params),
             "DeleteUsagePlanKey" => self.delete_usage_plan_key(req, &params),
             "GetUsage" => self.get_usage(req, &params),
-            "UpdateUsage" => ok(json!({})),
+            "UpdateUsage" => self.update_usage(req, &params),
             "CreateVpcLink" => self.create_vpc_link(req),
             "GetVpcLink" => self.get_vpc_link(req, &params),
             "GetVpcLinks" => self.get_vpc_links(req),
@@ -141,19 +141,8 @@ impl ApiGatewayService {
             "UpdateGatewayResponse" => self.update_gateway_response(req, &params),
             "GetExport" => self.get_export(req, &params),
             "GetSdk" => self.get_sdk(req, &params),
-            "GetSdkType" => ok(
-                json!({"id": params.get("id"), "friendlyName": "Stub", "configurationProperties": []}),
-            ),
-            "GetSdkTypes" => ok(json!({
-                "item": [
-                    {"id": "java", "friendlyName": "Java"},
-                    {"id": "javascript", "friendlyName": "JavaScript"},
-                    {"id": "android", "friendlyName": "Android"},
-                    {"id": "objectivec", "friendlyName": "Objective-C"},
-                    {"id": "swift", "friendlyName": "Swift"},
-                    {"id": "ruby", "friendlyName": "Ruby"},
-                ]
-            })),
+            "GetSdkType" => self.get_sdk_type(&params),
+            "GetSdkTypes" => ok(json!({ "item": sdk_types() })),
             "TagResource" => self.tag_resource(req, &params),
             "UntagResource" => self.untag_resource(req, &params),
             "GetTags" => self.get_tags(req, &params),

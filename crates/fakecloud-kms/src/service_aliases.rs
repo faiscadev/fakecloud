@@ -173,6 +173,8 @@ impl KmsService {
         })?;
 
         let key_id_filter = body["KeyId"].as_str();
+        let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let marker = body["Marker"].as_str();
 
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
@@ -182,7 +184,7 @@ impl KmsService {
         let resolved_filter =
             key_id_filter.and_then(|kid| Self::resolve_key_id_with_state(state, kid));
 
-        let aliases: Vec<Value> = state
+        let all_aliases: Vec<Value> = state
             .aliases
             .values()
             .filter(|a| match (&resolved_filter, key_id_filter) {
@@ -199,13 +201,35 @@ impl KmsService {
             })
             .collect();
 
+        // Real Limit/Marker pagination (mirrors ListGrants): the marker
+        // is the AliasName of the last item on the previous page; resume
+        // after it.
+        let start = if let Some(m) = marker {
+            all_aliases
+                .iter()
+                .position(|a| a["AliasName"].as_str() == Some(m))
+                .map(|pos| pos + 1)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let page = &all_aliases[start..all_aliases.len().min(start + limit)];
+        let truncated = start + limit < all_aliases.len();
+
+        let mut result = json!({
+            "Aliases": page,
+            "Truncated": truncated,
+        });
+        if truncated {
+            if let Some(last) = page.last() {
+                result["NextMarker"] = last["AliasName"].clone();
+            }
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "Aliases": aliases,
-                "Truncated": false,
-            }))
-            .unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 }

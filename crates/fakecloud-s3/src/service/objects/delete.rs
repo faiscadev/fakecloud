@@ -290,6 +290,16 @@ impl S3Service {
             ));
         }
 
+        // AWS caps a single DeleteObjects request at 1000 objects and
+        // rejects anything larger with a 400 MalformedXML.
+        if entries.len() > 1000 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema",
+            ));
+        }
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state

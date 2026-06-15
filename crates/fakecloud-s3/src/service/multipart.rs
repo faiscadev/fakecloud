@@ -12,9 +12,9 @@ use crate::state::{MultipartUpload, S3Object, UploadPart};
 use md5::{Digest, Md5};
 
 use super::{
-    canned_acl_grants, compute_checksum, compute_md5, extract_user_metadata, no_such_bucket,
-    no_such_key, no_such_upload, parse_complete_multipart_xml, parse_grant_headers,
-    parse_url_encoded_tags, precondition_failed, resolve_object, s3_xml, xml_escape, S3Service,
+    canned_acl_grants, compute_md5, extract_user_metadata, no_such_bucket, no_such_key,
+    no_such_upload, parse_complete_multipart_xml, parse_grant_headers, parse_url_encoded_tags,
+    precondition_failed, resolve_object, s3_xml, xml_escape, S3Service,
 };
 
 /// Build the `CompleteMultipartUploadResult` XML response for an object that
@@ -544,6 +544,10 @@ impl S3Service {
         let mut combined_data = Vec::new();
         let mut md5_digests = Vec::new();
         let mut part_sizes = Vec::new();
+        // Per-part raw additional-checksum digests, collected in
+        // part-number order so we can build the COMPOSITE checksum
+        // (hash-of-part-hashes) AWS returns for multipart objects.
+        let mut part_checksum_digests: Vec<Vec<u8>> = Vec::new();
 
         for (part_num, submitted_etag) in &sorted_parts {
             let part = upload.parts.get(part_num).ok_or_else(|| {
@@ -580,6 +584,9 @@ impl S3Service {
                     "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's etag.",
                 ));
             }
+            if let Some(algo) = upload.checksum_algorithm.as_deref() {
+                part_checksum_digests.push(super::compute_checksum_raw(algo, &part_bytes));
+            }
             combined_data.extend_from_slice(&part_bytes);
             md5_digests.extend_from_slice(&part_md5);
             part_sizes.push((*part_num, part_bytes.len() as u64));
@@ -588,10 +595,13 @@ impl S3Service {
         // Multipart ETag: MD5(concat(part_md5_digests))-N
         let combined_md5 = Md5::digest(&md5_digests);
         let etag = format!("{:x}-{}", combined_md5, sorted_parts.len());
+        // Additional-checksum for a multipart object is COMPOSITE:
+        // base64(HASH(concat(raw part digests)))-N - NOT a checksum over
+        // the whole reassembled object.
         let checksum_value = upload
             .checksum_algorithm
             .as_deref()
-            .map(|algo| compute_checksum(algo, &combined_data));
+            .and_then(|algo| super::compute_composite_checksum(algo, &part_checksum_digests));
         let data = Bytes::from(combined_data);
         let store_body = data.clone();
 

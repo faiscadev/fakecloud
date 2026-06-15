@@ -416,6 +416,20 @@ impl ApiGatewayService {
         })
     }
 
+    /// GetSdkType: return the descriptor for a known SDK type id instead
+    /// of a literal "Stub" friendlyName.
+    pub(super) fn get_sdk_type(
+        &self,
+        params: &BTreeMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = params.get("id").cloned().unwrap_or_default();
+        sdk_types()
+            .into_iter()
+            .find(|t| t["id"].as_str() == Some(id.as_str()))
+            .map(ok)
+            .unwrap_or_else(|| Err(not_found("SDK type not found")))
+    }
+
     pub(super) fn tag_resource(
         &self,
         req: &AwsRequest,
