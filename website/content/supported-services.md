@@ -15,7 +15,7 @@ fakecloud provides 100% API conformance across 3,710 operations. Unlike mocks, f
 ## Supported Services
 
 ### Compute & Containers
-- **EC2**: 767 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instance control plane is metadata-faithful; Docker-backed execution is a roadmap follow-up.
+- **EC2**: 767 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instances run as real containers — Docker/Podman by default or native Kubernetes Pods (`FAKECLOUD_EC2_BACKEND=k8s`) — running user-data at boot, with start/stop/reboot/terminate mapped to the container lifecycle and `GetConsoleOutput` returning the container log; degrades to metadata-only when no container runtime is present.
 - **Lambda**: 70 operations. Full execution environment in real Docker containers across 23 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
 - **ECR**: 58 operations. Full OCI v2 Distribution protocol support for `docker push` and `docker pull`.
 - **ECS**: 77 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.
