@@ -71,6 +71,9 @@ type EC2Instance struct {
 	SecurityGroupIDs []string `json:"securityGroupIds"`
 	AvailabilityZone string   `json:"availabilityZone"`
 	LaunchTime       string   `json:"launchTime"`
+	// ContainerID is the backing Docker container id or Kubernetes Pod name,
+	// or nil when the instance runs metadata-only (no container runtime).
+	ContainerID *string `json:"containerId"`
 }
 
 type EC2InstancesResponse struct {

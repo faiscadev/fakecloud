@@ -61,6 +61,8 @@ export interface Ec2Instance {
   securityGroupIds: string[];
   availabilityZone: string;
   launchTime: string;
+  /** Backing Docker container id or Kubernetes Pod name; null when metadata-only. */
+  containerId: string | null;
 }
 
 export interface Ec2InstancesResponse {

@@ -140,6 +140,8 @@ final class Ec2Instance
         public readonly array $securityGroupIds,
         public readonly string $availabilityZone,
         public readonly string $launchTime,
+        /** Backing Docker container id or Kubernetes Pod name; null when metadata-only. */
+        public readonly ?string $containerId,
     ) {}
 
     public static function fromArray(array $data): self
@@ -157,6 +159,7 @@ final class Ec2Instance
             $data['securityGroupIds'] ?? [],
             $data['availabilityZone'],
             $data['launchTime'],
+            $data['containerId'] ?? null,
         );
     }
 }

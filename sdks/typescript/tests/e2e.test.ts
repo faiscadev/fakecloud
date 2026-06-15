@@ -176,6 +176,12 @@ describe("ec2", () => {
     expect(instance!.privateIp.length).toBeGreaterThan(0);
     expect(instance!.availabilityZone.length).toBeGreaterThan(0);
     expect(Array.isArray(instance!.securityGroupIds)).toBe(true);
+    // Backing container id (Docker) / Pod name (k8s), or null when the
+    // instance runs metadata-only (no container runtime in the test env).
+    expect(
+      instance!.containerId === null ||
+        typeof instance!.containerId === "string",
+    ).toBe(true);
   });
 });
 

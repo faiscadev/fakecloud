@@ -2337,9 +2337,9 @@ pub struct Elbv2WafCountsResponse {
 // ── EC2 instances (introspection) ───────────────────────────────────
 
 /// A single EC2 instance as surfaced by `GET /_fakecloud/ec2/instances`.
-/// Instances are metadata-faithful today (Docker-backed execution is a
-/// roadmap follow-up), so this mirrors the control-plane view without
-/// leaking runtime-internal fields.
+/// One EC2 instance's control-plane view, plus the backing container handle
+/// when the instance is backed by a real container runtime (Docker container
+/// id or Kubernetes Pod name); `container_id` is `None` in metadata-only mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ec2Instance {
@@ -2357,6 +2357,10 @@ pub struct Ec2Instance {
     pub security_group_ids: Vec<String>,
     pub availability_zone: String,
     pub launch_time: String,
+    /// Backing container id (Docker) or Pod name (k8s); `None` when the
+    /// instance runs metadata-only (no container runtime available).
+    #[serde(default)]
+    pub container_id: Option<String>,
 }
 
 /// Response body for `GET /_fakecloud/ec2/instances`.

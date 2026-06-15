@@ -134,6 +134,9 @@ class Ec2Instance:
     subnet_id: Optional[str] = None
     vpc_id: Optional[str] = None
     key_name: Optional[str] = None
+    #: Backing Docker container id or Kubernetes Pod name; ``None`` when the
+    #: instance runs metadata-only (no container runtime).
+    container_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Ec2Instance:

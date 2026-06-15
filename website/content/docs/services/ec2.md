@@ -28,7 +28,7 @@ EC2 uses the `ec2Query` protocol: form-encoded requests and flattened-XML respon
 
 ## Introspection
 
-- `GET /_fakecloud/ec2/instances` — list every fakecloud-managed EC2 instance across all account partitions with its control-plane metadata (`instanceId`, `imageId`, `instanceType`, `state`, `privateIp`, `publicIp`, `subnetId`, `vpcId`, `keyName`, `securityGroupIds`, `availabilityZone`, `launchTime`). Lets tests assert on instance state without re-parsing `DescribeInstances` XML. Exposed through every fakecloud introspection SDK — `fc.ec2().getInstances()` (Go/Java/TS/PHP), `fc.ec2.get_instances()` (Python), `fc.ec2().get_instances()` (Rust).
+- `GET /_fakecloud/ec2/instances` — list every fakecloud-managed EC2 instance across all account partitions with its control-plane metadata (`instanceId`, `imageId`, `instanceType`, `state`, `privateIp`, `publicIp`, `subnetId`, `vpcId`, `keyName`, `securityGroupIds`, `availabilityZone`, `launchTime`) plus `containerId` — the backing Docker container id or Kubernetes Pod name, or `null` when the instance runs metadata-only (no container runtime). Lets tests assert on instance state (and which container backs it) without re-parsing `DescribeInstances` XML. Exposed through every fakecloud introspection SDK — `fc.ec2().getInstances()` (Go/Java/TS/PHP), `fc.ec2.get_instances()` (Python), `fc.ec2().get_instances()` (Rust).
 
 ## Known limitations
 
