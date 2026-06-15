@@ -9,7 +9,7 @@ fakecloud implements **767 of 767** AWS EC2 operations at 100% Smithy conformanc
 ## Supported features
 
 - **Core networking** — VPCs (+ secondary CIDRs, tenancy), DHCP option sets, subnets (+ CIDR reservations), security groups (rules, references, VPC associations), route tables, internet / egress-only / NAT gateways, and elastic IPs with transfer/move flows.
-- **Compute** — `RunInstances` and the full instance lifecycle (start/stop/reboot/terminate/monitor), instance attributes, credit specifications, metadata + maintenance options, instance types, and topology. Key pairs and placement groups. The instance control plane is metadata-faithful; **real Docker-backed instance execution is a roadmap follow-up**.
+- **Compute** — `RunInstances` and the full instance lifecycle (start/stop/reboot/terminate/monitor), instance attributes, credit specifications, metadata + maintenance options, instance types, and topology. Key pairs and placement groups. **Instances are backed by real Docker/Podman containers** — `RunInstances` boots a container per instance, runs your user-data at boot, and maps start/stop/reboot/terminate onto the container lifecycle (falling back to a metadata-only control plane when no container runtime is present).
 - **Storage** — EBS volumes (+ modifications, recycle bin), snapshots (+ copy, tier, lock, fast restores, block-public-access), AMIs (register/copy/deprecate/deregistration-protection), and EBS encryption defaults.
 - **Interfaces** — elastic network interfaces with attachments, permissions, IPv4/IPv6 address assignment, and prefix lists.
 - **Edge / advanced networking** — network ACLs, VPC peering, VPC endpoints + PrivateLink (services, connection notifications), flow logs, launch templates (+ versions), spot requests / fleets / EC2 fleets, capacity reservations (+ fleets), reserved instances, dedicated hosts.
@@ -32,6 +32,6 @@ EC2 uses the `ec2Query` protocol: form-encoded requests and flattened-XML respon
 
 ## Known limitations
 
-- **Instance execution is metadata-only** — `RunInstances` records a faithful instance, reservation, and state machine, but does not yet boot a real Docker container. Real container-backed execution (reusing the Lambda/ECS/RDS runtime) is a planned follow-up.
+- **Instances run as containers, not VMs** — `RunInstances` boots a real Docker/Podman container per instance (Amazon Linux by default, overridable via `FAKECLOUD_EC2_DEFAULT_IMAGE`) and runs user-data at boot, but it is a container, not a full virtual machine: no kernel modules, no nested virtualization, and the instance type / EBS sizing is metadata only. When no container runtime is available, the control plane degrades to a metadata-only instance so every API call still succeeds. Native Kubernetes-Pod backing (`FAKECLOUD_EC2_BACKEND=k8s`, mirroring Lambda/ECS/RDS) is a follow-up.
 - **A handful of model operations are absent from the vendored AWS SDK** (`DescribeIpamPoolAllocations`, `ModifyIpamPoolAllocation`, and the capacity-reservation cancellation-quote pair). They are implemented and conformance-probed via raw `ec2Query`, and graduate to typed SDK calls on the next SDK refresh.
 - Security-group rules and network ACLs are stored and returned faithfully but are **not enforced** against instance traffic (there is no data plane to police).
