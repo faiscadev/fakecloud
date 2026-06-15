@@ -16,11 +16,13 @@ fakecloud is configured via CLI flags or environment variables. Flags take prece
 | `--data-path`        | `FAKECLOUD_DATA_PATH`       | —                  | Directory to persist state to. Required when `--storage-mode=persistent`.                |
 | `--s3-cache-size`    | `FAKECLOUD_S3_CACHE_SIZE`   | `268435456`        | In-memory LRU cache for S3 object bodies in persistent mode. Default 256 MiB.            |
 |                      | `FAKECLOUD_CONTAINER_CLI`   | auto-detect        | Container CLI to use (`docker` or `podman`)                                              |
-|                      | `FAKECLOUD_CONTAINER_BACKEND` | unset (docker)   | Global execution backend for all container-backed services (Lambda, ECS, RDS, ElastiCache). `k8s` runs them as native Kubernetes Pods. See [Kubernetes backend](/docs/guides/kubernetes-backend/). |
+|                      | `FAKECLOUD_CONTAINER_BACKEND` | unset (docker)   | Global execution backend for all container-backed services (Lambda, ECS, RDS, ElastiCache, EC2). `k8s` runs them as native Kubernetes Pods. See [Kubernetes backend](/docs/guides/kubernetes-backend/). |
 |                      | `FAKECLOUD_LAMBDA_BACKEND`  | inherits global    | Per-service override for Lambda (`k8s` or `docker`). Wins over `FAKECLOUD_CONTAINER_BACKEND`. |
 |                      | `FAKECLOUD_ECS_BACKEND`     | inherits global    | Per-service override for ECS task execution (`k8s` or `docker`). |
 |                      | `FAKECLOUD_RDS_BACKEND`     | inherits global    | Per-service override for RDS DB instances (`k8s` or `docker`). |
 |                      | `FAKECLOUD_ELASTICACHE_BACKEND` | inherits global| Per-service override for ElastiCache (`k8s` or `docker`). |
+|                      | `FAKECLOUD_EC2_BACKEND`     | inherits global    | Per-service override for EC2 instances (`k8s` or `docker`). |
+|                      | `FAKECLOUD_EC2_DEFAULT_IMAGE` | `amazonlinux:2023` | Base container image EC2 instances boot from (any OS image with `tail`/`sh`). |
 |                      | `FAKECLOUD_LAMBDA_MAX_CONCURRENCY` | `10`        | Max warm instances kept per Lambda function. Each instance serves one invocation at a time (the runtime emulator can't handle concurrent events); the pool scales up to this cap under concurrent load, then queues. Raise for higher per-function concurrency. |
 |                      | `FAKECLOUD_K8S_NAMESPACE`   | `default`          | Namespace fakecloud creates Pods in. Only honored on the K8s backend. |
 |                      | `FAKECLOUD_K8S_SELF_URL`    | —                  | In-cluster URL of the fakecloud Service (e.g. `http://fakecloud.fakecloud.svc.cluster.local:4566`). Required for the K8s backend — Pods fetch artifacts from and call back to this URL. |

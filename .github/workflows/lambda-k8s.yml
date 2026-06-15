@@ -96,3 +96,12 @@ jobs:
             --features k8s-integration \
             --test k8s_integration \
             -- --test-threads=1
+
+      - name: EC2 K8s integration tests
+        env:
+          FAKECLOUD_K8S_TEST: '1'
+        run: |
+          cargo test -p fakecloud-ec2 \
+            --features k8s-integration \
+            --test k8s_integration \
+            -- --test-threads=1

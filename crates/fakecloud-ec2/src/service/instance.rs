@@ -224,9 +224,9 @@ async fn change_state(
 ) -> Result<AwsResponse, AwsServiceError> {
     let ids = indexed_list(&req.query_params, "InstanceId");
     let mut changes = Vec::new();
-    // Container handles of affected instances, collected under the lock and
-    // acted on afterwards so no await happens while the state lock is held.
-    let mut affected: Vec<(String, String)> = Vec::new();
+    // Ids of backed instances, collected under the lock and acted on
+    // afterwards so no await happens while the state lock is held.
+    let mut affected: Vec<String> = Vec::new();
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -242,8 +242,8 @@ async fn change_state(
                 if new_code == 80 {
                     inst.public_ip = None;
                 }
-                if let Some(cid) = &inst.container_id {
-                    affected.push((id.clone(), cid.clone()));
+                if inst.container_id.is_some() {
+                    affected.push(id.clone());
                 }
                 // A terminated instance no longer has a backing container.
                 if new_code == 48 {
@@ -259,14 +259,16 @@ async fn change_state(
         }
     }
 
-    // Map the state transition onto the backing container's lifecycle.
+    // Map the state transition onto the backing container's lifecycle. Ops
+    // are keyed by instance id (the k8s backend recreates Pods on start).
     if let Some(rt) = &svc.runtime {
-        for (id, cid) in &affected {
+        for id in &affected {
             match new_code {
                 16 => {
                     // StartInstances: the container may come back with a new
-                    // address; reflect it in describe output.
-                    if let Some(new_ip) = rt.start_instance(cid).await {
+                    // address (always so on k8s, which recreates the Pod);
+                    // reflect it in describe output, along with the Pod name.
+                    if let Some(new_ip) = rt.start_instance(id).await {
                         let mut accounts = svc.state.write();
                         let state = accounts.get_or_create(&req.account_id);
                         if let Some(inst) = state.instances.get_mut(id) {
@@ -274,8 +276,8 @@ async fn change_state(
                         }
                     }
                 }
-                80 => rt.stop_instance(cid).await,
-                48 => rt.terminate_instance(cid).await,
+                80 => rt.stop_instance(id).await,
+                48 => rt.terminate_instance(id).await,
                 _ => {}
             }
         }
@@ -312,20 +314,26 @@ pub(crate) async fn reboot_instances(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let ids = indexed_list(&req.query_params, "InstanceId");
-    let container_ids: Vec<String> = {
+    // Only reboot instances that actually have a backing container.
+    let backed: Vec<String> = {
         let accounts = svc.state.read();
         match accounts.get(&req.account_id) {
             Some(state) => ids
                 .iter()
-                .filter_map(|id| state.instances.get(id))
-                .filter_map(|i| i.container_id.clone())
+                .filter(|id| {
+                    state
+                        .instances
+                        .get(*id)
+                        .is_some_and(|i| i.container_id.is_some())
+                })
+                .cloned()
                 .collect(),
             None => Vec::new(),
         }
     };
     if let Some(rt) = &svc.runtime {
-        for cid in &container_ids {
-            rt.reboot_instance(cid).await;
+        for id in &backed {
+            rt.reboot_instance(id).await;
         }
     }
     Ok(Ec2Service::respond(

@@ -1,12 +1,12 @@
 +++
 title = "Kubernetes backend"
-description = "Run fakecloud's container-backed services (Lambda, ECS, RDS, ElastiCache) as native Kubernetes Pods instead of Docker containers. Avoid docker-in-docker, get real resource limits, debug with kubectl."
+description = "Run fakecloud's container-backed services (Lambda, ECS, RDS, ElastiCache, EC2) as native Kubernetes Pods instead of Docker containers. Avoid docker-in-docker, get real resource limits, debug with kubectl."
 weight = 30
 +++
 
-By default, fakecloud runs its container-backed services — Lambda, ECS, RDS, ElastiCache — in Docker containers via `docker run`. When fakecloud itself runs inside Kubernetes (CI pipelines, multi-tenant test clusters), that means docker-in-docker: privileged pods, opaque resource accounting, and harder debugging.
+By default, fakecloud runs its container-backed services — Lambda, ECS, RDS, ElastiCache, EC2 — in Docker containers via `docker run`. When fakecloud itself runs inside Kubernetes (CI pipelines, multi-tenant test clusters), that means docker-in-docker: privileged pods, opaque resource accounting, and harder debugging.
 
-The Kubernetes backend (issue [#1234](https://github.com/faiscadev/fakecloud/issues/1234)) replaces the Docker path with native Pods. Flip the whole stack with `FAKECLOUD_CONTAINER_BACKEND=k8s`, or opt a single service in/out with its `FAKECLOUD_<SERVICE>_BACKEND` variable. Each Lambda function gets a Pod sized from the function's `MemorySize`, executes the AWS Runtime Interface Emulator image, and is reused across invocations exactly like a warm Docker container; ECS tasks, RDS instances, and ElastiCache nodes get Pods too (see the per-service sections below).
+The Kubernetes backend (issue [#1234](https://github.com/faiscadev/fakecloud/issues/1234)) replaces the Docker path with native Pods. Flip the whole stack with `FAKECLOUD_CONTAINER_BACKEND=k8s`, or opt a single service in/out with its `FAKECLOUD_<SERVICE>_BACKEND` variable. Each Lambda function gets a Pod sized from the function's `MemorySize`, executes the AWS Runtime Interface Emulator image, and is reused across invocations exactly like a warm Docker container; ECS tasks, RDS instances, ElastiCache nodes, and EC2 instances get Pods too (see the per-service sections below).
 
 ## When to use it
 
@@ -182,9 +182,18 @@ Set `FAKECLOUD_ECS_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`
 - Container images (including AWS ECR URIs, rewritten to the in-cluster registry) must be pullable by the cluster.
 - Low-level Docker-runtime knobs (`ulimits`, `devices`, `sysctls`, `tmpfs`, Linux capabilities) aren't translated to the Pod; `privileged`, `readonlyRootFilesystem`, and a numeric `user` are. Task volumes become Pod-local `emptyDir` scratch shared by name within the task.
 
+## EC2
+
+Set `FAKECLOUD_EC2_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run EC2 instances as native Pods instead of Docker containers.
+
+- Each `RunInstances` instance becomes **one Pod** running the instance's base image (Amazon Linux by default, overridable via `FAKECLOUD_EC2_DEFAULT_IMAGE`), kept alive with `tail -f /dev/null`. The instance's private IP in `DescribeInstances` is the Pod IP.
+- **User-data** runs at boot exactly as on the Docker backend: it's decoded and executed as a root shell script in the container, backgrounded so a slow script never blocks readiness.
+- A Pod can't be stopped and restarted in place, so `StopInstances` **deletes** the Pod and `StartInstances`/`RebootInstances` **recreate** it under the same deterministic name (re-running user-data). Instances aren't persistent disks, so this matches the container model — not EBS-backed stop/start semantics. `TerminateInstances` deletes the Pod for good.
+- The EC2 backend only creates and deletes Pods — it never execs into them — so it needs no `pods/exec` permission (unlike ElastiCache).
+
 ## Limitations
 
-- The Kubernetes backend covers Lambda, ElastiCache, RDS, and ECS execution — the whole container-backed stack can run natively on Kubernetes.
+- The Kubernetes backend covers Lambda, ElastiCache, RDS, ECS, and EC2 execution — the whole container-backed stack can run natively on Kubernetes.
 - Container-image Lambda functions whose image registry requires auth need a manually-created `kubernetes.io/dockerconfigjson` Secret referenced via `FAKECLOUD_K8S_PULL_SECRET`. Auto-creating that secret requires `secrets` permissions that not every cluster admin wants to grant fakecloud.
 - Cold-start latency adds the init container HTTP round-trip to download code + layers (typically <500ms intra-cluster), on top of image pull + RIE start. Warm-Pod reuse keeps subsequent invocations as fast as the Docker backend.
 - The K8s backend requires fakecloud's process to remain reachable at `FAKECLOUD_K8S_SELF_URL` for the lifetime of each Pod's init container. If fakecloud restarts mid-init, that Pod's bootstrap fails and the facade will spawn a fresh one on the next invocation.

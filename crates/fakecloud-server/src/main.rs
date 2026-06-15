@@ -667,12 +667,29 @@ async fn main() {
     } else {
         tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
     }
-    // EC2 instance backing runtime (Docker/Podman). Optional: when no
+    // EC2 instance backing runtime. FAKECLOUD_EC2_BACKEND=k8s (or the global
+    // FAKECLOUD_CONTAINER_BACKEND=k8s) runs instances as native Kubernetes
+    // Pods; anything else (or unset) uses the local Docker/Podman CLI. When no
     // container CLI is present, RunInstances serves metadata-only instances so
     // the control plane still works everywhere.
     let ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>> =
-        fakecloud_ec2::runtime::Ec2Runtime::new().map(Arc::new);
+        if fakecloud_k8s::backend_choice("FAKECLOUD_EC2_BACKEND") == fakecloud_k8s::Backend::K8s {
+            match fakecloud_ec2::runtime::Ec2Runtime::new_k8s(bound_addr.port()).await {
+                Ok(rt) => Some(Arc::new(rt)),
+                Err(e) => {
+                    eprintln!(
+                        "Kubernetes EC2 backend selected (FAKECLOUD_EC2_BACKEND/FAKECLOUD_CONTAINER_BACKEND=k8s) but failed to initialize: {e}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            fakecloud_ec2::runtime::Ec2Runtime::new().map(Arc::new)
+        };
     if let Some(ref rt) = ec2_runtime {
+        // Sweep instance Pods left by a previous process (k8s only; no-op on
+        // the Docker backend, handled by the shared container reaper).
+        rt.reap_stale().await;
         tracing::info!(
             cli = rt.cli_name(),
             "EC2 instance execution enabled via container runtime"
