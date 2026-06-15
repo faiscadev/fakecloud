@@ -450,6 +450,22 @@ pub(crate) fn task_should_stop(containers: &[RunningContainer]) -> bool {
     containers.iter().all(|c| c.exit_code.is_some())
 }
 
+/// True if the task's `desired_status` in state is `STOPPED` — i.e. a
+/// StopTask / scale-down / DeleteService raced the launch and asked for this
+/// task to be killed. A missing task (deleted from state mid-launch) also
+/// counts as "stop": there's nothing left to keep running for.
+pub(crate) fn task_desired_stopped(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+) -> bool {
+    let accounts = state.read();
+    match accounts.get(account_id).and_then(|s| s.tasks.get(task_id)) {
+        Some(task) => task.desired_status == "STOPPED",
+        None => true,
+    }
+}
+
 fn build_container_plans(
     state: &SharedEcsState,
     account_id: &str,
@@ -1212,6 +1228,15 @@ fn parse_port_mapping(value: &serde_json::Value) -> Option<PortMapping> {
     })
 }
 
+/// The `fakecloud-instance=fakecloud-<pid>` ownership label value, matching
+/// exactly how RDS/ElastiCache/Lambda/EC2(Docker) construct it. The shared
+/// startup reaper lists containers carrying this label, parses the owning
+/// PID, and removes any whose owner is no longer alive. Returns the full
+/// `key=value` string ready to follow a `--label` flag.
+pub(crate) fn fakecloud_instance_label() -> String {
+    format!("fakecloud-instance=fakecloud-{}", std::process::id())
+}
+
 /// Build the docker `run` argv for a single container plan. Pure so unit
 /// tests can assert on flag ordering / `--publish` translation without
 /// shelling out. The returned vector is everything *after* the binary
@@ -1235,6 +1260,14 @@ pub(crate) fn build_run_argv(
     argv.push(format!("fakecloud-ecs-task={}", task_id));
     argv.push("--label".into());
     argv.push(format!("fakecloud-ecs-container={}", plan.container_name));
+    // Ownership label shared with RDS/ElastiCache/Lambda/EC2(Docker). The
+    // startup reaper (`fakecloud-server::reaper`) filters strictly on
+    // `label=fakecloud-instance` and parses the owning PID out of the value
+    // (`fakecloud-<pid>`). Without this, ECS task containers (and their
+    // host-port publishes / awsvpc networks) leak unreapably after an
+    // ungraceful restart. See fakecloud_instance_label().
+    argv.push("--label".into());
+    argv.push(fakecloud_instance_label());
     // Inject `--add-host host.docker.internal:<ip>` only for docker;
     // podman provides `host.containers.internal` natively and rejects
     // the host-gateway mapping (issue #1539).
@@ -1873,6 +1906,35 @@ mod tests {
             task.captured_logs.starts_with("[task failed to start]:"),
             "captured_logs missing prefix: {:?}",
             task.captured_logs
+        );
+    }
+
+    /// 4.2 — `task_desired_stopped` is the post-launch gate `run_task_inner`
+    /// uses to detect a StopTask / scale-down / DeleteService that raced the
+    /// launch. RUNNING desired_status -> keep running; STOPPED -> self-stop;
+    /// task removed from state -> treat as stop (nothing to keep alive).
+    #[test]
+    fn task_desired_stopped_detects_stop_during_launch() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        acct.tasks.insert("running".into(), make_task("running"));
+        let mut stopping = make_task("stopping");
+        stopping.desired_status = "STOPPED".into();
+        acct.tasks.insert("stopping".into(), stopping);
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        assert!(
+            !task_desired_stopped(&state, "000000000000", "running"),
+            "a RUNNING task must not be treated as stopped",
+        );
+        assert!(
+            task_desired_stopped(&state, "000000000000", "stopping"),
+            "a task whose desired_status is STOPPED must be treated as stopped",
+        );
+        assert!(
+            task_desired_stopped(&state, "000000000000", "deleted-mid-launch"),
+            "a task removed from state mid-launch must be treated as stopped",
         );
     }
 
@@ -2971,5 +3033,73 @@ mod tests {
         assert_eq!(tg_targets.len(), 1);
         assert_eq!(tg_targets[0].0, "172.18.0.2");
         assert_eq!(tg_targets[0].1, Some(80));
+    }
+
+    fn minimal_plan() -> ContainerPlan {
+        ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: None,
+            volume_mounts: Vec::new(),
+            ulimits: Vec::new(),
+            linux_parameters: None,
+            stop_timeout: None,
+            user: None,
+            working_directory: None,
+            tty: false,
+            interactive: false,
+            readonly_rootfs: false,
+        }
+    }
+
+    /// 4.1 — every ECS task container must carry the shared
+    /// `fakecloud-instance` ownership label so the startup reaper picks it
+    /// up after an ungraceful restart (it filters strictly on that label).
+    #[test]
+    fn build_run_argv_emits_fakecloud_instance_label() {
+        let plan = minimal_plan();
+        let argv = build_run_argv(
+            &plan,
+            &[],
+            "task-1",
+            "host.docker.internal",
+            None,
+            "alpine",
+            true,
+        );
+        let expected = fakecloud_instance_label();
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--label" && w[1] == expected),
+            "argv must contain `--label {expected}`: {argv:?}",
+        );
+    }
+
+    /// 4.1 — the label value must be exactly the shape the reaper parses:
+    /// `fakecloud-instance=fakecloud-<pid>`. The reaper strips the
+    /// `fakecloud-` prefix off the value and `parse::<u32>()`s the rest, so a
+    /// non-numeric tail (e.g. a task id) would silently never reap.
+    #[test]
+    fn fakecloud_instance_label_matches_reaper_format() {
+        let label = fakecloud_instance_label();
+        let (key, value) = label.split_once('=').expect("label is key=value");
+        assert_eq!(key, "fakecloud-instance");
+        let pid_str = value
+            .strip_prefix("fakecloud-")
+            .expect("value starts with fakecloud-");
+        assert_eq!(
+            pid_str.parse::<u32>().ok(),
+            Some(std::process::id()),
+            "reaper must be able to parse the owning pid out of {label}",
+        );
     }
 }

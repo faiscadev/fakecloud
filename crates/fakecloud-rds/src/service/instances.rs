@@ -289,7 +289,7 @@ impl RdsService {
                             }
                         }
 
-                        {
+                        let instance_present = {
                             let mut accounts = state_handle.write();
                             let state = accounts.get_or_create(&account_id);
                             if let Some(inst) = state.instances.get_mut(&id) {
@@ -298,12 +298,37 @@ impl RdsService {
                                 inst.port = i32::from(running.endpoint_port);
                                 inst.host_port = running.host_port;
                                 inst.container_id = running.container_id;
+                                // Register as cluster member so failover /
+                                // restore paths can find the writer.
+                                if let Some(ref cid) = cluster_id_for_attach {
+                                    attach_cluster_member(state, cid, &id);
+                                }
+                                true
+                            } else {
+                                false
                             }
-                            // Register as cluster member so failover /
-                            // restore paths can find the writer.
-                            if let Some(ref cid) = cluster_id_for_attach {
-                                attach_cluster_member(state, cid, &id);
-                            }
+                        };
+                        // DeleteDBInstance raced this create: it removed the
+                        // instance from state and called stop_container(id)
+                        // while ensure_postgres was still mid-flight (before
+                        // it registered the container), so that stop was a
+                        // no-op. The container the runtime just registered is
+                        // now an orphan holding a host port. Stop and remove
+                        // it here, mirroring ElastiCache's deleted-while-
+                        // creating None branch.
+                        if !instance_present {
+                            tracing::info!(
+                                db_instance_identifier = %id,
+                                "instance deleted during create; reaping orphaned backing container",
+                            );
+                            runtime.stop_container(&id).await;
+                            save_snapshot_static(
+                                state_handle.clone(),
+                                snapshot_store.clone(),
+                                snapshot_lock.clone(),
+                            )
+                            .await;
+                            return;
                         }
                         // Persist the flipped status. Without this the
                         // synchronous CreateDBInstance save captures the

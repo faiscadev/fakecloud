@@ -1268,4 +1268,71 @@ mod tests {
             None => std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY"),
         }
     }
+
+    fn running_stub(container_id: &str) -> RunningDbContainer {
+        RunningDbContainer {
+            container_id: container_id.to_string(),
+            host_port: 54321,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: 54321,
+        }
+    }
+
+    /// 4.3 — the create-during-delete race. DeleteDBInstance calls
+    /// `stop_container(id)` while `ensure_postgres` is still mid-flight (the
+    /// container not yet registered), so that stop is a no-op. The create
+    /// task then registers a live container. Reproduce that exact ordering
+    /// and assert the registered container leaks when nothing reaps it —
+    /// i.e. the bug the fix closes by re-running `stop_container` in the
+    /// create task's instance-gone branch.
+    #[tokio::test]
+    async fn stop_container_before_registration_is_a_noop_then_registration_leaks() {
+        let rt = RdsRuntime::new_stub();
+
+        // Delete arrives first: container not registered yet -> no-op.
+        rt.stop_container("db-1").await;
+        assert!(
+            rt.containers.read().is_empty(),
+            "nothing registered yet, stop is a no-op",
+        );
+
+        // ensure_postgres finishes and registers the running container.
+        rt.containers
+            .write()
+            .insert("db-1".to_string(), running_stub("container-abc"));
+
+        // Without the fix the create task's instance-gone branch did nothing,
+        // so the container stays registered (and the real docker container
+        // keeps holding its host port) forever.
+        assert_eq!(
+            rt.containers.read().len(),
+            1,
+            "the registered container leaks with no cleanup branch",
+        );
+    }
+
+    /// 4.3 — the fix: once the create task observes the instance is gone, it
+    /// calls `stop_container(id)`. By then the container IS registered, so
+    /// the stop actually reaps it (the runtime uses `cli=true` so the docker
+    /// rm shells out to a successful no-op binary). The map ends empty: no
+    /// zombie backing container.
+    #[tokio::test]
+    async fn stop_container_after_registration_reaps_orphan_on_delete_during_create() {
+        let rt = RdsRuntime::new_stub();
+
+        // Simulate ensure_postgres having registered the just-started
+        // container right before the create task checks state.
+        rt.containers
+            .write()
+            .insert("db-1".to_string(), running_stub("container-abc"));
+
+        // The instance-gone branch reaps it.
+        rt.stop_container("db-1").await;
+
+        assert!(
+            rt.containers.read().is_empty(),
+            "stop_container must reap the registered orphan: {:?}",
+            rt.containers.read().keys().collect::<Vec<_>>(),
+        );
+    }
 }

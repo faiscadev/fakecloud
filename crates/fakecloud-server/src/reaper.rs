@@ -1,14 +1,15 @@
 //! Startup reaper for orphaned backing containers.
 //!
 //! fakecloud spawns docker containers for RDS (postgres), ElastiCache (redis),
-//! and Lambda (runtime images) and labels each one with
-//! `fakecloud-instance=fakecloud-<server-pid>`. Normal shutdown runs
-//! `stop_all()` on each runtime, but if the server was killed with SIGKILL
-//! (or crashed, or OOM'd) those containers outlive the process and pile up.
+//! Lambda (runtime images), EC2 and ECS tasks, and labels each one with
+//! `fakecloud-instance=fakecloud-<server-pid>`. ECS awsvpc per-task networks
+//! carry the same label. Normal shutdown runs `stop_all()` on each runtime,
+//! but if the server was killed with SIGKILL (or crashed, or OOM'd) those
+//! containers (and networks) outlive the process and pile up.
 //!
-//! On startup we list every container carrying the `fakecloud-instance`
-//! label, parse the owning PID out of the label value, and remove any
-//! container whose owner is no longer alive. Containers owned by the
+//! On startup we list every container — then every network — carrying the
+//! `fakecloud-instance` label, parse the owning PID out of the label value,
+//! and remove any whose owner is no longer alive. Objects owned by the
 //! currently-running fakecloud process are always skipped.
 
 use std::process::{Command, Stdio};
@@ -24,20 +25,43 @@ pub fn reap_stale_containers() {
         return;
     };
 
-    let output = match Command::new(&cli)
-        .args([
-            "ps",
-            "-a",
-            "--filter",
-            "label=fakecloud-instance",
-            "--format",
-            "{{.ID}} {{.Label \"fakecloud-instance\"}}",
-        ])
-        .stderr(Stdio::null())
-        .output()
-    {
+    let reaped = reap_orphans(&cli, &["ps", "-a"], |id| {
+        vec!["rm".to_string(), "-f".to_string(), id.to_string()]
+    });
+    if reaped > 0 {
+        tracing::info!(count = reaped, "reaped orphaned backing containers");
+    }
+
+    // ECS awsvpc per-task networks carry the same ownership label. The
+    // network driver refuses removal while a container is still attached,
+    // so prune networks *after* containers. `network rm` is a no-op for an
+    // already-gone network, so a partial container reap above doesn't wedge
+    // this pass.
+    let reaped_networks = reap_orphans(&cli, &["network", "ls"], |id| {
+        vec!["network".to_string(), "rm".to_string(), id.to_string()]
+    });
+    if reaped_networks > 0 {
+        tracing::info!(count = reaped_networks, "reaped orphaned backing networks");
+    }
+}
+
+/// List objects carrying the `fakecloud-instance` label via
+/// `<cli> <list_args> --filter label=fakecloud-instance`, then run the
+/// `remove_argv(id)` command for every object whose owning PID is no longer
+/// alive (skipping the current process and live owners). Returns the number
+/// removed. Shared by the container and network reap passes.
+fn reap_orphans(cli: &str, list_args: &[&str], remove_argv: impl Fn(&str) -> Vec<String>) -> usize {
+    let mut args: Vec<&str> = list_args.to_vec();
+    args.extend_from_slice(&[
+        "--filter",
+        "label=fakecloud-instance",
+        "--format",
+        "{{.ID}} {{.Label \"fakecloud-instance\"}}",
+    ]);
+
+    let output = match Command::new(cli).args(&args).stderr(Stdio::null()).output() {
         Ok(o) if o.status.success() => o,
-        _ => return,
+        _ => return 0,
     };
 
     let self_pid = std::process::id();
@@ -57,8 +81,8 @@ pub fn reap_stale_containers() {
         if pid == self_pid || pid_alive(pid) {
             continue;
         }
-        let removed = Command::new(&cli)
-            .args(["rm", "-f", id])
+        let removed = Command::new(cli)
+            .args(remove_argv(id))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -69,9 +93,7 @@ pub fn reap_stale_containers() {
         }
     }
 
-    if reaped > 0 {
-        tracing::info!(count = reaped, "reaped orphaned backing containers");
-    }
+    reaped
 }
 
 fn detect_cli() -> Option<String> {
