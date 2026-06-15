@@ -25,7 +25,9 @@
 
 use std::time::Duration;
 
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::Api;
 
 use fakecloud_ec2::runtime::Ec2Runtime;
 use fakecloud_k8s::K8sClient;
@@ -95,6 +97,40 @@ async fn read_marker(c: &K8sClient, pod: &str) -> Option<String> {
     }
 }
 
+fn pods_api(c: &K8sClient) -> Api<Pod> {
+    Api::namespaced(c.client().clone(), TEST_NS)
+}
+
+/// Whether the Pod is gone (404) or terminating (`deletionTimestamp` set).
+/// Deletion is graceful, so a deleted Pod lingers in `Terminating` for its
+/// grace period — checking the API object is robust where exec is not.
+async fn pod_deleting_or_gone(api: &Api<Pod>, name: &str) -> bool {
+    match api.get(name).await {
+        Ok(p) => p.metadata.deletion_timestamp.is_some(),
+        Err(kube::Error::Api(e)) if e.code == 404 => true,
+        Err(_) => false,
+    }
+}
+
+/// Whether the Pod is fully gone (404).
+async fn pod_absent(api: &Api<Pod>, name: &str) -> bool {
+    matches!(api.get(name).await, Err(kube::Error::Api(e)) if e.code == 404)
+}
+
+async fn poll_until<F, Fut>(tries: u32, mut f: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..tries {
+        if f().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
 #[tokio::test]
 async fn precondition_env_must_be_set() {
     require_test_env();
@@ -118,6 +154,7 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
 
     let rt = Ec2Runtime::new_k8s(4566).await.expect("new_k8s");
     let c = client().await;
+    let api = pods_api(&c);
     let instance_id = "i-0k8slifecycle";
 
     // RunInstances boots a Pod and runs user-data at boot.
@@ -128,61 +165,36 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
     let pod = running.container_id.clone();
     assert!(!running.private_ip.is_empty(), "pod should report an IP");
 
-    let mut marker = None;
-    for _ in 0..40 {
-        marker = read_marker(&c, &pod).await;
-        if marker.as_deref() == Some("ran") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert_eq!(
-        marker.as_deref(),
-        Some("ran"),
-        "user-data did not run in Pod"
-    );
+    let ran = poll_until(40, || async {
+        read_marker(&c, &pod).await.as_deref() == Some("ran")
+    })
+    .await;
+    assert!(ran, "user-data did not run in Pod");
 
-    // StopInstances deletes the Pod.
+    // StopInstances deletes the Pod (graceful — assert via the API object,
+    // which flips to terminating/gone immediately, not via exec).
     rt.stop_instance(instance_id).await;
-    let mut gone = false;
-    for _ in 0..40 {
-        if read_marker(&c, &pod).await.is_none() {
-            gone = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert!(gone, "Pod should be deleted after StopInstances");
+    let stopped = poll_until(120, || pod_deleting_or_gone(&api, &pod)).await;
+    assert!(stopped, "Pod should be deleting/gone after StopInstances");
 
-    // StartInstances recreates the Pod (same name) and re-runs user-data.
+    // StartInstances recreates the Pod (same name; create_pod replaces any
+    // still-terminating one) and re-runs user-data.
     let new_ip = rt.start_instance(instance_id).await;
     assert!(
         new_ip.is_some(),
         "start should report the recreated Pod's IP"
     );
-    let mut restarted = None;
-    for _ in 0..40 {
-        restarted = read_marker(&c, &pod).await;
-        if restarted.as_deref() == Some("ran") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert_eq!(
-        restarted.as_deref(),
-        Some("ran"),
+    let restarted = poll_until(60, || async {
+        read_marker(&c, &pod).await.as_deref() == Some("ran")
+    })
+    .await;
+    assert!(
+        restarted,
         "Pod should be running again after StartInstances"
     );
 
     // TerminateInstances removes the Pod for good.
     rt.terminate_instance(instance_id).await;
-    let mut removed = false;
-    for _ in 0..40 {
-        if read_marker(&c, &pod).await.is_none() {
-            removed = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    let removed = poll_until(120, || pod_absent(&api, &pod)).await;
     assert!(removed, "Pod should be gone after TerminateInstances");
 }
