@@ -151,6 +151,43 @@ spec:
 - Pods carry labels `fakecloud-managed-by=fakecloud`, `fakecloud-instance=<pid>`, `fakecloud-lambda=<function>`, `fakecloud-deploy-id=<hash>` so you can `kubectl get pods -l fakecloud-managed-by=fakecloud`.
 - Pods run with whatever default security context your cluster's `PodSecurityPolicy` / `PodSecurityAdmission` enforces — no `privileged`, no special capabilities. The fakecloud Pod itself also doesn't need privileged.
 
+## Pod scheduling and metadata
+
+Real clusters often need fakecloud's Pods to carry a `nodeSelector` (pin workloads to a node pool), taint `tolerations` (run on tainted/spot nodes), or `annotations` (cost allocation, mesh sidecar injection, scrape config). You can attach all three at three levels, lowest to highest precedence:
+
+1. **Global** — `FAKECLOUD_K8S_NODE_SELECTOR` / `FAKECLOUD_K8S_TOLERATIONS` / `FAKECLOUD_K8S_ANNOTATIONS`, applied to every fakecloud Pod across all k8s-backed services.
+2. **Per-service** — `FAKECLOUD_<SERVICE>_K8S_<KEY>` (e.g. `FAKECLOUD_LAMBDA_K8S_NODE_SELECTOR`, `FAKECLOUD_RDS_K8S_TOLERATIONS`), applied to that service's Pods.
+3. **Per-instance** — a reserved tag on the individual resource (Lambda function, DB instance, cache cluster, ECS task, EC2 instance): `fakecloud-k8s/node-selector`, `fakecloud-k8s/tolerations`, `fakecloud-k8s/annotations`.
+
+Value formats are the same at every level:
+
+- `NODE_SELECTOR` / `ANNOTATIONS`: a flat `key=value,key=value` map.
+- `TOLERATIONS`: a JSON array of Kubernetes [`Toleration`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#scheduling) objects.
+
+Merge across the levels: the maps (node selector, annotations) union per key, and a higher level overrides only the keys it sets — lower-level keys survive. Tolerations combine additively (a Pod tolerates the union of all configured taints), dropping exact duplicates.
+
+```sh
+# Global: keep every fakecloud Pod off the default node pool.
+FAKECLOUD_K8S_NODE_SELECTOR=fakecloud=true
+FAKECLOUD_K8S_TOLERATIONS='[{"key":"fakecloud","operator":"Exists","effect":"NoSchedule"}]'
+
+# Service: send all Lambda Pods to the burst pool, with a cost-center annotation.
+FAKECLOUD_LAMBDA_K8S_NODE_SELECTOR=pool=burst
+FAKECLOUD_LAMBDA_K8S_ANNOTATIONS=cost-center=lambda
+```
+
+```sh
+# Per-instance: this one function pins to GPU nodes (overrides the service/global
+# node selector for the `accelerator` key) via a tag at create time.
+aws lambda create-function \
+  --tags 'fakecloud-k8s/node-selector=accelerator=nvidia,fakecloud-k8s/annotations=team=ml' \
+  ... # other create-function args
+```
+
+A malformed env value (e.g. invalid tolerations JSON) fails fast at fakecloud startup so a typo is loud. A malformed per-instance *tag* is logged and ignored for that field, so a bad tag never makes a single resource un-runnable. Per-instance tags only take effect when present at the resource's creation time; tags added later (`TagResource` / `add-tags-to-resource`) don't retroactively re-schedule a running Pod — recreate the resource to pick them up.
+
+The `fakecloud-k8s/*` tags are ordinary resource tags — fakecloud reads them but does not strip them, so they remain visible in `ListTags` / `list-tags-for-resource` output and count toward the resource's AWS tag limit (e.g. 50 for Lambda) like any other tag.
+
 ## ElastiCache backend
 
 Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) to run cache clusters, replication groups, and serverless caches as native Pods instead of Docker containers.

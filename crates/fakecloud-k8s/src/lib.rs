@@ -13,8 +13,10 @@
 //! Backend selection (`FAKECLOUD_CONTAINER_BACKEND` /
 //! `FAKECLOUD_<SERVICE>_BACKEND`) lives in [`backend`]. The kube client
 //! wrapper and Pod lifecycle live in [`client`]. Env parsing
-//! (`FAKECLOUD_K8S_*`) lives in [`env`]. Naming + label conventions live
-//! in [`names`] and [`labels`].
+//! (`FAKECLOUD_K8S_*`) lives in [`env`]. Operator-configurable Pod
+//! scheduling/metadata (node selector, tolerations, annotations) lives in
+//! [`pod_config`]. Naming + label conventions live in [`names`] and
+//! [`labels`].
 //!
 //! See `website/content/docs/guides/kubernetes-backend.md` for the
 //! operator-facing setup (ServiceAccount, RBAC, Deployment yaml).
@@ -24,7 +26,9 @@ pub mod client;
 pub mod env;
 pub mod labels;
 pub mod names;
+pub mod pod_config;
 
 pub use backend::{backend_choice, Backend};
 pub use client::{ExecOutput, K8sClient, K8sError};
 pub use env::{K8sEnv, K8sEnvError};
+pub use pod_config::{K8sPodConfig, K8sPodConfigError};

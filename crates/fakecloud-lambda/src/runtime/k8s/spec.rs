@@ -597,6 +597,46 @@ mod tests {
     }
 
     #[test]
+    fn per_function_tags_override_base_pod_config() {
+        use fakecloud_k8s::K8sPodConfig;
+        use std::collections::BTreeMap;
+
+        // Backend base (global + service env): one node-selector key.
+        let base = K8sPodConfig {
+            node_selector: BTreeMap::from([
+                ("disktype".to_string(), "ssd".to_string()),
+                ("zone".to_string(), "a".to_string()),
+            ]),
+            ..Default::default()
+        };
+
+        // Function carries a reserved tag overriding disktype and adding
+        // an annotation.
+        let mut f = zip_function("my-fn");
+        f.tags
+            .insert("fakecloud-k8s/node-selector".into(), "disktype=nvme".into());
+        f.tags
+            .insert("fakecloud-k8s/annotations".into(), "team=core".into());
+
+        let mut pod = build_pod_spec(&f, "d", &ctx()).unwrap();
+        // Mirror the launch() contract: base merged with per-function tags.
+        base.merge(K8sPodConfig::from_tags(&f.tags)).apply(&mut pod);
+
+        let selector = pod.spec.unwrap().node_selector.unwrap();
+        // Tag wins on disktype; the base-only zone key survives.
+        assert_eq!(selector.get("disktype").map(String::as_str), Some("nvme"));
+        assert_eq!(selector.get("zone").map(String::as_str), Some("a"));
+        assert_eq!(
+            pod.metadata
+                .annotations
+                .unwrap()
+                .get("team")
+                .map(String::as_str),
+            Some("core")
+        );
+    }
+
+    #[test]
     fn restart_policy_never() {
         let f = zip_function("my-fn");
         let pod = build_pod_spec(&f, "d", &ctx()).unwrap();

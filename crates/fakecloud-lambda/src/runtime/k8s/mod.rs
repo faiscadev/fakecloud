@@ -18,7 +18,7 @@ pub mod spec;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fakecloud_k8s::{K8sClient, K8sEnv, K8sEnvError};
+use fakecloud_k8s::{K8sClient, K8sEnv, K8sEnvError, K8sPodConfig, K8sPodConfigError};
 
 use super::backend::{BackendHandle, LambdaBackend, RuntimeError, WarmInstance};
 use crate::state::LambdaFunction;
@@ -28,12 +28,19 @@ use spec::{build_pod_spec, unique_pod_name, PodSpecContext};
 /// touches Lambda Pods.
 const SERVICE: &str = "lambda";
 
+/// Env prefix for Lambda-scoped Pod config overrides
+/// (`FAKECLOUD_LAMBDA_K8S_NODE_SELECTOR`, etc.). Merged over the global
+/// `FAKECLOUD_K8S_*` config.
+const POD_CONFIG_PREFIX: &str = "FAKECLOUD_LAMBDA_K8S";
+
 /// Errors that can prevent the K8s backend from initializing. Surfaced
 /// to the operator at fakecloud startup; never silently swallowed.
 #[derive(Debug, thiserror::Error)]
 pub enum K8sBackendError {
     #[error(transparent)]
     Env(#[from] K8sEnvError),
+    #[error(transparent)]
+    PodConfig(#[from] K8sPodConfigError),
     #[error("failed to connect to the Kubernetes cluster: {0}")]
     Connect(String),
 }
@@ -58,6 +65,10 @@ pub struct K8sBackend {
     /// Optional `imagePullSecrets` reference for image-package functions
     /// that pull from a registry needing credentials.
     pull_secret: Option<String>,
+    /// Global + Lambda-service node selector / tolerations / annotations
+    /// applied to every Lambda Pod. Per-function tag overrides are merged
+    /// over this at launch time.
+    pod_config: K8sPodConfig,
 }
 
 impl K8sBackend {
@@ -70,6 +81,7 @@ impl K8sBackend {
         internal_token: String,
     ) -> Result<Self, K8sBackendError> {
         let env = K8sEnv::from_env(default_ecr_port)?;
+        let pod_config = K8sPodConfig::resolved_base(POD_CONFIG_PREFIX)?;
         let client = K8sClient::connect(env.namespace.clone())
             .await
             .map_err(|e| K8sBackendError::Connect(e.to_string()))?;
@@ -89,6 +101,7 @@ impl K8sBackend {
             ecr_port: env.ecr_port,
             internal_token,
             pull_secret: env.pull_secret,
+            pod_config,
         })
     }
 }
@@ -132,6 +145,14 @@ impl LambdaBackend for K8sBackend {
         // `unique_pod_name`).
         let pod_name = unique_pod_name(&func.function_name, deploy_id);
         pod.metadata.name = Some(pod_name.clone());
+
+        // Apply operator-configured scheduling/metadata: global +
+        // service base with this function's reserved-tag overrides merged
+        // over it (per-function tags win).
+        self.pod_config
+            .clone()
+            .merge(K8sPodConfig::from_tags(&func.tags))
+            .apply(&mut pod);
 
         self.client
             .create_pod(&pod)
