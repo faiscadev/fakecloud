@@ -158,24 +158,40 @@ impl DynamoDbStreamsService {
             .find(|t| t.stream_arn.as_deref() == Some(stream_arn.as_str()))
             .ok_or_else(|| not_found("Stream", &stream_arn))?;
 
+        // The iterator is anchored to an *exclusive start sequence number*,
+        // not a positional index into the records Vec. `add_stream_record`
+        // physically trims expired records off the front (`records.retain`),
+        // which would shift every index; a sequence-number anchor is stable
+        // across trims (like native Kinesis advancing by stored seq, not by
+        // Vec position). GetRecords returns records whose sequence_number is
+        // strictly greater than this anchor. bug-audit 2026-06-15, 4.4.
         let records = table.stream_records.read();
-        let start_index: usize = match iterator_type.as_str() {
-            "TRIM_HORIZON" => 0,
-            "LATEST" => records.len(),
+        let after_seq: String = match iterator_type.as_str() {
+            // Oldest retained record: anchor below every sequence number so the
+            // first GetRecords returns the whole retained window.
+            "TRIM_HORIZON" => "0".to_string(),
+            // After the newest record: anchor at the max current sequence so
+            // only records added later are returned.
+            "LATEST" => records
+                .iter()
+                .map(|r| r.dynamodb.sequence_number.clone())
+                .max_by(|a, b| cmp_seq(a, b))
+                .unwrap_or_else(|| "0".to_string()),
+            // Inclusive of the named record: anchor just below it.
             "AT_SEQUENCE_NUMBER" => {
                 let seq = require_string(body, "SequenceNumber")?;
-                records
-                    .iter()
-                    .position(|r| r.dynamodb.sequence_number == seq)
-                    .ok_or_else(|| invalid_argument("SequenceNumber not found"))?
+                if !records.iter().any(|r| r.dynamodb.sequence_number == seq) {
+                    return Err(invalid_argument("SequenceNumber not found"));
+                }
+                exclusive_before(&seq)
             }
+            // Exclusive of the named record: anchor exactly at it.
             "AFTER_SEQUENCE_NUMBER" => {
                 let seq = require_string(body, "SequenceNumber")?;
-                let idx = records
-                    .iter()
-                    .position(|r| r.dynamodb.sequence_number == seq)
-                    .ok_or_else(|| invalid_argument("SequenceNumber not found"))?;
-                idx + 1
+                if !records.iter().any(|r| r.dynamodb.sequence_number == seq) {
+                    return Err(invalid_argument("SequenceNumber not found"));
+                }
+                seq
             }
             other => {
                 return Err(invalid_argument(&format!(
@@ -184,7 +200,7 @@ impl DynamoDbStreamsService {
             }
         };
 
-        let token = format!("{stream_arn}|{shard_id}|{start_index}");
+        let token = format!("{stream_arn}|{shard_id}|{after_seq}");
         Ok(AwsResponse::ok_json(json!({ "ShardIterator": token })))
     }
 
@@ -198,9 +214,11 @@ impl DynamoDbStreamsService {
         }
         let stream_arn = parts[0].to_string();
         let shard_id = parts[1].to_string();
-        let start_index: usize = parts[2]
-            .parse()
-            .map_err(|_| invalid_argument("ShardIterator is invalid"))?;
+        // Exclusive start sequence number (see get_shard_iterator). Index-based
+        // tokens minted by older builds would parse as a number too, but they
+        // are positions; since we now compare by sequence number this is
+        // self-correcting after one GetShardIterator. bug-audit 2026-06-15, 4.4.
+        let after_seq = parts[2].to_string();
 
         let accounts = self.state.read();
         let state = accounts
@@ -212,14 +230,29 @@ impl DynamoDbStreamsService {
             .find(|t| t.stream_arn.as_deref() == Some(stream_arn.as_str()))
             .ok_or_else(|| not_found("Stream", &stream_arn))?;
 
+        // Records whose sequence number is strictly greater than the anchor,
+        // in stored (arrival) order. Front-trimming by `records.retain` cannot
+        // make us skip or replay: the anchor moves only by what we actually
+        // returned, never by physical position.
         let records = table.stream_records.read();
-        let end_index = records.len().min(start_index.saturating_add(limit));
-        let records_json: Vec<Value> = records[start_index..end_index]
+        let selected: Vec<&crate::state::StreamRecord> = records
+            .iter()
+            .filter(|r| {
+                cmp_seq(&r.dynamodb.sequence_number, &after_seq) == std::cmp::Ordering::Greater
+            })
+            .take(limit)
+            .collect();
+
+        let next_seq = selected
+            .last()
+            .map(|r| r.dynamodb.sequence_number.clone())
+            .unwrap_or(after_seq);
+        let records_json: Vec<Value> = selected
             .iter()
             .map(|r| stream_record_to_json(r, table))
             .collect();
 
-        let next_token = format!("{stream_arn}|{shard_id}|{end_index}");
+        let next_token = format!("{stream_arn}|{shard_id}|{next_seq}");
         Ok(AwsResponse::ok_json(json!({
             "Records": records_json,
             "NextShardIterator": next_token,
@@ -254,6 +287,33 @@ fn stream_record_to_json(r: &crate::state::StreamRecord, table: &DynamoTable) ->
 
 fn stream_label(stream_arn: &str) -> String {
     stream_arn.rsplit('/').next().unwrap_or("").to_string()
+}
+
+/// Compare two DynamoDB stream sequence numbers numerically. Sequence numbers
+/// are minted by an atomic counter and zero-padded to a fixed width, so they
+/// are also lexicographically ordered; we still parse to `u128` so that an
+/// un-padded legacy value (or one of a different width) compares correctly.
+fn cmp_seq(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.parse::<u128>(), b.parse::<u128>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        // Non-numeric values fall back to byte order (deterministic, total).
+        _ => a.cmp(b),
+    }
+}
+
+/// The largest sequence number strictly less than `seq`, used to build an
+/// exclusive anchor for `AT_SEQUENCE_NUMBER` (which is inclusive of the named
+/// record). For the numeric counter this is `seq - 1`; if `seq` is `0` or
+/// non-numeric we anchor at `"0"` so nothing earlier is skipped.
+fn exclusive_before(seq: &str) -> String {
+    match seq.parse::<u128>() {
+        Ok(n) if n > 0 => {
+            // Preserve the original zero-padded width so lexicographic order
+            // continues to match numeric order for downstream string compares.
+            format!("{:0width$}", n - 1, width = seq.len())
+        }
+        _ => "0".to_string(),
+    }
 }
 
 fn require_string(body: &Value, field: &str) -> Result<String, AwsServiceError> {
@@ -433,6 +493,117 @@ mod tests {
         let recs = body["Records"].as_array().unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0]["eventName"].as_str().unwrap(), "INSERT");
+    }
+
+    fn push_record(state: &SharedDynamoDbState, seq: &str, age_hours: i64, event_id: &str) {
+        let mut accts = state.write();
+        let s = accts.get_or_create("123456789012");
+        let table = s.tables.get_mut("widgets").unwrap();
+        let rec = StreamRecord {
+            event_id: event_id.into(),
+            event_name: "INSERT".into(),
+            event_version: "1.1".into(),
+            event_source: "aws:dynamodb".into(),
+            aws_region: "us-east-1".into(),
+            event_source_arn: table.stream_arn.clone().unwrap(),
+            timestamp: Utc::now() - chrono::Duration::hours(age_hours),
+            dynamodb: DynamoDbStreamRecord {
+                keys: HashMap::new(),
+                new_image: Some(HashMap::new()),
+                old_image: None,
+                sequence_number: seq.into(),
+                size_bytes: 16,
+                stream_view_type: "NEW_AND_OLD_IMAGES".into(),
+            },
+        };
+        table.stream_records.write().push(rec);
+    }
+
+    fn trim_front(state: &SharedDynamoDbState, n: usize) {
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("widgets").unwrap();
+        let mut recs = table.stream_records.write();
+        for _ in 0..n {
+            if !recs.is_empty() {
+                recs.remove(0);
+            }
+        }
+    }
+
+    // bug-audit 2026-06-15, 4.4: the iterator is anchored to a sequence number,
+    // not a Vec index. A consumer that has read up to record N must, after the
+    // front of the records Vec is physically trimmed (24h retention), continue
+    // exactly where it left off — no skipped or replayed records.
+    #[tokio::test]
+    async fn iterator_survives_front_trim_without_skip_or_replay() {
+        let state = make_state();
+        let arn = seed_table(&state); // seeds one record seq "1"
+                                      // Replace the seeded record set with a clean, ordered set seq 1..=5.
+        {
+            let accts = state.read();
+            let s = accts.get("123456789012").unwrap();
+            s.tables
+                .get("widgets")
+                .unwrap()
+                .stream_records
+                .write()
+                .clear();
+        }
+        for i in 1..=5u64 {
+            // First two records are aged so a later trim removes them.
+            let age = if i <= 2 { 30 } else { 0 };
+            push_record(&state, &format!("{i:021}"), age, &format!("e{i}"));
+        }
+        let svc = DynamoDbStreamsService::new(state.clone());
+
+        // Start at TRIM_HORIZON, read 3 records (seq 1,2,3).
+        let it_resp = svc
+            .handle(req(
+                "GetShardIterator",
+                json!({
+                    "StreamArn": arn,
+                    "ShardId": "shardId-00000000000000000000-00000001",
+                    "ShardIteratorType": "TRIM_HORIZON",
+                }),
+            ))
+            .await
+            .unwrap();
+        let it: Value = serde_json::from_slice(it_resp.body.expect_bytes()).unwrap();
+        let iterator = it["ShardIterator"].as_str().unwrap().to_string();
+
+        let r1 = svc
+            .handle(req(
+                "GetRecords",
+                json!({"ShardIterator": iterator, "Limit": 3}),
+            ))
+            .await
+            .unwrap();
+        let b1: Value = serde_json::from_slice(r1.body.expect_bytes()).unwrap();
+        let recs1 = b1["Records"].as_array().unwrap();
+        assert_eq!(recs1.len(), 3);
+        assert_eq!(recs1[0]["eventID"].as_str().unwrap(), "e1");
+        assert_eq!(recs1[2]["eventID"].as_str().unwrap(), "e3");
+        let next = b1["NextShardIterator"].as_str().unwrap().to_string();
+
+        // Now retention trims the two aged front records (seq 1,2) off the Vec.
+        // An index-based iterator would now mis-resolve and skip/replay; a
+        // sequence-anchored one continues correctly with seq 4,5.
+        trim_front(&state, 2);
+
+        let r2 = svc
+            .handle(req("GetRecords", json!({"ShardIterator": next})))
+            .await
+            .unwrap();
+        let b2: Value = serde_json::from_slice(r2.body.expect_bytes()).unwrap();
+        let recs2 = b2["Records"].as_array().unwrap();
+        assert_eq!(
+            recs2.len(),
+            2,
+            "must return exactly the un-consumed records after a front trim"
+        );
+        assert_eq!(recs2[0]["eventID"].as_str().unwrap(), "e4");
+        assert_eq!(recs2[1]["eventID"].as_str().unwrap(), "e5");
     }
 
     #[tokio::test]

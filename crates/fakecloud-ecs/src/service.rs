@@ -234,6 +234,146 @@ impl EcsService {
             self.save_snapshot().await;
         }
     }
+
+    /// Converge every ACTIVE service toward its `desiredCount`, launching
+    /// replacement tasks for any shortfall. Real ECS maintains `desiredCount`
+    /// autonomously; `reconcile_persisted_tasks` STOPs all tasks and zeroes
+    /// counts on restart "trusting a scheduler ticker," but no such ticker
+    /// existed, so services with `desiredCount=N` stayed at `runningCount=0`
+    /// forever. This is that ticker. It also re-launches tasks lost to crashed
+    /// containers during normal operation. bug-audit 2026-06-15, 4.7.
+    ///
+    /// One pass: for each service, count its non-STOPPED tasks (matched by the
+    /// `ecs-svc/<name>` `started_by` tag, same as `recompute_service_counts`);
+    /// if that count is below `desiredCount`, spawn the difference via the
+    /// shared `spawn_service_tasks` path and hand the new task IDs to the
+    /// runtime. Persist only when something was launched.
+    pub async fn reconcile_service_desired_counts(&self) {
+        // Phase 1 (write lock): find shortfalls, spawn PENDING task rows,
+        // and refresh each service's running/pending counts so DescribeServices
+        // is accurate immediately. Collect the new task IDs to launch after the
+        // lock is released.
+        let mut to_launch: Vec<(String, String)> = Vec::new(); // (account_id, task_id)
+        {
+            let mut accounts = self.state.write();
+            for (account_id, state) in accounts.iter_mut() {
+                // Snapshot the services we may need to scale so we don't hold
+                // an aliasing borrow of `state` while mutating it.
+                let scalable: Vec<Service> = state
+                    .services
+                    .values()
+                    .filter(|s| {
+                        s.status == "ACTIVE"
+                            && s.scheduling_strategy != "DAEMON"
+                            && s.desired_count > 0
+                    })
+                    .cloned()
+                    .collect();
+                for service in scalable {
+                    let service_tag = format!("ecs-svc/{}", service.service_name);
+                    let mut active = 0i32;
+                    for t in state.tasks.values() {
+                        if t.started_by.as_deref() == Some(service_tag.as_str())
+                            && t.cluster_name == service.cluster_name
+                            && matches!(
+                                t.last_status.as_str(),
+                                "RUNNING" | "PENDING" | "PROVISIONING"
+                            )
+                        {
+                            active += 1;
+                        }
+                    }
+                    let shortfall = service.desired_count - active;
+                    if shortfall <= 0 {
+                        continue;
+                    }
+                    let launch_type = if service.launch_type.is_empty() {
+                        "FARGATE"
+                    } else {
+                        &service.launch_type
+                    };
+                    let ids = spawn_service_tasks(
+                        state,
+                        &service,
+                        shortfall,
+                        service.role_arn.as_deref().unwrap_or(""),
+                        launch_type,
+                        None,
+                    );
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    tracing::info!(
+                        service = %service.service_name,
+                        cluster = %service.cluster_name,
+                        launched = ids.len(),
+                        desired = service.desired_count,
+                        "ecs scheduler: launching tasks to converge to desiredCount",
+                    );
+                    // Reflect the new PENDING tasks in the stored counts.
+                    if let Some(svc) = state.services.get_mut(&service.service_name) {
+                        svc.pending_count = svc.pending_count.saturating_add(ids.len() as i32);
+                        for d in svc.deployments.iter_mut() {
+                            if d.status == "PRIMARY" {
+                                d.pending_count = d.pending_count.saturating_add(ids.len() as i32);
+                            }
+                        }
+                    }
+                    for id in ids {
+                        to_launch.push((account_id.to_string(), id));
+                    }
+                }
+            }
+        }
+
+        if to_launch.is_empty() {
+            return;
+        }
+
+        // Phase 2 (no lock): hand new tasks to the runtime, which advances them
+        // PENDING -> RUNNING in the background. Without a runtime (docker/podman
+        // absent) mark them STOPPED so they don't linger PENDING forever.
+        if let Some(rt) = &self.runtime {
+            for (account_id, task_id) in &to_launch {
+                rt.clone()
+                    .run_task(self.state.clone(), task_id.clone(), account_id.clone());
+            }
+        } else {
+            let mut accounts = self.state.write();
+            for (account_id, task_id) in &to_launch {
+                if let Some(state) = accounts.get_mut(account_id) {
+                    if let Some(t) = state.tasks.get_mut(task_id) {
+                        t.last_status = "STOPPED".into();
+                        t.desired_status = "STOPPED".into();
+                        t.stop_code = Some("TaskFailedToStart".into());
+                        t.stopped_reason = Some(
+                            "No container runtime available (docker/podman not installed)".into(),
+                        );
+                        t.stopped_at = Some(chrono::Utc::now());
+                        for c in t.containers.iter_mut() {
+                            c.last_status = "STOPPED".into();
+                        }
+                    }
+                }
+            }
+        }
+
+        self.save_snapshot().await;
+    }
+}
+
+/// Background scheduler ticker: periodically converges ECS services toward
+/// `desiredCount`. Wired in `fakecloud-server` like the other tickers. Real
+/// ECS does this continuously; we tick every few seconds. bug-audit 4.7.
+pub async fn run_scheduler_ticker(service: Arc<EcsService>, interval: std::time::Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Skip the immediate first tick; restart reconciliation runs separately.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        service.reconcile_service_desired_counts().await;
+    }
 }
 
 #[async_trait]

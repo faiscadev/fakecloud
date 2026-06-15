@@ -242,3 +242,157 @@ fn paginate_checked_rejects_invalid_token() {
     assert!(paginate_checked(&items, Some("2"), 3).is_ok());
     assert!(paginate_checked(&items, None, 3).is_ok());
 }
+
+// bug-audit 2026-06-15, 4.7: a service with desiredCount=N and 0 running tasks
+// must converge to N tasks once the scheduler ticker runs. Before the fix
+// `reconcile_persisted_tasks` zeroed counts and STOPped tasks on restart
+// trusting a scheduler ticker that did not exist, so services stayed stuck at
+// runningCount=0. Here we drive `reconcile_service_desired_counts` directly.
+mod scheduler_reconcile {
+    use super::*;
+    use crate::state::{Service, SharedEcsState, TaskDefinition};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    const ACCOUNT: &str = "000000000000";
+
+    fn make_task_definition() -> TaskDefinition {
+        TaskDefinition {
+            family: "web".into(),
+            revision: 1,
+            task_definition_arn: format!("arn:aws:ecs:us-east-1:{ACCOUNT}:task-definition/web:1"),
+            container_definitions: vec![serde_json::json!({
+                "name": "app",
+                "image": "public.ecr.aws/nginx/nginx:latest",
+                "essential": true,
+            })],
+            status: "ACTIVE".into(),
+            task_role_arn: None,
+            execution_role_arn: None,
+            network_mode: Some("awsvpc".into()),
+            requires_compatibilities: vec!["FARGATE".into()],
+            compatibilities: vec!["FARGATE".into()],
+            cpu: Some("256".into()),
+            memory: Some("512".into()),
+            pid_mode: None,
+            ipc_mode: None,
+            volumes: vec![],
+            placement_constraints: vec![],
+            proxy_configuration: None,
+            inference_accelerators: vec![],
+            ephemeral_storage: None,
+            runtime_platform: None,
+            requires_attributes: vec![],
+            registered_at: chrono::Utc::now(),
+            registered_by: None,
+            deregistered_at: None,
+            tags: vec![],
+            enable_fault_injection: None,
+        }
+    }
+
+    fn make_service(desired: i32) -> Service {
+        Service {
+            service_name: "api".into(),
+            service_arn: format!("arn:aws:ecs:us-east-1:{ACCOUNT}:service/default/api"),
+            cluster_name: "default".into(),
+            cluster_arn: format!("arn:aws:ecs:us-east-1:{ACCOUNT}:cluster/default"),
+            task_definition_arn: format!("arn:aws:ecs:us-east-1:{ACCOUNT}:task-definition/web:1"),
+            family: "web".into(),
+            revision: 1,
+            desired_count: desired,
+            running_count: 0,
+            pending_count: 0,
+            launch_type: "FARGATE".into(),
+            status: "ACTIVE".into(),
+            scheduling_strategy: "REPLICA".into(),
+            deployment_controller: "ECS".into(),
+            minimum_healthy_percent: None,
+            maximum_percent: None,
+            circuit_breaker: None,
+            deployments: vec![],
+            load_balancers: vec![],
+            service_registries: vec![],
+            placement_constraints: vec![],
+            placement_strategy: vec![],
+            network_configuration: None,
+            tags: vec![],
+            created_at: chrono::Utc::now(),
+            created_by: None,
+            role_arn: None,
+            platform_version: None,
+            health_check_grace_period_seconds: None,
+            enable_execute_command: false,
+            enable_ecs_managed_tags: false,
+            propagate_tags: None,
+            capacity_provider_strategy: vec![],
+            availability_zone_rebalancing: None,
+            volume_configurations: vec![],
+        }
+    }
+
+    fn count_service_tasks(state: &SharedEcsState, status_filter: &[&str]) -> usize {
+        let accounts = state.read();
+        let s = accounts.get(ACCOUNT).unwrap();
+        s.tasks
+            .values()
+            .filter(|t| {
+                t.started_by.as_deref() == Some("ecs-svc/api")
+                    && status_filter.contains(&t.last_status.as_str())
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn service_converges_to_desired_count_and_is_idempotent() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new(ACCOUNT, "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create(ACCOUNT);
+        acct.task_definitions
+            .entry("web".to_string())
+            .or_default()
+            .insert(1, make_task_definition());
+        acct.services
+            .insert("default/api".to_string(), make_service(2));
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        // No runtime configured: tasks are spawned then marked STOPPED
+        // ("no container runtime"). The convergence intent — spawning
+        // desiredCount tasks for the shortfall — is what we assert.
+        let svc = EcsService::new(state.clone());
+        svc.reconcile_service_desired_counts().await;
+        assert_eq!(
+            count_service_tasks(&state, &["STOPPED"]),
+            2,
+            "scheduler must spawn desiredCount tasks for a service at 0 running"
+        );
+
+        // Simulate those tasks actually running (as the runtime would), then
+        // tick again: the service is now at desiredCount so NO new tasks spawn.
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_mut(ACCOUNT).unwrap();
+            for t in s.tasks.values_mut() {
+                if t.started_by.as_deref() == Some("ecs-svc/api") {
+                    t.last_status = "RUNNING".into();
+                    t.desired_status = "RUNNING".into();
+                    t.stop_code = None;
+                    t.stopped_reason = None;
+                    t.stopped_at = None;
+                }
+            }
+        }
+        svc.reconcile_service_desired_counts().await;
+        assert_eq!(
+            count_service_tasks(&state, &["RUNNING"]),
+            2,
+            "converged service must stay at desiredCount"
+        );
+        assert_eq!(
+            count_service_tasks(&state, &["PENDING", "PROVISIONING", "STOPPED"]),
+            0,
+            "no extra tasks once desiredCount is met (no over-provisioning)"
+        );
+    }
+}

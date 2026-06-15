@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use base64::Engine;
 use chrono::Utc;
@@ -10,7 +12,16 @@ use crate::state::{MessageAttribute, SharedSqsState, SqsMessage};
 /// Implements SqsDelivery so other services can push messages into SQS queues.
 pub struct SqsDeliveryImpl {
     state: SharedSqsState,
-    kms_hook: Option<std::sync::Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    /// Set whenever a cross-service delivery mutates queue state. The
+    /// `SqsDelivery` trait is synchronous and has no access to the async
+    /// snapshot writer the service handler uses, so messages injected by
+    /// SNS/EventBridge/S3/Scheduler fan-out used to vanish on restart while
+    /// direct SendMessage survived. A background flusher in the server polls
+    /// this flag and persists, giving delivered messages durability with a
+    /// small (sub-second) eventual-consistency window. bug-audit 2026-06-15,
+    /// 4.8.
+    dirty: Option<Arc<AtomicBool>>,
 }
 
 impl SqsDeliveryImpl {
@@ -18,15 +29,26 @@ impl SqsDeliveryImpl {
         Self {
             state,
             kms_hook: None,
+            dirty: None,
         }
     }
 
-    pub fn with_kms_hook(
-        mut self,
-        hook: std::sync::Arc<dyn fakecloud_core::delivery::KmsHook>,
-    ) -> Self {
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
         self.kms_hook = Some(hook);
         self
+    }
+
+    /// Wire a dirty flag that a background flusher watches to persist
+    /// cross-service deliveries. See the `dirty` field. bug-audit 4.8.
+    pub fn with_dirty_flag(mut self, dirty: Arc<AtomicBool>) -> Self {
+        self.dirty = Some(dirty);
+        self
+    }
+
+    fn mark_dirty(&self) {
+        if let Some(flag) = &self.dirty {
+            flag.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -204,8 +226,72 @@ impl SqsDelivery for SqsDeliveryImpl {
             sequence_number,
         };
         queue.messages.push_back(msg);
+        drop(accounts);
+        self.mark_dirty();
         tracing::debug!(queue_arn, "delivered message to SQS queue");
         Ok(())
+    }
+}
+
+/// Persist `state` as an SQS snapshot if it differs from what is on disk.
+///
+/// Shared by the background flusher and exposed for tests so the durability of
+/// cross-service deliveries can be verified with a real save+load round-trip.
+/// Returns `Ok(())` even when no store is configured (memory mode). bug-audit
+/// 2026-06-15, 4.8.
+pub fn persist_sqs_state(
+    state: &SharedSqsState,
+    store: &Arc<dyn fakecloud_persistence::SnapshotStore>,
+) -> std::io::Result<()> {
+    let snapshot = crate::state::SqsSnapshot {
+        schema_version: crate::state::SQS_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+        state: None,
+    };
+    let bytes = serde_json::to_vec(&snapshot)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    store.save(&bytes)
+}
+
+/// Background loop that persists cross-service SQS deliveries.
+///
+/// The `SqsDelivery` trait is synchronous and has no access to the async
+/// snapshot writer the request handler uses, so fan-out messages from
+/// SNS/EventBridge/S3/Scheduler were never checkpointed. This loop watches the
+/// shared `dirty` flag the delivery impl sets and persists the state whenever
+/// it flips, bounding the data-loss window to one poll interval. The flush is
+/// offloaded to the blocking pool so the file write never stalls a Tokio
+/// worker. bug-audit 2026-06-15, 4.8.
+pub async fn run_delivery_flusher(
+    state: SharedSqsState,
+    store: Arc<dyn fakecloud_persistence::SnapshotStore>,
+    dirty: Arc<AtomicBool>,
+    interval: std::time::Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        // swap(false): only persist when there was a delivery since the last
+        // flush, and clear before persisting so a delivery racing the flush
+        // re-arms the flag rather than being lost.
+        if dirty.swap(false, Ordering::AcqRel) {
+            let state = state.clone();
+            let store = store.clone();
+            let dirty = dirty.clone();
+            let join = tokio::task::spawn_blocking(move || persist_sqs_state(&state, &store)).await;
+            match join {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, "sqs delivery flush failed; will retry");
+                    dirty.store(true, Ordering::Release);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "sqs delivery flush task panicked");
+                    dirty.store(true, Ordering::Release);
+                }
+            }
+        }
     }
 }
 
@@ -460,6 +546,51 @@ mod tests {
         let guard = state.read();
         let q = guard.default_ref().queues.get(&url).unwrap();
         assert_eq!(q.messages[0].body, "plain-body");
+    }
+
+    // bug-audit 2026-06-15, 4.8: a cross-service delivery must survive a
+    // save+load round-trip. Before the dirty-flag + flusher, only the service
+    // handler persisted, so SNS/EventBridge fan-out messages vanished on
+    // restart while direct SendMessage survived.
+    #[test]
+    fn delivered_message_survives_save_and_load() {
+        use fakecloud_persistence::SnapshotStore;
+
+        let queue = make_queue("durable", false, false);
+        let arn = queue.arn.clone();
+        let url = queue.queue_url.clone();
+        let state = make_state_with_queue(queue);
+
+        let dirty = Arc::new(AtomicBool::new(false));
+        let delivery = SqsDeliveryImpl::new(state.clone()).with_dirty_flag(dirty.clone());
+        delivery.deliver_to_queue(&arn, "fanned-out", &HashMap::new());
+        assert!(
+            dirty.load(Ordering::Acquire),
+            "delivery must mark state dirty for the flusher"
+        );
+
+        // Flush exactly as the background flusher would, then drop in-memory
+        // state and reload from the snapshot bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SnapshotStore> = Arc::new(
+            fakecloud_persistence::DiskSnapshotStore::new(dir.path().join("snapshot.json")),
+        );
+        persist_sqs_state(&state, &store).unwrap();
+
+        let bytes = store.load().unwrap().expect("snapshot written");
+        let snapshot: crate::state::SqsSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("multi-account snapshot");
+        let restored = accounts.default_ref();
+        let q = restored
+            .queues
+            .get(&url)
+            .expect("queue present after reload");
+        assert_eq!(
+            q.messages.len(),
+            1,
+            "delivered message must survive restart"
+        );
+        assert_eq!(q.messages.front().unwrap().body, "fanned-out");
     }
 
     #[test]

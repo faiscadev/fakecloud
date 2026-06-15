@@ -478,10 +478,17 @@ async fn main() {
     // `ecs_runtime = ...` assignment after the delivery bus setup.
     let ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>;
     // Cross-service delivery bus
+    // Dirty flags shared between the synchronous delivery impls and the
+    // background flushers wired after the snapshot stores load. The delivery
+    // trait is sync and can't reach the async snapshot writer, so fan-out
+    // messages/records are persisted by polling these flags. bug-audit 4.8.
+    let sqs_delivery_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let kinesis_delivery_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
     let sqs_delivery = Arc::new(
         fakecloud_sqs::delivery::SqsDeliveryImpl::new(sqs_state.clone())
-            .with_kms_hook(kms_hook_for_services.clone()),
+            .with_kms_hook(kms_hook_for_services.clone())
+            .with_dirty_flag(sqs_delivery_dirty.clone()),
     );
     // Lambda delivery (SNS can invoke Lambda functions via container runtime)
     let lambda_delivery: Option<Arc<dyn fakecloud_core::delivery::LambdaDelivery>> =
@@ -503,8 +510,10 @@ async fn main() {
         sns_state.clone(),
         delivery_for_sns.clone(),
     ));
-    let kinesis_delivery_for_eb =
-        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+    let kinesis_delivery_for_eb = fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
+        kinesis_state.clone(),
+        kinesis_delivery_dirty.clone(),
+    );
     // Step Functions delivery (EventBridge/Scheduler can start executions)
     let sfn_delivery_for_eb: Arc<dyn fakecloud_core::delivery::StepFunctionsDelivery> = {
         // Build a full delivery bus for the SFN interpreter so task states
@@ -577,10 +586,15 @@ async fn main() {
     // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis;
     // metric filters publish CloudWatch metric data points)
     let sqs_delivery_for_ses = sqs_delivery.clone();
-    let kinesis_delivery =
-        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+    let kinesis_delivery = fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
+        kinesis_state.clone(),
+        kinesis_delivery_dirty.clone(),
+    );
     let kinesis_delivery_for_dynamodb =
-        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
+            kinesis_state.clone(),
+            kinesis_delivery_dirty.clone(),
+        );
     let s3_delivery_for_logs = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
         s3_state.clone(),
     ));
@@ -961,10 +975,20 @@ async fn main() {
     let mut sqs_service = SqsService::new(sqs_state.clone())
         .with_kms_hook(kms_hook_for_services.clone())
         .with_region(cli.region.clone());
-    if let Some(store) = sqs_snapshot_store {
+    if let Some(store) = sqs_snapshot_store.clone() {
         sqs_service = sqs_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(sqs_service));
+    // Flush cross-service SQS deliveries (SNS/EventBridge/S3/Scheduler fan-out)
+    // that the sync delivery trait cannot persist itself. bug-audit 4.8.
+    if let Some(store) = sqs_snapshot_store {
+        tokio::spawn(fakecloud_sqs::delivery::run_delivery_flusher(
+            sqs_state.clone(),
+            store,
+            sqs_delivery_dirty.clone(),
+            std::time::Duration::from_millis(500),
+        ));
+    }
     let sns_state_for_sfn = sns_state.clone();
     let delivery_for_sns_sfn = delivery_for_sns.clone();
     let sns_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
@@ -1935,10 +1959,21 @@ async fn main() {
             None
         };
     let mut kinesis_service = KinesisService::new(kinesis_state.clone());
-    if let Some(store) = kinesis_snapshot_store {
+    if let Some(store) = kinesis_snapshot_store.clone() {
         kinesis_service = kinesis_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(kinesis_service));
+    // Flush cross-service Kinesis deliveries (DynamoDB streaming / Logs
+    // subscription / EventBridge target) that the sync delivery trait cannot
+    // persist itself. bug-audit 4.8.
+    if let Some(store) = kinesis_snapshot_store {
+        tokio::spawn(fakecloud_kinesis::delivery::run_delivery_flusher(
+            kinesis_state.clone(),
+            store,
+            kinesis_delivery_dirty.clone(),
+            std::time::Duration::from_millis(500),
+        ));
+    }
     let rds_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2171,7 +2206,7 @@ async fn main() {
             None
         };
     let mut ecr_service = EcrService::new(ecr_state.clone()).with_kms(kms_state.clone());
-    if let Some(store) = ecr_snapshot_store {
+    if let Some(store) = ecr_snapshot_store.clone() {
         ecr_service = ecr_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ecr_service));
@@ -2179,8 +2214,13 @@ async fn main() {
     // re-runs the prune evaluator on every repository with a policy
     // set so time-based selections (e.g. `sinceImagePushed`) take
     // effect even when no new push triggers an evaluation. The tick
-    // is a cheap read-only scan when no policies are set.
-    let ecr_lifecycle_ticker = fakecloud_ecr::LifecycleTicker::new(ecr_state.clone());
+    // is a cheap read-only scan when no policies are set. A pruning tick
+    // is persisted via the snapshot store so evicted images don't
+    // resurrect on restart (bug-audit 4.6). The store is crash-safe
+    // (atomic rename), so a fresh lock here is fine even though the
+    // request path uses its own.
+    let ecr_lifecycle_ticker = fakecloud_ecr::LifecycleTicker::new(ecr_state.clone())
+        .with_snapshot(ecr_snapshot_store, Arc::new(tokio::sync::Mutex::new(())));
     tokio::spawn(ecr_lifecycle_ticker.run());
     let ecs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2246,6 +2286,15 @@ async fn main() {
     ecs_service.reconcile_persisted_tasks().await;
     let ecs_service = Arc::new(ecs_service);
     let ecs_service_for_scheduler = ecs_service.clone();
+    // ECS desiredCount scheduler ticker. reconcile_persisted_tasks STOPs all
+    // tasks and zeroes counts on restart; this ticker is what brings each
+    // service back up to its desiredCount (and re-launches tasks lost to
+    // crashed containers during normal operation). bug-audit 4.7.
+    let ecs_service_for_desired_count = ecs_service.clone();
+    tokio::spawn(fakecloud_ecs::run_scheduler_ticker(
+        ecs_service_for_desired_count,
+        std::time::Duration::from_secs(3),
+    ));
     registry.register(ecs_service);
     let elbv2_introspection_state = elbv2_state.clone();
     // Wire an S3-only delivery bus so the ALB dataplane can flush
