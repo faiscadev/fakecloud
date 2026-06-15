@@ -555,6 +555,7 @@ pub(crate) fn ec2_instance_response(
         security_group_ids: instance.security_group_ids.clone(),
         availability_zone: instance.az.clone(),
         launch_time: instance.launch_time.clone(),
+        container_id: instance.container_id.clone(),
     }
 }
 

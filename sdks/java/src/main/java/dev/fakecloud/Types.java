@@ -70,7 +70,8 @@ public final class Types {
             String keyName,
             List<String> securityGroupIds,
             String availabilityZone,
-            String launchTime) {}
+            String launchTime,
+            String containerId) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Ec2InstancesResponse(List<Ec2Instance> instances) {}

@@ -173,6 +173,9 @@ def test_ec2_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
     assert instance.instance_type == "t3.micro"
     assert instance.private_ip
     assert isinstance(instance.security_group_ids, list)
+    # Backing container id (Docker) / Pod name (k8s), or None when the
+    # instance runs metadata-only (no container runtime in the test env).
+    assert instance.container_id is None or isinstance(instance.container_id, str)
 
 
 # ── ElastiCache ───────────────────────────────────────────────────────
