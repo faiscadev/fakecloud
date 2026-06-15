@@ -2587,6 +2587,9 @@
           "target": "com.amazonaws.ec2#AttachClassicLinkVpc"
         },
         {
+          "target": "com.amazonaws.ec2#AttachImageWatermark"
+        },
+        {
           "target": "com.amazonaws.ec2#AttachInternetGateway"
         },
         {
@@ -3842,6 +3845,9 @@
         },
         {
           "target": "com.amazonaws.ec2#DetachClassicLinkVpc"
+        },
+        {
+          "target": "com.amazonaws.ec2#DetachImageWatermark"
         },
         {
           "target": "com.amazonaws.ec2#DetachInternetGateway"
@@ -8850,6 +8856,64 @@
             "aws.protocols#ec2QueryName": "Return",
             "smithy.api#documentation": "<p>Returns <code>true</code> if the request succeeds; otherwise, it returns an error.</p>",
             "smithy.api#xmlName": "return"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#output": {}
+      }
+    },
+    "com.amazonaws.ec2#AttachImageWatermark": {
+      "type": "operation",
+      "input": {
+        "target": "com.amazonaws.ec2#AttachImageWatermarkRequest"
+      },
+      "output": {
+        "target": "com.amazonaws.ec2#AttachImageWatermarkResult"
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Attaches a watermark to a non-public AMI. The watermark is a structured identifier that\n      automatically propagates to all derivative images created through\n        <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateImage.html\">CreateImage</a>,\n        <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html\">CopyImage</a>,\n        and <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateRestoreImageTask.html\">CreateRestoreImageTask</a>.</p>\n         <p>Only the AMI owner can attach watermarks. Watermarks cannot be added to public\n      AMIs.</p>"
+      }
+    },
+    "com.amazonaws.ec2#AttachImageWatermarkRequest": {
+      "type": "structure",
+      "members": {
+        "ImageId": {
+          "target": "com.amazonaws.ec2#ImageId",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The ID of the AMI.</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "WatermarkName": {
+          "target": "com.amazonaws.ec2#ImageWatermarkNameRequest",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The name for the watermark. Combined with the caller's account ID to form the\n        <code>WatermarkKey</code> (<code>accountId:watermarkName</code>).</p>\n         <p>Constraints: 3-128 alphanumeric characters, parentheses (()), square brackets ([]), spaces\n      ( ), periods (.), slashes (/), dashes (-), single quotes ('), at-signs (@), or\n      underscores(_)</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "DryRun": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Checks whether you have the required permissions for the action, without actually making the request, \n\t\t\tand provides an error response. If you have the required permissions, the error response is \n\t\t\t<code>DryRunOperation</code>. Otherwise, it is <code>UnauthorizedOperation</code>.</p>"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#input": {}
+      }
+    },
+    "com.amazonaws.ec2#AttachImageWatermarkResult": {
+      "type": "structure",
+      "members": {
+        "WatermarkKey": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "aws.protocols#ec2QueryName": "WatermarkKey",
+            "smithy.api#documentation": "<p>The watermark identifier, in <code>accountId:watermarkName</code> format (for example,\n        <code>123456789012:approvedAmi</code>).</p>",
+            "smithy.api#xmlName": "watermarkKey"
           }
         }
       },
@@ -17954,9 +18018,7 @@
         "InstanceTypeSpecifications": {
           "target": "com.amazonaws.ec2#ReservationFleetInstanceSpecificationList",
           "traits": {
-            "smithy.api#clientOptional": {},
             "smithy.api#documentation": "<p>Information about the instance types for which to reserve the capacity.</p>",
-            "smithy.api#required": {},
             "smithy.api#xmlName": "InstanceTypeSpecification"
           }
         },
@@ -19515,6 +19577,13 @@
           "target": "com.amazonaws.ec2#DestinationOptionsRequest",
           "traits": {
             "smithy.api#documentation": "<p>The destination options.</p>"
+          }
+        },
+        "TagFieldSpecifications": {
+          "target": "com.amazonaws.ec2#TagFieldSpecificationListRequest",
+          "traits": {
+            "smithy.api#documentation": "<p>The tag configuration associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>",
+            "smithy.api#xmlName": "TagFieldSpecification"
           }
         }
       },
@@ -53565,6 +53634,64 @@
         "smithy.api#output": {}
       }
     },
+    "com.amazonaws.ec2#DetachImageWatermark": {
+      "type": "operation",
+      "input": {
+        "target": "com.amazonaws.ec2#DetachImageWatermarkRequest"
+      },
+      "output": {
+        "target": "com.amazonaws.ec2#DetachImageWatermarkResult"
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Removes a watermark from the specified AMI. This is an idempotent operation. It succeeds\n      even if the watermark does not exist on the image.</p>\n         <p>Removing a watermark from an image does not affect derivative images that already carry\n      the watermark.</p>\n         <p>Only the AMI owner can detach watermarks.</p>"
+      }
+    },
+    "com.amazonaws.ec2#DetachImageWatermarkRequest": {
+      "type": "structure",
+      "members": {
+        "ImageId": {
+          "target": "com.amazonaws.ec2#ImageId",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The ID of the AMI.</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "WatermarkKey": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The watermark key to remove, in <code>accountId:watermarkName</code> format (for example,\n        <code>123456789012:approvedAmi</code>).</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "DryRun": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Checks whether you have the required permissions for the action, without actually making the request, \n\t\t\tand provides an error response. If you have the required permissions, the error response is \n\t\t\t<code>DryRunOperation</code>. Otherwise, it is <code>UnauthorizedOperation</code>.</p>"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#input": {}
+      }
+    },
+    "com.amazonaws.ec2#DetachImageWatermarkResult": {
+      "type": "structure",
+      "members": {
+        "Return": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Return",
+            "smithy.api#documentation": "<p>Returns <code>true</code> if the request succeeds; otherwise, it returns an error.</p>",
+            "smithy.api#xmlName": "return"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#output": {}
+      }
+    },
     "com.amazonaws.ec2#DetachInternetGateway": {
       "type": "operation",
       "input": {
@@ -63272,6 +63399,14 @@
             "smithy.api#documentation": "<p>The destination options.</p>",
             "smithy.api#xmlName": "destinationOptions"
           }
+        },
+        "TagFieldSpecifications": {
+          "target": "com.amazonaws.ec2#TagFieldSpecificationListResponse",
+          "traits": {
+            "aws.protocols#ec2QueryName": "TagFieldSpecificationSet",
+            "smithy.api#documentation": "<p>The tag configuration associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>",
+            "smithy.api#xmlName": "tagFieldSpecificationSet"
+          }
         }
       },
       "traits": {
@@ -70900,6 +71035,14 @@
             "smithy.api#xmlName": "freeTierEligible"
           }
         },
+        "ImageWatermarks": {
+          "target": "com.amazonaws.ec2#ImageWatermarkList",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ImageWatermarkSet",
+            "smithy.api#documentation": "<p>The watermarks attached to the AMI.</p>",
+            "smithy.api#xmlName": "imageWatermarkSet"
+          }
+        },
         "ImageId": {
           "target": "com.amazonaws.ec2#String",
           "traits": {
@@ -71556,6 +71699,14 @@
             "smithy.api#documentation": "<p>Indicates whether the AMI has public launch permissions. A value of <code>true</code>\n      means this AMI has public launch permissions, while <code>false</code> means it has only\n      implicit (AMI owner) or explicit (shared with your account) launch permissions.</p>",
             "smithy.api#xmlName": "isPublic"
           }
+        },
+        "ImageWatermarks": {
+          "target": "com.amazonaws.ec2#ImageWatermarkList",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ImageWatermarkSet",
+            "smithy.api#documentation": "<p>The watermarks attached to the AMI.</p>",
+            "smithy.api#xmlName": "imageWatermarkSet"
+          }
         }
       },
       "traits": {
@@ -72183,6 +72334,72 @@
       "type": "list",
       "member": {
         "target": "com.amazonaws.ec2#ImageUsageResourceTypeRequest"
+      }
+    },
+    "com.amazonaws.ec2#ImageWatermark": {
+      "type": "structure",
+      "members": {
+        "WatermarkKey": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "aws.protocols#ec2QueryName": "WatermarkKey",
+            "smithy.api#documentation": "<p>The watermark identifier, in <code>accountId:watermarkName</code> format (for example,\n        <code>123456789012:approvedAmi</code>). The <code>accountId</code> portion is the Amazon Web Services account\n      ID of the watermark creator. The <code>watermarkName</code> portion is customer-provided.</p>",
+            "smithy.api#xmlName": "watermarkKey"
+          }
+        },
+        "SourceImageRegion": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "aws.protocols#ec2QueryName": "SourceImageRegion",
+            "smithy.api#documentation": "<p>The Region where the watermark was originally attached.</p>",
+            "smithy.api#xmlName": "sourceImageRegion"
+          }
+        },
+        "SourceImageId": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "aws.protocols#ec2QueryName": "SourceImageId",
+            "smithy.api#documentation": "<p>The ID of the AMI to which the watermark was originally attached.</p>",
+            "smithy.api#xmlName": "sourceImageId"
+          }
+        },
+        "SourceImageCreationTime": {
+          "target": "com.amazonaws.ec2#MillisecondDateTime",
+          "traits": {
+            "aws.protocols#ec2QueryName": "SourceImageCreationTime",
+            "smithy.api#documentation": "<p>The creation date of the source AMI, in the\n      following format:\n        <i>YYYY</i>-<i>MM</i>-<i>DD</i>T<i>HH</i>:<i>MM</i>:<i>SS</i>.<i>ssssss</i>+<i>HH</i>:<i>MM</i>.</p>",
+            "smithy.api#xmlName": "sourceImageCreationTime"
+          }
+        },
+        "WatermarkCreationTime": {
+          "target": "com.amazonaws.ec2#MillisecondDateTime",
+          "traits": {
+            "aws.protocols#ec2QueryName": "WatermarkCreationTime",
+            "smithy.api#documentation": "<p>The date and time the watermark was attached to the AMI, in the following format:\n        <i>YYYY</i>-<i>MM</i>-<i>DD</i>T<i>HH</i>:<i>MM</i>:<i>SS</i>.<i>ssssss</i>+<i>HH</i>:<i>MM</i>.</p>",
+            "smithy.api#xmlName": "watermarkCreationTime"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Describes a watermark attached to an AMI.</p>"
+      }
+    },
+    "com.amazonaws.ec2#ImageWatermarkList": {
+      "type": "list",
+      "member": {
+        "target": "com.amazonaws.ec2#ImageWatermark",
+        "traits": {
+          "smithy.api#xmlName": "item"
+        }
+      }
+    },
+    "com.amazonaws.ec2#ImageWatermarkNameRequest": {
+      "type": "string",
+      "traits": {
+        "smithy.api#length": {
+          "min": 3,
+          "max": 128
+        }
       }
     },
     "com.amazonaws.ec2#ImdsSupportValues": {
@@ -125740,6 +125957,105 @@
         }
       }
     },
+    "com.amazonaws.ec2#TagFieldSpecificationListRequest": {
+      "type": "list",
+      "member": {
+        "target": "com.amazonaws.ec2#TagFieldSpecificationRequest",
+        "traits": {
+          "smithy.api#xmlName": "item"
+        }
+      },
+      "traits": {
+        "smithy.api#length": {
+          "min": 1,
+          "max": 3
+        }
+      }
+    },
+    "com.amazonaws.ec2#TagFieldSpecificationListResponse": {
+      "type": "list",
+      "member": {
+        "target": "com.amazonaws.ec2#TagFieldSpecificationResponse",
+        "traits": {
+          "smithy.api#xmlName": "item"
+        }
+      },
+      "traits": {
+        "smithy.api#length": {
+          "min": 1,
+          "max": 3
+        }
+      }
+    },
+    "com.amazonaws.ec2#TagFieldSpecificationRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceType": {
+          "target": "com.amazonaws.ec2#TaggableResourceType",
+          "traits": {
+            "smithy.api#documentation": "<p>The resource type for the tag keys associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>"
+          }
+        },
+        "TagKeys": {
+          "target": "com.amazonaws.ec2#TagKeyList",
+          "traits": {
+            "smithy.api#documentation": "<p>The tag keys on your tagged resources to be displayed by the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>",
+            "smithy.api#xmlName": "TagKey"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>A single resource's tag configuration associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>"
+      }
+    },
+    "com.amazonaws.ec2#TagFieldSpecificationResponse": {
+      "type": "structure",
+      "members": {
+        "ResourceType": {
+          "target": "com.amazonaws.ec2#TaggableResourceType",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ResourceType",
+            "smithy.api#documentation": "<p>The resource type for the tag keys associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>",
+            "smithy.api#xmlName": "resourceType"
+          }
+        },
+        "TagKeys": {
+          "target": "com.amazonaws.ec2#TagKeyList",
+          "traits": {
+            "aws.protocols#ec2QueryName": "TagKeySet",
+            "smithy.api#documentation": "<p>The tag keys on your tagged resources to be displayed by the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>",
+            "smithy.api#xmlName": "tagKeySet"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>A single resource's tag configuration associated with the Flow Logs Amazon EC2 Tags feature fields in your custom log format.</p>"
+      }
+    },
+    "com.amazonaws.ec2#TagKey": {
+      "type": "string",
+      "traits": {
+        "smithy.api#length": {
+          "min": 1,
+          "max": 128
+        }
+      }
+    },
+    "com.amazonaws.ec2#TagKeyList": {
+      "type": "list",
+      "member": {
+        "target": "com.amazonaws.ec2#TagKey",
+        "traits": {
+          "smithy.api#xmlName": "item"
+        }
+      },
+      "traits": {
+        "smithy.api#length": {
+          "min": 1,
+          "max": 2
+        }
+      }
+    },
     "com.amazonaws.ec2#TagList": {
       "type": "list",
       "member": {
@@ -125783,6 +126099,29 @@
     },
     "com.amazonaws.ec2#TaggableResourceId": {
       "type": "string"
+    },
+    "com.amazonaws.ec2#TaggableResourceType": {
+      "type": "enum",
+      "members": {
+        "network_interface": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "network-interface"
+          }
+        },
+        "instance": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "instance"
+          }
+        },
+        "auto_scaling_group": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "auto-scaling-group"
+          }
+        }
+      }
     },
     "com.amazonaws.ec2#TargetCapacitySpecification": {
       "type": "structure",
@@ -134387,13 +134726,6 @@
             "aws.protocols#ec2QueryName": "EndTime",
             "smithy.api#documentation": "<p>The modification completion or failure time.</p>",
             "smithy.api#xmlName": "endTime"
-          }
-        },
-        "Operator": {
-          "target": "com.amazonaws.ec2#OperatorResponse",
-          "traits": {
-            "aws.protocols#ec2QueryName": "Operator",
-            "smithy.api#xmlName": "operator"
           }
         }
       },

@@ -1,10 +1,10 @@
 +++
 title = "EC2"
-description = "Amazon EC2 — the full 767-operation control plane. VPCs, subnets, security groups, instances, EBS, AMIs, transit gateways, VPN, IPAM, Verified Access, and the entire networking long tail at 100% Smithy conformance."
+description = "Amazon EC2 — the full 769-operation control plane. VPCs, subnets, security groups, instances, EBS, AMIs, transit gateways, VPN, IPAM, Verified Access, and the entire networking long tail at 100% Smithy conformance."
 weight = 41
 +++
 
-fakecloud implements **767 of 767** AWS EC2 operations at 100% Smithy conformance — the complete control plane for the largest service surface in AWS. Request/response shapes, flattened `ec2Query` XML lists, field names, enum validation, and integer/length bounds are checked against AWS's own Smithy model on every commit.
+fakecloud implements **769 of 769** AWS EC2 operations at 100% Smithy conformance — the complete control plane for the largest service surface in AWS. Request/response shapes, flattened `ec2Query` XML lists, field names, enum validation, and integer/length bounds are checked against AWS's own Smithy model on every commit.
 
 ## Supported features
 
@@ -33,5 +33,5 @@ EC2 uses the `ec2Query` protocol: form-encoded requests and flattened-XML respon
 ## Known limitations
 
 - **Instances run as containers, not VMs** — `RunInstances` boots a real container per instance (Amazon Linux by default, overridable via `FAKECLOUD_EC2_DEFAULT_IMAGE`) and runs user-data at boot, but it is a container, not a full virtual machine: no kernel modules, no nested virtualization, and the instance type / EBS sizing is metadata only. The container runs as a local Docker/Podman container by default, or as a **native Kubernetes Pod** when `FAKECLOUD_EC2_BACKEND=k8s` (or the global `FAKECLOUD_CONTAINER_BACKEND=k8s`) is set — mirroring the Lambda/ECS/RDS/ElastiCache backends, so fakecloud running inside Kubernetes needs no Docker daemon. On the k8s backend a stopped instance's Pod is deleted and recreated on start (instances are not persistent disks). When no container runtime is available at all, the control plane degrades to a metadata-only instance so every API call still succeeds.
-- **A handful of model operations are absent from the vendored AWS SDK** (`DescribeIpamPoolAllocations`, `ModifyIpamPoolAllocation`, and the capacity-reservation cancellation-quote pair). They are implemented and conformance-probed via raw `ec2Query`, and graduate to typed SDK calls on the next SDK refresh.
+- **A handful of model operations are absent from the vendored AWS SDK** (`DescribeIpamPoolAllocations`, `ModifyIpamPoolAllocation`, the capacity-reservation cancellation-quote pair, and the `AttachImageWatermark`/`DetachImageWatermark` AMI watermark pair). They are implemented and conformance-probed via raw `ec2Query`, and graduate to typed SDK calls on the next SDK refresh.
 - Security-group rules and network ACLs are stored and returned faithfully but are **not enforced** against instance traffic (there is no data plane to police).

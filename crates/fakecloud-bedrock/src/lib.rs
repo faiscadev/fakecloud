@@ -6,6 +6,7 @@ pub mod converse;
 pub mod custom_model_deployments;
 pub mod custom_models;
 pub mod customization;
+pub mod data_retention;
 
 pub mod enforced_guardrails;
 pub mod evaluation;

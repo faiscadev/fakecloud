@@ -1918,6 +1918,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteResourcePolicy`
 - `DeregisterMarketplaceModelEndpoint`
 - `ExportAutomatedReasoningPolicyVersion`
+- `GetAccountDataRetention`
 - `GetAdvancedPromptOptimizationJob`
 - `GetAutomatedReasoningPolicy`
 - `GetAutomatedReasoningPolicyAnnotations`
@@ -1966,6 +1967,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListPromptRouters`
 - `ListProvisionedModelThroughputs`
 - `ListTagsForResource`
+- `PutAccountDataRetention`
 - `PutEnforcedGuardrailConfiguration`
 - `PutModelInvocationLoggingConfiguration`
 - `PutResourcePolicy`
@@ -2718,6 +2720,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [CloudWatch (Metrics & Alarms)](@/docs/services/cloudwatch.md)
 
+- `AssociateDatasetKmsKey`
 - `DeleteAlarmMuteRule`
 - `DeleteAlarms`
 - `DeleteAnomalyDetector`
@@ -2732,10 +2735,12 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeInsightRules`
 - `DisableAlarmActions`
 - `DisableInsightRules`
+- `DisassociateDatasetKmsKey`
 - `EnableAlarmActions`
 - `EnableInsightRules`
 - `GetAlarmMuteRule`
 - `GetDashboard`
+- `GetDataset`
 - `GetInsightRuleReport`
 - `GetMetricData`
 - `GetMetricStatistics`
@@ -3155,6 +3160,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AssociateTrunkInterface`
 - `AssociateVpcCidrBlock`
 - `AttachClassicLinkVpc`
+- `AttachImageWatermark`
 - `AttachInternetGateway`
 - `AttachNetworkInterface`
 - `AttachVerifiedAccessTrustProvider`
@@ -3574,6 +3580,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeVpnConnections`
 - `DescribeVpnGateways`
 - `DetachClassicLinkVpc`
+- `DetachImageWatermark`
 - `DetachInternetGateway`
 - `DetachNetworkInterface`
 - `DetachVerifiedAccessTrustProvider`

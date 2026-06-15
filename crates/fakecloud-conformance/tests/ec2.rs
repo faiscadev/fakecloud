@@ -2976,7 +2976,7 @@ async fn ec2_detach_volume() {
     assert_eq!(r.volume_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "ModifyVolume", checksum = "a66e5eb0")]
+#[test_action("ec2", "ModifyVolume", checksum = "5f399766")]
 #[tokio::test]
 async fn ec2_modify_volume() {
     let s = TestServer::start().await;
@@ -2995,7 +2995,7 @@ async fn ec2_modify_volume() {
     );
 }
 
-#[test_action("ec2", "DescribeVolumesModifications", checksum = "9c511c39")]
+#[test_action("ec2", "DescribeVolumesModifications", checksum = "d60ecd74")]
 #[tokio::test]
 async fn ec2_describe_volumes_modifications() {
     let s = TestServer::start().await;
@@ -3521,7 +3521,7 @@ async fn ec2_register_image() {
     assert!(r.image_id().unwrap().starts_with("ami-"));
 }
 
-#[test_action("ec2", "DescribeImages", checksum = "5a0f040c")]
+#[test_action("ec2", "DescribeImages", checksum = "b00eefc4")]
 #[tokio::test]
 async fn ec2_describe_images() {
     let s = TestServer::start().await;
@@ -4494,7 +4494,7 @@ async fn ec2_describe_vpc_endpoint_associations() {
 
 // ---- flow logs ----
 
-#[test_action("ec2", "CreateFlowLogs", checksum = "2d5b67e2")]
+#[test_action("ec2", "CreateFlowLogs", checksum = "11dcdafd")]
 #[tokio::test]
 async fn ec2_create_flow_logs() {
     let s = TestServer::start().await;
@@ -4510,7 +4510,7 @@ async fn ec2_create_flow_logs() {
     assert!(!r.flow_log_ids().is_empty());
 }
 
-#[test_action("ec2", "DescribeFlowLogs", checksum = "579d9fb3")]
+#[test_action("ec2", "DescribeFlowLogs", checksum = "9207ff36")]
 #[tokio::test]
 async fn ec2_describe_flow_logs() {
     let s = TestServer::start().await;
@@ -5142,7 +5142,7 @@ async fn ec2_get_capacity_reservation_usage() {
     assert_eq!(r.capacity_reservation_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "e0539ad5")]
+#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "a33a6641")]
 #[tokio::test]
 async fn ec2_create_capacity_reservation_fleet() {
     let s = TestServer::start().await;
@@ -11245,7 +11245,7 @@ async fn ec2_describe_instance_event_windows() {
     c.describe_instance_event_windows().send().await.unwrap();
 }
 
-#[test_action("ec2", "DescribeInstanceImageMetadata", checksum = "ef67930c")]
+#[test_action("ec2", "DescribeInstanceImageMetadata", checksum = "9e1e5cc9")]
 #[tokio::test]
 async fn ec2_describe_instance_image_metadata() {
     let s = TestServer::start().await;
@@ -12516,4 +12516,52 @@ async fn ec2_modify_ipam_pool_allocation() {
         "Action=ModifyIpamPoolAllocation&Version=2016-11-15&IpamPoolAllocationId=ipam-pool-alloc-1",
     )
     .await;
+}
+
+#[test_action("ec2", "AttachImageWatermark", checksum = "fb734a5c")]
+#[tokio::test]
+async fn ec2_attach_image_watermark() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let ami = make_ami(&c).await;
+    let resp = ec2_raw(
+        &server,
+        &format!(
+            "Action=AttachImageWatermark&Version=2016-11-15&ImageId={ami}&WatermarkName=brand"
+        ),
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<watermarkKey>"),
+        "missing watermarkKey in response: {body}"
+    );
+}
+
+#[test_action("ec2", "DetachImageWatermark", checksum = "00e5b4c6")]
+#[tokio::test]
+async fn ec2_detach_image_watermark() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let ami = make_ami(&c).await;
+    let attach = ec2_raw(
+        &server,
+        &format!(
+            "Action=AttachImageWatermark&Version=2016-11-15&ImageId={ami}&WatermarkName=brand"
+        ),
+    )
+    .await;
+    let body = attach.text().await.unwrap();
+    let key = body
+        .split("<watermarkKey>")
+        .nth(1)
+        .and_then(|s| s.split("</watermarkKey>").next())
+        .expect("watermarkKey in attach response");
+    let resp = ec2_raw(
+        &server,
+        &format!("Action=DetachImageWatermark&Version=2016-11-15&ImageId={ami}&WatermarkKey={key}"),
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<return>true</return>"), "unexpected: {body}");
 }

@@ -4,7 +4,7 @@ description = "Amazon CloudWatch metrics, alarms, dashboards, anomaly detectors,
 weight = 33
 +++
 
-fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service, awsQuery protocol) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. All 46 operations are implemented with persisted in-memory state.
+fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service, awsQuery protocol) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. All 49 operations are implemented with persisted in-memory state.
 
 **Status: full control plane. Metrics are stored in memory and do not persist across server restarts; alarm evaluation is driven by the metric data you publish, not by a background sampling loop.**
 

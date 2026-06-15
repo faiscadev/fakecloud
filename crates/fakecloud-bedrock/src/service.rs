@@ -71,6 +71,7 @@ fn is_read_only_action(action: &str) -> bool {
             | "GetProvisionedModelThroughput"
             | "ListProvisionedModelThroughputs"
             | "GetModelInvocationLoggingConfiguration"
+            | "GetAccountDataRetention"
             | "GetAsyncInvoke"
             | "ListAsyncInvokes"
             | "InvokeModel"
@@ -765,6 +766,14 @@ impl BedrockService {
             }
             (Method::GET, 2) if segs[0] == "async-invoke" => {
                 Some(("GetAsyncInvoke", Some(decode(&segs[1])), None))
+            }
+
+            // Account data retention
+            (Method::GET, 1) if segs[0] == "data-retention" => {
+                Some(("GetAccountDataRetention", None, None))
+            }
+            (Method::PUT, 1) if segs[0] == "data-retention" => {
+                Some(("PutAccountDataRetention", None, None))
             }
 
             // Tags — all POST with ARN in body
@@ -1546,6 +1555,13 @@ impl AwsService for BedrockService {
             "DeleteModelInvocationLoggingConfiguration" => {
                 crate::logging::delete_model_invocation_logging_configuration(&self.state, &req)
             }
+            // Account data retention
+            "GetAccountDataRetention" => {
+                crate::data_retention::get_account_data_retention(&self.state, &req)
+            }
+            "PutAccountDataRetention" => {
+                crate::data_retention::put_account_data_retention(&self.state, &req, &body)
+            }
             // Runtime operations
             "InvokeModel" => {
                 let model_id = resource_id.unwrap_or_default();
@@ -1800,6 +1816,8 @@ impl AwsService for BedrockService {
             "PutModelInvocationLoggingConfiguration",
             "GetModelInvocationLoggingConfiguration",
             "DeleteModelInvocationLoggingConfiguration",
+            "GetAccountDataRetention",
+            "PutAccountDataRetention",
             "InvokeModel",
             "InvokeModelWithResponseStream",
             "InvokeModelWithBidirectionalStream",

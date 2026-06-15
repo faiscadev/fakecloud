@@ -102,6 +102,10 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetOTelEnrichment",
     "StartOTelEnrichment",
     "StopOTelEnrichment",
+    // Dataset KMS key management.
+    "AssociateDatasetKmsKey",
+    "DisassociateDatasetKmsKey",
+    "GetDataset",
     // Misc.
     "DescribeAlarmContributors",
     "GetMetricWidgetImage",
@@ -197,6 +201,8 @@ impl AwsService for CloudWatchService {
                 | "DeleteAlarmMuteRule"
                 | "StartOTelEnrichment"
                 | "StopOTelEnrichment"
+                | "AssociateDatasetKmsKey"
+                | "DisassociateDatasetKmsKey"
                 | "TagResource"
                 | "UntagResource"
         );
@@ -248,6 +254,10 @@ impl AwsService for CloudWatchService {
             "GetOTelEnrichment" => self.get_otel_enrichment(&req),
             "StartOTelEnrichment" => self.start_otel_enrichment(&req),
             "StopOTelEnrichment" => self.stop_otel_enrichment(&req),
+            // Dataset KMS key management.
+            "AssociateDatasetKmsKey" => self.associate_dataset_kms_key(&req),
+            "DisassociateDatasetKmsKey" => self.disassociate_dataset_kms_key(&req),
+            "GetDataset" => self.get_dataset(&req),
             // Misc.
             "DescribeAlarmContributors" => self.describe_alarm_contributors(&req),
             "GetMetricWidgetImage" => self.get_metric_widget_image(&req),

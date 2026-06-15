@@ -950,6 +950,9 @@ pub struct Ec2State {
     pub snapshot_block_public_access: String,
     #[serde(default)]
     pub images: HashMap<String, Image>,
+    /// Watermarks attached to AMIs: image_id -> watermark_key -> watermark_name.
+    #[serde(default)]
+    pub image_watermarks: HashMap<String, HashMap<String, String>>,
     /// Account-level image block-public-access state.
     #[serde(default)]
     pub image_block_public_access: String,

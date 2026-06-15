@@ -2259,3 +2259,53 @@ async fn bedrock_converse_stream() {
     let body_bytes = resp.bytes().await.unwrap();
     assert!(body_bytes.len() > 100);
 }
+
+// ---------------------------------------------------------------------------
+// Account data retention — absent from the vendored aws-sdk-bedrock, so
+// exercised via raw restJson1 GET/PUT. They graduate to typed SDK calls on the
+// next SDK refresh.
+// ---------------------------------------------------------------------------
+
+#[test_action("bedrock", "GetAccountDataRetention", checksum = "9cbe11ec")]
+#[test_action("bedrock", "PutAccountDataRetention", checksum = "ff88323b")]
+#[tokio::test]
+async fn bedrock_account_data_retention() {
+    let server = TestServer::start().await;
+    let h = reqwest::Client::new();
+    let a = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake";
+
+    // Default before any Put.
+    let r = h
+        .get(format!("{}/data-retention", server.endpoint()))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["mode"].as_str(), Some("default"));
+
+    // Put a new mode.
+    let r = h
+        .put(format!("{}/data-retention", server.endpoint()))
+        .header("content-type", "application/json")
+        .header("authorization", a)
+        .body(serde_json::json!({ "mode": "none" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["mode"].as_str(), Some("none"));
+    assert!(v.get("updatedAt").is_some());
+
+    // Get reflects the new mode.
+    let r = h
+        .get(format!("{}/data-retention", server.endpoint()))
+        .header("authorization", a)
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["mode"].as_str(), Some("none"));
+}

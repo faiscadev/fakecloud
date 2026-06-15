@@ -482,6 +482,62 @@ pub(crate) fn reset_image_attribute(
 }
 
 /// Simple require-ImageId + `<return>true</return>` handler.
+pub(crate) fn attach_image_watermark(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let image_id = require(&req.query_params, "ImageId")?;
+    let watermark_name = require(&req.query_params, "WatermarkName")?;
+    validate_length(&req.query_params, "WatermarkName", 1, 255)?;
+
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    if !state.images.contains_key(&image_id) {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidAMIID.NotFound",
+            format!("The image id '[{image_id}]' does not exist"),
+        ));
+    }
+    let watermark_key = gen_id("wmk");
+    state
+        .image_watermarks
+        .entry(image_id)
+        .or_default()
+        .insert(watermark_key.clone(), watermark_name);
+    Ok(Ec2Service::respond(
+        "AttachImageWatermark",
+        &req.request_id,
+        &ec2_elem("watermarkKey", &watermark_key),
+    ))
+}
+
+pub(crate) fn detach_image_watermark(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let image_id = require(&req.query_params, "ImageId")?;
+    let watermark_key = require(&req.query_params, "WatermarkKey")?;
+
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    if !state.images.contains_key(&image_id) {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidAMIID.NotFound",
+            format!("The image id '[{image_id}]' does not exist"),
+        ));
+    }
+    if let Some(marks) = state.image_watermarks.get_mut(&image_id) {
+        marks.remove(&watermark_key);
+    }
+    Ok(Ec2Service::respond(
+        "DetachImageWatermark",
+        &req.request_id,
+        &ec2_return(true),
+    ))
+}
+
 fn image_ack(
     svc: &Ec2Service,
     req: &AwsRequest,

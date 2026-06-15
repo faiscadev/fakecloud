@@ -147,6 +147,16 @@ pub struct BedrockState {
     /// Automated reasoning annotations keyed by (policy_arn, workflow_id).
     #[serde(with = "tuple2_map_serde")]
     pub ar_annotations: BTreeMap<(String, String), serde_json::Value>,
+    /// Account-level data retention configuration.
+    #[serde(default)]
+    pub data_retention: Option<DataRetentionConfig>,
+}
+
+/// Account-level data retention setting and when it was last changed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DataRetentionConfig {
+    pub mode: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl BedrockState {
@@ -185,6 +195,7 @@ impl BedrockState {
             ar_build_workflows: BTreeMap::new(),
             ar_test_results: BTreeMap::new(),
             ar_annotations: BTreeMap::new(),
+            data_retention: None,
         }
     }
 
@@ -220,6 +231,7 @@ impl BedrockState {
         self.ar_build_workflows.clear();
         self.ar_test_results.clear();
         self.ar_annotations.clear();
+        self.data_retention = None;
     }
 }
 
