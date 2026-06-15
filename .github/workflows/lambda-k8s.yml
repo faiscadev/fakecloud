@@ -8,6 +8,7 @@ on:
       - 'crates/fakecloud-elasticache/**'
       - 'crates/fakecloud-rds/**'
       - 'crates/fakecloud-ecs/**'
+      - 'crates/fakecloud-ec2/**'
       - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   pull_request:
@@ -17,6 +18,7 @@ on:
       - 'crates/fakecloud-elasticache/**'
       - 'crates/fakecloud-rds/**'
       - 'crates/fakecloud-ecs/**'
+      - 'crates/fakecloud-ec2/**'
       - 'crates/fakecloud-k8s/**'
       - '.github/workflows/lambda-k8s.yml'
   workflow_dispatch:

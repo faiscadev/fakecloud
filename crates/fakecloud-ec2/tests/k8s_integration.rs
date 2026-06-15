@@ -159,7 +159,11 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
 
     // RunInstances boots a Pod and runs user-data at boot.
     let running = rt
-        .run_instance(instance_id, Some(USER_DATA_B64))
+        .run_instance(
+            instance_id,
+            Some(USER_DATA_B64),
+            &std::collections::BTreeMap::new(),
+        )
         .await
         .expect("run_instance");
     let pod = running.container_id.clone();
