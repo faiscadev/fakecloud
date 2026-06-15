@@ -28,6 +28,9 @@ fakecloud is configured via CLI flags or environment variables. Flags take prece
 |                      | `FAKECLOUD_K8S_SELF_URL`    | —                  | In-cluster URL of the fakecloud Service (e.g. `http://fakecloud.fakecloud.svc.cluster.local:4566`). Required for the K8s backend — Pods fetch artifacts from and call back to this URL. |
 |                      | `FAKECLOUD_K8S_ECR_URL`     | host of `_SELF_URL`| Override the host:port the K8s backend rewrites AWS private-ECR URIs to. Defaults to the host of `FAKECLOUD_K8S_SELF_URL`. |
 |                      | `FAKECLOUD_K8S_PULL_SECRET` | unset              | Name of a `kubernetes.io/dockerconfigjson` Secret used as `imagePullSecrets` for Pods pulling private images. |
+|                      | `FAKECLOUD_K8S_NODE_SELECTOR` | unset            | `key=value,key=value` node selector applied to every fakecloud Pod. Per-service override: `FAKECLOUD_<SERVICE>_K8S_NODE_SELECTOR` (e.g. `FAKECLOUD_LAMBDA_K8S_NODE_SELECTOR`). See [Kubernetes backend](/docs/guides/kubernetes-backend/#pod-scheduling-and-metadata). |
+|                      | `FAKECLOUD_K8S_TOLERATIONS` | unset              | JSON array of k8s `Toleration` objects applied to every fakecloud Pod. Per-service override: `FAKECLOUD_<SERVICE>_K8S_TOLERATIONS`. |
+|                      | `FAKECLOUD_K8S_ANNOTATIONS` | unset              | `key=value,key=value` annotations added to every fakecloud Pod. Per-service override: `FAKECLOUD_<SERVICE>_K8S_ANNOTATIONS`. |
 |                      | `FAKECLOUD_MAX_REQUEST_BODY_BYTES` | `1073741824` | Max bytes a buffered request body can absorb before fakecloud returns 413. Default 1 GiB. Streaming routes (S3 `PutObject` / `UploadPart`, ECR OCI blob upload `PATCH` / `PUT`) bypass this cap entirely — they spool the raw HTTP body to disk instead of buffering it all in RAM. Raise this only when stress-testing buffered requests past 1 GiB. |
 
 ## Examples
