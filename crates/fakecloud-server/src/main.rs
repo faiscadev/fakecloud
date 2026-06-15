@@ -1585,6 +1585,13 @@ async fn main() {
     // `GET /_fakecloud/ec2/instances`.
     let ec2_service = Ec2Service::with_state(ec2_state.clone()).with_runtime(ec2_runtime.clone());
     let ec2_introspection_state = ec2_state.clone();
+    // Recreate the backing containers for persisted EC2 instances that the
+    // snapshot claims should be running. The startup reaper (above) already
+    // removed the previous process's containers (their owning PID is dead), so
+    // a persisted `running` instance would otherwise point at a removed
+    // container with a silently-dead lifecycle. Fire-and-forget: spawns one
+    // task per instance and returns immediately (bug-hunt 2026-06-15 0.3).
+    ec2_service.recover_persisted_containers().await;
     registry.register(Arc::new(ec2_service));
     let mut shared_body_cache: Option<Arc<fakecloud_persistence::cache::BodyCache>> = None;
     let s3_store: Arc<dyn fakecloud_persistence::S3Store> = match persistence_config.mode {

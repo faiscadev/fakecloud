@@ -903,6 +903,129 @@ impl Ec2Service {
     pub fn shared_state(&self) -> SharedEc2State {
         self.state.clone()
     }
+
+    /// Rebuild the backing-container runtime state for persisted instances
+    /// after a fakecloud restart, mirroring RDS/ElastiCache
+    /// `recover_persisted_containers`.
+    ///
+    /// On an ungraceful restart the new process has a new PID, so the shared
+    /// reaper removes every EC2 container labeled with the *previous* PID; an
+    /// instance that persisted as `running` with a `container_id` would
+    /// otherwise be left pointing at a removed container, with every
+    /// subsequent Stop/Start/Reboot/Terminate a silent no-op (bug-hunt
+    /// 2026-06-15 finding 0.3). For each such instance we flip it to `pending`
+    /// and spawn a fresh backing container in the background, reconciling it to
+    /// `running` (with the new id/IP) when it's up, or `stopped` on failure.
+    /// Instances persisted as `stopped`/`terminated` are left as-is —
+    /// StartInstances revives the former. No-op when no runtime is configured
+    /// or there are no instances to recover.
+    pub async fn recover_persisted_containers(&self) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+
+        struct Pending {
+            account_id: String,
+            id: String,
+            user_data: Option<String>,
+            tags: std::collections::BTreeMap<String, String>,
+        }
+
+        let pending: Vec<Pending> = {
+            let mut accounts = self.state.write();
+            let mut out = Vec::new();
+            for (_, state) in accounts.iter_mut() {
+                let account_id = state.account_id.clone();
+                // Snapshot the tag map first so we don't hold two borrows of
+                // `state` at once when re-deriving per-instance Pod tags.
+                let tag_snapshot: std::collections::HashMap<String, Vec<crate::state::Tag>> =
+                    state.tags.clone();
+                for (id, inst) in state.instances.iter_mut() {
+                    // Only running/pending instances need a live container; the
+                    // stale container_id is dropped (the reaper removed it).
+                    if !matches!(inst.state_name.as_str(), "running" | "pending") {
+                        continue;
+                    }
+                    let tags = tag_snapshot
+                        .get(id)
+                        .map(|t| {
+                            t.iter()
+                                .map(|tag| (tag.key.clone(), tag.value.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    inst.state_code = 0;
+                    inst.state_name = "pending".to_string();
+                    inst.container_id = None;
+                    out.push(Pending {
+                        account_id: account_id.clone(),
+                        id: id.clone(),
+                        user_data: inst.user_data.clone(),
+                        tags,
+                    });
+                }
+            }
+            out
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = pending.len(),
+            "recovering backing containers for persisted ec2 instances",
+        );
+
+        for p in pending {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                let running = runtime
+                    .run_instance(&p.id, p.user_data.as_deref(), &p.tags)
+                    .await;
+                let reap = {
+                    let mut accounts = state.write();
+                    match (
+                        accounts
+                            .get_mut(&p.account_id)
+                            .and_then(|s| s.instances.get_mut(&p.id)),
+                        running,
+                    ) {
+                        (Some(inst), Ok(r)) => {
+                            if inst.state_code == 48 {
+                                // Terminated during recovery: drop the container.
+                                true
+                            } else {
+                                inst.state_code = 16;
+                                inst.state_name = "running".to_string();
+                                inst.private_ip = r.private_ip;
+                                inst.container_id = Some(r.container_id);
+                                false
+                            }
+                        }
+                        (Some(inst), Err(error)) => {
+                            tracing::error!(
+                                %error,
+                                instance_id = %p.id,
+                                "failed to recover ec2 backing container after restart",
+                            );
+                            inst.state_code = 80;
+                            inst.state_name = "stopped".to_string();
+                            inst.container_id = None;
+                            false
+                        }
+                        // Deleted during recovery: stop the container we just
+                        // started so it isn't orphaned (mirrors ElastiCache).
+                        (None, Ok(_)) => true,
+                        (None, Err(_)) => false,
+                    }
+                };
+                if reap {
+                    runtime.terminate_instance(&p.id).await;
+                }
+            });
+        }
+    }
 }
 
 impl Default for Ec2Service {

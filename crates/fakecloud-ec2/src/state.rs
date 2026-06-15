@@ -292,6 +292,105 @@ pub struct Instance {
     /// real container runtime. `None` in metadata-only mode.
     #[serde(default)]
     pub container_id: Option<String>,
+    // ---- modifiable instance attributes (ModifyInstanceAttribute et al.) ----
+    /// `disableApiTermination` — when true, TerminateInstances is rejected.
+    #[serde(default)]
+    pub disable_api_termination: bool,
+    /// `disableApiStop` — when true, StopInstances is rejected.
+    #[serde(default)]
+    pub disable_api_stop: bool,
+    /// `sourceDestCheck` — defaults to true on AWS.
+    #[serde(default = "default_true")]
+    pub source_dest_check: bool,
+    /// `ebsOptimized`.
+    #[serde(default)]
+    pub ebs_optimized: bool,
+    /// `instanceInitiatedShutdownBehavior` — `stop` (default) | `terminate`.
+    #[serde(default = "default_shutdown_behavior")]
+    pub instance_initiated_shutdown_behavior: String,
+    /// `userData` — base64-encoded, as supplied at launch / via Modify.
+    #[serde(default)]
+    pub user_data: Option<String>,
+    // ---- Modify*Options round-trip state ----
+    /// `metadataOptions` (`ModifyInstanceMetadataOptions`).
+    #[serde(default)]
+    pub metadata_options: MetadataOptions,
+    /// `cpuOptions` (`ModifyInstanceCpuOptions`).
+    #[serde(default)]
+    pub cpu_options: Option<CpuOptions>,
+    /// `bandwidthWeighting` (`ModifyInstanceNetworkPerformanceOptions`).
+    #[serde(default)]
+    pub bandwidth_weighting: Option<String>,
+    /// `maintenanceOptions` (`ModifyInstanceMaintenanceOptions`).
+    #[serde(default)]
+    pub maintenance_options: MaintenanceOptions,
+    /// `placement` tenancy/affinity overrides (`ModifyInstancePlacement`).
+    #[serde(default)]
+    pub placement_tenancy: Option<String>,
+    #[serde(default)]
+    pub placement_affinity: Option<String>,
+    #[serde(default)]
+    pub placement_group_name: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_shutdown_behavior() -> String {
+    "stop".to_string()
+}
+
+/// IMDS (instance-metadata service) options, round-tripped by
+/// `ModifyInstanceMetadataOptions` and reflected in DescribeInstances.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetadataOptions {
+    /// `optional` | `required`.
+    pub http_tokens: String,
+    /// `disabled` | `enabled`.
+    pub http_endpoint: String,
+    pub http_put_response_hop_limit: i64,
+    /// `disabled` | `enabled`.
+    pub http_protocol_ipv6: String,
+    /// `disabled` | `enabled`.
+    pub instance_metadata_tags: String,
+}
+
+impl Default for MetadataOptions {
+    fn default() -> Self {
+        Self {
+            http_tokens: "optional".to_string(),
+            http_endpoint: "enabled".to_string(),
+            http_put_response_hop_limit: 1,
+            http_protocol_ipv6: "disabled".to_string(),
+            instance_metadata_tags: "disabled".to_string(),
+        }
+    }
+}
+
+/// CPU options round-tripped by `ModifyInstanceCpuOptions`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpuOptions {
+    pub core_count: i64,
+    pub threads_per_core: i64,
+}
+
+/// Maintenance options round-tripped by `ModifyInstanceMaintenanceOptions`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MaintenanceOptions {
+    /// `disabled` | `default`.
+    pub auto_recovery: String,
+    /// `disabled` | `default`.
+    pub reboot_migration: String,
+}
+
+impl Default for MaintenanceOptions {
+    fn default() -> Self {
+        Self {
+            auto_recovery: "default".to_string(),
+            reboot_migration: "default".to_string(),
+        }
+    }
 }
 
 /// An EBS volume attachment.
@@ -1225,5 +1324,83 @@ mod tests {
         s.upsert_tags("sg-1", &[tag("Name", "x")]);
         s.remove_tags("sg-1", &[("Name".to_string(), None)]);
         assert!(!s.tags.contains_key("sg-1"));
+    }
+
+    fn sample_instance() -> Instance {
+        Instance {
+            instance_id: "i-1".to_string(),
+            image_id: "ami-1".to_string(),
+            instance_type: "t3.micro".to_string(),
+            state_code: 16,
+            state_name: "running".to_string(),
+            private_ip: "10.0.0.1".to_string(),
+            public_ip: Some("52.0.0.1".to_string()),
+            subnet_id: Some("subnet-1".to_string()),
+            vpc_id: Some("vpc-1".to_string()),
+            key_name: None,
+            security_group_ids: vec!["sg-1".to_string()],
+            reservation_id: "r-1".to_string(),
+            ami_launch_index: 0,
+            monitoring: false,
+            az: "us-east-1a".to_string(),
+            launch_time: "2024-01-01T00:00:00.000Z".to_string(),
+            container_id: Some("abc".to_string()),
+            disable_api_termination: true,
+            disable_api_stop: true,
+            source_dest_check: false,
+            ebs_optimized: true,
+            instance_initiated_shutdown_behavior: "terminate".to_string(),
+            user_data: Some("ZWNobyBoaQ==".to_string()),
+            metadata_options: MetadataOptions {
+                http_tokens: "required".to_string(),
+                ..MetadataOptions::default()
+            },
+            cpu_options: Some(CpuOptions {
+                core_count: 4,
+                threads_per_core: 2,
+            }),
+            bandwidth_weighting: Some("vpc-1".to_string()),
+            maintenance_options: MaintenanceOptions::default(),
+            placement_tenancy: Some("dedicated".to_string()),
+            placement_affinity: None,
+            placement_group_name: Some("cluster-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn instance_attributes_round_trip_through_serde() {
+        let inst = sample_instance();
+        let json = serde_json::to_string(&inst).unwrap();
+        let back: Instance = serde_json::from_str(&json).unwrap();
+        assert!(back.disable_api_termination);
+        assert!(back.disable_api_stop);
+        assert!(!back.source_dest_check);
+        assert!(back.ebs_optimized);
+        assert_eq!(back.instance_initiated_shutdown_behavior, "terminate");
+        assert_eq!(back.user_data.as_deref(), Some("ZWNobyBoaQ=="));
+        assert_eq!(back.metadata_options.http_tokens, "required");
+        assert_eq!(back.cpu_options.as_ref().unwrap().core_count, 4);
+        assert_eq!(back.bandwidth_weighting.as_deref(), Some("vpc-1"));
+        assert_eq!(back.placement_tenancy.as_deref(), Some("dedicated"));
+        assert_eq!(back.placement_group_name.as_deref(), Some("cluster-1"));
+    }
+
+    #[test]
+    fn instance_attribute_defaults_load_from_legacy_snapshot() {
+        // A snapshot written before the attribute fields existed (only the
+        // pre-existing members) must deserialize, with AWS defaults filled in.
+        let legacy = r#"{
+            "instance_id":"i-1","image_id":"ami-1","instance_type":"t3.micro",
+            "state_code":16,"state_name":"running","private_ip":"10.0.0.1",
+            "public_ip":null,"subnet_id":null,"vpc_id":null,"key_name":null,
+            "reservation_id":"r-1","ami_launch_index":0,"monitoring":false,
+            "az":"us-east-1a","launch_time":"2024-01-01T00:00:00.000Z"
+        }"#;
+        let inst: Instance = serde_json::from_str(legacy).unwrap();
+        assert!(!inst.disable_api_termination);
+        assert!(inst.source_dest_check, "sourceDestCheck defaults to true");
+        assert_eq!(inst.instance_initiated_shutdown_behavior, "stop");
+        assert_eq!(inst.metadata_options.http_tokens, "optional");
+        assert!(inst.cpu_options.is_none());
     }
 }

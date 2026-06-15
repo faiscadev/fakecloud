@@ -2473,9 +2473,12 @@ async fn ec2_start_instances() {
     let id = run_one(&c).await;
     c.stop_instances().instance_ids(&id).send().await.unwrap();
     let r = c.start_instances().instance_ids(&id).send().await.unwrap();
+    // AWS returns the instance in `pending`; it transitions to `running`
+    // asynchronously as the backing host boots (it never returns `running`
+    // synchronously from StartInstances).
     assert_eq!(
         r.starting_instances()[0].current_state().unwrap().name(),
-        Some(&aws_sdk_ec2::types::InstanceStateName::Running)
+        Some(&aws_sdk_ec2::types::InstanceStateName::Pending)
     );
 }
 
@@ -2540,9 +2543,13 @@ async fn ec2_describe_instance_status() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
     let id = run_one(&c).await;
+    // A freshly launched instance is `pending` until the backing host boots;
+    // DescribeInstanceStatus only reports `running` instances unless
+    // IncludeAllInstances is set, so set it to observe the pending instance.
     let r = c
         .describe_instance_status()
         .instance_ids(&id)
+        .include_all_instances(true)
         .send()
         .await
         .unwrap();
