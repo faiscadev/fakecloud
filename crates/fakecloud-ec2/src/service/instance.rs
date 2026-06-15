@@ -140,10 +140,15 @@ pub(crate) async fn run_instances(
     // configured, or a container fails to start, the instance falls back to a
     // synthesized private IP and no container handle — the API still succeeds.
     let ids: Vec<String> = (0..count).map(|_| gen_id("i")).collect();
+    // Reserved `fakecloud-k8s/*` scheduling tags are read from the request's
+    // TagSpecification here, before the backing Pod is built: instance tags
+    // are written to state only after the container boots (below), so the
+    // k8s backend can't read them back at spawn time.
+    let instance_tags = crate::service::tags::tag_specifications_for(&req.query_params, "instance");
     let mut backing: HashMap<String, crate::runtime::RunningInstance> = HashMap::new();
     if let Some(rt) = &svc.runtime {
         for id in &ids {
-            match rt.run_instance(id, user_data).await {
+            match rt.run_instance(id, user_data, &instance_tags).await {
                 Ok(running) => {
                     backing.insert(id.clone(), running);
                 }
