@@ -585,7 +585,6 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetMFADevice",
     "ResyncMFADevice",
     "SetSecurityTokenServicePreferences",
-    "GetSecurityTokenServicePreferences",
     "UpdateServerCertificate",
     "CreateDelegationRequest",
     "GetDelegationRequest",

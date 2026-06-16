@@ -4443,23 +4443,24 @@ fn create_open_id_connect_provider_missing_url_emits_invalid_input() {
 }
 
 #[test]
-fn get_security_token_service_preferences_is_iam_enforceable() {
-    // §5.4: GetSecurityTokenServicePreferences was dispatched but absent
-    // from SUPPORTED_ACTIONS, so iam_action_for returned None and the op
-    // ran with zero policy evaluation under --iam strict. Its sibling
-    // Set... was already enforced — assert both now resolve.
+fn set_security_token_service_preferences_is_iam_enforceable() {
+    // The real AWS action `SetSecurityTokenServicePreferences` is mapped and
+    // IAM-enforced. Its read-back sibling `GetSecurityTokenServicePreferences`
+    // is a fakecloud-only extension (absent from AWS's iam.json), so it is
+    // intentionally NOT in SUPPORTED_ACTIONS — there is no AWS IAM action to
+    // write a policy against, and listing it would fail the handwritten-test
+    // audit (no Smithy model to checksum).
     let svc = make_service();
-    let get_req = make_request("GetSecurityTokenServicePreferences", vec![]);
-    let action = svc
-        .iam_action_for(&get_req)
-        .expect("GetSecurityTokenServicePreferences must be IAM-enforced");
-    assert_eq!(action.service, "iam");
-    assert_eq!(action.action, "GetSecurityTokenServicePreferences");
-
     let set_req = make_request("SetSecurityTokenServicePreferences", vec![]);
     assert_eq!(
         svc.iam_action_for(&set_req).map(|a| a.action),
         Some("SetSecurityTokenServicePreferences")
+    );
+
+    let get_req = make_request("GetSecurityTokenServicePreferences", vec![]);
+    assert!(
+        svc.iam_action_for(&get_req).is_none(),
+        "Get... is a fakecloud extension, not a mapped AWS IAM action"
     );
 }
 
