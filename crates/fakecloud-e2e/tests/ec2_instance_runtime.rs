@@ -78,20 +78,46 @@ async fn run_instances_boots_real_container_with_user_data() {
     let instances = resp.instances();
     assert_eq!(instances.len(), 1);
     let instance_id = instances[0].instance_id().expect("instance id").to_string();
+    // RunInstances returns immediately with the instance in `pending` (AWS
+    // never blocks on the container coming up); the backing container boots in
+    // the background and DescribeInstances flips to `running` once it's up.
     assert_eq!(
         instances[0]
             .state()
             .and_then(|s| s.name())
             .map(|n| n.as_str()),
-        Some("running")
+        Some("pending")
     );
 
-    // The private IP must be the real container address, not the synthesized
-    // 10.0.0.x fallback used in metadata-only mode.
-    let private_ip = instances[0].private_ip_address().expect("private ip");
+    // Poll DescribeInstances until the instance reaches `running` and reports
+    // the real container private IP (not the 10.0.0.x metadata-only fallback).
+    let mut private_ip = String::new();
+    let mut became_running = false;
+    for _ in 0..60 {
+        let d = c
+            .describe_instances()
+            .instance_ids(&instance_id)
+            .send()
+            .await
+            .unwrap();
+        if let Some(inst) = d
+            .reservations()
+            .iter()
+            .flat_map(|r| r.instances())
+            .find(|i| i.instance_id() == Some(instance_id.as_str()))
+        {
+            if inst.state().and_then(|s| s.name()).map(|n| n.as_str()) == Some("running") {
+                private_ip = inst.private_ip_address().unwrap_or_default().to_string();
+                became_running = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(became_running, "instance never reached running state");
     assert!(
-        !private_ip.starts_with("10.0.0."),
-        "expected a real container IP, got {private_ip}"
+        !private_ip.is_empty() && !private_ip.starts_with("10.0.0."),
+        "expected a real container IP, got {private_ip:?}"
     );
 
     // A running container exists for this instance.

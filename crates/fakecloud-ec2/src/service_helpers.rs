@@ -53,6 +53,99 @@ pub fn not_found(code: &str, id: &str) -> AwsServiceError {
     )
 }
 
+/// `InvalidInstanceID.NotFound` (HTTP 400) — the requested instance does not
+/// exist, matching what AWS returns for state-change/describe ops on a bad id.
+pub fn instance_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidInstanceID.NotFound",
+        format!("The instance ID '{id}' does not exist"),
+    )
+}
+
+/// `InstanceLimitExceeded` (HTTP 400) — the requested instance count exceeds
+/// the limit, matching what AWS returns when MaxCount is above the per-request
+/// (or account) ceiling.
+pub fn instance_limit_exceeded(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InstanceLimitExceeded",
+        message.into(),
+    )
+}
+
+/// `IncorrectInstanceState` (HTTP 400) — an instance state-change is illegal
+/// from the instance's current state (e.g. starting a terminated instance).
+pub fn incorrect_instance_state(id: &str, current: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "IncorrectInstanceState",
+        format!("The instance '{id}' is not in a state from which it can be modified (current state: {current})"),
+    )
+}
+
+/// Match an EC2 filter value against a candidate, honoring the `*` (any run)
+/// and `?` (any single char) wildcards AWS supports in filter values. A value
+/// with no wildcard is an exact match.
+pub fn filter_value_matches(pattern: &str, candidate: &str) -> bool {
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return pattern == candidate;
+    }
+    glob_match(pattern.as_bytes(), candidate.as_bytes())
+}
+
+/// Minimal glob matcher for `*`/`?` over bytes (EC2 filter wildcards).
+fn glob_match(pat: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star_p = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Apply offset-based pagination to an already-sorted item list. Returns the
+/// page slice plus the opaque `NextToken` to return (the absolute next offset
+/// as a string), or `None` when the page reaches the end. `max_results` of
+/// `None` means "all remaining".
+pub fn paginate<T: Clone>(
+    items: &[T],
+    next_token: Option<&str>,
+    max_results: Option<usize>,
+) -> (Vec<T>, Option<String>) {
+    let start = next_token
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0);
+    let start = start.min(items.len());
+    let end = match max_results {
+        Some(n) => (start + n).min(items.len()),
+        None => items.len(),
+    };
+    let page = items[start..end].to_vec();
+    let token = if end < items.len() {
+        Some(end.to_string())
+    } else {
+        None
+    };
+    (page, token)
+}
+
 /// Require a non-empty scalar parameter, else `MissingParameter`. Omitting a
 /// required scalar is wire-observable, so the conformance harness generates a
 /// negative variant for it — handlers must reject it.
@@ -285,6 +378,41 @@ mod tests {
             tags,
             vec![("Name".into(), Some("web".into())), ("env".into(), None)]
         );
+    }
+
+    #[test]
+    fn filter_wildcards() {
+        assert!(filter_value_matches("web", "web"));
+        assert!(!filter_value_matches("web", "web1"));
+        assert!(filter_value_matches("web*", "web-prod"));
+        assert!(filter_value_matches("*prod", "web-prod"));
+        assert!(filter_value_matches("web*prod", "web-staging-prod"));
+        assert!(filter_value_matches("we?", "web"));
+        assert!(!filter_value_matches("we?", "web1"));
+        assert!(filter_value_matches("*", "anything"));
+        assert!(!filter_value_matches("web?", "web"));
+    }
+
+    #[test]
+    fn paginate_pages_and_round_trips_token() {
+        let items: Vec<i32> = (0..10).collect();
+        let (page, token) = paginate(&items, None, Some(4));
+        assert_eq!(page, vec![0, 1, 2, 3]);
+        assert_eq!(token.as_deref(), Some("4"));
+        let (page2, token2) = paginate(&items, token.as_deref(), Some(4));
+        assert_eq!(page2, vec![4, 5, 6, 7]);
+        assert_eq!(token2.as_deref(), Some("8"));
+        let (page3, token3) = paginate(&items, token2.as_deref(), Some(4));
+        assert_eq!(page3, vec![8, 9]);
+        assert_eq!(token3, None);
+    }
+
+    #[test]
+    fn paginate_no_max_returns_all() {
+        let items: Vec<i32> = (0..3).collect();
+        let (page, token) = paginate(&items, None, None);
+        assert_eq!(page, items);
+        assert_eq!(token, None);
     }
 
     #[test]

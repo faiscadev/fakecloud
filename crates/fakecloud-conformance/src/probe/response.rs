@@ -157,6 +157,29 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "AccessDenied",
             "NotFound",
         ],
+        // EC2's Smithy model declares no per-operation `errors:` lists at all,
+        // yet the EC2 Query API has a large, well-documented set of client
+        // error codes every operation can return for a missing/invalid/
+        // wrong-state resource. Source: EC2 API "Error codes" reference
+        // (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html).
+        // These are real AWS responses to the synthetic ids/params the probes
+        // send (a nonexistent instance -> InvalidInstanceID.NotFound, an
+        // illegal transition -> IncorrectInstanceState, etc.), so a handler
+        // returning one of them ran correctly. Anything outside this list is
+        // still treated as a routing miss / undeclared error.
+        "ec2" => &[
+            "InvalidInstanceID.NotFound",
+            "InvalidInstanceID.Malformed",
+            "IncorrectInstanceState",
+            "InstanceLimitExceeded",
+            "InvalidParameterValue",
+            "InvalidParameterCombination",
+            "InvalidParameter",
+            "MissingParameter",
+            "InvalidAMIID.NotFound",
+            "InvalidAMIID.Malformed",
+            "InvalidAMIID.Unavailable",
+        ],
         _ => &[],
     }
 }
