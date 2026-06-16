@@ -994,6 +994,186 @@ fn iam_action_for_create_reads_function_name_from_body() {
     );
 }
 
+/// Every operation name that `resolve_action` (and therefore `handle`)
+/// can dispatch. Mirrors the dispatch tables in `service/init.rs`. If a
+/// new op is routed there, it must be added here AND to
+/// `iam_action_name_for` — the assertion below fails otherwise, which is
+/// the whole point (Lambda is `iam_enforceable`, so an unmapped dispatched
+/// op runs with zero policy evaluation = silent auth bypass, bug-hunt
+/// 2026-06-15 §5.1).
+const ALL_DISPATCHED_LAMBDA_OPS: &[&str] = &[
+    "CreateFunction",
+    "ListFunctions",
+    "GetFunction",
+    "DeleteFunction",
+    "Invoke",
+    "InvokeAsync",
+    "InvokeWithResponseStream",
+    "UpdateFunctionCode",
+    "UpdateFunctionConfiguration",
+    "GetFunctionConfiguration",
+    "PublishVersion",
+    "ListVersionsByFunction",
+    "GetAccountSettings",
+    "AddPermission",
+    "RemovePermission",
+    "GetPolicy",
+    "CreateAlias",
+    "GetAlias",
+    "UpdateAlias",
+    "DeleteAlias",
+    "ListAliases",
+    "PutFunctionConcurrency",
+    "GetFunctionConcurrency",
+    "DeleteFunctionConcurrency",
+    "PutProvisionedConcurrencyConfig",
+    "GetProvisionedConcurrencyConfig",
+    "DeleteProvisionedConcurrencyConfig",
+    "ListProvisionedConcurrencyConfigs",
+    "PutFunctionEventInvokeConfig",
+    "GetFunctionEventInvokeConfig",
+    "UpdateFunctionEventInvokeConfig",
+    "DeleteFunctionEventInvokeConfig",
+    "ListFunctionEventInvokeConfigs",
+    "PutRuntimeManagementConfig",
+    "GetRuntimeManagementConfig",
+    "PutFunctionScalingConfig",
+    "GetFunctionScalingConfig",
+    "PutFunctionRecursionConfig",
+    "GetFunctionRecursionConfig",
+    "CreateFunctionUrlConfig",
+    "GetFunctionUrlConfig",
+    "UpdateFunctionUrlConfig",
+    "DeleteFunctionUrlConfig",
+    "ListFunctionUrlConfigs",
+    "CreateEventSourceMapping",
+    "ListEventSourceMappings",
+    "GetEventSourceMapping",
+    "UpdateEventSourceMapping",
+    "DeleteEventSourceMapping",
+    "PublishLayerVersion",
+    "ListLayers",
+    "ListLayerVersions",
+    "GetLayerVersion",
+    "GetLayerVersionByArn",
+    "DeleteLayerVersion",
+    "GetLayerVersionPolicy",
+    "AddLayerVersionPermission",
+    "RemoveLayerVersionPermission",
+    "CreateCodeSigningConfig",
+    "GetCodeSigningConfig",
+    "UpdateCodeSigningConfig",
+    "DeleteCodeSigningConfig",
+    "ListCodeSigningConfigs",
+    "PutFunctionCodeSigningConfig",
+    "GetFunctionCodeSigningConfig",
+    "DeleteFunctionCodeSigningConfig",
+    "ListFunctionsByCodeSigningConfig",
+    "TagResource",
+    "UntagResource",
+    "ListTags",
+    "CreateCapacityProvider",
+    "GetCapacityProvider",
+    "ListCapacityProviders",
+    "UpdateCapacityProvider",
+    "DeleteCapacityProvider",
+    "ListFunctionVersionsByCapacityProvider",
+    "GetDurableExecution",
+    "GetDurableExecutionHistory",
+    "GetDurableExecutionState",
+    "ListDurableExecutionsByFunction",
+    "CheckpointDurableExecution",
+    "StopDurableExecution",
+    "SendDurableExecutionCallbackSuccess",
+    "SendDurableExecutionCallbackFailure",
+    "SendDurableExecutionCallbackHeartbeat",
+];
+
+#[test]
+fn every_dispatched_lambda_op_maps_to_an_iam_action() {
+    for op in ALL_DISPATCHED_LAMBDA_OPS {
+        assert!(
+            iam_action_name_for(op).is_some(),
+            "dispatched Lambda op {op:?} has no IAM action mapping — it would run \
+             with zero policy evaluation under --iam strict (silent auth bypass)"
+        );
+    }
+}
+
+#[test]
+fn iam_action_name_for_applies_smithy_overrides() {
+    // The three ops whose IAM action differs from the operation name,
+    // straight from the Smithy model's aws.iam#iamAction.name override.
+    assert_eq!(iam_action_name_for("Invoke"), Some("InvokeFunction"));
+    assert_eq!(
+        iam_action_name_for("InvokeWithResponseStream"),
+        Some("InvokeFunction")
+    );
+    assert_eq!(
+        iam_action_name_for("GetLayerVersionByArn"),
+        Some("GetLayerVersion")
+    );
+    // An unrouted/unknown op is unmapped (None), as expected.
+    assert_eq!(iam_action_name_for("NotARealLambdaOp"), None);
+}
+
+#[test]
+fn iam_action_for_maps_update_function_code() {
+    // Regression for §5.1: UpdateFunctionCode was unmapped (_ => None), so
+    // a deny policy on lambda:UpdateFunctionCode was silently ignored.
+    let svc = LambdaService::new(make_state());
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/myfn/code",
+        r#"{"ZipFile":""}"#,
+    );
+    let action = svc.iam_action_for(&req).expect("must be mapped");
+    assert_eq!(action.service, "lambda");
+    assert_eq!(action.action, "UpdateFunctionCode");
+    assert_eq!(
+        action.resource,
+        "arn:aws:lambda:us-east-1:123456789012:function:myfn"
+    );
+}
+
+#[test]
+fn iam_action_for_maps_invoke_async_to_invoke_function() {
+    // InvokeAsync is the deprecated second invoke path; previously unmapped.
+    let svc = LambdaService::new(make_state());
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/myfn/invoke-async",
+        "{}",
+    );
+    let action = svc.iam_action_for(&req).expect("must be mapped");
+    // AWS models InvokeAsync as the distinct (deprecated) lambda:InvokeAsync
+    // action; assert we map to it rather than dropping enforcement.
+    assert_eq!(action.action, "InvokeAsync");
+    assert_eq!(
+        action.resource,
+        "arn:aws:lambda:us-east-1:123456789012:function:myfn"
+    );
+}
+
+#[test]
+fn iam_action_for_maps_tag_and_layer_ops() {
+    let svc = LambdaService::new(make_state());
+    let tag_req = make_request(
+        Method::POST,
+        "/2017-03-31/tags/arn:aws:lambda:us-east-1:123456789012:function:f",
+        "{}",
+    );
+    assert_eq!(
+        svc.iam_action_for(&tag_req).map(|a| a.action),
+        Some("TagResource")
+    );
+    let layer_req = make_request(Method::GET, "/2018-10-31/layers/mylayer/versions/3", "");
+    assert_eq!(
+        svc.iam_action_for(&layer_req).map(|a| a.action),
+        Some("GetLayerVersion")
+    );
+}
+
 // ── Error branch tests ──
 
 #[tokio::test]

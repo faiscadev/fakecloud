@@ -1311,6 +1311,108 @@ async fn lambda_function_without_policy_denies_non_root_invoke() {
 }
 
 #[tokio::test]
+async fn lambda_update_function_code_deny_is_honored() {
+    // bug-hunt 2026-06-15 §5.1: UpdateFunctionCode (and 70 other ops) were
+    // unmapped in `iam_action_for` (_ => None), so Lambda being
+    // `iam_enforceable` meant they ran with ZERO policy evaluation. A user
+    // with Allow-* but an explicit Deny on lambda:UpdateFunctionCode could
+    // still update code. With the action now mapped, the Deny must win.
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    aws_sdk_lambda::Client::new(&boot)
+        .create_function()
+        .function_name("lam-deny-code")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(
+                    make_empty_python_zip(),
+                ))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "lam_code_deny").await;
+    attach_inline_policy(
+        &server,
+        "lam_code_deny",
+        "AllowAllDenyCode",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"*","Resource":"*"},
+            {"Effect":"Deny","Action":"lambda:UpdateFunctionCode","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+    let err = lambda
+        .update_function_code()
+        .function_name("lam-deny-code")
+        .zip_file(aws_sdk_lambda::primitives::Blob::new(
+            make_empty_python_zip(),
+        ))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("AccessDeniedException"),
+        "explicit Deny on lambda:UpdateFunctionCode must be honored, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn lambda_update_function_code_allowed_with_policy() {
+    // Allow-side pair for §5.1: a user explicitly allowed
+    // lambda:UpdateFunctionCode must NOT be denied by the enforcement gate.
+    let server = start_strict().await;
+    let boot = sdk_config_with(&server, "test", "test").await;
+    aws_sdk_lambda::Client::new(&boot)
+        .create_function()
+        .function_name("lam-allow-code")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(
+                    make_empty_python_zip(),
+                ))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, secret) = bootstrap_user(&server, "lam_code_allow").await;
+    attach_inline_policy(
+        &server,
+        "lam_code_allow",
+        "AllowCode",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"lambda:UpdateFunctionCode","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+    lambda
+        .update_function_code()
+        .function_name("lam-allow-code")
+        .zip_file(aws_sdk_lambda::primitives::Blob::new(
+            make_empty_python_zip(),
+        ))
+        .send()
+        .await
+        .expect("explicit Allow on lambda:UpdateFunctionCode must succeed");
+}
+
+#[tokio::test]
 async fn lambda_function_policy_wildcard_principal_grants_any_user() {
     // Public-function idiom: AddPermission with Principal="*" lets
     // any non-root user through the enforcement gate.

@@ -1075,9 +1075,17 @@ impl AwsService for S3Service {
             key.as_deref(),
             &request.query_params,
         )?;
+        // A handful of S3-adjacent ops are authorized under sibling IAM
+        // service prefixes, not `s3:`. Select the right prefix so a policy
+        // targeting the real action string actually matches.
+        let service = match action {
+            "CreateSession" => "s3express",
+            "WriteGetObjectResponse" => "s3-object-lambda",
+            _ => "s3",
+        };
         let resource = s3_resource_for(action, bucket, key.as_deref());
         Some(fakecloud_core::auth::IamAction {
-            service: "s3",
+            service,
             action,
             resource,
         })
@@ -1237,6 +1245,17 @@ fn s3_detect_action(
             _ => None,
         };
     }
+
+    // WriteGetObjectResponse is an Object Lambda data-plane op routed as
+    // `POST /WriteGetObjectResponse` (the literal value occupies the bucket
+    // segment). AWS authorizes it under the separate
+    // `s3-object-lambda:WriteGetObjectResponse` action — handled in
+    // `iam_action_for`, which selects the `s3-object-lambda` service prefix
+    // for this op. Previously unmapped -> enforcement skipped.
+    if is_post && bucket == Some("WriteGetObjectResponse") && key.is_none() {
+        return Some("WriteGetObjectResponse");
+    }
+
     let has_key = key.is_some();
 
     // Multipart sub-resource forms
@@ -1301,6 +1320,28 @@ fn s3_detect_action(
         }
         if has("restore") && is_post {
             return Some("RestoreObject");
+        }
+        // RenameObject is an object-level op (`PUT /bucket/newkey?renameObject`
+        // + `x-amz-rename-source`). It carries a key, so it must be detected
+        // here — the `!has_key` arm below never sees it. Without this it fell
+        // through to `PutObject`, so a policy denying `s3:RenameObject` was
+        // silently ineffective.
+        if has("renameObject") && is_put {
+            return Some("RenameObject");
+        }
+        // UpdateObjectEncryption (`PUT /bucket/key?encryption`) changes an
+        // existing object's server-side encryption. AWS gates this under
+        // `s3:PutObject` (encryption is a write attribute), and there is no
+        // distinct public `s3:UpdateObjectEncryption` IAM action — so map to
+        // PutObject deliberately rather than letting it fall through.
+        if has("encryption") && is_put {
+            return Some("PutObject");
+        }
+        // SelectObjectContent (`POST /bucket/key?select&select-type=2`) reads
+        // object data, so AWS authorizes it with `s3:GetObject`. Previously
+        // unmapped -> `_ => None` -> enforcement skipped entirely.
+        if has("select-type") && is_post {
+            return Some("GetObject");
         }
     }
 
@@ -1480,11 +1521,25 @@ fn s3_detect_action(
         if has("metadataJournalTable") && is_put {
             return Some("UpdateBucketMetadataJournalTableConfiguration");
         }
-        if has("abac") && is_put {
-            return Some("PutBucketAbacConfiguration");
+        if has("abac") {
+            // PUT  -> PutBucketAbacConfiguration
+            // GET  -> GetBucketAbacConfiguration (previously fell through to
+            //         the plain `GET bucket` arm and was IAM-evaluated as
+            //         s3:ListObjects — a policy on the ABAC config was never
+            //         honored).
+            return Some(match method {
+                "PUT" => "PutBucketAbacConfiguration",
+                "GET" => "GetBucketAbacConfiguration",
+                _ => return None,
+            });
         }
-        if has("renameObject") && is_put {
-            return Some("RenameObject");
+        if has("session") && is_get {
+            // CreateSession (S3 Express directory buckets). AWS authorizes it
+            // under the separate `s3express:CreateSession` action — handled in
+            // `iam_action_for`, which selects the `s3express` service prefix
+            // for this op. Previously fell through to the plain `GET bucket`
+            // arm and was evaluated as s3:ListObjects.
+            return Some("CreateSession");
         }
         if has("object-lock") {
             return Some(match method {
@@ -2762,6 +2817,158 @@ pub(crate) fn check_object_lock_for_overwrite(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod s3_detect_action_tests {
+    //! Auth-mapping regressions for bug-hunt 2026-06-15 §5.3: ops that
+    //! were unmapped (-> enforcement skipped) or mapped to the wrong
+    //! action (-> the policy targeting them never applied).
+    use super::s3_detect_action;
+    use std::collections::HashMap;
+
+    fn q(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn select_object_content_maps_to_get_object() {
+        // POST /bucket/key?select&select-type=2 reads object data.
+        let action = s3_detect_action(
+            "POST",
+            Some("bucket"),
+            Some("key"),
+            &q(&[("select", ""), ("select-type", "2")]),
+        );
+        assert_eq!(action, Some("GetObject"));
+    }
+
+    #[test]
+    fn write_get_object_response_is_detected() {
+        // POST /WriteGetObjectResponse (no key) — Object Lambda data plane.
+        let action = s3_detect_action("POST", Some("WriteGetObjectResponse"), None, &q(&[]));
+        assert_eq!(action, Some("WriteGetObjectResponse"));
+    }
+
+    #[test]
+    fn rename_object_is_detected_with_key() {
+        // PUT /bucket/newkey?renameObject carries a key — previously fell
+        // through to PutObject so s3:RenameObject denies were ineffective.
+        let action = s3_detect_action(
+            "PUT",
+            Some("bucket"),
+            Some("newkey"),
+            &q(&[("renameObject", "")]),
+        );
+        assert_eq!(action, Some("RenameObject"));
+    }
+
+    #[test]
+    fn update_object_encryption_maps_to_put_object() {
+        // PUT /bucket/key?encryption changes object SSE; AWS gates this on
+        // s3:PutObject (no distinct public action). Deliberate, not a
+        // silent PutObject fall-through.
+        let action = s3_detect_action(
+            "PUT",
+            Some("bucket"),
+            Some("key"),
+            &q(&[("encryption", "")]),
+        );
+        assert_eq!(action, Some("PutObject"));
+    }
+
+    #[test]
+    fn create_session_not_misdetected_as_list_objects() {
+        // GET /bucket?session — previously fell through to ListObjects.
+        let action = s3_detect_action("GET", Some("bucket"), None, &q(&[("session", "")]));
+        assert_eq!(action, Some("CreateSession"));
+    }
+
+    #[test]
+    fn get_bucket_abac_not_misdetected_as_list_objects() {
+        // GET /bucket?abac — previously fell through to ListObjects.
+        let action = s3_detect_action("GET", Some("bucket"), None, &q(&[("abac", "")]));
+        assert_eq!(action, Some("GetBucketAbacConfiguration"));
+    }
+
+    #[test]
+    fn put_bucket_abac_still_detected() {
+        let action = s3_detect_action("PUT", Some("bucket"), None, &q(&[("abac", "")]));
+        assert_eq!(action, Some("PutBucketAbacConfiguration"));
+    }
+}
+
+#[cfg(test)]
+mod s3_iam_service_prefix_tests {
+    //! §5.3: CreateSession and WriteGetObjectResponse are authorized under
+    //! sibling IAM service prefixes (s3express / s3-object-lambda), not s3.
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_service() -> S3Service {
+        let state: SharedS3State = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        S3Service::new(state, Arc::new(DeliveryBus::new()))
+    }
+
+    fn req(method: Method, path: &str, query: &[(&str, &str)]) -> AwsRequest {
+        let path_segments: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments,
+            raw_path: path.to_string(),
+            raw_query: String::new(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn create_session_uses_s3express_prefix() {
+        let svc = make_service();
+        let action = svc
+            .iam_action_for(&req(Method::GET, "/mybucket", &[("session", "")]))
+            .expect("must be mapped");
+        assert_eq!(action.service, "s3express");
+        assert_eq!(action.action, "CreateSession");
+        assert_eq!(action.action_string(), "s3express:CreateSession");
+    }
+
+    #[test]
+    fn write_get_object_response_uses_object_lambda_prefix() {
+        let svc = make_service();
+        let action = svc
+            .iam_action_for(&req(Method::POST, "/WriteGetObjectResponse", &[]))
+            .expect("must be mapped");
+        assert_eq!(action.service, "s3-object-lambda");
+        assert_eq!(action.action, "WriteGetObjectResponse");
+        assert_eq!(
+            action.action_string(),
+            "s3-object-lambda:WriteGetObjectResponse"
+        );
+    }
+}
 
 #[cfg(test)]
 mod extract_xml_value_tests {

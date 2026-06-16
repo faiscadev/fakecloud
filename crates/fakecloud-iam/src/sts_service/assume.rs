@@ -507,6 +507,19 @@ impl StsService {
                     role_arn,
                 ));
             }
+        } else {
+            // AssumeRoleWithWebIdentity against a role that does not exist
+            // must be denied rather than fall through to credential
+            // minting with no trust check (same gap that bug-audit
+            // 2026-05-28 §5.4 fixed for plain AssumeRole). AWS returns
+            // AccessDenied for sts:AssumeRoleWithWebIdentity on a role it
+            // cannot resolve.
+            let caller_principal = federated_principal(&federated_provider, &account_id);
+            return Err(trust_policy_denied(
+                "sts:AssumeRoleWithWebIdentity",
+                &caller_principal.arn,
+                role_arn,
+            ));
         }
 
         let target_state = accounts.get_or_create(&account_id);
@@ -709,6 +722,18 @@ impl StsService {
                     role_arn,
                 ));
             }
+        } else {
+            // AssumeRoleWithSAML against a role that does not exist must be
+            // denied rather than fall through to credential minting with no
+            // trust check (same gap that bug-audit 2026-05-28 §5.4 fixed
+            // for plain AssumeRole). AWS returns AccessDenied for
+            // sts:AssumeRoleWithSAML on a role it cannot resolve.
+            let caller_principal = federated_principal(&saml_provider_arn, &account_id);
+            return Err(trust_policy_denied(
+                "sts:AssumeRoleWithSAML",
+                &caller_principal.arn,
+                role_arn,
+            ));
         }
 
         let target_state = accounts.get_or_create(&account_id);

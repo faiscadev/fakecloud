@@ -4443,6 +4443,28 @@ fn create_open_id_connect_provider_missing_url_emits_invalid_input() {
 }
 
 #[test]
+fn set_security_token_service_preferences_is_iam_enforceable() {
+    // The real AWS action `SetSecurityTokenServicePreferences` is mapped and
+    // IAM-enforced. Its read-back sibling `GetSecurityTokenServicePreferences`
+    // is a fakecloud-only extension (absent from AWS's iam.json), so it is
+    // intentionally NOT in SUPPORTED_ACTIONS — there is no AWS IAM action to
+    // write a policy against, and listing it would fail the handwritten-test
+    // audit (no Smithy model to checksum).
+    let svc = make_service();
+    let set_req = make_request("SetSecurityTokenServicePreferences", vec![]);
+    assert_eq!(
+        svc.iam_action_for(&set_req).map(|a| a.action),
+        Some("SetSecurityTokenServicePreferences")
+    );
+
+    let get_req = make_request("GetSecurityTokenServicePreferences", vec![]);
+    assert!(
+        svc.iam_action_for(&get_req).is_none(),
+        "Get... is a fakecloud extension, not a mapped AWS IAM action"
+    );
+}
+
+#[test]
 fn create_virtual_mfa_device_bad_path_emits_invalid_input() {
     let svc = make_service();
     let err = svc

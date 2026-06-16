@@ -180,6 +180,14 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidAMIID.Malformed",
             "InvalidAMIID.Unavailable",
         ],
+        // STS returns AccessDenied (HTTP 403) whenever a role can't be assumed
+        // -- the role doesn't exist, or its trust policy rejects the caller --
+        // for AssumeRole / AssumeRoleWithWebIdentity / AssumeRoleWithSAML. AWS
+        // documents this as a standard response, but the per-op Smithy `errors:`
+        // lists only enumerate the token/policy exceptions, not AccessDenied. A
+        // handler returning AccessDenied to the probes' synthetic (nonexistent)
+        // role ARNs ran correctly. Source: STS API "Common Errors" + per-op docs.
+        "sts" => &["AccessDenied"],
         _ => &[],
     }
 }
