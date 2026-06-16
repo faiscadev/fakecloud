@@ -357,6 +357,15 @@ pub struct GlobalReplicationGroup {
     pub members: Vec<GlobalReplicationGroupMember>,
     pub cluster_enabled: bool,
     pub arn: String,
+    /// Number of global node groups (shards). Adjusted by the
+    /// Increase/Decrease/RebalanceNodeGroupsInGlobalReplicationGroup ops
+    /// and reflected in DescribeGlobalReplicationGroups. Defaults to 1.
+    #[serde(default = "default_global_node_group_count")]
+    pub num_node_groups: i32,
+}
+
+fn default_global_node_group_count() -> i32 {
+    1
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1372,6 +1381,7 @@ mod tests {
                 cluster_enabled: false,
                 arn: "arn:aws:elasticache:us-east-1:123456789012:globalreplicationgroup:global-rg"
                     .to_string(),
+                num_node_groups: 1,
             },
         );
         assert_eq!(state.global_replication_groups.len(), 1);

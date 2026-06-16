@@ -982,4 +982,100 @@ mod managed_rule_set_validation_tests {
         assert!(paginate_checked(&items, Some("2"), 3).is_ok());
         assert!(paginate_checked(&items, None, 3).is_ok());
     }
+
+    fn req_json(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "wafv2".into(),
+            action: action.into(),
+            method: http::Method::POST,
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            path_segments: Vec::new(),
+            query_params: std::collections::HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            request_id: "r".into(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    /// 1.23: PutManagedRuleSetVersions persists, and ListManagedRuleSets /
+    /// ListAvailableManagedRuleGroupVersions return what was published -
+    /// real round-trip, not write-only/empty.
+    #[test]
+    fn managed_rule_set_publishing_round_trips() {
+        let svc = Wafv2Service::default();
+
+        // Before publishing, ListManagedRuleSets is empty.
+        let resp = svc
+            .list_managed_rule_sets(&req_json(
+                "ListManagedRuleSets",
+                json!({"Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["ManagedRuleSets"].as_array().unwrap().len(), 0);
+
+        // Publish two versions with a recommended version.
+        svc.put_managed_rule_set_versions(&req_json(
+            "PutManagedRuleSetVersions",
+            json!({
+                "Name": "MyRuleSet",
+                "Id": "abc123",
+                "Scope": "REGIONAL",
+                "LockToken": "tok",
+                "RecommendedVersion": "Version_2.0",
+                "VersionsToPublish": {
+                    "Version_1.0": {"ForecastedLifetime": 30},
+                    "Version_2.0": {"ForecastedLifetime": 30},
+                },
+            }),
+        ))
+        .unwrap();
+
+        // ListManagedRuleSets now returns the set.
+        let resp = svc
+            .list_managed_rule_sets(&req_json(
+                "ListManagedRuleSets",
+                json!({"Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let sets = body["ManagedRuleSets"].as_array().unwrap();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0]["Name"].as_str(), Some("MyRuleSet"));
+
+        // ListAvailableManagedRuleGroupVersions returns the published versions.
+        let resp = svc
+            .list_available_managed_rule_group_versions(&req_json(
+                "ListAvailableManagedRuleGroupVersions",
+                json!({"VendorName": "MyVendor", "Name": "MyRuleSet", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let versions: Vec<&str> = body["Versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["Name"].as_str())
+            .collect();
+        assert!(versions.contains(&"Version_1.0"));
+        assert!(versions.contains(&"Version_2.0"));
+        assert_eq!(body["CurrentDefaultVersion"].as_str(), Some("Version_2.0"));
+
+        // A different scope does not see the REGIONAL set.
+        let resp = svc
+            .list_managed_rule_sets(&req_json(
+                "ListManagedRuleSets",
+                json!({"Scope": "CLOUDFRONT"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["ManagedRuleSets"].as_array().unwrap().len(), 0);
+    }
 }

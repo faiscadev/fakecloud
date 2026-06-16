@@ -183,6 +183,7 @@ mod tests {
             next_sequence_number: 0,
             permission_labels: Vec::new(),
             receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
         };
         s.queues.insert(url.clone(), queue);
         s.name_to_url.insert(name.to_string(), url.clone());

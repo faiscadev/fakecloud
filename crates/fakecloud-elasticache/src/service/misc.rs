@@ -525,16 +525,71 @@ impl ElastiCacheService {
         action: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "GlobalReplicationGroupId")?;
-        let accounts = self.state.read();
-        let empty = ElastiCacheState::new(&request.account_id, &request.region);
-        let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let group = state.global_replication_groups.get(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "GlobalReplicationGroupNotFoundFault",
-                format!("GlobalReplicationGroup {id} not found."),
-            )
-        })?;
+        // NodeGroupCount is the target shard count for Increase/Decrease;
+        // Rebalance keeps the count and only re-partitions slots.
+        let requested_count = optional_query_param(request, "NodeGroupCount")
+            .as_deref()
+            .and_then(|v| v.parse::<i32>().ok());
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let group = state
+            .global_replication_groups
+            .get_mut(&id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "GlobalReplicationGroupNotFoundFault",
+                    format!("GlobalReplicationGroup {id} not found."),
+                )
+            })?;
+
+        match action {
+            "IncreaseNodeGroupsInGlobalReplicationGroup" => {
+                let target = requested_count.ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "NodeGroupCount is required",
+                    )
+                })?;
+                if target <= group.num_node_groups {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        format!(
+                            "NodeGroupCount ({target}) must be greater than the current count ({})",
+                            group.num_node_groups
+                        ),
+                    ));
+                }
+                group.num_node_groups = target;
+            }
+            "DecreaseNodeGroupsInGlobalReplicationGroup" => {
+                let target = requested_count.ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "NodeGroupCount is required",
+                    )
+                })?;
+                if target < 1 || target >= group.num_node_groups {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        format!(
+                            "NodeGroupCount ({target}) must be >= 1 and less than the current count ({})",
+                            group.num_node_groups
+                        ),
+                    ));
+                }
+                group.num_node_groups = target;
+            }
+            // RebalanceSlotsInGlobalReplicationGroup: keep the shard count,
+            // the slot re-partition is reflected by the xml builder.
+            _ => {}
+        }
+
         let xml = global_replication_group_xml(group, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,

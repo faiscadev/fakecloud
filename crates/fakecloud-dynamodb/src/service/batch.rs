@@ -23,7 +23,7 @@ use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
     extract_key, get_table, get_table_mut, parse_expression_attribute_names,
     parse_expression_attribute_values, require_str_with_code, return_consumed_mode,
-    return_icm_mode, DynamoDbService,
+    return_icm_mode, validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -49,6 +49,24 @@ impl DynamoDbService {
             })?
             .clone();
 
+        // AWS limits a single BatchGetItem to 100 keys across all
+        // tables; over that it returns a ValidationException rather than
+        // silently processing the whole oversized batch.
+        let total_keys: usize = request_items
+            .values()
+            .filter_map(|p| p["Keys"].as_array().map(|k| k.len()))
+            .sum();
+        if total_keys > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "Too many items requested for the BatchGetItem call: {total_keys} \
+                     (max 100)"
+                ),
+            ));
+        }
+
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
@@ -69,8 +87,15 @@ impl DynamoDbService {
             for key_val in keys {
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(key_val.clone()).unwrap_or_default();
+                // Reject malformed/under-specified keys the same way
+                // GetItem does instead of coercing to `{}`.
+                validate_key_attributes_in_key(table, &key)?;
                 if let Some(idx) = table.find_item_index(&key) {
-                    items.push(json!(table.items[idx]));
+                    // Honor the per-table ProjectionExpression /
+                    // AttributesToGet so callers only get the attributes
+                    // they asked for (GetItem already does this).
+                    let projected = super::project_item(&table.items[idx], params);
+                    items.push(json!(projected));
                 }
             }
             let key_count = keys.len().max(1) as f64;
@@ -125,10 +150,85 @@ impl DynamoDbService {
             })?
             .clone();
 
+        // AWS caps a single BatchWriteItem at 25 write requests across
+        // all tables; over that it returns a ValidationException rather
+        // than processing the oversized batch.
+        let total_requests: usize = request_items
+            .values()
+            .filter_map(|r| r.as_array().map(|a| a.len()))
+            .sum();
+        if total_requests > 25 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "Too many items requested for the BatchWriteItem call: {total_requests} \
+                     (max 25)"
+                ),
+            ));
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let mut consumed_capacity: Vec<Value> = Vec::new();
         let mut item_collection_metrics: HashMap<String, Vec<Value>> = HashMap::new();
+
+        // Validate every request before mutating any state so a
+        // malformed/keyless item or a duplicate key in the batch fails
+        // the whole call (AWS rejects these up-front, not after partial
+        // application).
+        for (table_name, requests) in &request_items {
+            let table = state.tables.get(table_name.as_str()).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Requested resource not found: Table: {table_name} not found"),
+                )
+            })?;
+            let reqs = requests.as_array().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Request list must be an array",
+                )
+            })?;
+            let mut seen_keys: Vec<HashMap<String, AttributeValue>> = Vec::new();
+            for request in reqs {
+                let key = if let Some(put_req) = request.get("PutRequest") {
+                    let item: HashMap<String, AttributeValue> =
+                        serde_json::from_value(put_req["Item"].clone()).map_err(|_| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationException",
+                                "PutRequest.Item is not a valid item",
+                            )
+                        })?;
+                    validate_key_in_item(table, &item)?;
+                    extract_key(table, &item)
+                } else if let Some(del_req) = request.get("DeleteRequest") {
+                    let key: HashMap<String, AttributeValue> =
+                        serde_json::from_value(del_req["Key"].clone()).map_err(|_| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationException",
+                                "DeleteRequest.Key is not a valid key",
+                            )
+                        })?;
+                    validate_key_attributes_in_key(table, &key)?;
+                    key
+                } else {
+                    continue;
+                };
+                if seen_keys.contains(&key) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "Provided list of item keys contains duplicates",
+                    ));
+                }
+                seen_keys.push(key);
+            }
+        }
 
         for (table_name, requests) in &request_items {
             let table = state.tables.get_mut(table_name.as_str()).ok_or_else(|| {
@@ -760,11 +860,13 @@ impl DynamoDbService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
-        // ExecuteStatement's Smithy `errors:` list lacks ValidationException.
-        // Surface missing-statement and malformed-PartiQL failures as
-        // ResourceNotFoundException, which is declared and semantically the
-        // closest fit ("no resource matches that query").
-        let statement = require_str_with_code(&body, "Statement", "ResourceNotFoundException")?;
+        // A genuinely missing table is the only PartiQL failure AWS maps
+        // to ResourceNotFoundException; the shared engine already returns
+        // that code via `get_table`. Malformed-PartiQL and key/type
+        // errors must stay ValidationException with the correct `__type`,
+        // so we do NOT blanket-remap them. A missing `Statement` field is
+        // itself a ValidationException.
+        let statement = require_str_with_code(&body, "Statement", "ValidationException")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
 
         // Hold the write lock only long enough to mutate state and
@@ -777,8 +879,7 @@ impl DynamoDbService {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let region = state.region.clone();
-            let outcome = execute_partiql_in_state(state, statement, &parameters)
-                .map_err(remap_execute_statement_error)?;
+            let outcome = execute_partiql_in_state(state, statement, &parameters)?;
             let response = outcome.response.clone();
 
             let kinesis_info = if let (Some(table_name), Some(event_name)) =
@@ -1136,29 +1237,6 @@ impl DynamoDbService {
     }
 }
 
-/// Rewrite a `ValidationException` from the shared PartiQL engine into a
-/// `ResourceNotFoundException` so the strict-mode conformance probe accepts
-/// the response on ExecuteStatement (which doesn't declare ValidationException
-/// in its Smithy `errors:` list).
-fn remap_execute_statement_error(err: AwsServiceError) -> AwsServiceError {
-    match err {
-        AwsServiceError::AwsError {
-            status,
-            code,
-            message,
-            extra_fields,
-            headers,
-        } if code == "ValidationException" => AwsServiceError::AwsError {
-            status,
-            code: "ResourceNotFoundException".to_string(),
-            message,
-            extra_fields,
-            headers,
-        },
-        other => other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,6 +1319,177 @@ mod tests {
             on_demand_throughput: None,
         };
         s.tables.insert(name.to_string(), table);
+    }
+
+    /// 1.11/1.12: BatchGetItem must honor the per-table
+    /// ProjectionExpression / AttributesToGet instead of returning the
+    /// whole stored item.
+    #[tokio::test]
+    async fn batch_get_item_honors_projection_and_legacy_attributes_to_get() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        svc.batch_write_item(&req_for(
+            "BatchWriteItem",
+            json!({"RequestItems": {"Widgets": [
+                {"PutRequest": {"Item": {"pk": {"S": "a"}, "x": {"S": "1"}, "y": {"S": "2"}}}},
+            ]}}),
+        ))
+        .unwrap();
+
+        // ProjectionExpression
+        let resp = svc
+            .batch_get_item(&req_for(
+                "BatchGetItem",
+                json!({"RequestItems": {"Widgets": {
+                    "Keys": [{"pk": {"S": "a"}}],
+                    "ProjectionExpression": "x",
+                }}}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let item = &body["Responses"]["Widgets"][0];
+        assert!(item.get("x").is_some());
+        assert!(item.get("y").is_none(), "projection must drop y");
+        assert!(item.get("pk").is_none(), "projection only returns x");
+
+        // Legacy AttributesToGet
+        let resp = svc
+            .batch_get_item(&req_for(
+                "BatchGetItem",
+                json!({"RequestItems": {"Widgets": {
+                    "Keys": [{"pk": {"S": "a"}}],
+                    "AttributesToGet": ["pk", "y"],
+                }}}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let item = &body["Responses"]["Widgets"][0];
+        assert!(item.get("pk").is_some());
+        assert!(item.get("y").is_some());
+        assert!(item.get("x").is_none(), "AttributesToGet must drop x");
+    }
+
+    /// 1.14: BatchGetItem must reject >100 keys.
+    #[tokio::test]
+    async fn batch_get_item_rejects_over_100_keys() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+        let keys: Vec<Value> = (0..101)
+            .map(|i| json!({"pk": {"S": i.to_string()}}))
+            .collect();
+        let err = svc
+            .batch_get_item(&req_for(
+                "BatchGetItem",
+                json!({"RequestItems": {"Widgets": {"Keys": keys}}}),
+            ))
+            .err()
+            .expect("over-100 batch rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    /// 1.14: BatchWriteItem must reject >25 requests.
+    #[tokio::test]
+    async fn batch_write_item_rejects_over_25_requests() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+        let reqs: Vec<Value> = (0..26)
+            .map(|i| json!({"PutRequest": {"Item": {"pk": {"S": i.to_string()}}}}))
+            .collect();
+        let err = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": reqs}}),
+            ))
+            .err()
+            .expect("over-25 batch rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    /// 1.14: BatchWriteItem must reject duplicate keys within one batch.
+    #[tokio::test]
+    async fn batch_write_item_rejects_duplicate_keys() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+        let err = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": [
+                    {"PutRequest": {"Item": {"pk": {"S": "a"}}}},
+                    {"DeleteRequest": {"Key": {"pk": {"S": "a"}}}},
+                ]}}),
+            ))
+            .err()
+            .expect("duplicate key rejected");
+        assert!(format!("{err:?}").contains("duplicates"));
+    }
+
+    /// 1.14: BatchWriteItem must reject keyless items instead of coercing
+    /// them to `{}` and writing them.
+    #[tokio::test]
+    async fn batch_write_item_rejects_keyless_item() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": [
+                    {"PutRequest": {"Item": {"notthekey": {"S": "x"}}}},
+                ]}}),
+            ))
+            .err()
+            .expect("keyless item rejected");
+        assert!(format!("{err:?}").contains("Missing the key pk"));
+        // Nothing should have been written.
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 0);
+    }
+
+    /// 1.26: ExecuteStatement must keep a genuine PartiQL
+    /// ValidationException as ValidationException (not remap to
+    /// ResourceNotFoundException) while still mapping a missing table to
+    /// ResourceNotFoundException.
+    #[tokio::test]
+    async fn execute_statement_preserves_validation_vs_not_found() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        // Malformed PartiQL -> ValidationException.
+        let err = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({"Statement": "BOGUS NOT A REAL PARTIQL STATEMENT"}),
+            ))
+            .err()
+            .expect("malformed partiql");
+        assert!(
+            format!("{err:?}").contains("ValidationException"),
+            "malformed PartiQL must stay ValidationException, got {err:?}"
+        );
+
+        // Missing table -> ResourceNotFoundException.
+        let err = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({"Statement": "SELECT * FROM \"Nope\""}),
+            ))
+            .err()
+            .expect("missing table");
+        assert!(
+            format!("{err:?}").contains("ResourceNotFoundException"),
+            "missing table must be ResourceNotFoundException, got {err:?}"
+        );
     }
 
     #[tokio::test]

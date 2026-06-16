@@ -75,6 +75,19 @@ pub struct SqsQueue {
     pub permission_labels: Vec<String>,
     /// Tracks message_id -> list of all receipt handles ever issued for that message
     pub receipt_handle_map: BTreeMap<String, Vec<String>>,
+    /// FIFO: ReceiveRequestAttemptId -> the message_ids returned by the
+    /// original receive + an expiry. A retried receive with the same id
+    /// within the visibility window replays the exact same batch instead
+    /// of returning the next messages (AWS FIFO de-dup of receive
+    /// attempts).
+    #[serde(default)]
+    pub receive_attempt_cache: BTreeMap<String, ReceiveAttemptEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiveAttemptEntry {
+    pub message_ids: Vec<String>,
+    pub expiry: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -67,6 +67,7 @@ impl ResourceProvisioner {
             next_sequence_number: 0,
             permission_labels: Vec::new(),
             receipt_handle_map: std::collections::BTreeMap::new(),
+            receive_attempt_cache: std::collections::BTreeMap::new(),
         };
 
         state

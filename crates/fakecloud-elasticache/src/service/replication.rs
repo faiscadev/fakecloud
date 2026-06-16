@@ -403,11 +403,12 @@ impl ElastiCacheService {
                 automatic_failover: primary_group.automatic_failover_enabled,
                 status: "associated".to_string(),
             }],
-            cluster_enabled: false,
+            cluster_enabled: primary_group.cluster_enabled,
             arn: format!(
                 "arn:aws:elasticache:{}:{}:globalreplicationgroup:{}",
                 region, account_id, global_replication_group_id
             ),
+            num_node_groups: primary_group.num_node_groups.max(1),
         };
 
         let xml = global_replication_group_xml(&group, true);

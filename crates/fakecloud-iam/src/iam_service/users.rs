@@ -375,8 +375,20 @@ impl IamService {
 
         let actual_new_name = new_user_name.unwrap_or_else(|| user_name.clone());
         user.user_name = actual_new_name.clone();
+        // Preserve the existing ARN's partition (aws / aws-cn / aws-us-gov
+        // / aws-iso*) rather than hardcoding `arn:aws:`, which would flip
+        // the partition on a rename in cn-/us-gov-/iso- regions. Derive it
+        // from the user's current ARN, falling back to the region.
+        let partition = user
+            .arn
+            .split(':')
+            .nth(1)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| partition_for_region(&req.region).to_string());
         user.arn = format!(
-            "arn:aws:iam::{}:user{}{}",
+            "arn:{}:iam::{}:user{}{}",
+            partition,
             state.account_id,
             if user.path == "/" { "/" } else { &user.path },
             actual_new_name

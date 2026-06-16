@@ -903,6 +903,126 @@ async fn mpu_full_lifecycle_creates_object() {
     assert!(!bucket.multipart_uploads.contains_key(&upload_id));
 }
 
+/// 1.18: a multipart object with an additional checksum must report a
+/// COMPOSITE checksum (`base64(HASH(concat(part raw digests)))-N`), not
+/// a checksum over the whole reassembled object.
+#[tokio::test]
+async fn mpu_complete_uses_composite_additional_checksum() {
+    let svc = make_service();
+    seed_bucket(&svc, "comp");
+
+    // Initiate with a SHA256 additional checksum.
+    let init_req = make_request(Method::POST, "/comp/k", &[("uploads", "")], b"");
+    let mut init_req = init_req;
+    init_req.headers.insert(
+        "x-amz-checksum-algorithm",
+        http::HeaderValue::from_static("SHA256"),
+    );
+    let resp = svc
+        .create_multipart_upload("123456789012", &init_req, "comp", "k")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    let start = body.find("<UploadId>").unwrap() + "<UploadId>".len();
+    let end = body.find("</UploadId>").unwrap();
+    let upload_id = body[start..end].to_string();
+
+    let part1 = vec![b'a'; 5 * 1024 * 1024];
+    let part2 = b"second-part".to_vec();
+    let mut etags = Vec::new();
+    for (n, data) in [(1u32, &part1), (2u32, &part2)] {
+        let req = make_request(
+            Method::PUT,
+            "/comp/k",
+            &[("partNumber", &n.to_string())],
+            data,
+        );
+        let r = svc
+            .upload_part("123456789012", &req, "comp", "k", &upload_id, n as i64)
+            .await
+            .unwrap();
+        etags.push(r.headers.get("etag").unwrap().to_str().unwrap().to_string());
+    }
+
+    let complete_xml = format!(
+        r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>"#,
+        etags[0], etags[1],
+    );
+    let complete_req = make_request(
+        Method::POST,
+        "/comp/k",
+        &[("uploadId", &upload_id)],
+        complete_xml.as_bytes(),
+    );
+    svc.complete_multipart_upload("123456789012", &complete_req, "comp", "k", &upload_id)
+        .unwrap();
+
+    let expected = super::compute_composite_checksum(
+        "SHA256",
+        &[
+            super::compute_checksum_raw("SHA256", &part1),
+            super::compute_checksum_raw("SHA256", &part2),
+        ],
+    )
+    .unwrap();
+    assert!(
+        expected.ends_with("-2"),
+        "composite checksum must carry -N suffix"
+    );
+
+    let __mas = svc.state.read();
+    let state = __mas.default_ref();
+    let obj = state.buckets.get("comp").unwrap().objects.get("k").unwrap();
+    assert_eq!(
+        obj.checksum_value.as_deref(),
+        Some(expected.as_str()),
+        "stored checksum must be the COMPOSITE checksum-of-checksums, not a whole-object checksum"
+    );
+
+    // Sanity: it must NOT equal a single checksum over the whole object.
+    let mut whole = part1.clone();
+    whole.extend_from_slice(&part2);
+    let whole_ck = super::compute_checksum("SHA256", &whole);
+    assert_ne!(obj.checksum_value.as_deref(), Some(whole_ck.as_str()));
+}
+
+/// 1.18: composite checksum helper round-trips for every supported
+/// additional-checksum algorithm.
+#[test]
+fn compute_composite_checksum_supports_all_algorithms() {
+    for algo in ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"] {
+        let p1 = super::compute_checksum_raw(algo, b"part-one");
+        let p2 = super::compute_checksum_raw(algo, b"part-two");
+        assert!(!p1.is_empty(), "{algo} raw digest");
+        let composite = super::compute_composite_checksum(algo, &[p1, p2]).unwrap();
+        assert!(composite.ends_with("-2"), "{algo} composite suffix");
+    }
+    assert!(super::compute_composite_checksum("SHA256", &[]).is_none());
+    assert!(super::compute_composite_checksum("BOGUS", &[vec![1]]).is_none());
+}
+
+/// 1.19: DeleteObjects must reject >1000 keys with a 400 MalformedXML.
+#[tokio::test]
+async fn delete_objects_rejects_over_1000_keys() {
+    let svc = make_service();
+    seed_bucket(&svc, "bdel-limit");
+
+    let mut xml = String::from("<Delete>");
+    for i in 0..1001 {
+        xml.push_str(&format!("<Object><Key>k{i}.txt</Key></Object>"));
+    }
+    xml.push_str("</Delete>");
+    let req = make_request(
+        Method::POST,
+        "/bdel-limit",
+        &[("delete", "")],
+        xml.as_bytes(),
+    );
+    assert_aws_err(
+        svc.delete_objects("123456789012", &req, "bdel-limit"),
+        "MalformedXML",
+    );
+}
+
 /// bug-hunt 2026-06-13, finding 4.1: CompleteMultipartUpload assembles
 /// parts off-lock from a cloned snapshot. In disk mode a concurrent
 /// UploadPart of the same part number rewrites the fixed `part-NNNNN.bin`

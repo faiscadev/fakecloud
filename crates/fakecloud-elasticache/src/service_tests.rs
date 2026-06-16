@@ -1250,10 +1250,11 @@ fn service_with_global_replication_group(
                     automatic_failover: false,
                     status: "associated".to_string(),
                 }],
-                cluster_enabled: false,
+                cluster_enabled: true,
                 arn: format!(
                     "arn:aws:elasticache:us-east-1:123456789012:globalreplicationgroup:{global_replication_group_id}"
                 ),
+                num_node_groups: 2,
             },
         );
     }
@@ -1314,6 +1315,70 @@ fn describe_global_replication_groups_filters_by_id() {
     );
     assert!(body.contains("<ReplicationGroupId>primary-rg</ReplicationGroupId>"));
     assert!(body.contains("<DescribeGlobalReplicationGroupsResponse"));
+}
+
+/// 1.23: Increase/Decrease node groups in a global replication group must
+/// actually apply the count and reflect it in
+/// DescribeGlobalReplicationGroups (no longer a no-op).
+#[test]
+fn global_node_group_reshard_applies_and_reflects() {
+    let service = service_with_global_replication_group("fc-us-east-1-global-a", "primary-rg");
+
+    let count_node_groups = |service: &ElastiCacheService| -> usize {
+        let resp = service
+            .describe_global_replication_groups(&request(
+                "DescribeGlobalReplicationGroups",
+                &[
+                    ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                    ("ShowMemberInfo", "true"),
+                ],
+            ))
+            .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        body.matches("<GlobalNodeGroup>").count()
+    };
+
+    // Seed starts at 2 node groups.
+    assert_eq!(count_node_groups(&service), 2);
+
+    // Increase to 4.
+    service
+        .increase_node_groups_in_global_replication_group(&request(
+            "IncreaseNodeGroupsInGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("NodeGroupCount", "4"),
+                ("ApplyImmediately", "true"),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(count_node_groups(&service), 4, "increase must apply");
+
+    // Decrease to 1.
+    service
+        .decrease_node_groups_in_global_replication_group(&request(
+            "DecreaseNodeGroupsInGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("NodeGroupCount", "1"),
+                ("ApplyImmediately", "true"),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(count_node_groups(&service), 1, "decrease must apply");
+
+    // Increase to a value not greater than current is rejected.
+    let err = service
+        .increase_node_groups_in_global_replication_group(&request(
+            "IncreaseNodeGroupsInGlobalReplicationGroup",
+            &[
+                ("GlobalReplicationGroupId", "fc-us-east-1-global-a"),
+                ("NodeGroupCount", "1"),
+            ],
+        ))
+        .err()
+        .expect("non-increasing count rejected");
+    assert!(format!("{err:?}").contains("InvalidParameterValueException"));
 }
 
 #[test]

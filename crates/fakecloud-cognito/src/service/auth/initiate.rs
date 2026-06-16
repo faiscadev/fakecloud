@@ -136,6 +136,34 @@ impl CognitoService {
         }
     }
 
+    /// Look up the app client's secret and, if it has one, require a
+    /// valid `SECRET_HASH` on the request. `secret_hash` is the value from
+    /// AuthParameters / the request body (may be absent).
+    pub(super) fn require_secret_hash(
+        &self,
+        client_id: &str,
+        username: &str,
+        secret_hash: Option<&Value>,
+    ) -> Result<(), AwsServiceError> {
+        let client_secret = {
+            let accounts = self.state.read();
+            let mut found = None;
+            for (_, account) in accounts.iter() {
+                if let Some(client) = account.user_pool_clients.get(client_id) {
+                    found = client.client_secret.clone();
+                    break;
+                }
+            }
+            found
+        };
+        crate::service::validate_secret_hash(
+            client_secret.as_deref(),
+            secret_hash.and_then(|v| v.as_str()),
+            username,
+            client_id,
+        )
+    }
+
     pub(super) async fn initiate_user_password_auth(
         &self,
         body: &Value,
@@ -184,6 +212,10 @@ impl CognitoService {
                     "PASSWORD is required in AuthParameters",
                 )
             })?;
+
+        // When the app client has a secret, the request must present a
+        // valid SECRET_HASH (matches the OAuth /token enforcement).
+        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
 
         // CompromisedCredentialsRiskConfiguration: when the pool has a
         // risk config with `EventAction = BLOCK` for sign-in events and
@@ -486,6 +518,9 @@ impl CognitoService {
                     "USERNAME is required in AuthParameters",
                 )
             })?;
+
+        // SECRET_HASH enforcement for clients with a secret.
+        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
 
         let (user_attrs, region, account_id) = {
             let accounts = self.state.read();

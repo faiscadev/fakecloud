@@ -190,11 +190,10 @@ async fn ddb_partiql_insert_missing_sort_key_validation() {
         .await
         .expect_err("insert without sort key must fail");
     let msg = format!("{:?}", err.into_service_error());
-    // PartiQL INSERT with a missing required key surfaces as
-    // ResourceNotFoundException after #1359 — DynamoDB's Smithy errors
-    // list for ExecuteStatement doesn't declare ValidationException, so
-    // fakecloud now emits the declared shape instead.
-    assert!(msg.contains("ResourceNotFoundException"), "got {msg}");
+    // PartiQL INSERT with a missing required key is a ValidationException,
+    // matching AWS — the prior remap to ResourceNotFoundException returned the
+    // wrong __type to clients and is no longer applied.
+    assert!(msg.contains("ValidationException"), "got {msg}");
     assert!(msg.contains("Missing the key sk"), "got {msg}");
 }
 

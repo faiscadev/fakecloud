@@ -230,6 +230,19 @@ pub struct GlobalTableDescription {
     pub global_table_status: String,
     pub creation_date: DateTime<Utc>,
     pub replication_group: Vec<ReplicaDescription>,
+    /// Billing mode applied across all replicas via
+    /// `UpdateGlobalTableSettings` (`PROVISIONED` / `PAY_PER_REQUEST`).
+    /// Defaults to PROVISIONED to match real DynamoDB global-table v1.
+    #[serde(default = "default_global_billing_mode")]
+    pub billing_mode: String,
+    /// Global provisioned write capacity applied across all replicas via
+    /// `UpdateGlobalTableSettings`. `None` under PAY_PER_REQUEST.
+    #[serde(default)]
+    pub provisioned_write_capacity_units: Option<i64>,
+}
+
+fn default_global_billing_mode() -> String {
+    "PROVISIONED".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +257,10 @@ pub struct ReplicaDescription {
     /// Per-replica provisioned-write-capacity autoscaling settings.
     #[serde(default)]
     pub write_capacity_auto_scaling: Option<serde_json::Value>,
+    /// Per-replica provisioned read capacity supplied via
+    /// `UpdateGlobalTableSettings` ReplicaSettingsUpdate.
+    #[serde(default)]
+    pub read_capacity_units: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -44,6 +44,49 @@ pub(crate) fn strip_nulls_deep(value: Value) -> Value {
     }
 }
 
+/// The SDK-type descriptors API Gateway exposes via GetSdkTypes, shared
+/// with GetSdkType so a single id lookup returns a real descriptor.
+pub(crate) fn sdk_types() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "id": "android",
+            "friendlyName": "Android",
+            "description": "Android SDK with a Java client",
+            "configurationProperties": []
+        }),
+        serde_json::json!({
+            "id": "javascript",
+            "friendlyName": "JavaScript",
+            "description": "JavaScript SDK",
+            "configurationProperties": []
+        }),
+        serde_json::json!({
+            "id": "ios-objectivec",
+            "friendlyName": "iOS (Objective-C)",
+            "description": "iOS SDK in Objective-C",
+            "configurationProperties": []
+        }),
+        serde_json::json!({
+            "id": "ios-swift",
+            "friendlyName": "iOS (Swift)",
+            "description": "iOS SDK in Swift",
+            "configurationProperties": []
+        }),
+        serde_json::json!({
+            "id": "java",
+            "friendlyName": "Java",
+            "description": "Java SDK",
+            "configurationProperties": []
+        }),
+        serde_json::json!({
+            "id": "ruby",
+            "friendlyName": "Ruby",
+            "description": "Ruby SDK",
+            "configurationProperties": []
+        }),
+    ]
+}
+
 pub(crate) fn ok_no_content() -> Result<AwsResponse, AwsServiceError> {
     Ok(AwsResponse {
         status: StatusCode::ACCEPTED,

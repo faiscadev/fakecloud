@@ -33,6 +33,15 @@ impl CognitoService {
             })?;
             let pool_id = client.user_pool_id.clone();
 
+            // When the app client has a secret, SignUp must present a valid
+            // SECRET_HASH (matches the OAuth /token + InitiateAuth checks).
+            crate::service::validate_secret_hash(
+                client.client_secret.as_deref(),
+                body["SecretHash"].as_str(),
+                username,
+                client_id,
+            )?;
+
             // Validate password against pool policy
             let pool = state.user_pools.get(&pool_id).ok_or_else(|| {
                 AwsServiceError::aws_error(

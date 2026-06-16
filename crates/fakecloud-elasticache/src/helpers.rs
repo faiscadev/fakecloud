@@ -1302,7 +1302,25 @@ pub(crate) fn global_replication_group_xml(
         String::new()
     };
     let global_node_groups_xml = if group.cluster_enabled {
-        "<GlobalNodeGroups><GlobalNodeGroup><GlobalNodeGroupId>0001</GlobalNodeGroupId><Slots>0-16383</Slots></GlobalNodeGroup></GlobalNodeGroups>".to_string()
+        let count = group.num_node_groups.max(1);
+        // Partition the 16384-slot keyspace evenly across the node groups
+        // so the rendered slot ranges reflect the actual shard count.
+        let total_slots = 16384i32;
+        let mut members = String::new();
+        let mut next_slot = 0i32;
+        for i in 0..count {
+            let remaining = count - i;
+            let chunk = (total_slots - next_slot) / remaining;
+            let end = next_slot + chunk - 1;
+            members.push_str(&format!(
+                "<GlobalNodeGroup><GlobalNodeGroupId>{:04}</GlobalNodeGroupId><Slots>{}-{}</Slots></GlobalNodeGroup>",
+                i + 1,
+                next_slot,
+                end
+            ));
+            next_slot = end + 1;
+        }
+        format!("<GlobalNodeGroups>{members}</GlobalNodeGroups>")
     } else {
         String::new()
     };

@@ -64,8 +64,9 @@ impl DynamoDbService {
             &mut expr_attr_values,
         )?;
         let scan_forward = body["ScanIndexForward"].as_bool().unwrap_or(true);
-        let limit = body["Limit"].as_i64().map(|l| l as usize);
+        let limit = validate_limit(&body)?;
         let index_name = body["IndexName"].as_str();
+        let count_only = resolve_select(&body, index_name.is_some())?;
         let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
             parse_key_map(&body["ExclusiveStartKey"]);
 
@@ -257,8 +258,6 @@ impl DynamoDbService {
             Vec::new()
         };
 
-        let select = body["Select"].as_str();
-        let count_only = matches!(select, Some("COUNT"));
         let items: Vec<Value> = if count_only {
             Vec::new()
         } else {
@@ -351,9 +350,10 @@ impl DynamoDbService {
             &mut expr_attr_names,
             &mut expr_attr_values,
         )?;
-        let limit = body["Limit"].as_i64().map(|l| l as usize);
+        let limit = validate_limit(&body)?;
         let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
             parse_key_map(&body["ExclusiveStartKey"]);
+        let count_only = resolve_select(&body, body["IndexName"].as_str().is_some())?;
 
         // IndexName: when present, items still come from the base
         // table (fakecloud doesn't keep separate per-index storage)
@@ -490,8 +490,6 @@ impl DynamoDbService {
             Vec::new()
         };
 
-        let select = body["Select"].as_str();
-        let count_only = matches!(select, Some("COUNT"));
         let items: Vec<Value> = if count_only {
             Vec::new()
         } else {
@@ -600,6 +598,87 @@ fn resolve_legacy_or_expression(
             legacy, role, names, values,
         )?)),
         (None, None) => Ok(None),
+    }
+}
+
+/// Validate the `Limit` parameter shared by Query and Scan. AWS rejects
+/// any non-positive limit with a ValidationException rather than casting
+/// `-1` to `usize::MAX` or returning an empty page (which spins
+/// paginators). Returns the validated limit as `Option<usize>`.
+fn validate_limit(body: &Value) -> Result<Option<usize>, AwsServiceError> {
+    match body["Limit"].as_i64() {
+        Some(l) if l < 1 => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Limit must be >= 1",
+        )),
+        Some(l) => Ok(Some(l as usize)),
+        None => Ok(None),
+    }
+}
+
+/// Validate the `Select` parameter for a Query/Scan and decide whether
+/// the operation returns only a count. `is_index_query` is true when an
+/// IndexName is present (only then is ALL_PROJECTED_ATTRIBUTES legal).
+///
+/// AWS rules enforced here:
+/// - `Select` must be one of the four documented enum values.
+/// - `SPECIFIC_ATTRIBUTES` requires a ProjectionExpression or
+///   AttributesToGet, and conversely any projection forces
+///   SPECIFIC_ATTRIBUTES (any other explicit Select is rejected).
+/// - `ALL_PROJECTED_ATTRIBUTES` is only valid on an index query.
+fn resolve_select(body: &Value, is_index_query: bool) -> Result<bool, AwsServiceError> {
+    let select = body["Select"].as_str();
+    let has_projection = body["ProjectionExpression"]
+        .as_str()
+        .is_some_and(|p| !p.is_empty())
+        || body["AttributesToGet"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty());
+
+    if let Some(sel) = select {
+        if !matches!(
+            sel,
+            "ALL_ATTRIBUTES" | "ALL_PROJECTED_ATTRIBUTES" | "SPECIFIC_ATTRIBUTES" | "COUNT"
+        ) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "1 validation error detected: Value '{sel}' at 'select' failed to satisfy \
+                     constraint: Member must satisfy enum value set: \
+                     [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]"
+                ),
+            ));
+        }
+        if sel == "ALL_PROJECTED_ATTRIBUTES" && !is_index_query {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Select type ALL_PROJECTED_ATTRIBUTES is not supported for queries on the table; \
+                 it is only supported on index queries",
+            ));
+        }
+        if sel == "SPECIFIC_ATTRIBUTES" && !has_projection {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Select type SPECIFIC_ATTRIBUTES requires a ProjectionExpression or AttributesToGet",
+            ));
+        }
+        if has_projection && sel != "SPECIFIC_ATTRIBUTES" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "Cannot use both Select and ProjectionExpression/AttributesToGet unless \
+                     Select is SPECIFIC_ATTRIBUTES (got {sel})"
+                ),
+            ));
+        }
+        Ok(sel == "COUNT")
+    } else {
+        Ok(false)
     }
 }
 
@@ -777,6 +856,156 @@ mod tests {
             body["LastEvaluatedKey"].is_object(),
             "LastEvaluatedKey must point at the last examined item, not the last surviving"
         );
+    }
+
+    /// 1.25: Scan must reject Limit <= 0 with ValidationException rather
+    /// than casting -1 to usize::MAX or returning an empty page with a
+    /// LastEvaluatedKey.
+    #[tokio::test]
+    async fn scan_rejects_non_positive_limit() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a"), item("b")]);
+        let svc = DynamoDbService::new(state);
+        for bad in [-1, 0] {
+            let err = svc
+                .scan(&req_for("Scan", json!({"TableName": "T", "Limit": bad})))
+                .err()
+                .unwrap_or_else(|| panic!("Limit={bad} must be rejected"));
+            assert!(format!("{err:?}").contains("ValidationException"));
+        }
+    }
+
+    /// 1.25: Query must reject Limit <= 0 too.
+    #[tokio::test]
+    async fn query_rejects_non_positive_limit() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a")]);
+        let svc = DynamoDbService::new(state);
+        let err = svc
+            .query(&req_for(
+                "Query",
+                json!({
+                    "TableName": "T",
+                    "Limit": 0,
+                    "KeyConditionExpression": "pk = :v",
+                    "ExpressionAttributeValues": {":v": {"S": "a"}},
+                }),
+            ))
+            .err()
+            .expect("Limit=0 rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    /// 1.13: Scan Select=SPECIFIC_ATTRIBUTES with a ProjectionExpression
+    /// projects to the requested attributes; Select=COUNT counts only.
+    #[tokio::test]
+    async fn scan_select_specific_attributes_projects() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item_with("a", "color", "red")]);
+        let svc = DynamoDbService::new(state);
+        let resp = svc
+            .scan(&req_for(
+                "Scan",
+                json!({
+                    "TableName": "T",
+                    "Select": "SPECIFIC_ATTRIBUTES",
+                    "ProjectionExpression": "color",
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let item0 = &body["Items"][0];
+        assert!(item0.get("color").is_some());
+        assert!(item0.get("pk").is_none());
+    }
+
+    /// 1.13: Scan Select=ALL_ATTRIBUTES returns full items.
+    #[tokio::test]
+    async fn scan_select_all_attributes_returns_full_item() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item_with("a", "color", "red")]);
+        let svc = DynamoDbService::new(state);
+        let resp = svc
+            .scan(&req_for(
+                "Scan",
+                json!({"TableName": "T", "Select": "ALL_ATTRIBUTES"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let item0 = &body["Items"][0];
+        assert!(item0.get("pk").is_some());
+        assert!(item0.get("color").is_some());
+    }
+
+    /// 1.13: Invalid Select values and incompatible combinations are
+    /// rejected with ValidationException.
+    #[tokio::test]
+    async fn scan_rejects_invalid_and_incompatible_select() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a")]);
+        let svc = DynamoDbService::new(state);
+
+        // garbage enum value
+        let err = svc
+            .scan(&req_for(
+                "Scan",
+                json!({"TableName": "T", "Select": "NONSENSE"}),
+            ))
+            .err()
+            .expect("invalid Select rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+
+        // SPECIFIC_ATTRIBUTES with no projection
+        let err = svc
+            .scan(&req_for(
+                "Scan",
+                json!({"TableName": "T", "Select": "SPECIFIC_ATTRIBUTES"}),
+            ))
+            .err()
+            .expect("SPECIFIC_ATTRIBUTES needs projection");
+        assert!(format!("{err:?}").contains("ValidationException"));
+
+        // ALL_PROJECTED_ATTRIBUTES on a non-index (table) scan
+        let err = svc
+            .scan(&req_for(
+                "Scan",
+                json!({"TableName": "T", "Select": "ALL_PROJECTED_ATTRIBUTES"}),
+            ))
+            .err()
+            .expect("ALL_PROJECTED needs an index");
+        assert!(format!("{err:?}").contains("ValidationException"));
+
+        // ProjectionExpression with Select=ALL_ATTRIBUTES is incompatible
+        let err = svc
+            .scan(&req_for(
+                "Scan",
+                json!({
+                    "TableName": "T",
+                    "Select": "ALL_ATTRIBUTES",
+                    "ProjectionExpression": "pk",
+                }),
+            ))
+            .err()
+            .expect("projection forces SPECIFIC_ATTRIBUTES");
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    /// 1.12: Scan honors the legacy AttributesToGet parameter.
+    #[tokio::test]
+    async fn scan_honors_legacy_attributes_to_get() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item_with("a", "color", "red")]);
+        let svc = DynamoDbService::new(state);
+        let resp = svc
+            .scan(&req_for(
+                "Scan",
+                json!({"TableName": "T", "AttributesToGet": ["color"]}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let item0 = &body["Items"][0];
+        assert!(item0.get("color").is_some());
+        assert!(item0.get("pk").is_none());
     }
 
     #[tokio::test]

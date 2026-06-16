@@ -731,6 +731,54 @@ fn generate_client_secret() -> String {
     encoded.chars().take(51).collect()
 }
 
+/// Compute the Cognito SECRET_HASH for an app client that has a secret:
+/// `base64(HMAC-SHA256(username + client_id, client_secret))`.
+pub(crate) fn compute_secret_hash(username: &str, client_id: &str, client_secret: &str) -> String {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(client_secret.as_bytes())
+        .expect("HMAC accepts keys of any size");
+    mac.update(username.as_bytes());
+    mac.update(client_id.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+/// Validate a request's `SECRET_HASH` for a client that has a secret.
+/// Returns the AWS error when the hash is missing or wrong; a no-op when
+/// the client has no secret (mirrors the OAuth `/token` enforcement but
+/// for the JSON InitiateAuth / SignUp / Confirm* surface). AWS uses
+/// InvalidParameterException when the hash is absent and
+/// NotAuthorizedException when it's present but wrong.
+pub(crate) fn validate_secret_hash(
+    client_secret: Option<&str>,
+    supplied_secret_hash: Option<&str>,
+    username: &str,
+    client_id: &str,
+) -> Result<(), AwsServiceError> {
+    let Some(secret) = client_secret else {
+        return Ok(());
+    };
+    let Some(supplied) = supplied_secret_hash else {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "Client {client_id} is configured with secret but SECRET_HASH was not received"
+            ),
+        ));
+    };
+    let expected = compute_secret_hash(username, client_id, secret);
+    if supplied != expected {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "NotAuthorizedException",
+            "Unable to verify secret hash for client ".to_string() + client_id,
+        ));
+    }
+    Ok(())
+}
+
 fn parse_token_validity_units(val: &Value) -> Option<TokenValidityUnits> {
     if !val.is_object() {
         return None;

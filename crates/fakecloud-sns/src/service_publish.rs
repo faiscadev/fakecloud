@@ -309,6 +309,11 @@ impl SnsService {
             .get(&topic_arn)
             .ok_or_else(|| not_found("Topic"))?;
         let is_fifo = topic.is_fifo;
+        let content_dedup = topic
+            .attributes
+            .get("ContentBasedDeduplication")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         let endpoint = state.endpoint.clone();
         drop(_accts);
 
@@ -342,6 +347,16 @@ impl SnsService {
             }
         }
 
+        // Validate: at least one entry. AWS returns EmptyBatchRequest for
+        // a batch with no entries rather than silently succeeding.
+        if entries.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "EmptyBatchRequest",
+                "The batch request doesn't contain any entries.",
+            ));
+        }
+
         // Validate: max 10 entries
         if entries.len() > 10 {
             return Err(AwsServiceError::aws_error(
@@ -368,6 +383,16 @@ impl SnsService {
                 StatusCode::BAD_REQUEST,
                 "InvalidParameter",
                 "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
+            ));
+        }
+
+        // FIFO without ContentBasedDeduplication: every entry must carry a
+        // MessageDeduplicationId (matches the single Publish validation).
+        if is_fifo && !content_dedup && entries.iter().any(|e| e.4.is_none()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                "Invalid parameter: The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
             ));
         }
 

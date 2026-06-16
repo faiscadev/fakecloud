@@ -1528,6 +1528,39 @@ fn update_user_rename() {
     assert!(body.contains("<UserName>new-user</UserName>"));
 }
 
+/// 1.29: UpdateUser rename must preserve the ARN partition (aws-cn here)
+/// rather than hardcoding `arn:aws:`.
+#[test]
+fn update_user_rename_preserves_partition() {
+    let svc = make_service();
+    let mut create = make_request("CreateUser", vec![("UserName", "old-cn")]);
+    create.region = "cn-north-1".to_string();
+    let resp = svc.create_user(&create).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    assert!(
+        extract_xml_tag(&body, "Arn").starts_with("arn:aws-cn:iam::"),
+        "create should mint an aws-cn ARN"
+    );
+
+    let mut rename = make_request(
+        "UpdateUser",
+        vec![("UserName", "old-cn"), ("NewUserName", "new-cn")],
+    );
+    rename.region = "cn-north-1".to_string();
+    svc.update_user(&rename).unwrap();
+
+    let mut get = make_request("GetUser", vec![("UserName", "new-cn")]);
+    get.region = "cn-north-1".to_string();
+    let resp = svc.get_user(&get).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    let arn = extract_xml_tag(&body, "Arn");
+    assert!(
+        arn.starts_with("arn:aws-cn:iam::"),
+        "rename must keep the aws-cn partition, got {arn}"
+    );
+    assert!(arn.ends_with(":user/new-cn"));
+}
+
 // ---- Account Password Policy Tests ----
 
 #[test]

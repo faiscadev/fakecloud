@@ -385,10 +385,35 @@ impl Wafv2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let _vendor = require_str_len(&body, "VendorName", 1, 128)?;
-        let _name = require_str_len(&body, "Name", 1, 128)?;
-        let _scope = require_scope(&body)?;
+        let name = require_str_len(&body, "Name", 1, 128)?;
+        let scope = require_scope(&body)?;
         validate_opt_limit(&body)?;
         validate_opt_next_marker(&body)?;
+
+        // Return the versions actually published via
+        // PutManagedRuleSetVersions for this (scope, name) if any exist;
+        // otherwise fall back to the documented AWS-vendor sample set.
+        let state = self.state.read();
+        if let Some(set) = state
+            .accounts
+            .get(&req.account_id)
+            .and_then(|a| a.managed_rule_sets.get(&(scope.clone(), name.clone())))
+        {
+            let versions: Vec<Value> = set
+                .published_versions
+                .iter()
+                .map(|v| json!({"Name": v, "LastUpdateTimestamp": set.created_time.timestamp() as f64}))
+                .collect();
+            let current = set
+                .recommended_version
+                .clone()
+                .or_else(|| set.published_versions.last().cloned());
+            return Ok(AwsResponse::ok_json(json!({
+                "Versions": versions,
+                "CurrentDefaultVersion": current,
+            })));
+        }
+
         Ok(AwsResponse::ok_json(json!({
             "Versions": [
                 {"Name": "Version_1.0", "LastUpdateTimestamp": Utc::now().timestamp() as f64},
@@ -403,13 +428,33 @@ impl Wafv2Service {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _scope = require_scope(&body)?;
+        let scope = require_scope(&body)?;
         validate_opt_limit(&body)?;
         validate_opt_next_marker(&body)?;
-        // fakecloud does not expose vendor-side managed rule set publishing,
-        // so this always returns an empty list (matches accounts without
-        // FirewallManager publishing rights).
-        Ok(AwsResponse::ok_json(json!({ "ManagedRuleSets": [] })))
+
+        // Return the managed rule sets this account has published for the
+        // requested scope (via PutManagedRuleSetVersions).
+        let state = self.state.read();
+        let sets: Vec<Value> = state
+            .accounts
+            .get(&req.account_id)
+            .map(|a| {
+                a.managed_rule_sets
+                    .values()
+                    .filter(|s| s.scope == scope)
+                    .map(|s| {
+                        json!({
+                            "Name": s.name,
+                            "Id": s.id,
+                            "Description": s.description,
+                            "LockToken": s.lock_token,
+                            "LabelNamespace": s.label_namespace,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "ManagedRuleSets": sets })))
     }
 
     pub(super) fn put_managed_rule_set_versions(
@@ -423,17 +468,55 @@ impl Wafv2Service {
         fakecloud_core::validation::validate_string_length("Id", &id, 1, 36)?;
         let lock_token = require_str(&body, "LockToken")?;
         fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
-        let _scope = require_scope(&body)?;
-        if let Some(recommended_version) = body.get("RecommendedVersion").and_then(Value::as_str) {
-            fakecloud_core::validation::validate_string_length(
-                "RecommendedVersion",
-                recommended_version,
-                1,
-                64,
-            )?;
+        let scope = require_scope(&body)?;
+        let recommended_version = match body.get("RecommendedVersion").and_then(Value::as_str) {
+            Some(v) => {
+                fakecloud_core::validation::validate_string_length("RecommendedVersion", v, 1, 64)?;
+                Some(v.to_string())
+            }
+            None => None,
+        };
+
+        // Collect the version names being published (VersionsToPublish is a
+        // map of version-name -> {AssociatedRuleGroupArn, ForecastedLifetime}).
+        let mut published: Vec<String> = body
+            .get("VersionsToPublish")
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        published.sort();
+
+        let next_lock_token = synth_uuid();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let key = (scope.clone(), name.clone());
+        let entry =
+            account
+                .managed_rule_sets
+                .entry(key)
+                .or_insert_with(|| crate::state::ManagedRuleSet {
+                    id: id.clone(),
+                    name: name.clone(),
+                    scope: scope.clone(),
+                    description: None,
+                    lock_token: next_lock_token.clone(),
+                    label_namespace: format!("awswaf:managed:{name}"),
+                    recommended_version: None,
+                    published_versions: Vec::new(),
+                    created_time: Utc::now(),
+                });
+        for v in published {
+            if !entry.published_versions.contains(&v) {
+                entry.published_versions.push(v);
+            }
         }
+        if recommended_version.is_some() {
+            entry.recommended_version = recommended_version;
+        }
+        entry.lock_token = next_lock_token.clone();
+
         Ok(AwsResponse::ok_json(json!({
-            "NextLockToken": synth_uuid(),
+            "NextLockToken": next_lock_token,
         })))
     }
 

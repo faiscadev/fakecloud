@@ -3706,9 +3706,9 @@ fn partiql_insert_rejects_missing_partition_key() {
         Ok(_) => panic!("expected INSERT without pk to fail"),
     };
     let dbg = format!("{err:?}");
-    // ExecuteStatement doesn't declare ValidationException; we remap to
-    // ResourceNotFoundException to stay Smithy-compliant.
-    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
+    // A key/validation error on an existing table is a ValidationException,
+    // not a ResourceNotFoundException (only a missing table maps to NotFound).
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
     assert!(dbg.contains("Missing the key pk"), "got {dbg}");
 }
 
@@ -3728,7 +3728,7 @@ fn partiql_insert_rejects_wrong_key_type() {
         Ok(_) => panic!("expected INSERT with wrong-type pk to fail"),
     };
     let dbg = format!("{err:?}");
-    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
     assert!(dbg.contains("Type mismatch for key pk"), "got {dbg}");
 }
 
@@ -3945,7 +3945,7 @@ fn partiql_insert_rejects_missing_sort_key() {
         .err()
         .expect("missing sort key");
     let dbg = format!("{err:?}");
-    assert!(dbg.contains("ResourceNotFoundException"), "got {dbg}");
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
     assert!(dbg.contains("Missing the key sk"), "got {dbg}");
 }
 

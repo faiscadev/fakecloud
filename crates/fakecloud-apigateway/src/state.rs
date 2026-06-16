@@ -85,6 +85,11 @@ pub struct ApiGatewayState {
     /// Usage plan keys keyed by `usagePlanId` -> `apiKeyId`.
     #[serde(default)]
     pub usage_plan_keys: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// Per-(usagePlanId, apiKeyId) remaining quota, as observed/adjusted
+    /// via GetUsage / UpdateUsage. Absent until a key is metered; falls
+    /// back to the plan's quota limit.
+    #[serde(default)]
+    pub usage_remaining: BTreeMap<String, BTreeMap<String, i64>>,
     /// VPC links keyed by id.
     #[serde(default)]
     pub vpc_links: BTreeMap<String, serde_json::Value>,
@@ -162,6 +167,7 @@ impl ApiGatewayState {
             api_keys: BTreeMap::new(),
             usage_plans: BTreeMap::new(),
             usage_plan_keys: BTreeMap::new(),
+            usage_remaining: BTreeMap::new(),
             vpc_links: BTreeMap::new(),
             domain_names: BTreeMap::new(),
             domain_name_access_associations: BTreeMap::new(),
@@ -192,6 +198,7 @@ impl ApiGatewayState {
         self.api_keys.clear();
         self.usage_plans.clear();
         self.usage_plan_keys.clear();
+        self.usage_remaining.clear();
         self.vpc_links.clear();
         self.domain_names.clear();
         self.domain_name_access_associations.clear();

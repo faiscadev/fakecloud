@@ -2139,6 +2139,148 @@ fn auth_events_recorded_on_sign_up() {
     assert!(st.auth_events[0].success);
 }
 
+/// 1.27: SignUp + InitiateAuth must enforce SECRET_HASH for app clients
+/// that have a secret.
+#[test]
+fn secret_hash_enforced_for_clients_with_secret() {
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    // Client WITH a secret + USER_PASSWORD_AUTH.
+    let body = serde_json::to_string(&json!({
+        "UserPoolId": pool_id,
+        "ClientName": "sec",
+        "GenerateSecret": true,
+        "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    }))
+    .unwrap();
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body))
+        .unwrap();
+    let rb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let client_id = rb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let client_secret = rb["UserPoolClient"]["ClientSecret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // SignUp WITHOUT SecretHash -> InvalidParameterException.
+    let su = json!({"ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!"});
+    let err = block_on(svc.sign_up(&make_req("SignUp", &su.to_string())))
+        .err()
+        .expect("missing secret hash rejected");
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    // SignUp WITH the wrong SecretHash -> NotAuthorizedException.
+    let su = json!({
+        "ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!",
+        "SecretHash": "definitely-wrong",
+    });
+    let err = block_on(svc.sign_up(&make_req("SignUp", &su.to_string())))
+        .err()
+        .expect("wrong secret hash rejected");
+    assert_eq!(err.code(), "NotAuthorizedException");
+
+    // SignUp WITH the correct SecretHash -> success.
+    let correct = crate::service::compute_secret_hash("u1", &client_id, &client_secret);
+    let su = json!({
+        "ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!",
+        "SecretHash": correct,
+    });
+    block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();
+
+    // Set a permanent password so InitiateAuth can authenticate.
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "u1", "Password": "P@ssw0rd!", "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    // InitiateAuth WITHOUT SECRET_HASH -> rejected.
+    let ia = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "u1", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string())))
+        .err()
+        .expect("InitiateAuth without SECRET_HASH rejected");
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    // InitiateAuth WITH correct SECRET_HASH -> success.
+    let ia = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {
+            "USERNAME": "u1", "PASSWORD": "P@ssw0rd!",
+            "SECRET_HASH": crate::service::compute_secret_hash("u1", &client_id, &client_secret),
+        },
+    });
+    block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string()))).unwrap();
+}
+
+/// 1.27: a client WITHOUT a secret must not require SECRET_HASH.
+#[test]
+fn secret_hash_not_required_for_clients_without_secret() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let body = json!({
+        "UserPoolId": pool_id, "ClientName": "nosec",
+        "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH"]
+    });
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let rb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let client_id = rb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let su = json!({"ClientId": client_id, "Username": "u2", "Password": "P@ssw0rd!"});
+    block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();
+}
+
+/// 1.28: ListUsers must honor AttributesToGet, restricting each user's
+/// Attributes array to the requested names.
+#[test]
+fn list_users_honors_attributes_to_get() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    block_on(
+        svc.admin_create_user(&make_req(
+            "AdminCreateUser",
+            &json!({
+                "UserPoolId": pool_id,
+                "Username": "lu1",
+                "UserAttributes": [
+                    {"Name": "email", "Value": "a@b.com"},
+                    {"Name": "phone_number", "Value": "+15551112222"},
+                ],
+            })
+            .to_string(),
+        )),
+    )
+    .unwrap();
+
+    let resp = svc
+        .list_users(&make_req(
+            "ListUsers",
+            &json!({"UserPoolId": pool_id, "AttributesToGet": ["email"]}).to_string(),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let attrs = body["Users"][0]["Attributes"].as_array().unwrap();
+    let names: Vec<&str> = attrs.iter().filter_map(|a| a["Name"].as_str()).collect();
+    assert!(names.contains(&"email"));
+    assert!(
+        !names.contains(&"phone_number"),
+        "AttributesToGet must drop unrequested attrs"
+    );
+    assert!(!names.contains(&"sub"));
+}
+
 #[test]
 fn auth_events_recorded_on_sign_in_and_failure() {
     let state = std::sync::Arc::new(parking_lot::RwLock::new(
