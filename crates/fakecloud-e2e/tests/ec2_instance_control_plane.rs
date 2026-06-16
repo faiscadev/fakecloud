@@ -54,6 +54,33 @@ async fn run_instances_rejects_min_gt_max() {
 }
 
 #[tokio::test]
+async fn run_instances_rejects_count_over_limit_without_panic() {
+    // Regression: MinCount/MaxCount above the per-request ceiling used to panic
+    // the server (`clamp` with lo > hi), dropping the connection. AWS returns
+    // `InstanceLimitExceeded`; the server must respond with that, not crash.
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    for (min, max) in [(100, 100), (65, 65), (1000, 1000), (65, 200)] {
+        let err = c
+            .run_instances()
+            .image_id("ami-12345678")
+            .min_count(min)
+            .max_count(max)
+            .send()
+            .await
+            .expect_err("over-limit count must return an EC2 error, not crash");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("InstanceLimitExceeded"),
+            "expected InstanceLimitExceeded for {min}/{max}, got {msg}"
+        );
+    }
+    // The server is still alive after the rejected requests (no panic).
+    let ids = run(&c, 1, 1).await;
+    assert_eq!(ids.len(), 1, "server must survive over-limit requests");
+}
+
+#[tokio::test]
 async fn run_instances_returns_pending_then_running() {
     // A tiny image keeps any backing-container boot fast; `tail -f /dev/null`
     // keeps it alive. When no container runtime is present the background task

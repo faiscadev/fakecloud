@@ -63,6 +63,17 @@ pub fn instance_not_found(id: &str) -> AwsServiceError {
     )
 }
 
+/// `InstanceLimitExceeded` (HTTP 400) — the requested instance count exceeds
+/// the limit, matching what AWS returns when MaxCount is above the per-request
+/// (or account) ceiling.
+pub fn instance_limit_exceeded(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InstanceLimitExceeded",
+        message.into(),
+    )
+}
+
 /// `IncorrectInstanceState` (HTTP 400) — an instance state-change is illegal
 /// from the instance's current state (e.g. starting a terminated instance).
 pub fn incorrect_instance_state(id: &str, current: &str) -> AwsServiceError {

@@ -9,8 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, invalid_parameter_value, parse_filters, require, require_struct,
-    validate_enum, Filter,
+    gen_id, indexed_list, instance_limit_exceeded, invalid_parameter_value, parse_filters, require,
+    require_struct, validate_enum, Filter,
 };
 use crate::state::{Ec2State, Instance, Tag};
 
@@ -164,15 +164,27 @@ pub(crate) async fn run_instances(
             "Invalid value '{max}' for parameter maxCount is invalid. The maxCount must be equal to or greater than the minCount."
         )));
     }
+    // Reject requests for more instances than this fake will launch. Real AWS
+    // returns `InstanceLimitExceeded` once MaxCount exceeds the per-request /
+    // account ceiling; we apply the same error rather than silently clamping
+    // (which would launch fewer than MinCount and panic for min > ceiling).
+    const MAX_INSTANCES_PER_REQUEST: usize = 64;
+    if min > MAX_INSTANCES_PER_REQUEST {
+        return Err(instance_limit_exceeded(format!(
+            "You have requested more instances ({min}) than your current instance limit of {MAX_INSTANCES_PER_REQUEST} allows for this launch."
+        )));
+    }
     validate_enum_instance_type(req)?;
     validate_enum(
         &req.query_params,
         "InstanceInitiatedShutdownBehavior",
         &["stop", "terminate"],
     )?;
-    // AWS best-effort launches MaxCount instances (>= MinCount). With no real
-    // capacity ceiling here we launch the full MaxCount, clamped for safety.
-    let count = max.clamp(min.max(1), 64);
+    // AWS best-effort launches MaxCount instances (>= MinCount). `min` is
+    // already validated to be in 1..=MAX_INSTANCES_PER_REQUEST above, so this
+    // only caps an oversized MaxCount down to the ceiling (never below MinCount,
+    // and never with `lo > hi`, which would panic).
+    let count = max.min(MAX_INSTANCES_PER_REQUEST).max(min);
     let reservation_id = gen_id("r");
     let image_id = req
         .query_params
