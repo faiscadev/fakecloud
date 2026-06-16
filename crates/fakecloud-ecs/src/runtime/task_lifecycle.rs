@@ -164,6 +164,11 @@ impl EcsRuntime {
                     "bridge",
                     "--label",
                     &format!("fakecloud-ecs-task={}", task_id),
+                    // Ownership label so the startup reaper can prune the
+                    // per-task awsvpc network after an ungraceful restart,
+                    // matching the container label.
+                    "--label",
+                    &super::fakecloud_instance_label(),
                     &network_name,
                 ])
                 .output()
@@ -258,6 +263,17 @@ impl EcsRuntime {
         // fails to start (or an upstream gate times out), kill the
         // already-started containers and bail — partial-launch state is
         // harder to reason about than a clean failure.
+        // Register the task in `self.containers` BEFORE the launch loop so a
+        // concurrent StopTask / scale-down / DeleteService that arrives
+        // during the multi-second pull+run window can find the entry and stop
+        // whatever has been launched so far. (`stop_task` is a no-op when the
+        // key is absent — the orphan-on-race bug.) We append each container
+        // id to this entry as it starts, mirroring the k8s backend which
+        // registers the Pod name before `create_pod`.
+        self.containers
+            .write()
+            .entry(task_id.to_string())
+            .or_default();
         let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
         for (idx, (rp, run_image)) in resolved_plans.iter().zip(run_images.iter()).enumerate() {
             // Wait for every dependsOn[] entry on this container. Upstreams
@@ -309,6 +325,14 @@ impl EcsRuntime {
                 return Err(RuntimeError::ContainerStart(err));
             }
             let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
+            // Append to the runtime map immediately so a StopTask landing
+            // between this container and the next one in the launch loop can
+            // reach it.
+            self.containers
+                .write()
+                .entry(task_id.to_string())
+                .or_default()
+                .push((rp.plan.container_name.clone(), container_id.clone()));
             started.push(RunningContainer {
                 name: rp.plan.container_name.clone(),
                 container_id,
@@ -319,18 +343,60 @@ impl EcsRuntime {
             });
         }
 
-        // Stash all (name, container_id) pairs so StopTask/stop_all can
-        // reach every container backing this task.
-        {
-            let mut guard = self.containers.write();
-            guard.insert(
-                task_id.to_string(),
-                started
-                    .iter()
-                    .map(|c| (c.name.clone(), c.container_id.clone()))
-                    .collect(),
+        // A StopTask / scale-down / DeleteService that raced the launch may
+        // have flipped this task's desired_status to STOPPED while we were
+        // pulling/running (and may have already issued `docker stop` against
+        // the containers it could see in the runtime map). If so, stop every
+        // container we launched and finalize as a clean stop instead of
+        // marking the task RUNNING with a live workload the user asked to
+        // kill. Mirrors the k8s backend, which observes a 404 from the
+        // StopTask-deleted Pod and finalizes the same way.
+        if task_desired_stopped(state, account_id, task_id) {
+            for rc in &started {
+                let _ = Command::new(&self.cli)
+                    .args(["stop", "--time", "10", &rc.container_id])
+                    .output()
+                    .await;
+                let _ = Command::new(&self.cli)
+                    .args(["rm", "-f", &rc.container_id])
+                    .output()
+                    .await;
+            }
+            if network_created {
+                let _ = Command::new(&self.cli)
+                    .args(["network", "rm", &network_name])
+                    .output()
+                    .await;
+            }
+            self.containers.write().remove(task_id);
+            let stopped: Vec<RunningContainer> = started
+                .iter()
+                .map(|rc| RunningContainer {
+                    exit_code: Some(rc.exit_code.unwrap_or(137)),
+                    ..rc.clone()
+                })
+                .collect();
+            finalize_stopped_multi(
+                state,
+                account_id,
+                task_id,
+                &stopped,
+                137,
+                "",
+                "UserInitiated",
+                Some("Task stopped during launch".into()),
             );
+            self.deregister_lb_targets(state, account_id, task_id);
+            self.emit_state_change(
+                state,
+                account_id,
+                task_id,
+                "STOPPED",
+                Some(("UserInitiated", "Task stopped during launch".into())),
+            );
+            return Ok(());
         }
+
         mark_running_multi(state, account_id, task_id, &started);
         self.register_lb_targets(state, account_id, task_id);
         self.emit_state_change(state, account_id, task_id, "RUNNING", None);
@@ -611,6 +677,10 @@ impl EcsRuntime {
         let cli = self.cli.clone();
         let ids: Vec<String> = started.iter().map(|c| c.container_id.clone()).collect();
         let network = format!("fakecloud-ecs-{task_id}");
+        // Drop the runtime map entry we pre-registered before the launch loop
+        // so a failed launch doesn't leave a stale (now-empty) key that
+        // future StopTask calls would treat as a live task.
+        self.containers.write().remove(task_id);
         tokio::spawn(async move {
             for id in ids {
                 let _ = Command::new(&cli).args(["rm", "-f", &id]).output().await;
