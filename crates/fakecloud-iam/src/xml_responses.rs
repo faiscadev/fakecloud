@@ -145,7 +145,12 @@ pub fn get_user_response(user: &IamUser, request_id: &str) -> String {
     )
 }
 
-pub fn list_users_response(users: &[IamUser], request_id: &str) -> String {
+pub fn list_users_response(
+    users: &[IamUser],
+    is_truncated: bool,
+    marker: Option<&str>,
+    request_id: &str,
+) -> String {
     let members: String = users
         .iter()
         .map(|u| {
@@ -168,11 +173,17 @@ pub fn list_users_response(users: &[IamUser], request_id: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let marker_section = if let Some(m) = marker {
+        format!("\n    <Marker>{}</Marker>", xml_escape(m))
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListUsersResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListUsersResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <Users>
 {members}
     </Users>
@@ -430,7 +441,12 @@ pub fn create_policy_response(policy: &IamPolicy, request_id: &str) -> String {
     )
 }
 
-pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> String {
+pub fn list_policies_response(
+    policies: &[IamPolicy],
+    is_truncated: bool,
+    marker: Option<&str>,
+    request_id: &str,
+) -> String {
     let members: String = policies
         .iter()
         .map(|p| {
@@ -458,11 +474,17 @@ pub fn list_policies_response(policies: &[IamPolicy], request_id: &str) -> Strin
         .collect::<Vec<_>>()
         .join("\n");
 
+    let marker_section = if let Some(m) = marker {
+        format!("\n    <Marker>{}</Marker>", xml_escape(m))
+    } else {
+        String::new()
+    };
+
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListPoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListPoliciesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <Policies>
 {members}
     </Policies>

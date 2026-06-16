@@ -79,8 +79,8 @@ impl SnsDeliveryImpl {
             topic_arn,
             subject,
             endpoint: &endpoint,
-            sqs_message: message,
             default_message: message,
+            structure: None,
             envelope_attrs: &envelope_attrs,
             message_attributes: &empty_attrs,
             message_group_id,
@@ -139,6 +139,7 @@ mod tests {
             created_at: Utc::now(),
             subscriptions_deleted: 0,
             fifo_sequence: 0,
+            dedup_cache: std::collections::BTreeMap::new(),
         };
         (topic, arn)
     }

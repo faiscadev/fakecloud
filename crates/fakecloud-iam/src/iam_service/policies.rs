@@ -179,6 +179,13 @@ impl IamService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let path_prefix = req.query_params.get("PathPrefix").cloned();
         let scope = PolicyScope::from_query(req.query_params.get("Scope").map(|s| s.as_str()));
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let marker = req.query_params.get("Marker").cloned();
+
         let mut policies: Vec<IamPolicy> = state.policies.values().cloned().collect();
         if let Some(prefix) = path_prefix {
             policies.retain(|p| p.path.starts_with(&prefix));
@@ -188,7 +195,33 @@ impl IamService {
             // explicit ``Scope=AWS`` filter returns an empty list.
             policies.clear();
         }
-        let xml = xml_responses::list_policies_response(&policies, &req.request_id);
+        policies.sort_by(|a, b| a.policy_name.cmp(&b.policy_name));
+
+        // Marker-based pagination: resume after the marked item (by ARN, the
+        // stable cursor AWS uses for ListPolicies).
+        let start_idx = marker
+            .as_ref()
+            .and_then(|m| policies.iter().position(|p| p.arn == *m).map(|p| p + 1))
+            .unwrap_or(0);
+        let page = policies.get(start_idx..).unwrap_or(&[]);
+        let is_truncated = page.len() > max_items;
+        let page = if is_truncated {
+            &page[..max_items]
+        } else {
+            page
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|p| p.arn.clone())
+        } else {
+            None
+        };
+
+        let xml = xml_responses::list_policies_response(
+            page,
+            is_truncated,
+            next_marker.as_deref(),
+            &req.request_id,
+        );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 

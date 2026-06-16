@@ -525,7 +525,8 @@ impl KinesisService {
         let partition_key = require_partition_key(&body)?;
         let data = decode_record_data(&body["Data"])?;
         let encryption_type = stream.encryption_type.clone();
-        let shard = select_shard_mut(stream, partition_key);
+        let explicit_hash_key = body["ExplicitHashKey"].as_str();
+        let shard = select_shard_mut(stream, partition_key, explicit_hash_key)?;
         let sequence_number = append_record(shard, partition_key, data);
         let shard_id = shard.shard_id.clone();
 
@@ -1353,12 +1354,20 @@ impl KinesisService {
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
 
-        let exclusive_start = body["ExclusiveStartShardId"].as_str();
+        // Resume position: a NextToken (opaque cursor) takes precedence over
+        // ExclusiveStartShardId. AWS forbids mixing NextToken with the other
+        // filter params; at minimum we decode it back into the shard id to
+        // resume from the right place so SDK paginators advance.
+        let exclusive_start: Option<String> = match body["NextToken"].as_str() {
+            Some(token) => Some(decode_list_shards_token(token)?),
+            None => body["ExclusiveStartShardId"].as_str().map(str::to_string),
+        };
+
         let mut shards: Vec<Value> = stream
             .shards
             .iter()
             .filter(|s| {
-                if let Some(start_id) = exclusive_start {
+                if let Some(start_id) = exclusive_start.as_deref() {
                     s.shard_id.as_str() > start_id
                 } else {
                     true
@@ -1373,8 +1382,8 @@ impl KinesisService {
 
         let mut resp = json!({ "Shards": shards });
         if has_more {
-            if let Some(last) = shards.last() {
-                resp["NextToken"] = last["ShardId"].clone();
+            if let Some(last_id) = shards.last().and_then(|s| s["ShardId"].as_str()) {
+                resp["NextToken"] = json!(encode_list_shards_token(last_id));
             }
         }
 

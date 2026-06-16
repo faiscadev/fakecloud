@@ -313,18 +313,145 @@ impl EventBridgeService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_required("Entries", &body["Entries"])?;
-        let entries = body["Entries"]
+        let entries_array = body["Entries"]
             .as_array()
             .ok_or_else(|| missing("Entries"))?;
+        if entries_array.is_empty() || entries_array.len() > 10 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Value at 'Entries' failed to satisfy constraint: \
+                 Member must have length between 1 and 10",
+            ));
+        }
+        let entries = entries_array.clone();
 
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
         let mut result_entries = Vec::new();
-        for _entry in entries {
+        let mut events_to_deliver = Vec::new();
+        let mut failed_count = 0;
+
+        for entry in &entries {
+            // For partner events the bus is the partner source name: AWS
+            // routes the event to the partner event bus that mirrors the
+            // source. Validate Source/DetailType/Detail like PutEvents.
+            let source = entry["Source"].as_str().unwrap_or("").to_string();
+            let detail_type = entry["DetailType"].as_str().unwrap_or("").to_string();
+            let detail = entry["Detail"].as_str().unwrap_or("").to_string();
+
+            if let Err(error) = validate_put_events_entry(&source, &detail_type, &detail) {
+                failed_count += 1;
+                result_entries.push(error);
+                continue;
+            }
+
             let event_id = uuid::Uuid::new_v4().to_string();
+            // The partner event bus is named after the source. If the
+            // receiving account has not created that bus yet, the event is
+            // accepted (returns an EventId) but not routed -- matching AWS.
+            let event_bus_name = source.clone();
+            let time = parse_put_events_time(&entry["Time"]);
+            let resources: Vec<String> = entry["Resources"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let event = PutEvent {
+                event_id: event_id.clone(),
+                source: source.clone(),
+                detail_type: detail_type.clone(),
+                detail: detail.clone(),
+                event_bus_name: event_bus_name.clone(),
+                time,
+                resources: resources.clone(),
+            };
+
+            archive_matching_event(
+                state,
+                &event,
+                &event_bus_name,
+                &source,
+                &detail_type,
+                &detail,
+                &req.account_id,
+                &req.region,
+                &resources,
+            );
+
+            state.events.push(event);
+
+            // Route to rules attached to the partner event bus.
+            let matching_targets: Vec<EventTarget> = state
+                .rules
+                .values()
+                .filter(|r| {
+                    r.event_bus_name == event_bus_name
+                        && r.state == "ENABLED"
+                        && matches_pattern(
+                            r.event_pattern.as_deref(),
+                            &source,
+                            &detail_type,
+                            &detail,
+                            &req.account_id,
+                            &req.region,
+                            &resources,
+                        )
+                })
+                .flat_map(|r| r.targets.clone())
+                .collect();
+
+            if !matching_targets.is_empty() {
+                events_to_deliver.push((
+                    event_id.clone(),
+                    source,
+                    detail_type,
+                    detail,
+                    time,
+                    resources,
+                    matching_targets,
+                ));
+            }
+
             result_entries.push(json!({ "EventId": event_id }));
         }
 
+        drop(accounts);
+
+        for (event_id, source, detail_type, detail, time, resources, targets) in events_to_deliver {
+            let detail_value: Value = serde_json::from_str(&detail).unwrap_or(json!({}));
+            let event_json = json!({
+                "version": "0",
+                "id": event_id,
+                "source": source,
+                "account": req.account_id,
+                "detail-type": detail_type,
+                "detail": detail_value,
+                "time": time.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "region": req.region,
+                "resources": resources,
+            });
+
+            let ctx = EventDispatchContext {
+                state: &self.state,
+                delivery: &self.delivery,
+                lambda_state: self.lambda_state.as_ref(),
+                logs_state: self.logs_state.as_ref(),
+                container_runtime: &self.container_runtime,
+                account_id: &req.account_id,
+                region: &req.region,
+            };
+            for target in targets {
+                dispatch_event_target(&ctx, &target, &event_json, &event_id, &detail_type);
+            }
+        }
+
         Ok(AwsResponse::ok_json(json!({
-            "FailedEntryCount": 0,
+            "FailedEntryCount": failed_count,
             "Entries": result_entries,
         })))
     }

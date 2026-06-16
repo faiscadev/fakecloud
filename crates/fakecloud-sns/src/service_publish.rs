@@ -144,6 +144,52 @@ impl SnsService {
 
         self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message)?;
 
+        // FIFO dedup (1.4). Resolve the effective dedup id: the explicit
+        // MessageDeduplicationId, or the SHA-256 of the message body when
+        // ContentBasedDeduplication is enabled. A duplicate within the
+        // 5-minute window is suppressed (not fanned out) and replays the
+        // ORIGINAL MessageId/SequenceNumber. Mirrors SQS FIFO dedup.
+        let effective_dedup_id: Option<String> = if is_fifo {
+            message_dedup_id.clone().or_else(|| {
+                if content_dedup {
+                    Some(sns_sha256_hex(&message))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        if let Some(ref dedup_id) = effective_dedup_id {
+            let now = Utc::now();
+            if let Some(topic) = state.topics.get_mut(&topic_arn) {
+                topic.dedup_cache.retain(|_, e| e.expiry > now);
+                if let Some(entry) = topic.dedup_cache.get(dedup_id) {
+                    let sequence_xml = entry
+                        .sequence_number
+                        .as_deref()
+                        .map(|s| format!("\n    <SequenceNumber>{s}</SequenceNumber>"))
+                        .unwrap_or_default();
+                    let original_id = entry.message_id.clone();
+                    return Ok(xml_resp(
+                        &format!(
+                            r#"<PublishResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <PublishResult>
+    <MessageId>{original_id}</MessageId>{sequence_xml}
+  </PublishResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</PublishResponse>"#,
+                            req.request_id
+                        ),
+                        &req.request_id,
+                    ));
+                }
+            }
+        }
+
         // Mint a strictly-increasing FIFO SequenceNumber (1.6). None for standard topics.
         let sequence_number = if is_fifo {
             state.topics.get_mut(&topic_arn).map(|t| {
@@ -166,6 +212,21 @@ impl SnsService {
             timestamp: Utc::now(),
         });
 
+        // Record this publish in the FIFO dedup cache so a duplicate within
+        // the 5-minute window replays it (1.4).
+        if let Some(ref dedup_id) = effective_dedup_id {
+            if let Some(topic) = state.topics.get_mut(&topic_arn) {
+                topic.dedup_cache.insert(
+                    dedup_id.clone(),
+                    crate::state::SnsDedupEntry {
+                        message_id: msg_id.clone(),
+                        sequence_number: sequence_number.clone(),
+                        expiry: Utc::now() + chrono::Duration::minutes(5),
+                    },
+                );
+            }
+        }
+
         // Resolve the actual message per protocol for MessageStructure=json
         let parsed_structure: Option<Value> = if message_structure.as_deref() == Some("json") {
             Some(serde_json::from_str(&message).map_err(|_| {
@@ -184,18 +245,8 @@ impl SnsService {
         let endpoint = state.endpoint.clone();
         drop(accounts);
 
-        // Determine actual message content per protocol
-        let sqs_message = if let Some(ref structure) = parsed_structure {
-            structure
-                .get("sqs")
-                .or_else(|| structure.get("default"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&message)
-                .to_string()
-        } else {
-            message.clone()
-        };
-
+        // Determine the fallback ("default" key) body; each fan-out helper
+        // resolves its own protocol-specific body from `parsed_structure`.
         let default_message = if let Some(ref structure) = parsed_structure {
             structure
                 .get("default")
@@ -213,8 +264,8 @@ impl SnsService {
             topic_arn: &topic_arn,
             subject: subject.as_deref(),
             endpoint: &endpoint,
-            sqs_message: &sqs_message,
             default_message: &default_message,
+            structure: parsed_structure.as_ref(),
             envelope_attrs: &envelope_attrs,
             message_attributes: &message_attributes,
             message_group_id: message_group_id.as_deref(),
@@ -654,6 +705,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
     subs: &[(String, bool)],
     ctx: &TopicFanoutContext<'_>,
 ) {
+    let sqs_message = ctx.body_for_protocol("sqs");
     for (queue_arn, raw) in subs {
         if *raw {
             let mut sqs_msg_attrs = HashMap::new();
@@ -670,7 +722,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
             }
             delivery.send_to_sqs_with_attrs(
                 queue_arn,
-                ctx.sqs_message,
+                &sqs_message,
                 &sqs_msg_attrs,
                 ctx.message_group_id,
                 ctx.message_dedup_id,
@@ -680,7 +732,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
                 ctx.msg_id,
                 ctx.topic_arn,
                 &ctx.subject.map(|s| s.to_string()),
-                ctx.sqs_message,
+                &sqs_message,
                 ctx.envelope_attrs,
                 ctx.endpoint,
             );
@@ -704,11 +756,12 @@ pub(crate) fn deliver_to_http_subscribers(
     ctx: &TopicFanoutContext<'_>,
 ) {
     for sub in subs {
+        let protocol_body = ctx.body_for_protocol(&sub.protocol);
         let body = build_sns_envelope(
             ctx.msg_id,
             ctx.topic_arn,
             &ctx.subject.map(|s| s.to_string()),
-            ctx.default_message,
+            &protocol_body,
             ctx.envelope_attrs,
             ctx.endpoint,
         );
@@ -765,6 +818,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
     }
     let now = Utc::now();
     let subject_owned = ctx.subject.map(|s| s.to_string());
+    let lambda_message = ctx.body_for_protocol("lambda");
 
     let lambda_payloads: Vec<(String, String)> = subs
         .iter()
@@ -773,7 +827,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
                 message_id: ctx.msg_id,
                 topic_arn: ctx.topic_arn,
                 subscription_arn,
-                message: ctx.default_message,
+                message: &lambda_message,
                 subject: ctx.subject,
                 message_attributes: ctx.envelope_attrs,
                 timestamp: &now,
@@ -792,7 +846,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
                 .lambda_invocations
                 .push(crate::state::LambdaInvocation {
                     function_arn: function_arn.clone(),
-                    message: ctx.default_message.to_string(),
+                    message: lambda_message.clone(),
                     subject: subject_owned.clone(),
                     timestamp: now,
                 });
@@ -830,7 +884,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
 
 pub(crate) fn deliver_to_email_subscribers(
     state: &SharedSnsState,
-    subs: &[String],
+    subs: &[(String, String)],
     ctx: &TopicFanoutContext<'_>,
 ) {
     if subs.is_empty() {
@@ -839,12 +893,22 @@ pub(crate) fn deliver_to_email_subscribers(
     let now = Utc::now();
     let subject_owned = ctx.subject.map(|s| s.to_string());
     let topic_arn = ctx.topic_arn.to_string();
-    let body = ctx.default_message.to_string();
+    // Resolve the body per protocol so `email` and `email-json` subscribers
+    // can each receive their own MessageStructure=json variant.
+    let email_body = ctx.body_for_protocol("email");
+    let email_json_body = ctx.body_for_protocol("email-json");
+    let body_for = |protocol: &str| -> String {
+        if protocol == "email-json" {
+            email_json_body.clone()
+        } else {
+            email_body.clone()
+        }
+    };
     let acct = ctx.topic_arn.split(':').nth(4).unwrap_or("");
     {
         let mut accounts = state.write();
         let state = accounts.get_or_create(acct);
-        for email_address in subs {
+        for (email_address, protocol) in subs {
             tracing::info!(
                 email = %email_address,
                 topic_arn = %topic_arn,
@@ -852,7 +916,7 @@ pub(crate) fn deliver_to_email_subscribers(
             );
             state.sent_emails.push(crate::state::SentEmail {
                 email_address: email_address.clone(),
-                message: body.clone(),
+                message: body_for(protocol),
                 subject: subject_owned.clone(),
                 topic_arn: topic_arn.clone(),
                 timestamp: now,
@@ -869,15 +933,16 @@ pub(crate) fn deliver_to_email_subscribers(
             .clone()
             .unwrap_or_else(|| format!("AWS Notification - {topic_arn}"));
         let from = format!("no-reply@sns.{}.amazonaws.com", default_region(&topic_arn));
-        for email_address in subs {
+        for (email_address, protocol) in subs {
             let to = [email_address.clone()];
+            let relay_body = body_for(protocol);
             let mail = fakecloud_ses::smtp_relay::OutboundMail {
                 from: &from,
                 to: &to,
                 cc: &[],
                 bcc: &[],
                 subject: Some(&subject),
-                text_body: Some(&body),
+                text_body: Some(&relay_body),
                 html_body: None,
             };
             if let Err(err) = fakecloud_ses::smtp_relay::relay(&relay_url, &mail) {
@@ -909,6 +974,7 @@ pub(crate) fn deliver_to_sms_subscribers(
     if subs.is_empty() {
         return;
     }
+    let sms_message = ctx.body_for_protocol("sms");
     let acct = ctx.topic_arn.split(':').nth(4).unwrap_or("");
     let mut accounts = state.write();
     let state = accounts.get_or_create(acct);
@@ -920,7 +986,7 @@ pub(crate) fn deliver_to_sms_subscribers(
         );
         state
             .sms_messages
-            .push((phone_number.clone(), ctx.default_message.to_string()));
+            .push((phone_number.clone(), sms_message.clone()));
     }
 }
 

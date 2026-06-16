@@ -588,6 +588,7 @@ impl SnsService {
                 created_at: Utc::now(),
                 subscriptions_deleted: 0,
                 fifo_sequence: 0,
+                dedup_cache: std::collections::BTreeMap::new(),
             };
             state.topics.insert(topic_arn.clone(), topic);
         }
@@ -1727,7 +1728,8 @@ pub(crate) struct TopicSubscribers {
     pub(crate) http: Vec<HttpSubscriber>,
     /// (function_arn, subscription_arn)
     pub(crate) lambda: Vec<(String, String)>,
-    pub(crate) email: Vec<String>,
+    /// (email_address, protocol) where protocol is `email` or `email-json`
+    pub(crate) email: Vec<(String, String)>,
     pub(crate) sms: Vec<String>,
 }
 
@@ -1737,6 +1739,9 @@ pub(crate) struct TopicSubscribers {
 pub(crate) struct HttpSubscriber {
     pub(crate) endpoint: String,
     pub(crate) subscription_arn: String,
+    /// `http` or `https` — used to resolve the per-protocol body when
+    /// `MessageStructure=json`.
+    pub(crate) protocol: String,
     pub(crate) delivery_policy: Option<String>,
     pub(crate) redrive_policy: Option<String>,
 }
@@ -1751,12 +1756,36 @@ pub(crate) struct TopicFanoutContext<'a> {
     pub(crate) topic_arn: &'a str,
     pub(crate) subject: Option<&'a str>,
     pub(crate) endpoint: &'a str,
-    pub(crate) sqs_message: &'a str,
     pub(crate) default_message: &'a str,
+    /// When `MessageStructure=json`, the parsed protocol->body map. Each
+    /// fan-out helper resolves its own protocol key from this (falling back
+    /// to the `default` key) so every subscriber gets a protocol-specific
+    /// body, not just SQS. `None` for a plain (non-json) message.
+    pub(crate) structure: Option<&'a Value>,
     pub(crate) envelope_attrs: &'a serde_json::Map<String, Value>,
     pub(crate) message_attributes: &'a BTreeMap<String, MessageAttribute>,
     pub(crate) message_group_id: Option<&'a str>,
     pub(crate) message_dedup_id: Option<&'a str>,
+}
+
+impl TopicFanoutContext<'_> {
+    /// Resolve the body for a specific subscriber protocol when
+    /// `MessageStructure=json`. AWS picks the protocol-specific key
+    /// (`http`/`https`/`lambda`/`email`/`email-json`/`sms`/`application`/
+    /// `sqs`/`firehose`) and falls back to the required `default` key when
+    /// the protocol key is absent. With no JSON structure the resolved body
+    /// is just `default_message`.
+    pub(crate) fn body_for_protocol(&self, protocol: &str) -> String {
+        match self.structure {
+            Some(structure) => structure
+                .get(protocol)
+                .or_else(|| structure.get("default"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(self.default_message)
+                .to_string(),
+            None => self.default_message.to_string(),
+        }
+    }
 }
 
 /// Known match type keys for filter policy objects.

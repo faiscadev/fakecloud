@@ -109,6 +109,7 @@ mod tests {
                 created_at: Utc::now(),
                 subscriptions_deleted: 0,
                 fifo_sequence: 0,
+                dedup_cache: std::collections::BTreeMap::new(),
             },
         );
         state

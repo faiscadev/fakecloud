@@ -100,6 +100,36 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
         let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
 
+        // When the caller supplies KeyId for a symmetric decrypt, AWS
+        // validates it identifies the same CMK that produced the blob and
+        // returns IncorrectKeyException otherwise (1.5). For symmetric keys
+        // KeyId is optional (AWS recovers it from the blob), but if present
+        // it must match. We resolve the caller KeyId (raw id / key ARN /
+        // alias / alias ARN) to its key ARN and compare against the
+        // producing key's ARN.
+        if let Some(caller_key_id) = body["KeyId"].as_str().filter(|s| !s.is_empty()) {
+            let resolved = Self::resolve_key_id_with_state(state, caller_key_id)
+                .and_then(|id| state.keys.get(&id))
+                .map(|k| k.arn.clone());
+            match resolved {
+                Some(arn) if arn == decoded.source_arn => {}
+                Some(_) => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "IncorrectKeyException",
+                        "The key ID in the request does not identify a CMK that can perform this operation.",
+                    ));
+                }
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotFoundException",
+                        format!("Key '{caller_key_id}' does not exist"),
+                    ));
+                }
+            }
+        }
+
         // Gate Decrypt on the source key's lifecycle state. AWS rejects
         // Decrypt against a key in any state other than `Enabled`.
         if let Some(key_id_only) = decoded.source_arn.rsplit('/').next() {
