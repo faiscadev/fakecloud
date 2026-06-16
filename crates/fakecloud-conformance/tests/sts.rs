@@ -46,6 +46,20 @@ async fn sts_assume_role() {
 async fn sts_assume_role_with_web_identity() {
     let server = TestServer::start().await;
     let client = server.sts_client().await;
+    // The role must exist with a trust policy admitting the federated
+    // principal before AssumeRoleWithWebIdentity succeeds — assuming a
+    // non-existent role is denied (matches AWS).
+    server
+        .iam_client()
+        .await
+        .create_role()
+        .role_name("web-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
     let resp = client
         .assume_role_with_web_identity()
         .role_arn("arn:aws:iam::123456789012:role/web-role")
@@ -62,6 +76,20 @@ async fn sts_assume_role_with_web_identity() {
 async fn sts_assume_role_with_saml() {
     let server = TestServer::start().await;
     let client = server.sts_client().await;
+    // The role must exist with a trust policy admitting the SAML
+    // principal before AssumeRoleWithSAML succeeds — assuming a
+    // non-existent role is denied (matches AWS).
+    server
+        .iam_client()
+        .await
+        .create_role()
+        .role_name("saml-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithSAML"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
     let resp = client
         .assume_role_with_saml()
         .role_arn("arn:aws:iam::123456789012:role/saml-role")
