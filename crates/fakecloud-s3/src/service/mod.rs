@@ -2088,23 +2088,15 @@ pub(crate) fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
 pub(crate) fn compute_checksum_raw(algorithm: &str, data: &[u8]) -> Vec<u8> {
     match algorithm {
         "CRC32" => crc32fast::hash(data).to_be_bytes().to_vec(),
+        // CRC32C and CRC64NVME use the same crates as the streaming path so
+        // CopyObject / CompleteMultipartUpload produce identical results to
+        // a streaming PutObject (1.7); the COMPOSITE multipart checksum
+        // concatenates these raw digests before hashing (1.18).
         "CRC32C" => crc32c::crc32c(data).to_be_bytes().to_vec(),
         "CRC64NVME" => {
             let mut hasher = crc64fast_nvme::Digest::new();
             hasher.write(data);
             hasher.sum64().to_be_bytes().to_vec()
-        }
-        // CRC32C and CRC64NVME use the same crates as the streaming path so
-        // CopyObject / CompleteMultipartUpload produce identical results to
-        // a streaming PutObject (1.7).
-        "CRC32C" => {
-            let crc = crc32c::crc32c(data);
-            BASE64.encode(crc.to_be_bytes())
-        }
-        "CRC64NVME" => {
-            let mut hasher = crc64fast_nvme::Digest::new();
-            hasher.write(data);
-            BASE64.encode(hasher.sum64().to_be_bytes())
         }
         "SHA1" => {
             use sha1::Digest as _;
