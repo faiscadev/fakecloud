@@ -157,12 +157,14 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
     let api = pods_api(&c);
     let instance_id = "i-0k8slifecycle";
 
-    // RunInstances boots a Pod and runs user-data at boot.
+    // RunInstances boots a Pod and runs user-data at boot. (k8s ignores the
+    // per-subnet network spec — isolation there is a NetworkPolicy concern.)
     let running = rt
         .run_instance(
             instance_id,
             Some(USER_DATA_B64),
             &std::collections::BTreeMap::new(),
+            None,
         )
         .await
         .expect("run_instance");
