@@ -142,7 +142,7 @@ async fn sg_enforcement_degrades_without_net_admin() {
         .unwrap();
     let sg = sg.group_id().unwrap().to_string();
 
-    let mut launch = |n: &str| {
+    let launch = |n: &str| {
         let c = c.clone();
         let subnet = subnet.clone();
         let sg = sg.clone();
