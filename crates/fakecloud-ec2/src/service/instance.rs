@@ -244,7 +244,7 @@ pub(crate) async fn run_instances(
         .get("NetworkInterface.1.AssociatePublicIpAddress")
         .or_else(|| req.query_params.get("AssociatePublicIpAddress"))
         .map(|v| v == "true");
-    let (vpc_id, subnet_auto_public) = {
+    let (vpc_id, subnet_auto_public, instance_network) = {
         let accounts = svc.state.read();
         let empty = Ec2State::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -281,7 +281,15 @@ pub(crate) async fn run_instances(
                 sg_ids = vec![sg.group_id.clone()];
             }
         }
-        match subnet_id.as_ref() {
+        // The backing per-subnet network for phase-2 L3 isolation. A subnet
+        // with no `0.0.0.0/0 -> igw` route is private -> `internal` network.
+        let instance_network = subnet_id
+            .as_ref()
+            .map(|sid| crate::runtime::InstanceNetwork {
+                subnet_id: sid.clone(),
+                internal: !crate::defaults::subnet_is_public(state, sid),
+            });
+        let (vpc, auto_public) = match subnet_id.as_ref() {
             Some(sid) => state
                 .subnets
                 .get(sid)
@@ -301,7 +309,8 @@ pub(crate) async fn run_instances(
                 )),
                 true,
             ),
-        }
+        };
+        (vpc, auto_public, instance_network)
     };
     let assign_public = assoc_public.unwrap_or(subnet_auto_public);
 
@@ -377,11 +386,17 @@ pub(crate) async fn run_instances(
         let runtime = svc.runtime.clone();
         let account_id = req.account_id.clone();
         let ids = ids.clone();
+        let instance_network = instance_network.clone();
         tokio::spawn(async move {
             for id in &ids {
                 let running = if let Some(rt) = &runtime {
                     match rt
-                        .run_instance(id, user_data.as_deref(), &instance_tags)
+                        .run_instance(
+                            id,
+                            user_data.as_deref(),
+                            &instance_tags,
+                            instance_network.as_ref(),
+                        )
                         .await
                     {
                         Ok(r) => Some(r),

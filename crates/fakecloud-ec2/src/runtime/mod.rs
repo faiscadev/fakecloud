@@ -62,6 +62,32 @@ pub struct RunningInstance {
     /// The instance's private IP — the container's address on the daemon
     /// network (Docker) or the Pod IP (k8s).
     pub private_ip: String,
+    /// Name of the backing daemon network the container was attached to
+    /// (`fakecloud-subnet-<id>`), or `None` when it ran on the default bridge
+    /// (no network spec, or creation failed and we fell back). Surfaced for
+    /// introspection (#1745 phase 5).
+    pub network: Option<String>,
+}
+
+/// The L3 placement of an instance's backing container: which subnet it lands
+/// in and whether that subnet is private.
+///
+/// Per-subnet networks give the isolation #1745 wants for free: two instances
+/// in the same subnet share a bridge and can talk; instances in different
+/// subnets / VPCs land on different bridges and cannot route to each other.
+#[derive(Debug, Clone)]
+pub struct InstanceNetwork {
+    /// The EC2 subnet id the instance launched into.
+    pub subnet_id: String,
+    /// True when the subnet has no `0.0.0.0/0 -> igw` route (private): the
+    /// backing network is created `--internal` (no NAT to host/internet).
+    pub internal: bool,
+}
+
+/// The daemon network name backing an EC2 subnet. Stable per subnet so every
+/// instance in the subnet attaches to the same bridge.
+pub fn subnet_network_name(subnet_id: &str) -> String {
+    format!("fakecloud-subnet-{subnet_id}")
 }
 
 /// What the runtime remembers per instance so it can drive the backing
@@ -80,6 +106,11 @@ struct InstanceRecord {
     /// survive a k8s `Start`/`Reboot` recreate, so they're stored here
     /// rather than re-read from the control plane.
     tags: BTreeMap<String, String>,
+    /// The instance's subnet placement, captured at `RunInstances` so a k8s
+    /// `Start`/`Reboot` recreate re-applies the same network and phase-5
+    /// introspection can report the backing network. `None` in metadata-only
+    /// network mode.
+    network: Option<InstanceNetwork>,
 }
 
 /// The selected backing-container backend.
@@ -139,10 +170,17 @@ impl Ec2Runtime {
         instance_id: &str,
         user_data: Option<&str>,
         tags: &BTreeMap<String, String>,
+        network: Option<&InstanceNetwork>,
     ) -> Result<RunningInstance, RuntimeError> {
         let image = default_image();
         let running = match &self.backend {
-            InstanceBackend::Docker(d) => d.run_instance(instance_id, &image, user_data).await?,
+            // Docker attaches the container to the subnet's per-VPC bridge for
+            // L3 isolation. k8s pods share a flat network; isolation there is a
+            // NetworkPolicy concern handled separately (#1745 phase 4).
+            InstanceBackend::Docker(d) => {
+                d.run_instance(instance_id, &image, user_data, network)
+                    .await?
+            }
             InstanceBackend::K8s(k) => k.spawn_pod(instance_id, &image, user_data, tags).await?,
         };
         self.instances.write().insert(
@@ -152,6 +190,7 @@ impl Ec2Runtime {
                 image,
                 user_data: user_data.map(str::to_string),
                 tags: tags.clone(),
+                network: network.cloned(),
             },
         );
         Ok(running)
@@ -178,11 +217,16 @@ impl Ec2Runtime {
         let record = self.instances.read().get(instance_id)?.clone();
         match &self.backend {
             InstanceBackend::Docker(d) => {
-                // Same container; only the IP may change.
+                // Same container; only the IP may change. The subnet network the
+                // container was created on persists across stop/start.
                 let private_ip = d.start(&record.handle).await?;
                 Some(RunningInstance {
                     container_id: record.handle,
                     private_ip,
+                    network: record
+                        .network
+                        .as_ref()
+                        .map(|n| subnet_network_name(&n.subnet_id)),
                 })
             }
             InstanceBackend::K8s(k) => {
@@ -324,7 +368,16 @@ impl DockerInstances {
         instance_id: &str,
         image: &str,
         user_data: Option<&str>,
+        network: Option<&InstanceNetwork>,
     ) -> Result<RunningInstance, RuntimeError> {
+        // Ensure the subnet's bridge exists and attach to it for L3 isolation.
+        // Network creation is best-effort: on failure we fall back to the
+        // default bridge so the instance still boots (no regression vs today).
+        let attached_network = match network {
+            Some(net) => self.ensure_subnet_network(net).await,
+            None => None,
+        };
+
         let mut args: Vec<String> = vec![
             "run".to_string(),
             "-d".to_string(),
@@ -332,8 +385,12 @@ impl DockerInstances {
             format!("fakecloud-ec2={instance_id}"),
             "--label".to_string(),
             format!("fakecloud-instance={}", self.instance_id),
-            image.to_string(),
         ];
+        if let Some(name) = &attached_network {
+            args.push("--network".to_string());
+            args.push(name.clone());
+        }
+        args.push(image.to_string());
         args.extend(boot_command(user_data));
 
         let output = tokio::process::Command::new(&self.cli)
@@ -357,7 +414,61 @@ impl DockerInstances {
         Ok(RunningInstance {
             container_id,
             private_ip,
+            network: attached_network,
         })
+    }
+
+    /// Create (idempotently) the daemon network backing a subnet and return its
+    /// name, or `None` if creation failed (caller falls back to the default
+    /// bridge). The network carries the shared `fakecloud-instance` ownership
+    /// label so the startup reaper prunes it after an ungraceful restart, plus
+    /// a `fakecloud-subnet=<id>` label for introspection. Private subnets get
+    /// an `--internal` network (no NAT to the host/internet).
+    async fn ensure_subnet_network(&self, net: &InstanceNetwork) -> Option<String> {
+        let name = subnet_network_name(&net.subnet_id);
+        let mut args = vec!["network".to_string(), "create".to_string()];
+        if net.internal {
+            args.push("--internal".to_string());
+        }
+        args.push("--label".to_string());
+        args.push(format!("fakecloud-subnet={}", net.subnet_id));
+        args.push("--label".to_string());
+        args.push(format!("fakecloud-instance={}", self.instance_id));
+        args.push(name.clone());
+
+        let output = tokio::process::Command::new(&self.cli)
+            .args(&args)
+            .output()
+            .await;
+        match output {
+            // Created fresh.
+            Ok(out) if out.status.success() => Some(name),
+            // Already exists (another instance in the same subnet created it):
+            // a benign race — the network is there, so attach to it.
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                if err.contains("already exists") || err.contains("exists") {
+                    Some(name)
+                } else {
+                    tracing::warn!(
+                        subnet = %net.subnet_id,
+                        network = %name,
+                        error = %err.trim(),
+                        "subnet network creation failed; falling back to default bridge"
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    subnet = %net.subnet_id,
+                    network = %name,
+                    error = %e,
+                    "subnet network creation failed; falling back to default bridge"
+                );
+                None
+            }
+        }
     }
 
     /// Read the container's private IP from `inspect`. Returns `None` if the
