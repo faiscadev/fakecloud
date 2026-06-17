@@ -414,7 +414,7 @@ pub(crate) async fn run_instances(
             // security-group firewall so the new instances are filtered
             // (#1745 phase 3). No-op when enforcement is disabled.
             if let Some(rt) = &runtime {
-                if rt.firewall().enabled() {
+                if rt.network_isolation_enforced() {
                     super::firewall_model::reconcile(&svc_state, rt).await;
                 }
             }
@@ -605,7 +605,7 @@ async fn change_state(
             // Lifecycle changes move/remove instances (new IP on start, gone on
             // terminate): re-apply the security-group firewall (#1745 ph3).
             if let Some(rt) = &runtime {
-                if rt.firewall().enabled() {
+                if rt.network_isolation_enforced() {
                     super::firewall_model::reconcile(&svc_state, rt).await;
                 }
             }

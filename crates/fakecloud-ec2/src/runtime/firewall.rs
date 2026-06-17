@@ -50,6 +50,19 @@ pub struct InstanceFirewall {
     pub egress: Vec<FirewallRule>,
 }
 
+/// One running instance's flattened firewall view, keyed by both its id (for
+/// the k8s NetworkPolicy `podSelector`) and its IP (for nft). The shared
+/// intermediate the service layer produces from EC2 state; the nft model
+/// builder and the k8s NetworkPolicy builder both consume it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceRules {
+    pub instance_id: String,
+    pub subnet_id: String,
+    pub private_ip: String,
+    pub ingress: Vec<FirewallRule>,
+    pub egress: Vec<FirewallRule>,
+}
+
 /// A subnet-level NACL entry (allow/deny, ordered by rule number by the
 /// caller). NACLs are stateless and apply to the whole subnet.
 #[derive(Debug, Clone, PartialEq, Eq)]

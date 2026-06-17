@@ -20,13 +20,16 @@
 
 pub mod firewall;
 mod k8s;
+pub mod netpolicy;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use firewall::{render_ruleset, resolve_enforcement_mode, EnforcementMode, SubnetFirewall};
+use firewall::{
+    render_ruleset, resolve_enforcement_mode, EnforcementMode, InstanceRules, SubnetFirewall,
+};
 
 /// Default base image an instance's container runs. AMIs don't map to a
 /// concrete OS image, so we boot a real Amazon Linux container by default
@@ -262,6 +265,26 @@ impl Ec2Runtime {
     /// given per-subnet model. No-op (cheap) when enforcement is disabled.
     pub async fn reconcile_firewall(&self, subnets: Vec<SubnetFirewall>) {
         self.firewall.reconcile(&subnets).await;
+    }
+
+    /// Whether this runtime backs network isolation with real enforcement —
+    /// host nftables (Docker, opt-in) or k8s NetworkPolicy. Lets the control
+    /// plane skip building the firewall model entirely when neither applies.
+    pub fn network_isolation_enforced(&self) -> bool {
+        self.firewall.enabled() || self.is_k8s()
+    }
+
+    /// True for the Kubernetes backend (isolation via NetworkPolicy).
+    pub fn is_k8s(&self) -> bool {
+        matches!(self.backend, InstanceBackend::K8s(_))
+    }
+
+    /// Apply one NetworkPolicy per instance for the k8s backend. No-op on the
+    /// Docker backend (which uses nftables instead).
+    pub async fn reconcile_network_policies(&self, rules: Vec<InstanceRules>) {
+        if let InstanceBackend::K8s(k) = &self.backend {
+            k.reconcile_network_policies(&rules).await;
+        }
     }
 
     /// Name of the active backend, for logging.

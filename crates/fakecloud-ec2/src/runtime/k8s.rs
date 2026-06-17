@@ -21,6 +21,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
+use super::firewall::InstanceRules;
+use super::netpolicy::{self, CniDriver};
 use super::{boot_command, BackendInitError, RunningInstance, RuntimeError};
 
 /// Which `fakecloud-service` label instance Pods carry.
@@ -44,6 +46,10 @@ pub(super) struct K8sInstances {
     /// `Terminating`; a fresh name avoids a name collision with it (the old
     /// Pod terminates on its own).
     spawn_seq: Arc<AtomicU64>,
+    /// The detected cluster CNI, deciding whether NetworkPolicy is enforced
+    /// (#1745 phase 4). Policies are always created; this only governs the
+    /// degrade warning.
+    cni: CniDriver,
 }
 
 impl std::fmt::Debug for K8sInstances {
@@ -66,12 +72,46 @@ impl K8sInstances {
             "K8s EC2 backend initialized"
         );
         let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_EC2_K8S")?;
+        // Detect the CNI so we can warn when NetworkPolicy won't be enforced.
+        let cni = CniDriver::from_components(client.kube_system_pod_names().await);
+        if cni.enforces() {
+            tracing::info!(?cni, "k8s CNI enforces NetworkPolicy; EC2 security groups will be applied as NetworkPolicies");
+        } else {
+            tracing::warn!(
+                "k8s CNI does not appear to enforce NetworkPolicy (detected: {cni:?}); EC2 \
+                 security-group NetworkPolicies will be created but may not be enforced by the \
+                 cluster -- install a NetworkPolicy-enforcing CNI (e.g. Calico) for real isolation"
+            );
+        }
         Ok(Self {
             client,
             pull_secret: env.pull_secret,
             pod_config,
             spawn_seq: Arc::new(AtomicU64::new(0)),
+            cni,
         })
+    }
+
+    /// (Re)apply one NetworkPolicy per running instance and prune policies for
+    /// instances that no longer exist. Always creates the policies; whether
+    /// they're enforced is up to the cluster CNI (warned about at startup).
+    pub(super) async fn reconcile_network_policies(&self, rules: &[InstanceRules]) {
+        let namespace = self.client.namespace().to_string();
+        let owner = self.client.instance_id().to_string();
+        let policies = netpolicy::build_policies(rules, &namespace, &owner);
+        let keep: std::collections::HashSet<String> = policies
+            .iter()
+            .filter_map(|p| p.metadata.name.clone())
+            .collect();
+        for policy in &policies {
+            self.client.apply_network_policy(policy).await;
+        }
+        self.client.prune_network_policies(&keep).await;
+        tracing::debug!(
+            count = policies.len(),
+            enforced = self.cni.enforces(),
+            "applied EC2 NetworkPolicies"
+        );
     }
 
     /// Spawn (or recreate) the Pod backing an instance. Each spawn gets a

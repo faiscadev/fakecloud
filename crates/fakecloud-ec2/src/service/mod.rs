@@ -917,7 +917,7 @@ impl Ec2Service {
         let Some(runtime) = self.runtime.clone() else {
             return;
         };
-        if !runtime.firewall().enabled() {
+        if !runtime.network_isolation_enforced() {
             return;
         }
         let state = self.state.clone();
