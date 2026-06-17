@@ -254,6 +254,23 @@ impl Ec2Client<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// Inspect the real backing network of each EC2 instance — which
+    /// Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+    /// and whether security-group enforcement is active or degraded. A
+    /// debugging aid for "why can't X reach Y" (issue #1745).
+    pub async fn get_instance_networks(&self) -> Result<Ec2InstanceNetworksResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ec2/instance-networks",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 pub struct RdsClient<'a> {

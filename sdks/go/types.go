@@ -80,6 +80,32 @@ type EC2InstancesResponse struct {
 	Instances []EC2Instance `json:"instances"`
 }
 
+// EC2InstanceNetwork describes the real backing network of an EC2 instance —
+// which Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+// and whether security-group enforcement is active or degraded. A debugging
+// aid for "why can't X reach Y" (issue #1745).
+type EC2InstanceNetwork struct {
+	InstanceID string  `json:"instanceId"`
+	VpcID      *string `json:"vpcId"`
+	SubnetID   *string `json:"subnetId"`
+	PrivateIP  string  `json:"privateIp"`
+	// BackingNetwork is the Docker/Podman network (fakecloud-subnet-<id>) or k8s
+	// NetworkPolicy (fakecloud-ec2-<id>) backing the instance, or nil when
+	// metadata-only / not yet running.
+	BackingNetwork *string `json:"backingNetwork"`
+	// IsolationBackend is "docker", "podman", "kubernetes", or "none".
+	IsolationBackend string `json:"isolationBackend"`
+	// SecurityGroupEnforcement is "nftables", "networkpolicy", or "disabled".
+	SecurityGroupEnforcement string `json:"securityGroupEnforcement"`
+	// EnforcementActive reports whether security-group rules are actually
+	// enforced (vs tracked-only).
+	EnforcementActive bool `json:"enforcementActive"`
+}
+
+type EC2InstanceNetworksResponse struct {
+	InstanceNetworks []EC2InstanceNetwork `json:"instanceNetworks"`
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 type ElastiCacheCluster struct {

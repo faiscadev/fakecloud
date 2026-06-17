@@ -180,6 +180,50 @@ async fn sdk_ec2_get_instances() {
     assert!(!inst.private_ip.is_empty());
 }
 
+#[tokio::test]
+async fn sdk_ec2_get_instance_networks() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let ec2 = server.ec2_client().await;
+
+    let run = ec2
+        .run_instances()
+        .image_id("ami-net123")
+        .min_count(1)
+        .max_count(1)
+        .send()
+        .await
+        .unwrap();
+    let id = run.instances()[0].instance_id().unwrap().to_string();
+
+    let networks = fc
+        .ec2()
+        .get_instance_networks()
+        .await
+        .expect("get ec2 instance networks");
+    let net = networks
+        .instance_networks
+        .iter()
+        .find(|n| n.instance_id == id)
+        .expect("instance present in network introspection");
+    // No-subnet launch resolves into the default VPC + a default subnet.
+    assert!(net.vpc_id.as_deref().is_some_and(|v| v.starts_with("vpc-")));
+    assert!(net
+        .subnet_id
+        .as_deref()
+        .is_some_and(|s| s.starts_with("subnet-")));
+    // The isolation backend + SG enforcement mode are always reported. Without
+    // opt-in / NET_ADMIN, enforcement degrades to inactive (no regression).
+    assert!(matches!(
+        net.isolation_backend.as_str(),
+        "docker" | "podman" | "kubernetes" | "none"
+    ));
+    assert!(matches!(
+        net.security_group_enforcement.as_str(),
+        "nftables" | "networkpolicy" | "disabled"
+    ));
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -76,6 +76,26 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Ec2InstancesResponse(List<Ec2Instance> instances) {}
 
+    /**
+     * The real backing network of an EC2 instance — which Docker/Podman network
+     * or k8s NetworkPolicy backs it, its container IP, and whether
+     * security-group enforcement is active or degraded. A debugging aid for
+     * "why can't X reach Y" (issue #1745).
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Ec2InstanceNetwork(
+            String instanceId,
+            String vpcId,
+            String subnetId,
+            String privateIp,
+            String backingNetwork,
+            String isolationBackend,
+            String securityGroupEnforcement,
+            boolean enforcementActive) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Ec2InstanceNetworksResponse(List<Ec2InstanceNetwork> instanceNetworks) {}
+
     // ── ElastiCache ────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ElastiCacheCluster(

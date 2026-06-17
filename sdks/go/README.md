@@ -157,6 +157,13 @@ func main() {
 | `S3Import(ctx, req)` | Drive the `aws_s3.table_import_from_s3` bridge |
 | `S3Export(ctx, req)` | Drive the `aws_s3.query_export_to_s3` bridge |
 
+### EC2 - `fc.EC2()`
+
+| Method | Description |
+|--------|-------------|
+| `GetInstances(ctx)` | List EC2 instances with control-plane + runtime metadata |
+| `GetInstanceNetworks(ctx)` | Inspect each instance's backing network, container IP, isolation backend, and security-group enforcement state |
+
 ### ElastiCache - `fc.ElastiCache()`
 
 | Method | Description |

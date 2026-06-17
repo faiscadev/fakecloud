@@ -336,6 +336,16 @@ public final class FakeCloud {
         public Ec2InstancesResponse getInstances() {
             return http.get("/_fakecloud/ec2/instances", Ec2InstancesResponse.class);
         }
+
+        /**
+         * Inspect the real backing network of each EC2 instance — which
+         * Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+         * and whether security-group enforcement is active or degraded. A
+         * debugging aid for "why can't X reach Y" (issue #1745).
+         */
+        public Ec2InstanceNetworksResponse getInstanceNetworks() {
+            return http.get("/_fakecloud/ec2/instance-networks", Ec2InstanceNetworksResponse.class);
+        }
     }
 
     public static final class RdsClient {

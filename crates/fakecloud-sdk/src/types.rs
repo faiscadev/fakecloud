@@ -2369,3 +2369,35 @@ pub struct Ec2Instance {
 pub struct Ec2InstancesResponse {
     pub instances: Vec<Ec2Instance>,
 }
+
+/// The real backing network of one EC2 instance — a debugging aid for "why
+/// can't X reach Y" (issue #1745). Exposes which daemon network / NetworkPolicy
+/// backs the instance, its container IP, and whether security-group enforcement
+/// is active or degraded to metadata-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ec2InstanceNetwork {
+    pub instance_id: String,
+    pub vpc_id: Option<String>,
+    pub subnet_id: Option<String>,
+    /// The instance's address on its backing network.
+    pub private_ip: String,
+    /// The Docker/Podman network (`fakecloud-subnet-<id>`) or k8s NetworkPolicy
+    /// (`fakecloud-ec2-<id>`) backing the instance. `None` when metadata-only
+    /// (no container runtime) or not yet running.
+    pub backing_network: Option<String>,
+    /// `docker` | `podman` | `kubernetes` | `none`.
+    pub isolation_backend: String,
+    /// Security-group enforcement mechanism: `nftables` | `networkpolicy` |
+    /// `disabled`.
+    pub security_group_enforcement: String,
+    /// Whether security-group rules are actually enforced (vs tracked-only).
+    pub enforcement_active: bool,
+}
+
+/// Response body for `GET /_fakecloud/ec2/instance-networks`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ec2InstanceNetworksResponse {
+    pub instance_networks: Vec<Ec2InstanceNetwork>,
+}
