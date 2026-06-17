@@ -460,3 +460,82 @@ async fn describe_instances_rejects_out_of_range_max_results() {
         "expected InvalidParameterValue, got {msg}"
     );
 }
+
+// ---- Phase 1: default VPC topology (issue #1745) ----
+
+#[tokio::test]
+async fn default_vpc_and_subnets_exist_on_boot() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    // Every account+region ships a default VPC, like AWS.
+    let vpcs = c.describe_vpcs().send().await.unwrap();
+    let default_vpc = vpcs
+        .vpcs()
+        .iter()
+        .find(|v| v.is_default() == Some(true))
+        .expect("a default VPC should exist on boot");
+    assert_eq!(default_vpc.cidr_block(), Some("172.31.0.0/16"));
+    let vpc_id = default_vpc.vpc_id().unwrap().to_string();
+
+    // Default subnets, one per AZ, all default-for-az.
+    let subnets = c.describe_subnets().send().await.unwrap();
+    let defaults: Vec<_> = subnets
+        .subnets()
+        .iter()
+        .filter(|sn| sn.default_for_az() == Some(true))
+        .collect();
+    assert!(
+        defaults.len() >= 3,
+        "expected >=3 default subnets, got {}",
+        defaults.len()
+    );
+    assert!(defaults.iter().all(|sn| sn.vpc_id() == Some(vpc_id.as_str())));
+    assert!(defaults
+        .iter()
+        .all(|sn| sn.map_public_ip_on_launch() == Some(true)));
+
+    // A `default` security group exists in the default VPC.
+    let sgs = c.describe_security_groups().send().await.unwrap();
+    assert!(sgs
+        .security_groups()
+        .iter()
+        .any(|g| g.group_name() == Some("default") && g.vpc_id() == Some(vpc_id.as_str())));
+}
+
+#[tokio::test]
+async fn run_instances_without_subnet_lands_in_default_vpc() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+
+    let resp = c
+        .run_instances()
+        .image_id("ami-12345678")
+        .min_count(1)
+        .max_count(1)
+        .send()
+        .await
+        .unwrap();
+    let inst = &resp.instances()[0];
+    let vpc_id = inst.vpc_id().expect("instance should resolve a vpc-id");
+    assert!(vpc_id.starts_with("vpc-"), "got {vpc_id}");
+    let subnet_id = inst.subnet_id().expect("instance should resolve a subnet-id");
+    assert!(subnet_id.starts_with("subnet-"), "got {subnet_id}");
+
+    // The resolved VPC is the default VPC.
+    let vpcs = c.describe_vpcs().vpc_ids(vpc_id).send().await.unwrap();
+    assert_eq!(vpcs.vpcs()[0].is_default(), Some(true));
+
+    // The instance picked up the VPC's default security group.
+    let described = c
+        .describe_instances()
+        .instance_ids(inst.instance_id().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let groups = described.reservations()[0].instances()[0].security_groups();
+    assert!(
+        groups.iter().any(|g| g.group_name() == Some("default")),
+        "instance should attach the default security group"
+    );
+}

@@ -1231,11 +1231,18 @@ pub struct Ec2State {
 
 impl Ec2State {
     pub fn new(account_id: &str, region: &str) -> Self {
-        Self {
+        let mut state = Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             ..Default::default()
-        }
+        };
+        // Seed the default VPC topology (VPC, IGW, subnets, route table,
+        // security group, NACL) the way every AWS account+region ships one, so
+        // callers that never touch the VPC APIs still launch into a real,
+        // isolatable network. Ids are deterministic, so the throwaway empty
+        // states the read paths build report the same ids as this one.
+        crate::defaults::bootstrap_default_network(&mut state);
+        state
     }
 
     /// Replace the tag set for `resource_id` with `tags` merged over any

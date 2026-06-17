@@ -32,11 +32,30 @@ fn state_xml(tag: &str, code: i64, name: &str) -> String {
     format!("<{tag}><code>{code}</code><name>{name}</name></{tag}>")
 }
 
-fn instance_xml(i: &Instance, tags: &[Tag], owner: &str) -> String {
+/// Map of `security-group-id -> group-name` for the whole state, so
+/// DescribeInstances can render the real `groupName` (AWS returns the name, not
+/// the id) instead of echoing the id back.
+fn sg_name_map(state: &Ec2State) -> HashMap<String, String> {
+    state
+        .security_groups
+        .values()
+        .map(|g| (g.group_id.clone(), g.group_name.clone()))
+        .collect()
+}
+
+fn instance_xml(
+    i: &Instance,
+    tags: &[Tag],
+    owner: &str,
+    sg_names: &HashMap<String, String>,
+) -> String {
     let groups: Vec<String> = i
         .security_group_ids
         .iter()
-        .map(|g| format!("{}{}", ec2_elem("groupId", g), ec2_elem("groupName", g)))
+        .map(|g| {
+            let name = sg_names.get(g).map(String::as_str).unwrap_or(g.as_str());
+            format!("{}{}", ec2_elem("groupId", g), ec2_elem("groupName", name))
+        })
         .collect();
     let public = i
         .public_ip
@@ -197,8 +216,8 @@ pub(crate) async fn run_instances(
         .cloned()
         .unwrap_or_else(|| "t3.micro".to_string());
     let key_name = req.query_params.get("KeyName").cloned();
-    let subnet_id = req.query_params.get("SubnetId").cloned();
-    let sg_ids = indexed_list(&req.query_params, "SecurityGroupId");
+    let mut subnet_id = req.query_params.get("SubnetId").cloned();
+    let mut sg_ids = indexed_list(&req.query_params, "SecurityGroupId");
     let user_data = req.query_params.get("UserData").cloned();
     let owner = req.account_id.clone();
     let az = format!(
@@ -227,8 +246,43 @@ pub(crate) async fn run_instances(
         .map(|v| v == "true");
     let (vpc_id, subnet_auto_public) = {
         let accounts = svc.state.read();
-        match (accounts.get(&req.account_id), subnet_id.as_ref()) {
-            (Some(state), Some(sid)) => state
+        let empty = Ec2State::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        // No explicit subnet: land in the default VPC's default subnet for the
+        // target AZ (falling back to any default subnet), exactly as AWS does.
+        // This fills `subnet_id`/`vpc_id` so DescribeInstances reports a real
+        // subnet/VPC and phase-2 per-subnet networking has something to key on.
+        if subnet_id.is_none() {
+            if let Some(s) = state
+                .subnets
+                .values()
+                .filter(|s| s.default_for_az)
+                .find(|s| s.availability_zone == az)
+                .or_else(|| state.subnets.values().find(|s| s.default_for_az))
+            {
+                subnet_id = Some(s.subnet_id.clone());
+            }
+        }
+        // When the caller named no security group, AWS attaches the VPC's
+        // `default` group. Resolve it from the subnet's VPC (or the default VPC).
+        let resolved_vpc = subnet_id
+            .as_ref()
+            .and_then(|sid| state.subnets.get(sid))
+            .map(|s| s.vpc_id.clone());
+        if sg_ids.is_empty() {
+            let vpc = resolved_vpc
+                .clone()
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id, &req.region));
+            if let Some(sg) = state
+                .security_groups
+                .values()
+                .find(|g| g.vpc_id == vpc && g.group_name == "default")
+            {
+                sg_ids = vec![sg.group_id.clone()];
+            }
+        }
+        match subnet_id.as_ref() {
+            Some(sid) => state
                 .subnets
                 .get(sid)
                 .map(|s| {
@@ -238,9 +292,15 @@ pub(crate) async fn run_instances(
                     )
                 })
                 .unwrap_or((None, false)),
-            // No subnet specified: treat as a launch into the default VPC,
-            // which assigns public IPs by default.
-            _ => (None, true),
+            // No subnet (and no default subnet found): still a default-VPC
+            // launch, which assigns public IPs by default.
+            None => (
+                Some(crate::defaults::default_vpc_id(
+                    &req.account_id,
+                    &req.region,
+                )),
+                true,
+            ),
         }
     };
     let assign_public = assoc_public.unwrap_or(subnet_auto_public);
@@ -257,6 +317,7 @@ pub(crate) async fn run_instances(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        let sg_names = sg_name_map(state);
         for (idx, id) in ids.iter().enumerate() {
             let inst = Instance {
                 instance_id: id.clone(),
@@ -305,7 +366,7 @@ pub(crate) async fn run_instances(
                 "instance",
             );
             let tags = state.tags_for(id).to_vec();
-            rendered.push(instance_xml(&inst, &tags, &owner));
+            rendered.push(instance_xml(&inst, &tags, &owner, &sg_names));
             state.instances.insert(id.clone(), inst);
         }
     }
@@ -689,6 +750,7 @@ pub(crate) fn describe_instances(
     let (page, token) = crate::service_helpers::paginate(&matching, next_token, max_results);
 
     // Group the page back into reservations, preserving the sorted order.
+    let sg_names = sg_name_map(state);
     let mut by_res: HashMap<String, Vec<String>> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for i in page {
@@ -698,7 +760,12 @@ pub(crate) fn describe_instances(
         by_res
             .entry(i.reservation_id.clone())
             .or_default()
-            .push(instance_xml(i, state.tags_for(&i.instance_id), &owner));
+            .push(instance_xml(
+                i,
+                state.tags_for(&i.instance_id),
+                &owner,
+                &sg_names,
+            ));
     }
     let reservations: Vec<String> = order
         .iter()
@@ -874,8 +941,8 @@ pub(crate) fn describe_instance_attribute(
     let attribute = require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", ATTRIBUTE_VALUES)?;
     let accounts = svc.state.read();
-    let inst = accounts
-        .get(&req.account_id)
+    let acct_state = accounts.get(&req.account_id);
+    let inst = acct_state
         .and_then(|s| s.instances.get(&id))
         .ok_or_else(|| crate::service_helpers::instance_not_found(&id))?;
     let attr_xml = match attribute.as_str() {
@@ -908,10 +975,14 @@ pub(crate) fn describe_instance_attribute(
             None => "<userData/>".to_string(),
         },
         "groupSet" => {
+            let sg_names = acct_state.map(sg_name_map).unwrap_or_default();
             let groups: Vec<String> = inst
                 .security_group_ids
                 .iter()
-                .map(|g| format!("{}{}", ec2_elem("groupId", g), ec2_elem("groupName", g)))
+                .map(|g| {
+                    let name = sg_names.get(g).map(String::as_str).unwrap_or(g.as_str());
+                    format!("{}{}", ec2_elem("groupId", g), ec2_elem("groupName", name))
+                })
                 .collect();
             ec2_list("groupSet", &groups)
         }
