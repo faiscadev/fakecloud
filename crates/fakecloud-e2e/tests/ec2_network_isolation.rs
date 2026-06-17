@@ -166,7 +166,8 @@ async fn instances_isolate_by_subnet_network() {
     let b1 = run_in_subnet(&c, Some(&subnet_b)).await;
     let c1 = run_in_subnet(&c, None).await;
 
-    let a1_ip = wait_running(&c, &a1).await;
+    // a1 must be up before we exec into it; its own IP isn't needed.
+    wait_running(&c, &a1).await;
     let a2_ip = wait_running(&c, &a2).await;
     let b1_ip = wait_running(&c, &b1).await;
     let _c1_ip = wait_running(&c, &c1).await;
