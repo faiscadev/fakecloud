@@ -124,6 +124,9 @@ impl K8sInstances {
         Ok(RunningInstance {
             container_id: pod_name,
             private_ip: pod_ip,
+            // k8s pods share a flat network; per-subnet isolation is a
+            // NetworkPolicy concern (#1745 phase 4), not a daemon network.
+            network: None,
         })
     }
 

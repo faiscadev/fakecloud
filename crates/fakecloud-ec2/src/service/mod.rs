@@ -929,6 +929,7 @@ impl Ec2Service {
             id: String,
             user_data: Option<String>,
             tags: std::collections::BTreeMap<String, String>,
+            network: Option<crate::runtime::InstanceNetwork>,
         }
 
         let pending: Vec<Pending> = {
@@ -940,6 +941,15 @@ impl Ec2Service {
                 // `state` at once when re-deriving per-instance Pod tags.
                 let tag_snapshot: std::collections::HashMap<String, Vec<crate::state::Tag>> =
                     state.tags.clone();
+                // Which subnets are public (have an IGW default route), computed
+                // before the mutable instance loop so we can re-derive each
+                // recovered instance's `internal` flag without a second borrow.
+                let public_subnets: std::collections::HashSet<String> = state
+                    .subnets
+                    .keys()
+                    .filter(|sid| crate::defaults::subnet_is_public(state, sid))
+                    .cloned()
+                    .collect();
                 for (id, inst) in state.instances.iter_mut() {
                     // Only running/pending instances need a live container; the
                     // stale container_id is dropped (the reaper removed it).
@@ -954,6 +964,13 @@ impl Ec2Service {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let network =
+                        inst.subnet_id
+                            .clone()
+                            .map(|sid| crate::runtime::InstanceNetwork {
+                                internal: !public_subnets.contains(&sid),
+                                subnet_id: sid,
+                            });
                     inst.state_code = 0;
                     inst.state_name = "pending".to_string();
                     inst.container_id = None;
@@ -962,6 +979,7 @@ impl Ec2Service {
                         id: id.clone(),
                         user_data: inst.user_data.clone(),
                         tags,
+                        network,
                     });
                 }
             }
@@ -981,7 +999,7 @@ impl Ec2Service {
             let state = self.state.clone();
             tokio::spawn(async move {
                 let running = runtime
-                    .run_instance(&p.id, p.user_data.as_deref(), &p.tags)
+                    .run_instance(&p.id, p.user_data.as_deref(), &p.tags, p.network.as_ref())
                     .await;
                 let reap = {
                     let mut accounts = state.write();
