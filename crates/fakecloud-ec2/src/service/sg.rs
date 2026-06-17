@@ -397,6 +397,8 @@ fn authorize(
             sg.rules.extend(new_rules.clone());
         }
     }
+    // New rules change what traffic is allowed — re-apply the firewall (ph3).
+    svc.spawn_firewall_reconcile();
     let rule_items: Vec<String> = new_rules
         .iter()
         .map(|r| rule_xml(r, &owner, &region))
@@ -447,6 +449,8 @@ fn revoke(
             }
         }
     }
+    // Removing rules tightens the firewall — re-apply (ph3).
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         action,
         &req.request_id,

@@ -6,6 +6,7 @@ mod dhcp;
 mod eip;
 mod endpoint;
 mod eni;
+mod firewall_model;
 mod fleet;
 mod ice;
 mod image;
@@ -902,6 +903,27 @@ impl Ec2Service {
     /// introspection endpoints (`GET /_fakecloud/ec2/instances`).
     pub fn shared_state(&self) -> SharedEc2State {
         self.state.clone()
+    }
+
+    /// Re-derive the security-group/NACL firewall model from current state and
+    /// (re)apply it via the runtime's nftables enforcer (#1745 phase 3).
+    ///
+    /// Cheap no-op when there's no runtime or enforcement is disabled — the
+    /// common case — so it's safe to call liberally after any mutation that can
+    /// change the ruleset (RunInstances, Terminate, Authorize/Revoke,
+    /// network-ACL edits). Runs in the background so it never blocks the API
+    /// response.
+    pub(crate) fn spawn_firewall_reconcile(&self) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        if !runtime.firewall().enabled() {
+            return;
+        }
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            firewall_model::reconcile(&state, &runtime).await;
+        });
     }
 
     /// Rebuild the backing-container runtime state for persisted instances
