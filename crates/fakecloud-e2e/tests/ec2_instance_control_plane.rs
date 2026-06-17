@@ -490,7 +490,9 @@ async fn default_vpc_and_subnets_exist_on_boot() {
         "expected >=3 default subnets, got {}",
         defaults.len()
     );
-    assert!(defaults.iter().all(|sn| sn.vpc_id() == Some(vpc_id.as_str())));
+    assert!(defaults
+        .iter()
+        .all(|sn| sn.vpc_id() == Some(vpc_id.as_str())));
     assert!(defaults
         .iter()
         .all(|sn| sn.map_public_ip_on_launch() == Some(true)));
@@ -519,7 +521,9 @@ async fn run_instances_without_subnet_lands_in_default_vpc() {
     let inst = &resp.instances()[0];
     let vpc_id = inst.vpc_id().expect("instance should resolve a vpc-id");
     assert!(vpc_id.starts_with("vpc-"), "got {vpc_id}");
-    let subnet_id = inst.subnet_id().expect("instance should resolve a subnet-id");
+    let subnet_id = inst
+        .subnet_id()
+        .expect("instance should resolve a subnet-id");
     assert!(subnet_id.starts_with("subnet-"), "got {subnet_id}");
 
     // The resolved VPC is the default VPC.
