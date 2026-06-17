@@ -3913,13 +3913,16 @@ async fn ec2_delete_network_acl() {
         .send()
         .await
         .unwrap();
-    assert!(c
+    // The deleted NACL is gone. (The account's default NACL still exists, like
+    // AWS — so assert the specific id is absent rather than an empty list.)
+    assert!(!c
         .describe_network_acls()
         .send()
         .await
         .unwrap()
         .network_acls()
-        .is_empty());
+        .iter()
+        .any(|n| n.network_acl_id() == Some(id.as_str())));
 }
 
 #[test_action("ec2", "CreateNetworkAclEntry", checksum = "084c817c")]
