@@ -225,7 +225,10 @@ jobs:
       # (not skip) if the host can't enforce. CI=1 keeps other gates strict.
       - name: Run real packet-filtering test
         run: |
-          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+          # Keep cargo's PATH but append the sbin dirs so the fakecloud process
+          # (running as root) can actually find `nft` (in /usr/sbin); without
+          # this its capability probe fails and enforcement silently disables.
+          sudo -E env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
             FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
             cargo test -p fakecloud-e2e --test ec2_sg_enforcement_real -- --nocapture --test-threads=1
 

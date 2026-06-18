@@ -93,6 +93,18 @@ fn wait_ping(from: &str, to_ip: &str, want: bool) -> bool {
     can_ping(from, to_ip)
 }
 
+/// Poll up to ~15s for fakecloud's own nft table to be installed (the reconcile
+/// is async). Returns whether it appeared.
+fn wait_nft_table() -> bool {
+    for _ in 0..60 {
+        if cmd_ok("nft", &["list", "table", "inet", "fakecloud_ec2"]) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
 async fn wait_running(c: &aws_sdk_ec2::Client, id: &str) -> String {
     for _ in 0..80 {
         let d = c
@@ -124,10 +136,13 @@ async fn security_group_actually_drops_and_allows_packets() {
     if !require_enforcement_or_skip() {
         return;
     }
-    std::env::set_var("FAKECLOUD_EC2_SG_ENFORCEMENT", "1");
-    std::env::set_var("FAKECLOUD_EC2_DEFAULT_IMAGE", "alpine:3");
-
-    let server = TestServer::start().await;
+    // Pass enforcement + base image to the spawned server explicitly (not via
+    // inherited process env), so the binary definitely sees them.
+    let server = TestServer::start_with_env(&[
+        ("FAKECLOUD_EC2_SG_ENFORCEMENT", "1"),
+        ("FAKECLOUD_EC2_DEFAULT_IMAGE", "alpine:3"),
+    ])
+    .await;
     let c = server.ec2_client().await;
 
     // One VPC + subnet, and a security group with NO ingress allows (only the
@@ -182,6 +197,16 @@ async fn security_group_actually_drops_and_allows_packets() {
     let _a_ip = wait_running(&c, &a).await;
     let b_ip = wait_running(&c, &b).await;
     let ca = container_for(&a);
+
+    // Enforcement must have engaged: the reconcile creates fakecloud's own nft
+    // table. If it never appears, enforcement silently disabled (nft not found
+    // / no CAP_NET_ADMIN) — fail with that specific signal instead of a vague
+    // "packet not dropped".
+    assert!(
+        wait_nft_table(),
+        "fakecloud nft table `inet fakecloud_ec2` never appeared — SG enforcement \
+         did not engage (check that `nft` is on PATH and the process has CAP_NET_ADMIN)"
+    );
 
     // 1) Enforced deny: with no ingress allow, A cannot reach B.
     assert!(
