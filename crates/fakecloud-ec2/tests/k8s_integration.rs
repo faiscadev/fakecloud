@@ -205,3 +205,60 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
     let removed = poll_until(120, || pod_absent(&api, &new_pod)).await;
     assert!(removed, "Pod should be gone after TerminateInstances");
 }
+
+#[tokio::test]
+async fn security_groups_become_network_policies() {
+    use fakecloud_ec2::runtime::firewall::{FirewallRule, InstanceRules};
+    use fakecloud_ec2::runtime::netpolicy::policy_name;
+    use k8s_openapi::api::networking::v1::NetworkPolicy;
+
+    require_test_env();
+    ensure_namespace().await;
+    k8s_runtime_env();
+
+    let rt = Ec2Runtime::new_k8s(4566).await.expect("new_k8s");
+    let c = client().await;
+    let np_api: Api<NetworkPolicy> = Api::namespaced(c.client().clone(), TEST_NS);
+
+    let instance_id = "i-0k8snetpol";
+    let rules = vec![InstanceRules {
+        instance_id: instance_id.to_string(),
+        subnet_id: "subnet-k8s".to_string(),
+        private_ip: "10.99.0.2".to_string(),
+        ingress: vec![FirewallRule {
+            protocol: "tcp".into(),
+            from_port: 443,
+            to_port: 443,
+            cidr: Some("10.0.0.0/8".into()),
+        }],
+        egress: vec![],
+    }];
+
+    // Reconcile creates one NetworkPolicy selecting the instance pod, with the
+    // SG's ingress rule. (kindnet doesn't enforce it, but the object must exist
+    // -- a NetworkPolicy-enforcing CNI like Calico would then enforce it.)
+    rt.reconcile_network_policies(rules).await;
+    let name = policy_name(instance_id);
+    let np = np_api.get(&name).await.expect("NetworkPolicy should exist");
+    let spec = np.spec.expect("spec");
+    assert_eq!(
+        spec.pod_selector
+            .match_labels
+            .as_ref()
+            .and_then(|l| l.get("fakecloud-ec2"))
+            .map(String::as_str),
+        Some("i-0k8snetpol")
+    );
+    assert_eq!(spec.ingress.as_ref().map(|i| i.len()), Some(1));
+
+    // Reconciling with no instances prunes the policy.
+    rt.reconcile_network_policies(vec![]).await;
+    let pruned = poll_until(20, || async {
+        np_api.get_opt(&name).await.ok().flatten().is_none()
+    })
+    .await;
+    assert!(
+        pruned,
+        "NetworkPolicy should be pruned when its instance is gone"
+    );
+}

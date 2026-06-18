@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::runtime::firewall::{
-    group_by_subnet, FirewallRule, InstanceFirewall, NaclRule, SubnetFirewall,
+    group_by_subnet, FirewallRule, InstanceFirewall, InstanceRules, NaclRule, SubnetFirewall,
 };
 use crate::runtime::{subnet_network_name, Ec2Runtime};
 use crate::state::{Ec2State, NetworkAcl, SecurityGroupRule, SharedEc2State};
@@ -90,8 +90,10 @@ fn subnet_nacl<'a>(state: &'a Ec2State, subnet_id: &str) -> Option<&'a NetworkAc
         .find(|a| a.is_default && &a.vpc_id == vpc)
 }
 
-/// Build the per-subnet firewall model for one account partition.
-pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
+/// Flatten every enforced (running, subnet-placed) instance's security groups
+/// into per-instance ingress/egress rules, expanding referenced groups to
+/// member `/32`s.
+pub(crate) fn instance_rules(state: &Ec2State) -> Vec<InstanceRules> {
     // sg-id -> running member IPs, for referenced-group expansion.
     let mut sg_members: HashMap<String, Vec<String>> = HashMap::new();
     for inst in state.instances.values() {
@@ -105,8 +107,7 @@ pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
         }
     }
 
-    let mut instances: Vec<(String, InstanceFirewall)> = Vec::new();
-    let mut subnets_in_play: Vec<String> = Vec::new();
+    let mut out = Vec::new();
     for inst in state.instances.values() {
         let Some(subnet_id) = enforced(inst) else {
             continue;
@@ -125,16 +126,32 @@ pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
                 }
             }
         }
+        out.push(InstanceRules {
+            instance_id: inst.instance_id.clone(),
+            subnet_id: subnet_id.to_string(),
+            private_ip: inst.private_ip.clone(),
+            ingress,
+            egress,
+        });
+    }
+    out
+}
+
+/// Build the per-subnet nftables model for one account partition.
+pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
+    let mut instances: Vec<(String, InstanceFirewall)> = Vec::new();
+    let mut subnets_in_play: Vec<String> = Vec::new();
+    for r in instance_rules(state) {
         instances.push((
-            subnet_network_name(subnet_id),
+            subnet_network_name(&r.subnet_id),
             InstanceFirewall {
-                private_ip: inst.private_ip.clone(),
-                ingress,
-                egress,
+                private_ip: r.private_ip,
+                ingress: r.ingress,
+                egress: r.egress,
             },
         ));
-        if !subnets_in_play.contains(&subnet_id.to_string()) {
-            subnets_in_play.push(subnet_id.to_string());
+        if !subnets_in_play.contains(&r.subnet_id) {
+            subnets_in_play.push(r.subnet_id);
         }
     }
 
@@ -148,9 +165,22 @@ pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
     group_by_subnet(instances, nacls)
 }
 
-/// Build the model across every account partition (the host nft table is
-/// global) and hand it to the runtime to apply.
+/// Re-derive the firewall model across every account partition and apply it via
+/// the runtime — nftables for the Docker backend, NetworkPolicies for k8s. The
+/// runtime dispatches on its backend; this only assembles the global model.
 pub(crate) async fn reconcile(state: &SharedEc2State, runtime: &Arc<Ec2Runtime>) {
+    if runtime.is_k8s() {
+        // k8s: one NetworkPolicy per instance, built from the shared flatten.
+        let rules: Vec<InstanceRules> = {
+            let accounts = state.read();
+            accounts
+                .iter()
+                .flat_map(|(_, s)| instance_rules(s))
+                .collect()
+        };
+        runtime.reconcile_network_policies(rules).await;
+        return;
+    }
     let model: Vec<SubnetFirewall> = {
         let accounts = state.read();
         accounts

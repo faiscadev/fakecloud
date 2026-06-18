@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status;
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
 use kube::Client;
@@ -376,6 +377,77 @@ impl K8sClient {
             tracing::info!(service, reaped, "k8s reap_stale: removed orphan Pods");
         }
         reaped
+    }
+
+    /// Namespaced NetworkPolicy API handle.
+    pub fn network_policies(&self) -> Api<NetworkPolicy> {
+        Api::namespaced(self.client.clone(), &self.namespace)
+    }
+
+    /// Create or replace a NetworkPolicy (delete-then-create, like
+    /// [`create_pod`](Self::create_pod), so a re-apply with changed rules
+    /// always lands). Best-effort: errors are logged, not propagated, since a
+    /// failed policy apply must never fail the originating EC2 API call.
+    pub async fn apply_network_policy(&self, np: &NetworkPolicy) {
+        let Some(name) = np.metadata.name.clone() else {
+            return;
+        };
+        let api = self.network_policies();
+        let _ = api.delete(&name, &DeleteParams::default()).await;
+        if let Err(e) = api.create(&PostParams::default(), np).await {
+            // A concurrent re-apply may have recreated it; a 409 is benign.
+            if !matches!(&e, kube::Error::Api(a) if a.code == 409) {
+                tracing::warn!(policy = %name, error = %e, "k8s apply NetworkPolicy failed");
+            }
+        }
+    }
+
+    /// Delete every NetworkPolicy owned by this process (managed-by + this
+    /// instance label) whose name is not in `keep`. Prunes policies for
+    /// instances that have since terminated. Best-effort.
+    pub async fn prune_network_policies(&self, keep: &std::collections::HashSet<String>) {
+        let api = self.network_policies();
+        let selector = format!(
+            "{}={},{}={}",
+            labels::MANAGED_BY,
+            labels::MANAGED_BY_VALUE,
+            labels::INSTANCE,
+            self.instance_id,
+        );
+        let lp = ListParams::default().labels(&selector);
+        let list = match api.list(&lp).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "k8s prune NetworkPolicies: list failed");
+                return;
+            }
+        };
+        for np in list.items {
+            if let Some(name) = np.metadata.name {
+                if !keep.contains(&name) {
+                    let _ = api.delete(&name, &DeleteParams::default()).await;
+                }
+            }
+        }
+    }
+
+    /// Best-effort detection of the cluster CNI from `kube-system` Pod names
+    /// (e.g. `calico-node-*`, `cilium-*`, `kindnet-*`). Returns the matched
+    /// component names; the caller maps them to a driver. An empty result
+    /// (list failed or no recognizable CNI) maps to "unknown".
+    pub async fn kube_system_pod_names(&self) -> Vec<String> {
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), "kube-system");
+        match api.list(&ListParams::default()).await {
+            Ok(list) => list
+                .items
+                .into_iter()
+                .filter_map(|p| p.metadata.name)
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "k8s CNI detect: list kube-system pods failed");
+                Vec::new()
+            }
+        }
     }
 }
 
