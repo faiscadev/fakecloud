@@ -107,14 +107,28 @@ pub(crate) fn create_default_vpc(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let vpc = build_vpc("172.31.0.0/16".to_string(), "default".to_string(), true);
-    let vpc_id = vpc.vpc_id.clone();
+    // Every account already ships a seeded default VPC (bootstrapped at state
+    // construction), so CreateDefaultVpc must return THAT one, not mint a
+    // second `isDefault=true` VPC — a state impossible on AWS, which returns
+    // `DefaultVpcAlreadyExists` when one exists (bug-hunt 2026-06-18 finding
+    // 1.3). We surface the existing default rather than the error so callers
+    // that defensively call CreateDefaultVpc keep working.
     let owner = req.account_id.clone();
     let body = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let tags = state.tags_for(&vpc_id).to_vec();
-        state.vpcs.insert(vpc_id.clone(), vpc.clone());
+        let vpc = state
+            .vpcs
+            .values()
+            .find(|v| v.is_default)
+            .cloned()
+            // No default VPC somehow (e.g. it was deleted): re-create one.
+            .unwrap_or_else(|| {
+                let v = build_vpc("172.31.0.0/16".to_string(), "default".to_string(), true);
+                state.vpcs.insert(v.vpc_id.clone(), v.clone());
+                v
+            });
+        let tags = state.tags_for(&vpc.vpc_id).to_vec();
         format!("<vpc>{}</vpc>", vpc_xml(&vpc, &tags, &owner))
     };
     Ok(Ec2Service::respond(

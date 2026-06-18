@@ -10,10 +10,10 @@
 //!
 //! fakecloud builds the same fixtures the first time an account's EC2 state is
 //! constructed ([`Ec2State::new`](crate::state::Ec2State::new)). The resource
-//! ids are **deterministic** functions of the account id, region, and a role
-//! string, so the throwaway empty states that the read paths synthesize as a
-//! "not found" fallback report the *same* ids as the persisted account state —
-//! two `DescribeVpcs` calls before any write agree on the default VPC id.
+//! ids are **deterministic** functions of the account id and a role string
+//! (region-independent — see [`deterministic_id`]), so the throwaway empty
+//! states that the read paths synthesize as a "not found" fallback report the
+//! *same* ids as the persisted account state regardless of the caller's region.
 //!
 //! Per-VPC packet isolation (issue #1745 phase 2+) keys off this topology: a
 //! subnet whose route table has a `0.0.0.0/0 -> igw-…` route is public and gets
@@ -32,12 +32,19 @@ const DEFAULT_VPC_CIDR: &str = "172.31.0.0/16";
 /// test exercises (and keeps the deterministic CIDR layout simple).
 const DEFAULT_AZ_SUFFIXES: [&str; 3] = ["a", "b", "c"];
 
-/// Deterministic EC2 resource id: `<prefix>-<17 hex>` derived from the
-/// account, region, and a per-resource `role`. Stable across processes and
-/// across the throwaway empty states the read paths build, so the default
-/// VPC's ids never flap between calls.
-pub(crate) fn deterministic_id(prefix: &str, account: &str, region: &str, role: &str) -> String {
-    let seed = format!("{account}/{region}/{role}");
+/// Deterministic EC2 resource id: `<prefix>-<17 hex>` derived from the account
+/// and a per-resource `role`. Deliberately **region-independent**: a
+/// `MultiAccountState` partitions by account and pins a single region per
+/// server, but read handlers build a throwaway `Ec2State::new(account,
+/// req.region)` for accounts that don't exist yet — where `req.region` is the
+/// caller's SigV4 scope, not the server's region. Seeding the id on the region
+/// made those throwaway-derived ids disagree with the persisted account's ids
+/// whenever the client region differed from the server's, so a no-subnet launch
+/// stamped the instance with a subnet/VPC id that didn't exist in its own
+/// account (bug-hunt 2026-06-18 finding 1.1). Dropping region from the seed
+/// makes both paths agree; the AZ/CIDR cosmetics below still use the region.
+pub(crate) fn deterministic_id(prefix: &str, account: &str, role: &str) -> String {
+    let seed = format!("{account}/{role}");
     let h1 = fnv1a64(seed.as_bytes());
     let h2 = fnv1a64(format!("{seed}/salt").as_bytes());
     // 16 hex from the first hash + 1 nibble from the second = the 17 hex chars
@@ -72,15 +79,15 @@ fn az_id_prefix(region: &str) -> String {
     }
 }
 
-/// The default VPC id for an account+region (also exposed so request handlers
-/// can resolve the implicit default without re-deriving the seed by hand).
-pub(crate) fn default_vpc_id(account: &str, region: &str) -> String {
-    deterministic_id("vpc", account, region, "default-vpc")
+/// The default VPC id for an account (also exposed so request handlers can
+/// resolve the implicit default without re-deriving the seed by hand).
+pub(crate) fn default_vpc_id(account: &str) -> String {
+    deterministic_id("vpc", account, "default-vpc")
 }
 
-/// The default security-group id for an account+region.
-pub(crate) fn default_security_group_id(account: &str, region: &str) -> String {
-    deterministic_id("sg", account, region, "default-sg")
+/// The default security-group id for an account.
+pub(crate) fn default_security_group_id(account: &str) -> String {
+    deterministic_id("sg", account, "default-sg")
 }
 
 /// Populate `state` with the default VPC topology. Called once at state
@@ -94,11 +101,11 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
         state.region.clone()
     };
 
-    let vpc_id = default_vpc_id(&account, &region);
-    let igw_id = deterministic_id("igw", &account, &region, "default-igw");
-    let rtb_id = deterministic_id("rtb", &account, &region, "default-rtb");
-    let acl_id = deterministic_id("acl", &account, &region, "default-acl");
-    let sg_id = default_security_group_id(&account, &region);
+    let vpc_id = default_vpc_id(&account);
+    let igw_id = deterministic_id("igw", &account, "default-igw");
+    let rtb_id = deterministic_id("rtb", &account, "default-rtb");
+    let acl_id = deterministic_id("acl", &account, "default-acl");
+    let sg_id = default_security_group_id(&account);
 
     // --- default VPC ---
     state.vpcs.insert(
@@ -129,12 +136,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     let az_prefix = az_id_prefix(&region);
     let mut subnet_ids = Vec::new();
     for (idx, suffix) in DEFAULT_AZ_SUFFIXES.iter().enumerate() {
-        let subnet_id = deterministic_id(
-            "subnet",
-            &account,
-            &region,
-            &format!("default-subnet-{suffix}"),
-        );
+        let subnet_id = deterministic_id("subnet", &account, &format!("default-subnet-{suffix}"));
         let az = format!("{region}{suffix}");
         state.subnets.insert(
             subnet_id.clone(),
@@ -161,7 +163,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
 
     // --- main route table: local + default route at the IGW (public) ---
     let mut associations = vec![RouteTableAssociation {
-        association_id: deterministic_id("rtbassoc", &account, &region, "default-rtb-main"),
+        association_id: deterministic_id("rtbassoc", &account, "default-rtb-main"),
         route_table_id: rtb_id.clone(),
         subnet_id: None,
         gateway_id: None,
@@ -169,12 +171,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     }];
     for sid in &subnet_ids {
         associations.push(RouteTableAssociation {
-            association_id: deterministic_id(
-                "rtbassoc",
-                &account,
-                &region,
-                &format!("default-rtb-{sid}"),
-            ),
+            association_id: deterministic_id("rtbassoc", &account, &format!("default-rtb-{sid}")),
             route_table_id: rtb_id.clone(),
             subnet_id: Some(sid.clone()),
             gateway_id: None,
@@ -212,7 +209,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
             vpc_id: vpc_id.clone(),
             rules: vec![
                 SecurityGroupRule {
-                    rule_id: deterministic_id("sgr", &account, &region, "default-sg-ingress"),
+                    rule_id: deterministic_id("sgr", &account, "default-sg-ingress"),
                     group_id: sg_id.clone(),
                     is_egress: false,
                     ip_protocol: "-1".to_string(),
@@ -225,7 +222,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
                     description: String::new(),
                 },
                 SecurityGroupRule {
-                    rule_id: deterministic_id("sgr", &account, &region, "default-sg-egress"),
+                    rule_id: deterministic_id("sgr", &account, "default-sg-egress"),
                     group_id: sg_id.clone(),
                     is_egress: true,
                     ip_protocol: "-1".to_string(),
@@ -245,12 +242,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     let nacl_associations = subnet_ids
         .iter()
         .map(|sid| NetworkAclAssoc {
-            association_id: deterministic_id(
-                "aclassoc",
-                &account,
-                &region,
-                &format!("default-acl-{sid}"),
-            ),
+            association_id: deterministic_id("aclassoc", &account, &format!("default-acl-{sid}")),
             subnet_id: sid.clone(),
         })
         .collect();
@@ -340,8 +332,8 @@ mod tests {
 
     #[test]
     fn deterministic_id_is_stable_and_shaped() {
-        let a = deterministic_id("vpc", "123456789012", "us-east-1", "default-vpc");
-        let b = deterministic_id("vpc", "123456789012", "us-east-1", "default-vpc");
+        let a = deterministic_id("vpc", "123456789012", "default-vpc");
+        let b = deterministic_id("vpc", "123456789012", "default-vpc");
         assert_eq!(a, b);
         assert!(a.starts_with("vpc-"));
         // 17 hex chars after the prefix, matching EC2 long-ids.
@@ -351,19 +343,21 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_id_varies_by_account_region_role() {
-        let base = deterministic_id("vpc", "111111111111", "us-east-1", "default-vpc");
-        assert_ne!(
-            base,
-            deterministic_id("vpc", "222222222222", "us-east-1", "default-vpc")
-        );
-        assert_ne!(
-            base,
-            deterministic_id("vpc", "111111111111", "eu-west-1", "default-vpc")
-        );
-        assert_ne!(
-            base,
-            deterministic_id("vpc", "111111111111", "us-east-1", "default-igw")
+    fn deterministic_id_varies_by_account_and_role() {
+        let base = deterministic_id("vpc", "111111111111", "default-vpc");
+        assert_ne!(base, deterministic_id("vpc", "222222222222", "default-vpc"));
+        assert_ne!(base, deterministic_id("vpc", "111111111111", "default-igw"));
+    }
+
+    #[test]
+    fn deterministic_id_is_region_independent() {
+        // The id seed deliberately excludes region so read-path (req.region)
+        // and persisted (server region) states agree (finding 1.1). Region is
+        // not a parameter anymore — this documents the contract by asserting
+        // default_vpc_id depends only on the account.
+        assert_eq!(
+            default_vpc_id("111111111111"),
+            deterministic_id("vpc", "111111111111", "default-vpc")
         );
     }
 
@@ -416,6 +410,23 @@ mod tests {
         let a_vpc: Vec<_> = a.vpcs.keys().collect();
         let b_vpc: Vec<_> = b.vpcs.keys().collect();
         assert_eq!(a_vpc, b_vpc);
-        assert_eq!(a_vpc[0], &default_vpc_id("123456789012", "us-east-1"));
+        assert_eq!(a_vpc[0], &default_vpc_id("123456789012"));
+    }
+
+    #[test]
+    fn default_vpc_id_agrees_across_regions() {
+        // The crux of finding 1.1: a read-path empty built with the caller's
+        // region must derive the SAME default VPC id as the persisted account
+        // state built with the server's region.
+        let read_path = Ec2State::new("123456789012", "eu-west-1");
+        let persisted = Ec2State::new("123456789012", "us-east-1");
+        let read_vpc = read_path.vpcs.keys().next().unwrap();
+        let persisted_vpc = persisted.vpcs.keys().next().unwrap();
+        assert_eq!(read_vpc, persisted_vpc);
+        // subnets too (so a no-subnet launch resolves a subnet that exists in
+        // the persisted account regardless of the caller's region).
+        let read_subnets: std::collections::BTreeSet<_> = read_path.subnets.keys().collect();
+        let persisted_subnets: std::collections::BTreeSet<_> = persisted.subnets.keys().collect();
+        assert_eq!(read_subnets, persisted_subnets);
     }
 }

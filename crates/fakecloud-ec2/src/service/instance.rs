@@ -272,7 +272,7 @@ pub(crate) async fn run_instances(
         if sg_ids.is_empty() {
             let vpc = resolved_vpc
                 .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id, &req.region));
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id));
             if let Some(sg) = state
                 .security_groups
                 .values()
@@ -302,13 +302,7 @@ pub(crate) async fn run_instances(
                 .unwrap_or((None, false)),
             // No subnet (and no default subnet found): still a default-VPC
             // launch, which assigns public IPs by default.
-            None => (
-                Some(crate::defaults::default_vpc_id(
-                    &req.account_id,
-                    &req.region,
-                )),
-                true,
-            ),
+            None => (Some(crate::defaults::default_vpc_id(&req.account_id)), true),
         };
         (vpc, auto_public, instance_network)
     };

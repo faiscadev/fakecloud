@@ -127,6 +127,15 @@ pub(crate) fn delete_network_acl(
     let id = require(&req.query_params, "NetworkAclId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
+    // The default NACL of a VPC cannot be deleted — AWS returns
+    // `CannotDeleteDefaultNetworkAcl` (delete-protection finding).
+    if state.network_acls.get(&id).is_some_and(|a| a.is_default) {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "CannotDeleteDefaultNetworkAcl",
+            format!("The network acl '{id}' is the default network acl and cannot be deleted"),
+        ));
+    }
     state.network_acls.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(

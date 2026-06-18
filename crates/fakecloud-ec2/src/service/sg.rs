@@ -300,6 +300,31 @@ pub(crate) fn delete_security_group(
 ) -> Result<AwsResponse, AwsServiceError> {
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
+    // The VPC's `default` security group cannot be deleted — AWS returns
+    // `CannotDelete`. Without this guard, deleting it left a VPC with no
+    // default group, so a later no-SecurityGroupId RunInstances launched with
+    // an empty group list (impossible on AWS) (bug-hunt 2026-06-18 finding,
+    // delete-protection). Resolve the target group(s) and reject the default.
+    let targets: Vec<&crate::state::SecurityGroup> =
+        if let Some(id) = req.query_params.get("GroupId") {
+            state.security_groups.get(id).into_iter().collect()
+        } else if let Some(name) = req.query_params.get("GroupName") {
+            state
+                .security_groups
+                .values()
+                .filter(|g| &g.group_name == name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+    if targets.iter().any(|g| g.group_name == "default") {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "CannotDelete",
+            "the default security group cannot be deleted",
+        ));
+    }
+
     if let Some(id) = req.query_params.get("GroupId") {
         state.security_groups.remove(id);
         state.tags.remove(id);
