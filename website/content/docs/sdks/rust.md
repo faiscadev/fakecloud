@@ -113,6 +113,13 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 | ------------------ | ------------------------------------------ |
 | `tick_ttl().await` | Tick the DynamoDB TTL processor            |
 
+## `fc.ec2()`
+
+| Method                              | Description                                                                                                                                                  |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_instances().await`             | List EC2 instances with control-plane + runtime metadata                                                                                                    |
+| `get_instance_networks().await`     | Inspect each instance's backing network (Docker/Podman network or k8s NetworkPolicy), container IP, isolation backend, and whether security-group enforcement is active |
+
 ## `fc.ecr()`
 
 | Method                              | Description                                |

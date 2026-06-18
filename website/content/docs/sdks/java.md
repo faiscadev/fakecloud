@@ -73,6 +73,13 @@ FakeCloud fc2 = new FakeCloud("http://localhost:5000"); // explicit base URL
 | `getServerlessCaches()`   | List ElastiCache serverless caches  |
 | `getElastiCacheAcls()`    | List ElastiCache (Valkey/Redis) ACLs |
 
+## `fc.ec2()`
+
+| Method                  | Description                                                                                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getInstances()`        | List EC2 instances with control-plane + runtime metadata                                                                                                    |
+| `getInstanceNetworks()` | Inspect each instance's backing network (Docker/Podman network or k8s NetworkPolicy), container IP, isolation backend, and whether security-group enforcement is active |
+
 ## `fc.ecr()`
 
 | Method                                  | Description                                                  |

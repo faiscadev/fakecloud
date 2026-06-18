@@ -112,6 +112,13 @@ const fc = new FakeCloud("http://localhost:5000");
 | ----------- | ---------------------- |
 | `tickTtl()` | Tick the TTL processor |
 
+## `fc.ec2`
+
+| Method                  | Description                                                                                                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getInstances()`        | List EC2 instances with control-plane + runtime metadata                                                                                                    |
+| `getInstanceNetworks()` | Inspect each instance's backing network (Docker/Podman network or k8s NetworkPolicy), container IP, isolation backend, and whether security-group enforcement is active |
+
 ## `fc.ecr`
 
 | Method                  | Description                                                       |

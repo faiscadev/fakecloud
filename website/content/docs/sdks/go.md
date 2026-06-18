@@ -129,6 +129,13 @@ Sub-clients are accessed via methods: `fc.SES()`, `fc.SNS()`, `fc.Lambda()`, etc
 |--------|-------------|
 | `GetNamedQueries(ctx)` | List saved named queries |
 
+## `fc.EC2()`
+
+| Method | Description |
+|--------|-------------|
+| `GetInstances(ctx)` | List EC2 instances with control-plane + runtime metadata |
+| `GetInstanceNetworks(ctx)` | Inspect each instance's backing network (Docker/Podman network or k8s NetworkPolicy), container IP, isolation backend, and whether security-group enforcement is active |
+
 ## `fc.ECR()`
 
 | Method | Description |
