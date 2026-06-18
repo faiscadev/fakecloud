@@ -191,3 +191,44 @@ jobs:
           if [ "$INSTALL_PODMAN" = "true" ]; then
             podman system prune -af || true
           fi
+
+  # Privileged job: the ONLY place EC2 security-group packet filtering can be
+  # exercised for real (needs nftables + CAP_NET_ADMIN on a native-Linux Docker
+  # host). Boots two instances and asserts a real dropped/allowed packet —
+  # closing the bug-hunt 2026-06-18 gap (a) where only the generated ruleset was
+  # tested, never an actual blocked connection.
+  sg-enforcement:
+    name: EC2 SG enforcement (privileged)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+
+      - name: Pre-pull the instance base image
+        run: docker pull alpine:3
+
+      - name: Build fakecloud + the enforcement test
+        run: |
+          cargo build --bin fakecloud
+          cargo test -p fakecloud-e2e --test ec2_sg_enforcement_real --no-run
+
+      # Run as root so the spawned fakecloud process holds CAP_NET_ADMIN and can
+      # install nft rules. FAKECLOUD_TEST_SG_ENFORCE=1 makes the test hard-fail
+      # (not skip) if the host can't enforce. CI=1 keeps other gates strict.
+      - name: Run real packet-filtering test
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+            FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
+            cargo test -p fakecloud-e2e --test ec2_sg_enforcement_real -- --nocapture --test-threads=1
+
+      - name: nft ruleset diagnostics
+        if: always()
+        run: sudo nft list ruleset || true
