@@ -133,7 +133,12 @@ fn ports(r: &FirewallRule) -> Option<Vec<NetworkPolicyPort>> {
         // port -> leave ports unset (all ports of all protocols).
         _ => return None,
     };
-    if r.from_port < 0 || r.to_port < 0 {
+    // Ports are parsed permissively as i64; a value outside the valid
+    // 0..=65535 TCP/UDP port range can't be a real port. Reject the whole rule
+    // rather than silently truncating via `as i32` into a wrong/negative port
+    // (bug-hunt 2026-06-18 finding 2.1).
+    let valid = |p: i64| (0..=65535).contains(&p);
+    if !valid(r.from_port) || !valid(r.to_port) {
         return None;
     }
     let mut port = NetworkPolicyPort {
@@ -283,6 +288,24 @@ mod tests {
             .unwrap()[0];
         assert_eq!(port.port, Some(IntOrString::Int(8000)));
         assert_eq!(port.end_port, Some(8100));
+    }
+
+    #[test]
+    fn out_of_range_port_is_rejected_not_truncated() {
+        // A port > 65535 (parsed permissively as i64) must not silently
+        // truncate via `as i32` into a wrong/negative port (finding 2.1).
+        let huge = FirewallRule {
+            protocol: "tcp".into(),
+            from_port: 70000,
+            to_port: 70000,
+            cidr: None,
+        };
+        let r = rules("i-1", vec![huge], vec![]);
+        let p = &build_policies(&[r], "fakecloud", "x")[0];
+        // No ports clause -> the rule isn't narrowed to a bogus port.
+        assert!(p.spec.as_ref().unwrap().ingress.as_ref().unwrap()[0]
+            .ports
+            .is_none());
     }
 
     #[test]
