@@ -1566,3 +1566,25 @@ pub(crate) fn describe_instance_topology(
         &ec2_list("instanceSet", &[]),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::subnet_ip_prefix;
+
+    #[test]
+    fn subnet_ip_prefix_uses_subnet_network() {
+        // The synthesized metadata IP must land inside the subnet (finding 1.7).
+        assert_eq!(subnet_ip_prefix("172.31.16.0/20"), "172.31.16");
+        assert_eq!(subnet_ip_prefix("10.0.5.0/24"), "10.0.5");
+        // bare address (no mask) still works
+        assert_eq!(subnet_ip_prefix("192.168.1.0"), "192.168.1");
+    }
+
+    #[test]
+    fn subnet_ip_prefix_falls_back_on_garbage() {
+        assert_eq!(subnet_ip_prefix(""), "10.0.0");
+        assert_eq!(subnet_ip_prefix("not-a-cidr"), "10.0.0");
+        // IPv6 / non-dotted-quad falls back rather than producing nonsense
+        assert_eq!(subnet_ip_prefix("fd00::/8"), "10.0.0");
+    }
+}

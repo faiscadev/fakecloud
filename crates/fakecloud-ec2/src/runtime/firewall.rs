@@ -470,6 +470,38 @@ mod tests {
     }
 
     #[test]
+    fn cidr_with_nft_metacharacters_is_dropped_not_injected() {
+        // A CIDR carrying nft syntax (`;`, spaces, words) must never reach the
+        // `nft -f -` script (finding 2.2). The match clause is omitted; the
+        // rule still renders safely and terminates in `accept`.
+        let r = tcp(22, Some("10.0.0.0/8; drop comment \"x\""));
+        let line = render_rule(&r, Direction::Ingress, "172.30.0.2");
+        assert!(!line.contains(';'), "no injected semicolon: {line}");
+        assert!(!line.contains("comment"), "no injected tokens: {line}");
+        assert!(
+            !line.contains("ip saddr"),
+            "malformed cidr clause omitted: {line}"
+        );
+        assert!(line.ends_with("accept"), "rule still valid: {line}");
+    }
+
+    #[test]
+    fn unknown_protocol_with_bad_chars_emits_no_proto_match() {
+        let r = FirewallRule {
+            protocol: "tcp; drop".into(),
+            from_port: -1,
+            to_port: -1,
+            cidr: None,
+        };
+        let line = render_rule(&r, Direction::Ingress, "172.30.0.2");
+        assert!(
+            !line.contains(';') && !line.contains("ip protocol"),
+            "{line}"
+        );
+        assert_eq!(line, "ip daddr 172.30.0.2 accept");
+    }
+
+    #[test]
     fn nacl_deny_emitted_before_instance_rules() {
         let model = vec![SubnetFirewall {
             network_name: "fakecloud-subnet-a".into(),
