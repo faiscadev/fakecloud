@@ -247,6 +247,7 @@ pub(crate) fn create_network_acl_entry(
             acl.entries.push(parse_entry(req));
         }
     }
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         "CreateNetworkAclEntry",
         &req.request_id,
@@ -285,6 +286,7 @@ pub(crate) fn replace_network_acl_entry(
             }
         }
     }
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         "ReplaceNetworkAclEntry",
         &req.request_id,
@@ -312,6 +314,7 @@ pub(crate) fn delete_network_acl_entry(
                 .retain(|e| !(e.rule_number == num && e.egress == egress));
         }
     }
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         "DeleteNetworkAclEntry",
         &req.request_id,
@@ -352,6 +355,7 @@ pub(crate) fn replace_network_acl_association(
             }
         }
     }
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         "ReplaceNetworkAclAssociation",
         &req.request_id,

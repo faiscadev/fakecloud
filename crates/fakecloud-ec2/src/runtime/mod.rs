@@ -18,12 +18,15 @@
 //! state transitions) so every API call still succeeds. Real container
 //! backing is best-effort fidelity layered on top.
 
+pub mod firewall;
 mod k8s;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+
+use firewall::{render_ruleset, resolve_enforcement_mode, EnforcementMode, SubnetFirewall};
 
 /// Default base image an instance's container runs. AMIs don't map to a
 /// concrete OS image, so we boot a real Amazon Linux container by default
@@ -120,6 +123,96 @@ enum InstanceBackend {
     K8s(k8s::K8sInstances),
 }
 
+/// Host firewall enforcement for security groups + NACLs (#1745 phase 3).
+///
+/// The network-driver abstraction the issue asks for: today there is one real
+/// driver (nftables) plus the degraded no-op, selected once at construction.
+/// Branching on podman vs docker isn't needed explicitly — rootless podman
+/// can't touch the host firewall, so the `nft list ruleset` capability probe
+/// already degrades it; rootful podman with netavark passes the same probe.
+#[derive(Debug, Clone)]
+pub struct FirewallEnforcer {
+    mode: EnforcementMode,
+}
+
+impl FirewallEnforcer {
+    /// Resolve the enforcement mode from `FAKECLOUD_EC2_SG_ENFORCEMENT` and an
+    /// `nft` capability probe, warning once when enforcement was requested but
+    /// can't be backed (so the operator knows it degraded, not silently).
+    fn detect() -> Self {
+        let requested = std::env::var("FAKECLOUD_EC2_SG_ENFORCEMENT").ok();
+        let mode = resolve_enforcement_mode(requested.as_deref(), firewall::nft_available);
+        if requested.is_some() && mode == EnforcementMode::Disabled {
+            tracing::warn!(
+                "EC2 security-group enforcement was requested but nftables/CAP_NET_ADMIN \
+                 is unavailable; falling back to metadata-only (phase-2 L3 isolation stays \
+                 active, security-group rules are tracked but not enforced)"
+            );
+        } else if mode == EnforcementMode::Nftables {
+            tracing::info!("EC2 security-group enforcement active via nftables");
+        }
+        Self { mode }
+    }
+
+    /// Disabled enforcer (k8s backend, or no container runtime).
+    fn disabled() -> Self {
+        Self {
+            mode: EnforcementMode::Disabled,
+        }
+    }
+
+    pub fn mode(&self) -> EnforcementMode {
+        self.mode
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.mode != EnforcementMode::Disabled
+    }
+
+    /// Atomically swap in the rendered ruleset via `nft -f -`. No-op when
+    /// disabled. Best-effort: a failed apply logs and leaves the previous
+    /// ruleset in place rather than erroring the originating API call.
+    async fn reconcile(&self, subnets: &[SubnetFirewall]) {
+        if self.mode == EnforcementMode::Disabled {
+            return;
+        }
+        let ruleset = render_ruleset(subnets);
+        use tokio::io::AsyncWriteExt;
+        let mut child = match tokio::process::Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to spawn nft; security-group ruleset not applied");
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(ruleset.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        }
+        match child.wait_with_output().await {
+            Ok(out) if out.status.success() => {
+                tracing::debug!(
+                    subnets = subnets.len(),
+                    "applied EC2 security-group nft ruleset"
+                );
+            }
+            Ok(out) => {
+                tracing::warn!(
+                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "nft rejected the security-group ruleset; leaving the previous ruleset in place"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "nft apply failed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Ec2Runtime {
     backend: InstanceBackend,
@@ -127,6 +220,8 @@ pub struct Ec2Runtime {
     /// lifecycle operations and reset/shutdown teardown work without
     /// consulting service state.
     instances: Arc<RwLock<HashMap<String, InstanceRecord>>>,
+    /// Host firewall enforcer for security groups + NACLs.
+    firewall: FirewallEnforcer,
 }
 
 impl Ec2Runtime {
@@ -140,6 +235,7 @@ impl Ec2Runtime {
                 instance_id: format!("fakecloud-{}", std::process::id()),
             }),
             instances: Arc::new(RwLock::new(HashMap::new())),
+            firewall: FirewallEnforcer::detect(),
         })
     }
 
@@ -151,7 +247,21 @@ impl Ec2Runtime {
         Ok(Self {
             backend: InstanceBackend::K8s(backend),
             instances: Arc::new(RwLock::new(HashMap::new())),
+            // k8s isolation is a NetworkPolicy concern (phase 4), not host nft.
+            firewall: FirewallEnforcer::disabled(),
         })
+    }
+
+    /// The firewall enforcer, so the control plane can skip building the model
+    /// when enforcement is disabled and report the mode for introspection.
+    pub fn firewall(&self) -> &FirewallEnforcer {
+        &self.firewall
+    }
+
+    /// Re-render and atomically apply the security-group/NACL ruleset for the
+    /// given per-subnet model. No-op (cheap) when enforcement is disabled.
+    pub async fn reconcile_firewall(&self, subnets: Vec<SubnetFirewall>) {
+        self.firewall.reconcile(&subnets).await;
     }
 
     /// Name of the active backend, for logging.
