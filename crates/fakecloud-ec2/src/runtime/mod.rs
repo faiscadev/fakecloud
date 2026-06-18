@@ -201,6 +201,19 @@ impl FirewallEnforcer {
         if self.mode == EnforcementMode::Disabled {
             return;
         }
+        // Instances in the same subnet share one Linux bridge; their traffic is
+        // L2-switched and only traverses the `forward` chain (where our SG rules
+        // live) when bridge netfilter is enabled. Without this, same-subnet SG
+        // rules silently filter nothing — exactly what the real-packet E2E
+        // caught. Best-effort (needs CAP_NET_ADMIN, which the enforcer holds).
+        let _ = tokio::process::Command::new("modprobe")
+            .arg("br_netfilter")
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("sysctl")
+            .args(["-w", "net.bridge.bridge-nf-call-iptables=1"])
+            .output()
+            .await;
         let ruleset = render_ruleset(subnets);
         use tokio::io::AsyncWriteExt;
         let mut child = match tokio::process::Command::new("nft")
