@@ -32,6 +32,19 @@ fn state_xml(tag: &str, code: i64, name: &str) -> String {
     format!("<{tag}><code>{code}</code><name>{name}</name></{tag}>")
 }
 
+/// First three octets of a subnet CIDR's network address, e.g.
+/// `172.31.16.0/20 -> "172.31.16"`, so a synthesized private IP lands inside
+/// the subnet. Falls back to `10.0.0` for a non-IPv4-CIDR input.
+fn subnet_ip_prefix(cidr: &str) -> String {
+    let addr = cidr.split('/').next().unwrap_or(cidr);
+    let octets: Vec<&str> = addr.split('.').collect();
+    if octets.len() == 4 && octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+        format!("{}.{}.{}", octets[0], octets[1], octets[2])
+    } else {
+        "10.0.0".to_string()
+    }
+}
+
 /// Map of `security-group-id -> group-name` for the whole state, so
 /// DescribeInstances can render the real `groupName` (AWS returns the name, not
 /// the id) instead of echoing the id back.
@@ -244,7 +257,7 @@ pub(crate) async fn run_instances(
         .get("NetworkInterface.1.AssociatePublicIpAddress")
         .or_else(|| req.query_params.get("AssociatePublicIpAddress"))
         .map(|v| v == "true");
-    let (vpc_id, subnet_auto_public, instance_network) = {
+    let (vpc_id, subnet_auto_public, instance_network, ip_prefix) = {
         let accounts = svc.state.read();
         let empty = Ec2State::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -304,7 +317,17 @@ pub(crate) async fn run_instances(
             // launch, which assigns public IPs by default.
             None => (Some(crate::defaults::default_vpc_id(&req.account_id)), true),
         };
-        (vpc, auto_public, instance_network)
+        // Metadata-only private IP base, derived from the resolved subnet's
+        // CIDR so DescribeInstances reports an IP inside the subnet (was a
+        // hard-coded 10.0.0.x outside the subnet — bug-hunt finding 1.7). A
+        // real container-backed instance overwrites this with its true bridge
+        // IP once running.
+        let ip_prefix = subnet_id
+            .as_ref()
+            .and_then(|sid| state.subnets.get(sid))
+            .map(|s| subnet_ip_prefix(&s.cidr_block))
+            .unwrap_or_else(|| "10.0.0".to_string());
+        (vpc, auto_public, instance_network, ip_prefix)
     };
     let assign_public = assoc_public.unwrap_or(subnet_auto_public);
 
@@ -328,7 +351,7 @@ pub(crate) async fn run_instances(
                 instance_type: instance_type.clone(),
                 state_code: 0,
                 state_name: "pending".to_string(),
-                private_ip: format!("10.0.0.{}", 10 + idx),
+                private_ip: format!("{ip_prefix}.{}", 10 + idx),
                 public_ip: if assign_public {
                     Some(format!("52.0.0.{}", 10 + idx))
                 } else {
@@ -1542,4 +1565,26 @@ pub(crate) fn describe_instance_topology(
         &req.request_id,
         &ec2_list("instanceSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subnet_ip_prefix;
+
+    #[test]
+    fn subnet_ip_prefix_uses_subnet_network() {
+        // The synthesized metadata IP must land inside the subnet (finding 1.7).
+        assert_eq!(subnet_ip_prefix("172.31.16.0/20"), "172.31.16");
+        assert_eq!(subnet_ip_prefix("10.0.5.0/24"), "10.0.5");
+        // bare address (no mask) still works
+        assert_eq!(subnet_ip_prefix("192.168.1.0"), "192.168.1");
+    }
+
+    #[test]
+    fn subnet_ip_prefix_falls_back_on_garbage() {
+        assert_eq!(subnet_ip_prefix(""), "10.0.0");
+        assert_eq!(subnet_ip_prefix("not-a-cidr"), "10.0.0");
+        // IPv6 / non-dotted-quad falls back rather than producing nonsense
+        assert_eq!(subnet_ip_prefix("fd00::/8"), "10.0.0");
+    }
 }
