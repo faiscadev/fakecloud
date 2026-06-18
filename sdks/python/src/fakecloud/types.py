@@ -157,6 +157,48 @@ class Ec2InstancesResponse:
         )
 
 
+@dataclass
+class Ec2InstanceNetwork:
+    """The real backing network of an EC2 instance — which Docker/Podman network
+    or k8s NetworkPolicy backs it, its container IP, and whether security-group
+    enforcement is active or degraded. A debugging aid for "why can't X reach Y"
+    (issue #1745)."""
+
+    instance_id: str
+    private_ip: str
+    #: "docker", "podman", "kubernetes", or "none".
+    isolation_backend: str
+    #: "nftables", "networkpolicy", or "disabled".
+    security_group_enforcement: str
+    #: Whether security-group rules are actually enforced (vs tracked-only).
+    enforcement_active: bool
+    vpc_id: Optional[str] = None
+    subnet_id: Optional[str] = None
+    #: Docker/Podman network (``fakecloud-subnet-<id>``) or k8s NetworkPolicy
+    #: (``fakecloud-ec2-<id>``) backing the instance; ``None`` when
+    #: metadata-only or not yet running.
+    backing_network: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Ec2InstanceNetwork:
+        return cls(**_convert_keys(data))
+
+
+@dataclass
+class Ec2InstanceNetworksResponse:
+    instance_networks: List[Ec2InstanceNetwork]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Ec2InstanceNetworksResponse:
+        d = _convert_keys(data)
+        return cls(
+            instance_networks=[
+                Ec2InstanceNetwork.from_dict(item)
+                for item in d.get("instance_networks", [])
+            ],
+        )
+
+
 # ── ElastiCache ─────────────────────────────────────────────────────
 
 

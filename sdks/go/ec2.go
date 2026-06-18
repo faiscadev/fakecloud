@@ -16,3 +16,15 @@ func (c *EC2Client) GetInstances(ctx context.Context) (*EC2InstancesResponse, er
 	}
 	return &out, nil
 }
+
+// GetInstanceNetworks inspects the real backing network of each EC2 instance —
+// which Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+// and whether security-group enforcement is active or degraded. A debugging
+// aid for "why can't X reach Y" (issue #1745).
+func (c *EC2Client) GetInstanceNetworks(ctx context.Context) (*EC2InstanceNetworksResponse, error) {
+	var out EC2InstanceNetworksResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/ec2/instance-networks", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

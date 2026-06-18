@@ -1585,6 +1585,11 @@ async fn main() {
     // `GET /_fakecloud/ec2/instances`.
     let ec2_service = Ec2Service::with_state(ec2_state.clone()).with_runtime(ec2_runtime.clone());
     let ec2_introspection_state = ec2_state.clone();
+    // Separate clones for the instance-networks introspection endpoint (#1745),
+    // which also needs the runtime to report the isolation backend + SG
+    // enforcement mode.
+    let ec2_networks_state = ec2_state.clone();
+    let ec2_networks_runtime = ec2_runtime.clone();
     // Recreate the backing containers for persisted EC2 instances that the
     // snapshot claims should be running. The startup reaper (above) already
     // removed the previous process's containers (their owning PID is dead), so
@@ -5261,6 +5266,30 @@ async fn main() {
                             .collect();
                         instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
                         axum::Json(types::Ec2InstancesResponse { instances })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ec2/instance-networks",
+            axum::routing::get({
+                let es = ec2_networks_state;
+                let rt = ec2_networks_runtime;
+                move || {
+                    let es = es.clone();
+                    let rt = rt.clone();
+                    async move {
+                        let summary = rt.as_ref().map(|r| r.network_isolation_summary());
+                        let accounts = es.read();
+                        let mut instance_networks: Vec<types::Ec2InstanceNetwork> = accounts
+                            .iter()
+                            .flat_map(|(_, state)| state.instances.values())
+                            .map(|inst| {
+                                introspection::ec2_instance_network_response(inst, summary.as_ref())
+                            })
+                            .collect();
+                        instance_networks.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+                        axum::Json(types::Ec2InstanceNetworksResponse { instance_networks })
                     }
                 }
             }),

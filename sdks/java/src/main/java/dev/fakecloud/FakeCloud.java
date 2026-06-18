@@ -27,6 +27,7 @@ import dev.fakecloud.Types.ConfirmSubscriptionResponse;
 import dev.fakecloud.Types.ConfirmUserRequest;
 import dev.fakecloud.Types.ConfirmUserResponse;
 import dev.fakecloud.Types.ConfirmationCodesResponse;
+import dev.fakecloud.Types.Ec2InstanceNetworksResponse;
 import dev.fakecloud.Types.Ec2InstancesResponse;
 import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
@@ -335,6 +336,16 @@ public final class FakeCloud {
 
         public Ec2InstancesResponse getInstances() {
             return http.get("/_fakecloud/ec2/instances", Ec2InstancesResponse.class);
+        }
+
+        /**
+         * Inspect the real backing network of each EC2 instance — which
+         * Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+         * and whether security-group enforcement is active or degraded. A
+         * debugging aid for "why can't X reach Y" (issue #1745).
+         */
+        public Ec2InstanceNetworksResponse getInstanceNetworks() {
+            return http.get("/_fakecloud/ec2/instance-networks", Ec2InstanceNetworksResponse.class);
         }
     }
 

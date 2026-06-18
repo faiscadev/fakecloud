@@ -177,6 +177,56 @@ final class Ec2InstancesResponse
     }
 }
 
+/**
+ * The real backing network of an EC2 instance — which Docker/Podman network or
+ * k8s NetworkPolicy backs it, its container IP, and whether security-group
+ * enforcement is active or degraded. A debugging aid for "why can't X reach Y"
+ * (issue #1745).
+ */
+final class Ec2InstanceNetwork
+{
+    public function __construct(
+        public readonly string $instanceId,
+        public readonly ?string $vpcId,
+        public readonly ?string $subnetId,
+        public readonly string $privateIp,
+        /** Docker/Podman network or k8s NetworkPolicy backing the instance; null when metadata-only. */
+        public readonly ?string $backingNetwork,
+        /** "docker" | "podman" | "kubernetes" | "none". */
+        public readonly string $isolationBackend,
+        /** "nftables" | "networkpolicy" | "disabled". */
+        public readonly string $securityGroupEnforcement,
+        public readonly bool $enforcementActive,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['instanceId'],
+            $data['vpcId'] ?? null,
+            $data['subnetId'] ?? null,
+            $data['privateIp'],
+            $data['backingNetwork'] ?? null,
+            $data['isolationBackend'],
+            $data['securityGroupEnforcement'],
+            $data['enforcementActive'] ?? false,
+        );
+    }
+}
+
+final class Ec2InstanceNetworksResponse
+{
+    public function __construct(
+        /** @var Ec2InstanceNetwork[] */
+        public readonly array $instanceNetworks,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Ec2InstanceNetwork::fromArray(...), $data['instanceNetworks']));
+    }
+}
+
 // ── ElastiCache ────────────────────────────────────────────────
 
 final class ElastiCacheCluster

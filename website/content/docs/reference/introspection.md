@@ -177,6 +177,13 @@ curl http://localhost:4566/_fakecloud/health
 | -------- | ------ | ----------- |
 | `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire TTL items that are due. |
 
+## EC2
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/ec2/instances` | GET | List fakecloud-managed EC2 instances with control-plane + runtime metadata (state, IPs, subnet/VPC, backing container id). |
+| `/_fakecloud/ec2/instance-networks` | GET | Inspect each instance's real backing network: which Docker/Podman network or k8s NetworkPolicy backs it, its container IP, the isolation backend, and whether security-group enforcement is active or degraded. A debugging aid for "why can't X reach Y". |
+
 ## ECR
 
 | Endpoint | Method | Description |

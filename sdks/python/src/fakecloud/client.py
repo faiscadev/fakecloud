@@ -34,6 +34,7 @@ from fakecloud.types import (
     ConfirmUserRequest,
     ConfirmUserResponse,
     CreateAdminResponse,
+    Ec2InstanceNetworksResponse,
     Ec2InstancesResponse,
     EcrImagesResponse,
     EcrPullThroughRulesResponse,
@@ -261,6 +262,14 @@ class Ec2Client:
         resp = await self._client.get(f"{self._base}/_fakecloud/ec2/instances")
         _check(resp)
         return Ec2InstancesResponse.from_dict(resp.json())
+
+    async def get_instance_networks(self) -> Ec2InstanceNetworksResponse:
+        """Inspect the real backing network of each EC2 instance — which
+        Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+        and whether security-group enforcement is active or degraded."""
+        resp = await self._client.get(f"{self._base}/_fakecloud/ec2/instance-networks")
+        _check(resp)
+        return Ec2InstanceNetworksResponse.from_dict(resp.json())
 
 
 class ElastiCacheClient:
@@ -1823,6 +1832,14 @@ class _SyncEc2Client:
         resp = self._client.get(f"{self._base}/_fakecloud/ec2/instances")
         _check(resp)
         return Ec2InstancesResponse.from_dict(resp.json())
+
+    def get_instance_networks(self) -> Ec2InstanceNetworksResponse:
+        """Inspect the real backing network of each EC2 instance — which
+        Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+        and whether security-group enforcement is active or degraded."""
+        resp = self._client.get(f"{self._base}/_fakecloud/ec2/instance-networks")
+        _check(resp)
+        return Ec2InstanceNetworksResponse.from_dict(resp.json())
 
 
 class _SyncElastiCacheClient:

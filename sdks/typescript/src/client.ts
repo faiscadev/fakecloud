@@ -26,6 +26,7 @@ import type {
   ResetResponse,
   ResetServiceResponse,
   RdsInstancesResponse,
+  Ec2InstanceNetworksResponse,
   Ec2InstancesResponse,
   ElastiCacheAclsResponse,
   ElastiCacheClustersResponse,
@@ -265,6 +266,19 @@ export class Ec2Client {
 
   async getInstances(): Promise<Ec2InstancesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/ec2/instances`);
+    return parse(resp);
+  }
+
+  /**
+   * Inspect the real backing network of each EC2 instance — which
+   * Docker/Podman network or k8s NetworkPolicy backs it, its container IP, and
+   * whether security-group enforcement is active or degraded. A debugging aid
+   * for "why can't X reach Y" (issue #1745).
+   */
+  async getInstanceNetworks(): Promise<Ec2InstanceNetworksResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ec2/instance-networks`,
+    );
     return parse(resp);
   }
 }

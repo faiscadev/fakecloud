@@ -69,6 +69,33 @@ export interface Ec2InstancesResponse {
   instances: Ec2Instance[];
 }
 
+/**
+ * The real backing network of an EC2 instance — which Docker/Podman network or
+ * k8s NetworkPolicy backs it, its container IP, and whether security-group
+ * enforcement is active or degraded. A debugging aid for "why can't X reach Y"
+ * (issue #1745).
+ */
+export interface Ec2InstanceNetwork {
+  instanceId: string;
+  vpcId: string | null;
+  subnetId: string | null;
+  privateIp: string;
+  /** Docker/Podman network (`fakecloud-subnet-<id>`) or k8s NetworkPolicy
+   * (`fakecloud-ec2-<id>`) backing the instance; null when metadata-only or not
+   * yet running. */
+  backingNetwork: string | null;
+  /** "docker" | "podman" | "kubernetes" | "none". */
+  isolationBackend: string;
+  /** "nftables" | "networkpolicy" | "disabled". */
+  securityGroupEnforcement: string;
+  /** Whether security-group rules are actually enforced (vs tracked-only). */
+  enforcementActive: boolean;
+}
+
+export interface Ec2InstanceNetworksResponse {
+  instanceNetworks: Ec2InstanceNetwork[];
+}
+
 // ── ElastiCache ────────────────────────────────────────────────────
 
 export interface ElastiCacheCluster {

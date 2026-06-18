@@ -187,6 +187,11 @@ impl K8sInstances {
     pub(super) async fn reap_stale(&self) {
         self.client.reap_stale(SERVICE).await;
     }
+
+    /// Whether the detected cluster CNI enforces NetworkPolicy (introspection).
+    pub(super) fn cni_enforces(&self) -> bool {
+        self.cni.enforces()
+    }
 }
 
 /// Inputs for [`build_instance_pod`].

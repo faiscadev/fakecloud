@@ -539,6 +539,46 @@ pub(crate) fn organizations_accounts_snapshot(
     }
 }
 
+/// Build the backing-network view of one instance for
+/// `GET /_fakecloud/ec2/instance-networks`. `summary` is the runtime's
+/// isolation summary, or `None` when no container runtime is configured
+/// (metadata-only).
+pub(crate) fn ec2_instance_network_response(
+    instance: &fakecloud_ec2::state::Instance,
+    summary: Option<&fakecloud_ec2::runtime::NetworkIsolationSummary>,
+) -> types::Ec2InstanceNetwork {
+    let running = instance.state_name == "running";
+    let backing_network = match summary {
+        // Only a running, container-backed instance has a live backing network.
+        Some(s) if running && instance.container_id.is_some() => {
+            if s.backend == "kubernetes" {
+                Some(fakecloud_ec2::runtime::netpolicy::policy_name(
+                    &instance.instance_id,
+                ))
+            } else {
+                instance
+                    .subnet_id
+                    .as_ref()
+                    .map(|sid| fakecloud_ec2::runtime::subnet_network_name(sid))
+            }
+        }
+        _ => None,
+    };
+    types::Ec2InstanceNetwork {
+        instance_id: instance.instance_id.clone(),
+        vpc_id: instance.vpc_id.clone(),
+        subnet_id: instance.subnet_id.clone(),
+        private_ip: instance.private_ip.clone(),
+        backing_network,
+        isolation_backend: summary.map(|s| s.backend).unwrap_or("none").to_string(),
+        security_group_enforcement: summary
+            .map(|s| s.sg_enforcement)
+            .unwrap_or("disabled")
+            .to_string(),
+        enforcement_active: summary.map(|s| s.enforced).unwrap_or(false),
+    }
+}
+
 pub(crate) fn ec2_instance_response(
     instance: &fakecloud_ec2::state::Instance,
 ) -> types::Ec2Instance {

@@ -239,6 +239,19 @@ final class Ec2Client
             $this->http->get('/_fakecloud/ec2/instances')
         );
     }
+
+    /**
+     * Inspect the real backing network of each EC2 instance — which
+     * Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
+     * and whether security-group enforcement is active or degraded. A debugging
+     * aid for "why can't X reach Y" (issue #1745).
+     */
+    public function getInstanceNetworks(): Ec2InstanceNetworksResponse
+    {
+        return Ec2InstanceNetworksResponse::fromArray(
+            $this->http->get('/_fakecloud/ec2/instance-networks')
+        );
+    }
 }
 
 final class RdsClient

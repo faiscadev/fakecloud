@@ -96,6 +96,22 @@ pub fn subnet_network_name(subnet_id: &str) -> String {
     format!("fakecloud-subnet-{subnet_id}")
 }
 
+/// How this runtime isolates instance traffic, surfaced by the
+/// `/_fakecloud/ec2/instance-networks` introspection endpoint so users can
+/// answer "why can't X reach Y" — which backend, which SG-enforcement
+/// mechanism, and whether it's actually active vs degraded to metadata-only.
+#[derive(Debug, Clone)]
+pub struct NetworkIsolationSummary {
+    /// `docker` | `podman` | `kubernetes`.
+    pub backend: &'static str,
+    /// `nftables` (Docker host firewall) | `networkpolicy` (k8s) | `disabled`.
+    pub sg_enforcement: &'static str,
+    /// Whether security-group rules are actually enforced. False means rules
+    /// are tracked but not applied (no `CAP_NET_ADMIN`, or a CNI that ignores
+    /// NetworkPolicy) — phase-2 L3 isolation still holds.
+    pub enforced: bool,
+}
+
 /// What the runtime remembers per instance so it can drive the backing
 /// container's lifecycle and recreate it (k8s `Start`/`Reboot`).
 #[derive(Debug, Clone)]
@@ -284,6 +300,32 @@ impl Ec2Runtime {
     pub async fn reconcile_network_policies(&self, rules: Vec<InstanceRules>) {
         if let InstanceBackend::K8s(k) = &self.backend {
             k.reconcile_network_policies(&rules).await;
+        }
+    }
+
+    /// A snapshot of how this runtime isolates instance traffic, for the
+    /// `/_fakecloud/ec2/instance-networks` introspection endpoint (#1745 ph5).
+    pub fn network_isolation_summary(&self) -> NetworkIsolationSummary {
+        match &self.backend {
+            InstanceBackend::Docker(d) => NetworkIsolationSummary {
+                backend: if fakecloud_core::container_net::is_podman_binary(&d.cli) {
+                    "podman"
+                } else {
+                    "docker"
+                },
+                sg_enforcement: match self.firewall.mode() {
+                    EnforcementMode::Nftables => "nftables",
+                    EnforcementMode::Disabled => "disabled",
+                },
+                enforced: self.firewall.enabled(),
+            },
+            InstanceBackend::K8s(k) => NetworkIsolationSummary {
+                backend: "kubernetes",
+                sg_enforcement: "networkpolicy",
+                // NetworkPolicies are always created; "enforced" reflects
+                // whether the detected CNI actually applies them.
+                enforced: k.cni_enforces(),
+            },
         }
     }
 
