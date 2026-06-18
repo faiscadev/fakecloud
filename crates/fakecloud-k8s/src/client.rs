@@ -431,23 +431,31 @@ impl K8sClient {
         }
     }
 
-    /// Best-effort detection of the cluster CNI from `kube-system` Pod names
-    /// (e.g. `calico-node-*`, `cilium-*`, `kindnet-*`). Returns the matched
-    /// component names; the caller maps them to a driver. An empty result
-    /// (list failed or no recognizable CNI) maps to "unknown".
-    pub async fn kube_system_pod_names(&self) -> Vec<String> {
-        let api: Api<Pod> = Api::namespaced(self.client.clone(), "kube-system");
-        match api.list(&ListParams::default()).await {
-            Ok(list) => list
-                .items
-                .into_iter()
-                .filter_map(|p| p.metadata.name)
-                .collect(),
-            Err(e) => {
-                tracing::debug!(error = %e, "k8s CNI detect: list kube-system pods failed");
-                Vec::new()
+    /// Best-effort detection of the cluster CNI from Pod names across the
+    /// namespaces CNIs commonly install into (e.g. `calico-node-*`, `cilium-*`,
+    /// `kindnet-*`). Returns the matched component names; the caller maps them
+    /// to a driver. An empty result (lists failed or no recognizable CNI) maps
+    /// to "unknown".
+    ///
+    /// Scans `kube-system` plus the operator namespaces Calico/Cilium use
+    /// (`calico-system`, `tigera-operator`, `cilium`) so a Tigera-operator or
+    /// dedicated-namespace install isn't mis-reported as non-enforcing
+    /// (bug-hunt 2026-06-18 finding 1.6). Per-namespace list errors (RBAC /
+    /// absent namespace) are swallowed.
+    pub async fn cni_component_names(&self) -> Vec<String> {
+        const CNI_NAMESPACES: [&str; 4] =
+            ["kube-system", "calico-system", "tigera-operator", "cilium"];
+        let mut names = Vec::new();
+        for ns in CNI_NAMESPACES {
+            let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+            match api.list(&ListParams::default()).await {
+                Ok(list) => names.extend(list.items.into_iter().filter_map(|p| p.metadata.name)),
+                Err(e) => {
+                    tracing::debug!(namespace = ns, error = %e, "k8s CNI detect: list pods failed");
+                }
             }
         }
+        names
     }
 }
 

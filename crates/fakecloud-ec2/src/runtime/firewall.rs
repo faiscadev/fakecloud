@@ -261,15 +261,35 @@ fn push_proto_ports(parts: &mut Vec<String>, protocol: &str, from: i64, to: i64)
                 }
             }
         }
-        other => parts.push(format!("ip protocol {other}")),
+        // An unrecognized protocol is interpolated into the nft script, so
+        // restrict it to the protocol-token charset `[a-z0-9-]` to avoid
+        // ruleset injection (finding 2.2); anything else emits no proto match.
+        other if other.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+            parts.push(format!("ip protocol {other}"))
+        }
+        _ => {}
     }
 }
 
 /// Drop `0.0.0.0/0` (which nft rejects as a no-op match) to `None`, and strip a
 /// redundant `/32` host suffix so single-host rules read cleanly.
+///
+/// Also **sanitizes**: the CIDR comes from an Authorize/RevokeSecurityGroup
+/// param and is interpolated raw into the `nft -f -` script, so a value
+/// containing nft metacharacters (whitespace, `;`, `{`, newline, …) could
+/// inject ruleset syntax. Anything outside the IPv4/IPv6-CIDR character set
+/// `[0-9a-fA-F.:/]` is rejected to `None` (the match clause is dropped, never
+/// the whole rule), closing that injection surface (bug-hunt 2026-06-18
+/// finding 2.2).
 fn normalized_cidr(cidr: &Option<String>) -> Option<String> {
     let c = cidr.as_deref()?;
     if c == "0.0.0.0/0" || c.is_empty() {
+        return None;
+    }
+    if !c
+        .chars()
+        .all(|ch| ch.is_ascii_hexdigit() || matches!(ch, '.' | ':' | '/'))
+    {
         return None;
     }
     Some(c.trim_end_matches("/32").to_string())
@@ -285,19 +305,27 @@ pub enum EnforcementMode {
 }
 
 /// Decide the enforcement mode from the environment. Enforcement is opt-in:
-/// `FAKECLOUD_EC2_SG_ENFORCEMENT` must be set to `1`/`true`/`nftables`, and
-/// `nft` must actually be runnable, or we degrade to `Disabled` with a single
-/// warning. `env` and `nft_probe` are injected so the decision is unit-testable
-/// without touching the real environment or running `nft`.
+/// `FAKECLOUD_EC2_SG_ENFORCEMENT` must be set to `1`/`true`/`nftables`, `nft`
+/// must be runnable, AND the daemon must run on this host's network namespace
+/// (`host_local`). `env`, `host_local`, and `nft_probe` are injected so the
+/// decision is unit-testable without touching the environment or running `nft`.
+///
+/// `host_local` guards the false-positive on Docker Desktop / podman-machine
+/// (macOS/Windows): there the per-subnet bridges live inside the daemon's Linux
+/// VM, so `nft` on the host installs rules against the wrong netfilter and
+/// silently filters nothing — yet the probe would pass on a Linux box. We treat
+/// only a native-Linux host as able to filter (bug-hunt 2026-06-18 finding 1.5),
+/// so `enforced` never claims active enforcement that can't take effect.
 pub fn resolve_enforcement_mode(
     env: Option<&str>,
+    host_local: bool,
     nft_probe: impl FnOnce() -> bool,
 ) -> EnforcementMode {
     let opted_in = matches!(
         env.map(|v| v.to_ascii_lowercase()).as_deref(),
         Some("1") | Some("true") | Some("nftables") | Some("on")
     );
-    if !opted_in {
+    if !opted_in || !host_local {
         return EnforcementMode::Disabled;
     }
     if nft_probe() {
@@ -305,6 +333,15 @@ pub fn resolve_enforcement_mode(
     } else {
         EnforcementMode::Disabled
     }
+}
+
+/// Whether the container daemon shares this process's network namespace, so
+/// host nftables rules actually see the inter-container traffic. True only on a
+/// native-Linux host; Docker Desktop / podman-machine on macOS/Windows run the
+/// daemon in a separate Linux VM. (Honest default; can be overridden by the
+/// caller when fakecloud and the daemon are known to share a netns.)
+pub fn host_shares_daemon_netns() -> bool {
+    cfg!(target_os = "linux")
 }
 
 /// True when `nft list ruleset` runs successfully — i.e. nft exists and this
@@ -504,27 +541,33 @@ mod tests {
 
     #[test]
     fn enforcement_mode_is_opt_in_and_capability_gated() {
-        // not opted in -> disabled regardless of nft availability
+        // not opted in -> disabled regardless of nft availability / host
         assert_eq!(
-            resolve_enforcement_mode(None, || true),
+            resolve_enforcement_mode(None, true, || true),
             EnforcementMode::Disabled
         );
         assert_eq!(
-            resolve_enforcement_mode(Some("0"), || true),
+            resolve_enforcement_mode(Some("0"), true, || true),
             EnforcementMode::Disabled
         );
         // opted in but nft missing -> degrade
         assert_eq!(
-            resolve_enforcement_mode(Some("1"), || false),
+            resolve_enforcement_mode(Some("1"), true, || false),
             EnforcementMode::Disabled
         );
-        // opted in + capable -> nftables
+        // opted in + capable but daemon not host-local (Docker Desktop/VM) ->
+        // degrade rather than falsely claim enforced (finding 1.5)
         assert_eq!(
-            resolve_enforcement_mode(Some("nftables"), || true),
+            resolve_enforcement_mode(Some("1"), false, || true),
+            EnforcementMode::Disabled
+        );
+        // opted in + host-local + capable -> nftables
+        assert_eq!(
+            resolve_enforcement_mode(Some("nftables"), true, || true),
             EnforcementMode::Nftables
         );
         assert_eq!(
-            resolve_enforcement_mode(Some("TRUE"), || true),
+            resolve_enforcement_mode(Some("TRUE"), true, || true),
             EnforcementMode::Nftables
         );
     }

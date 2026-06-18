@@ -160,12 +160,18 @@ impl FirewallEnforcer {
     /// can't be backed (so the operator knows it degraded, not silently).
     fn detect() -> Self {
         let requested = std::env::var("FAKECLOUD_EC2_SG_ENFORCEMENT").ok();
-        let mode = resolve_enforcement_mode(requested.as_deref(), firewall::nft_available);
+        let mode = resolve_enforcement_mode(
+            requested.as_deref(),
+            firewall::host_shares_daemon_netns(),
+            firewall::nft_available,
+        );
         if requested.is_some() && mode == EnforcementMode::Disabled {
             tracing::warn!(
-                "EC2 security-group enforcement was requested but nftables/CAP_NET_ADMIN \
-                 is unavailable; falling back to metadata-only (phase-2 L3 isolation stays \
-                 active, security-group rules are tracked but not enforced)"
+                "EC2 security-group enforcement was requested but it can't take effect here \
+                 (needs nftables + CAP_NET_ADMIN on a native-Linux host whose daemon shares this \
+                 network namespace — Docker Desktop / podman-machine run the daemon in a VM); \
+                 falling back to metadata-only (phase-2 L3 isolation stays active, security-group \
+                 rules are tracked but not enforced)"
             );
         } else if mode == EnforcementMode::Nftables {
             tracing::info!("EC2 security-group enforcement active via nftables");
@@ -241,6 +247,13 @@ pub struct Ec2Runtime {
     instances: Arc<RwLock<HashMap<String, InstanceRecord>>>,
     /// Host firewall enforcer for security groups + NACLs.
     firewall: FirewallEnforcer,
+    /// Serializes firewall reconciles. Reconcile is fired from many concurrent
+    /// background tasks (per SG/NACL/lifecycle event); without this, two
+    /// reconciles built from divergent state could interleave so the k8s
+    /// apply+prune of one deletes a policy the other just applied (bug-hunt
+    /// 2026-06-18 finding 4.3). Holding it across the whole reconcile makes the
+    /// last-started reconcile the last-applied for both backends.
+    reconcile_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Ec2Runtime {
@@ -255,6 +268,7 @@ impl Ec2Runtime {
             }),
             instances: Arc::new(RwLock::new(HashMap::new())),
             firewall: FirewallEnforcer::detect(),
+            reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -268,6 +282,7 @@ impl Ec2Runtime {
             instances: Arc::new(RwLock::new(HashMap::new())),
             // k8s isolation is a NetworkPolicy concern (phase 4), not host nft.
             firewall: FirewallEnforcer::disabled(),
+            reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -279,7 +294,9 @@ impl Ec2Runtime {
 
     /// Re-render and atomically apply the security-group/NACL ruleset for the
     /// given per-subnet model. No-op (cheap) when enforcement is disabled.
+    /// Serialized against other reconciles (finding 4.3).
     pub async fn reconcile_firewall(&self, subnets: Vec<SubnetFirewall>) {
+        let _guard = self.reconcile_lock.lock().await;
         self.firewall.reconcile(&subnets).await;
     }
 
@@ -296,9 +313,12 @@ impl Ec2Runtime {
     }
 
     /// Apply one NetworkPolicy per instance for the k8s backend. No-op on the
-    /// Docker backend (which uses nftables instead).
+    /// Docker backend (which uses nftables instead). Serialized against other
+    /// reconciles so a concurrent apply+prune can't delete a just-applied
+    /// policy (finding 4.3).
     pub async fn reconcile_network_policies(&self, rules: Vec<InstanceRules>) {
         if let InstanceBackend::K8s(k) = &self.backend {
+            let _guard = self.reconcile_lock.lock().await;
             k.reconcile_network_policies(&rules).await;
         }
     }

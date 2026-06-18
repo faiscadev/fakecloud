@@ -73,7 +73,7 @@ impl K8sInstances {
         );
         let pod_config = K8sPodConfig::resolved_base("FAKECLOUD_EC2_K8S")?;
         // Detect the CNI so we can warn when NetworkPolicy won't be enforced.
-        let cni = CniDriver::from_components(client.kube_system_pod_names().await);
+        let cni = CniDriver::from_components(client.cni_component_names().await);
         if cni.enforces() {
             tracing::info!(?cni, "k8s CNI enforces NetworkPolicy; EC2 security groups will be applied as NetworkPolicies");
         } else {
