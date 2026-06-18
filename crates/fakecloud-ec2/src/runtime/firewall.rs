@@ -107,6 +107,11 @@ const TABLE: &str = "inet fakecloud_ec2";
 /// per-instance rules (stateless, subnet-wide).
 pub fn render_ruleset(subnets: &[SubnetFirewall]) -> String {
     let mut out = String::new();
+    // `add table` first so the following `flush` doesn't error on the *first*
+    // apply (when the table doesn't exist yet) — which would fail the entire
+    // `nft -f -` load and leave enforcement silently off. `add` is idempotent;
+    // `add`+`flush`+re-add is the canonical atomic-replace idiom.
+    out.push_str(&format!("add table {TABLE}\n"));
     out.push_str(&format!("flush table {TABLE}\n"));
     out.push_str(&format!("table {TABLE} {{\n"));
     out.push_str("  chain forward {\n");
@@ -407,7 +412,13 @@ mod tests {
             nacl: vec![],
         }];
         let rs = render_ruleset(&model);
-        assert!(rs.contains("flush table inet fakecloud_ec2"));
+        // `add table` must precede `flush table` so the first apply (table
+        // absent) doesn't error and abort the whole ruleset load.
+        let add = rs.find("add table inet fakecloud_ec2").expect("add table");
+        let flush = rs
+            .find("flush table inet fakecloud_ec2")
+            .expect("flush table");
+        assert!(add < flush, "add table must come before flush:\n{rs}");
         assert!(rs.contains("ct state established,related accept"));
         assert!(rs.contains("ip daddr 172.30.0.2 ip saddr 10.0.0.0/8 tcp dport 22 accept"));
         assert!(rs.contains("ip daddr 172.30.0.2 drop comment \"default-deny ingress\""));
