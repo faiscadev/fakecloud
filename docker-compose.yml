@@ -19,6 +19,16 @@ services:
       FAKECLOUD_REGION: "us-east-1"
       FAKECLOUD_ACCOUNT_ID: "123456789012"
       FAKECLOUD_LOG: "info"
+      # Opt in to EC2 security-group / NACL packet enforcement (nftables).
+      # Off by default — uncomment together with the cap_add below. Needs
+      # CAP_NET_ADMIN + the `nft` binary (shipped in the image) on a native-
+      # Linux Docker daemon; degrades to metadata-only otherwise.
+      # FAKECLOUD_EC2_SG_ENFORCEMENT: "1"
+    # Required for EC2 security-group enforcement (FAKECLOUD_EC2_SG_ENFORCEMENT).
+    # Uncomment to let fakecloud install nftables rules on its per-subnet
+    # bridges. Leave commented for the default metadata-only behavior.
+    # cap_add:
+    #   - NET_ADMIN
     # The slim image ships no curl/wget — use the binary's own healthcheck
     # subcommand, which probes 127.0.0.1:<port>/_fakecloud/health.
     healthcheck:
