@@ -267,9 +267,7 @@ class Ec2Client:
         """Inspect the real backing network of each EC2 instance — which
         Docker/Podman network or k8s NetworkPolicy backs it, its container IP,
         and whether security-group enforcement is active or degraded."""
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/ec2/instance-networks"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/ec2/instance-networks")
         _check(resp)
         return Ec2InstanceNetworksResponse.from_dict(resp.json())
 

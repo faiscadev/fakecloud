@@ -27,6 +27,7 @@ import dev.fakecloud.Types.ConfirmSubscriptionResponse;
 import dev.fakecloud.Types.ConfirmUserRequest;
 import dev.fakecloud.Types.ConfirmUserResponse;
 import dev.fakecloud.Types.ConfirmationCodesResponse;
+import dev.fakecloud.Types.Ec2InstanceNetworksResponse;
 import dev.fakecloud.Types.Ec2InstancesResponse;
 import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
