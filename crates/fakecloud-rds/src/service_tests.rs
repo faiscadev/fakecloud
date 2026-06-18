@@ -2812,3 +2812,23 @@ async fn download_db_log_file_portion_returns_empty_when_runtime_absent() {
     assert!(body.contains("<AdditionalDataPending>false</AdditionalDataPending>"));
     assert!(body.contains("<Marker>0</Marker>"));
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let svc = make_service();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating RDS state
+/// directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn SnapshotStore> = Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = make_service().with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

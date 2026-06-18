@@ -152,25 +152,29 @@ impl EcsService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = EcsSnapshot {
-            schema_version: ECS_SNAPSHOT_SCHEMA_VERSION,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_ecs_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write ecs snapshot"),
-            Err(err) => tracing::error!(%err, "ecs snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current state when invoked, or `None` in
+    /// memory mode. The CloudFormation provisioner mutates `state` directly and
+    /// uses this to write a CFN-provisioned resource through to disk.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_ecs_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     /// Reconcile persisted task state with reality after a fakecloud
@@ -359,6 +363,32 @@ impl EcsService {
         }
 
         self.save_snapshot().await;
+    }
+}
+
+pub async fn save_ecs_snapshot(
+    state: &SharedEcsState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = EcsSnapshot {
+        schema_version: ECS_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write ecs snapshot"),
+        Err(err) => tracing::error!(%err, "ecs snapshot task panicked"),
     }
 }
 

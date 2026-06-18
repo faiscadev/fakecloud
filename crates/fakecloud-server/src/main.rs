@@ -916,7 +916,16 @@ async fn main() {
     if let Some(store) = cloudformation_snapshot_store {
         cloudformation_service = cloudformation_service.with_snapshot_store(store);
     }
-    registry.register(Arc::new(cloudformation_service));
+    // The CloudFormation provisioner persists every snapshot-backed service a
+    // stack op touches by invoking that service's snapshot hook. We collect the
+    // hooks as each service is built below, then register CloudFormation last
+    // (after the S3 store and all hooks exist) via `with_s3_store` /
+    // `with_snapshot_hooks`. Keyed by the service names in
+    // `service_key_for_type`.
+    let mut cfn_snapshot_hooks: std::collections::BTreeMap<
+        &'static str,
+        fakecloud_persistence::SnapshotHook,
+    > = std::collections::BTreeMap::new();
     let sqs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -977,6 +986,9 @@ async fn main() {
         .with_region(cli.region.clone());
     if let Some(store) = sqs_snapshot_store.clone() {
         sqs_service = sqs_service.with_snapshot_store(store);
+    }
+    if let Some(h) = sqs_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("sqs", h);
     }
     registry.register(Arc::new(sqs_service));
     // Flush cross-service SQS deliveries (SNS/EventBridge/S3/Scheduler fan-out)
@@ -1052,6 +1064,9 @@ async fn main() {
     if let Some(store) = sns_snapshot_store {
         sns_service = sns_service.with_snapshot_store(store);
     }
+    if let Some(h) = sns_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("sns", h);
+    }
     registry.register(Arc::new(sns_service));
     let eb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -1119,6 +1134,9 @@ async fn main() {
     }
     if let Some(store) = eb_snapshot_store {
         eb_service = eb_service.with_snapshot_store(store);
+    }
+    if let Some(h) = eb_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("eventbridge", h);
     }
     registry.register(Arc::new(eb_service));
     // Spawn the EventBridge scheduler as a background task
@@ -1209,6 +1227,9 @@ async fn main() {
     if let Some(store) = iam_snapshot_store {
         sts_service = sts_service.with_snapshot_store(store);
     }
+    if let Some(h) = iam_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iam", h);
+    }
     registry.register(Arc::new(iam_service));
     registry.register(Arc::new(sts_service));
     let ssm_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
@@ -1275,6 +1296,9 @@ async fn main() {
         .with_kms_hook(kms_hook_for_services.clone());
     if let Some(store) = ssm_snapshot_store {
         ssm_service = ssm_service.with_snapshot_store(store);
+    }
+    if let Some(h) = ssm_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ssm", h);
     }
     registry.register(Arc::new(ssm_service));
     // DynamoDB is registered later, after s3_store is constructed, so the
@@ -1372,6 +1396,9 @@ async fn main() {
     if let Some(store) = lambda_snapshot_store {
         lambda_service = lambda_service.with_snapshot_store(store);
     }
+    if let Some(h) = lambda_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("lambda", h);
+    }
     registry.register(Arc::new(lambda_service));
     // SecretsManager delivery bus (rotation Lambda invocation)
     let delivery_for_secretsmanager = {
@@ -1446,6 +1473,9 @@ async fn main() {
     if let Some(store) = secretsmanager_snapshot_store {
         secretsmanager_service = secretsmanager_service.with_snapshot_store(store);
     }
+    if let Some(h) = secretsmanager_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("secretsmanager", h);
+    }
     registry.register(Arc::new(secretsmanager_service));
     let logs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -1510,6 +1540,9 @@ async fn main() {
     if let Some(store) = logs_snapshot_store {
         logs_service = logs_service.with_snapshot_store(store);
     }
+    if let Some(h) = logs_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("logs", h);
+    }
     registry.register(Arc::new(logs_service));
     let kms_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -1569,6 +1602,9 @@ async fn main() {
     let mut kms_service = KmsService::new(kms_state.clone());
     if let Some(store) = kms_snapshot_store.clone() {
         kms_service = kms_service.with_snapshot_store(store);
+    }
+    if let Some(h) = kms_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kms", h);
     }
     registry.register(Arc::new(kms_service));
     // Wire the snapshot store into the hook adapter too, so hook-driven
@@ -1730,6 +1766,9 @@ async fn main() {
     if let Some(store) = dynamodb_snapshot_store {
         dynamodb_service = dynamodb_service.with_snapshot_store(store);
     }
+    if let Some(h) = dynamodb_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("dynamodb", h);
+    }
     registry.register(Arc::new(dynamodb_service));
     // Companion data plane: DynamoDB Streams (`streams.dynamodb.<region>.amazonaws.com`)
     // shares the same per-table state populated by mutations on the main
@@ -1818,6 +1857,9 @@ async fn main() {
     if let Some(store) = ses_snapshot_store {
         ses_service = ses_service.with_snapshot_store(store);
     }
+    if let Some(h) = ses_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ses", h);
+    }
     registry.register(Arc::new(ses_service));
     ses_smtp::maybe_spawn(iam_state.clone(), ses_state.clone());
     let delivery_for_cognito = {
@@ -1900,6 +1942,9 @@ async fn main() {
     if let Some(store) = cognito_snapshot_store {
         cognito_service = cognito_service.with_snapshot_store(store);
     }
+    if let Some(h) = cognito_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("cognito", h);
+    }
     registry.register(Arc::new(cognito_service));
     // Cognito Federated Identity Pools (`cognito-identity` service).
     // Shares state with the user-pool service above; lives in the same
@@ -1968,6 +2013,9 @@ async fn main() {
     let mut kinesis_service = KinesisService::new(kinesis_state.clone());
     if let Some(store) = kinesis_snapshot_store.clone() {
         kinesis_service = kinesis_service.with_snapshot_store(store);
+    }
+    if let Some(h) = kinesis_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kinesis", h);
     }
     registry.register(Arc::new(kinesis_service));
     // Flush cross-service Kinesis deliveries (DynamoDB streaming / Logs
@@ -2094,6 +2142,9 @@ async fn main() {
     // spawns one task per instance and returns immediately, so a slow
     // postgres bring-up doesn't block server startup. (Issue #1338.)
     rds_service.recover_persisted_containers().await;
+    if let Some(h) = rds_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("rds", h);
+    }
     registry.register(Arc::new(rds_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2165,6 +2216,9 @@ async fn main() {
     // their Docker containers don't, so respawn them on startup. See
     // RDS #1338 for the original bug class.
     elasticache_service.recover_persisted_containers().await;
+    if let Some(h) = elasticache_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("elasticache", h);
+    }
     registry.register(Arc::new(elasticache_service));
     let ecr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2215,6 +2269,9 @@ async fn main() {
     let mut ecr_service = EcrService::new(ecr_state.clone()).with_kms(kms_state.clone());
     if let Some(store) = ecr_snapshot_store.clone() {
         ecr_service = ecr_service.with_snapshot_store(store);
+    }
+    if let Some(h) = ecr_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ecr", h);
     }
     registry.register(Arc::new(ecr_service));
     // Periodic re-evaluation of ECR lifecycle policies. The ticker
@@ -2302,6 +2359,9 @@ async fn main() {
         ecs_service_for_desired_count,
         std::time::Duration::from_secs(3),
     ));
+    if let Some(h) = ecs_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ecs", h);
+    }
     registry.register(ecs_service);
     let elbv2_introspection_state = elbv2_state.clone();
     // Wire an S3-only delivery bus so the ALB dataplane can flush
@@ -2387,6 +2447,9 @@ async fn main() {
         fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
     if let Some(store) = cloudwatch_snapshot_store {
         cloudwatch_service = cloudwatch_service.with_snapshot_store(store);
+    }
+    if let Some(h) = cloudwatch_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("cloudwatch", h);
     }
     registry.register(Arc::new(cloudwatch_service));
     let app_autoscaling_service =
@@ -2503,6 +2566,9 @@ async fn main() {
     if let Some(store) = sfn_snapshot_store {
         sfn_service = sfn_service.with_snapshot_store(store);
     }
+    if let Some(h) = sfn_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("stepfunctions", h);
+    }
     registry.register(Arc::new(sfn_service));
     let apigw_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2579,6 +2645,9 @@ async fn main() {
         apigw_service = apigw_service.with_snapshot_store(store);
     }
     let apigatewayv2_service = Arc::new(apigw_service);
+    if let Some(h) = apigatewayv2_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("apigatewayv2", h);
+    }
     let v2_arc: Arc<dyn fakecloud_core::service::AwsService> = apigatewayv2_service.clone();
     // v1 (REST APIs) shares the SigV4 service identifier `apigateway`
     // with v2; the registry is keyed by that identifier so we wrap
@@ -2650,6 +2719,9 @@ async fn main() {
         apigw_v1_service = apigw_v1_service.with_snapshot_store(store);
     }
     let v1_arc = Arc::new(apigw_v1_service);
+    if let Some(h) = v1_arc.snapshot_hook() {
+        cfn_snapshot_hooks.insert("apigateway", h);
+    }
     registry.register(Arc::new(ApiGatewayFacade::new(v1_arc, v2_arc)));
     let bedrock_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -2711,6 +2783,9 @@ async fn main() {
     if let Some(store) = bedrock_snapshot_store {
         bedrock_service = bedrock_service.with_snapshot_store(store);
     }
+    if let Some(h) = bedrock_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("bedrock", h);
+    }
     registry.register(Arc::new(bedrock_service));
     registry.register(Arc::new(BedrockAgentService::new(
         bedrock_agent_state.clone(),
@@ -2745,7 +2820,14 @@ async fn main() {
     if let Some(store) = scheduler_snapshot_store {
         scheduler_service = scheduler_service.with_snapshot_store(store);
     }
+    if let Some(h) = scheduler_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("scheduler", h);
+    }
     registry.register(Arc::new(scheduler_service));
+    let cloudformation_service = cloudformation_service
+        .with_s3_store(s3_store.clone())
+        .with_snapshot_hooks(cfn_snapshot_hooks);
+    registry.register(Arc::new(cloudformation_service));
     // Spawn the Scheduler firing loop as a background task. Mirrors
     // EventBridge's delivery bus so every target type Scheduler
     // routes (`:sqs:`, `:sns:`, `:lambda:`, `:states:`, `:events:`)

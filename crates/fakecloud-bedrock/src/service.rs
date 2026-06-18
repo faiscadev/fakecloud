@@ -99,26 +99,30 @@ impl BedrockService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = BedrockSnapshot {
-            schema_version: BEDROCK_SNAPSHOT_SCHEMA_VERSION,
-            state: None,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_bedrock_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write bedrock snapshot"),
-            Err(err) => tracing::error!(%err, "bedrock snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current Bedrock state when invoked, or
+    /// `None` in memory mode (no snapshot store). The CloudFormation provisioner
+    /// mutates `state` directly and uses this to write a CFN-provisioned
+    /// resource through to disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_bedrock_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     fn resolve_action(req: &AwsRequest) -> Option<(&str, Option<String>, Option<String>)> {
@@ -924,6 +928,38 @@ impl BedrockService {
         };
 
         Ok(AwsResponse::ok_json(json!({ "tags": tags_arr })))
+    }
+}
+
+/// Persist the current Bedrock state as a snapshot. Cloned + serialized under
+/// the snapshot lock. Noop when `store` is `None` (memory mode). Shared by
+/// `BedrockService::save_snapshot` and the CloudFormation provisioner's
+/// post-provision persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_bedrock_snapshot(
+    state: &SharedBedrockState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = BedrockSnapshot {
+        schema_version: BEDROCK_SNAPSHOT_SCHEMA_VERSION,
+        state: None,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write bedrock snapshot"),
+        Err(err) => tracing::error!(%err, "bedrock snapshot task panicked"),
     }
 }
 

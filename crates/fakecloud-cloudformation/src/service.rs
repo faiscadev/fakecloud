@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fakecloud_core::delivery::DeliveryBus;
@@ -10,7 +10,7 @@ use fakecloud_dynamodb::SharedDynamoDbState;
 use fakecloud_eventbridge::SharedEventBridgeState;
 use fakecloud_iam::SharedIamState;
 use fakecloud_logs::SharedLogsState;
-use fakecloud_persistence::SnapshotStore;
+use fakecloud_persistence::{S3Store, SnapshotHook, SnapshotStore};
 use fakecloud_s3::SharedS3State;
 use fakecloud_sns::SharedSnsState;
 use fakecloud_sqs::SharedSqsState;
@@ -48,6 +48,84 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::SecretsManager::Secret" => &["Arn", "Id"],
         "AWS::CloudFront::Distribution" => &["DomainName", "Id"],
         _ => &[],
+    }
+}
+
+/// Map a CloudFormation resource type (`AWS::<Service>::<Resource>`) to the
+/// snapshot-hook key for its owning service (the keys of
+/// `CloudFormationDeps::snapshot_hooks`). The key is the service segment, with
+/// aliases for the few services whose CloudFormation namespace differs from
+/// their fakecloud service name (e.g. `Events` -> `eventbridge`).
+///
+/// `AWS::S3::*` is intentionally absent: S3 buckets persist through the
+/// `S3Store` write-through path in the provisioner, not a whole-state snapshot
+/// hook. Returns `None` for malformed types and any service whose state is not
+/// snapshot-backed (those CFN resources have no persistence path either way).
+fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
+    let mut parts = resource_type.split("::");
+    let vendor = parts.next()?;
+    let service = parts.next()?;
+    // A real resource type has three segments; a 2-part string (or fewer) is
+    // not one.
+    parts.next()?;
+    if vendor != "AWS" {
+        return None;
+    }
+    Some(match service {
+        "Lambda" => "lambda",
+        "SecretsManager" => "secretsmanager",
+        "SQS" => "sqs",
+        "SNS" => "sns",
+        "DynamoDB" => "dynamodb",
+        "StepFunctions" => "stepfunctions",
+        "Events" => "eventbridge",
+        "SSM" => "ssm",
+        "Logs" => "logs",
+        "KMS" => "kms",
+        "Kinesis" => "kinesis",
+        "SES" => "ses",
+        "Cognito" => "cognito",
+        "RDS" => "rds",
+        "ElastiCache" => "elasticache",
+        "ECR" => "ecr",
+        "ECS" => "ecs",
+        "CloudWatch" => "cloudwatch",
+        "ApiGateway" => "apigateway",
+        "ApiGatewayV2" => "apigatewayv2",
+        "Bedrock" => "bedrock",
+        "Scheduler" => "scheduler",
+        "IAM" => "iam",
+        _ => return None,
+    })
+}
+
+/// Persist each distinct snapshot-backed service touched by a stack op, once.
+///
+/// `resource_types` is the set of `resource_type` strings the op created /
+/// updated / deleted. The CloudFormation provisioner mutates services' shared
+/// state directly and never triggers their snapshot path; this writes that
+/// state through to disk afterwards, so a CFN-provisioned (or CFN-deleted)
+/// resource survives a restart. Services with no registered hook (memory mode,
+/// or non-snapshot-backed services) are skipped.
+async fn persist_touched_services<I>(
+    hooks: &BTreeMap<&'static str, SnapshotHook>,
+    resource_types: I,
+) where
+    I: IntoIterator<Item = String>,
+{
+    if hooks.is_empty() {
+        return;
+    }
+    let mut keys: BTreeSet<&'static str> = BTreeSet::new();
+    for ty in resource_types {
+        if let Some(key) = service_key_for_type(&ty) {
+            keys.insert(key);
+        }
+    }
+    for key in keys {
+        if let Some(hook) = hooks.get(key) {
+            hook().await;
+        }
     }
 }
 
@@ -211,6 +289,19 @@ pub struct CloudFormationService {
     pub(crate) deps: CloudFormationDeps,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Fine-grained S3 disk store. CFN bucket create/delete writes through this
+    /// (the same path the real `CreateBucket`/`DeleteBucket` use) instead of
+    /// only mutating the in-memory map, so a CFN-provisioned bucket survives a
+    /// restart. Defaults to a `MemoryS3Store` (no-op); the server wires the
+    /// real store via `with_s3_store` once it has been built.
+    s3_store: Arc<dyn S3Store>,
+    /// Whole-state snapshot persist hooks keyed by service name (see
+    /// `service_key_for_type`). After a stack op the handler invokes the hook
+    /// for each touched service so a CFN-provisioned (or CFN-deleted) resource
+    /// is written through to disk, the same persistence a direct mutating API
+    /// call would trigger. Empty by default (memory mode, or no services
+    /// wired); the server populates it via `with_snapshot_hooks`.
+    snapshot_hooks: BTreeMap<&'static str, SnapshotHook>,
 }
 
 /// Everything the async CreateStack provisioning task needs to provision
@@ -221,6 +312,7 @@ struct CreateStackContext {
     delivery: Arc<DeliveryBus>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    snapshot_hooks: BTreeMap<&'static str, SnapshotHook>,
     provisioner: ResourceProvisioner,
     account_id: String,
     stack_name: String,
@@ -239,11 +331,27 @@ impl CloudFormationService {
             deps,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
+            snapshot_hooks: BTreeMap::new(),
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Wire the fine-grained S3 disk store so CFN-provisioned buckets are
+    /// written through to disk (see `ResourceProvisioner::s3_store`).
+    pub fn with_s3_store(mut self, store: Arc<dyn S3Store>) -> Self {
+        self.s3_store = store;
+        self
+    }
+
+    /// Register the per-service snapshot persist hooks (keyed by service name)
+    /// used to persist every snapshot-backed service a stack op touches.
+    pub fn with_snapshot_hooks(mut self, hooks: BTreeMap<&'static str, SnapshotHook>) -> Self {
+        self.snapshot_hooks = hooks;
         self
     }
 
@@ -312,6 +420,7 @@ impl CloudFormationService {
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
+            s3_store: self.s3_store.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),
@@ -749,6 +858,7 @@ impl CloudFormationService {
             delivery: self.deps.delivery.clone(),
             snapshot_store: self.snapshot_store.clone(),
             snapshot_lock: self.snapshot_lock.clone(),
+            snapshot_hooks: self.snapshot_hooks.clone(),
             provisioner: self.provisioner(&stack_id, &req.account_id, &req.region),
             account_id: req.account_id.clone(),
             stack_name: stack_name.clone(),
@@ -819,6 +929,7 @@ impl CloudFormationService {
             delivery,
             snapshot_store,
             snapshot_lock,
+            snapshot_hooks,
             provisioner,
             account_id,
             stack_name,
@@ -925,6 +1036,15 @@ impl CloudFormationService {
         );
 
         save_snapshot_static(state, snapshot_store, snapshot_lock).await;
+        // Persist every snapshot-backed service the stack provisioned, so a
+        // CFN-created resource (e.g. a Lambda function or Secret whose service
+        // is not otherwise re-mutated) is written to disk and survives a
+        // restart -- not just the CloudFormation stack metadata above.
+        persist_touched_services(
+            &snapshot_hooks,
+            resources.iter().map(|r| r.resource_type.clone()),
+        )
+        .await;
     }
 
     /// Roll a stack into CREATE_FAILED, record the lifecycle event, and
@@ -963,7 +1083,7 @@ impl CloudFormationService {
         );
     }
 
-    fn delete_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn delete_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let stack_name = Self::get_param(req, "StackName").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -972,96 +1092,111 @@ impl CloudFormationService {
             )
         })?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-
-        // Find stack by name or stack ID
-        let stack = state.stacks.values_mut().find(|s| {
-            (s.name == stack_name || s.stack_id == stack_name) && s.status != "DELETE_COMPLETE"
-        });
-
-        if let Some(stack) = stack {
-            let stack_id = stack.stack_id.clone();
-            let stack_name_for_notif = stack.name.clone();
-            let notification_arns = stack.notification_arns.clone();
-            let resources: Vec<_> = stack.resources.clone();
-
-            // Block delete if any of this stack's exports are still
-            // imported by another live stack. Mirrors real CFN.
-            let owned_exports: Vec<String> = state
-                .exports
-                .iter()
-                .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for export in &owned_exports {
-                if let Some(consumers) = state.imports.get(export) {
-                    let consumers: Vec<&String> = consumers
-                        .iter()
-                        .filter(|c| **c != stack_name_for_notif)
-                        .collect();
-                    if !consumers.is_empty() {
-                        let names: Vec<&str> = consumers.iter().map(|s| s.as_str()).collect();
-                        // DeleteStack declares only `TokenAlreadyExistsException`,
-                        // which is the closest declared shape for "this delete
-                        // can't proceed". Strict conformance rarely hits this
-                        // pre-flight (probe state is fresh per run); the unit
-                        // test asserting the legacy message still passes since
-                        // both error codes carry the same body text.
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::BAD_REQUEST,
-                            "TokenAlreadyExistsException",
-                            format!(
-                                "Export {export} cannot be deleted as it is in use by {}",
-                                names.join(", ")
-                            ),
-                        ));
-                    }
-                }
-            }
-
-            // Build the provisioner while we still have the stack_id
-            // Drop the write lock temporarily so the provisioner can read state
-            drop(accounts);
-            let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
-
-            // Delete resources in reverse order
-            for resource in resources.iter().rev() {
-                let _ = provisioner.delete_resource(resource);
-            }
-
-            // Re-acquire the write lock to update stack status
+        // Resource types deleted by this op, captured so we can persist the
+        // owning services after every state guard has been released (the
+        // `.await` must not straddle a non-Send `RwLockWriteGuard`). The guard
+        // work is wrapped in a block so the lock is dropped on every path -
+        // including the stack-not-found path - before the await below.
+        let mut deleted_types: Vec<String> = Vec::new();
+        {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
-            if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
-                stack.status = "DELETE_COMPLETE".to_string();
-                stack.resources.clear();
-                stack.outputs.clear();
-            }
-            // Drop this stack's exports + import-consumer entries.
-            let stale_exports: Vec<String> = state
-                .exports
-                .iter()
-                .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in stale_exports {
-                state.exports.remove(&k);
-            }
-            for entries in state.imports.values_mut() {
-                entries.retain(|s| s != &stack_name_for_notif);
-            }
-            state.imports.retain(|_, v| !v.is_empty());
-            drop(accounts);
 
-            Self::send_stack_notification(
-                &self.deps.delivery,
-                &notification_arns,
-                &stack_name_for_notif,
-                &stack_id,
-                "DELETE_COMPLETE",
-            );
+            // Find stack by name or stack ID
+            let stack = state.stacks.values_mut().find(|s| {
+                (s.name == stack_name || s.stack_id == stack_name) && s.status != "DELETE_COMPLETE"
+            });
+
+            if let Some(stack) = stack {
+                let stack_id = stack.stack_id.clone();
+                let stack_name_for_notif = stack.name.clone();
+                let notification_arns = stack.notification_arns.clone();
+                let resources: Vec<_> = stack.resources.clone();
+
+                // Block delete if any of this stack's exports are still
+                // imported by another live stack. Mirrors real CFN.
+                let owned_exports: Vec<String> = state
+                    .exports
+                    .iter()
+                    .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for export in &owned_exports {
+                    if let Some(consumers) = state.imports.get(export) {
+                        let consumers: Vec<&String> = consumers
+                            .iter()
+                            .filter(|c| **c != stack_name_for_notif)
+                            .collect();
+                        if !consumers.is_empty() {
+                            let names: Vec<&str> = consumers.iter().map(|s| s.as_str()).collect();
+                            // DeleteStack declares only `TokenAlreadyExistsException`,
+                            // which is the closest declared shape for "this delete
+                            // can't proceed". Strict conformance rarely hits this
+                            // pre-flight (probe state is fresh per run); the unit
+                            // test asserting the legacy message still passes since
+                            // both error codes carry the same body text.
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "TokenAlreadyExistsException",
+                                format!(
+                                    "Export {export} cannot be deleted as it is in use by {}",
+                                    names.join(", ")
+                                ),
+                            ));
+                        }
+                    }
+                }
+
+                // Build the provisioner while we still have the stack_id
+                // Drop the write lock temporarily so the provisioner can read state
+                drop(accounts);
+                let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
+
+                // Delete resources in reverse order
+                for resource in resources.iter().rev() {
+                    let _ = provisioner.delete_resource(resource);
+                }
+
+                // Re-acquire the write lock to update stack status
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
+                    stack.status = "DELETE_COMPLETE".to_string();
+                    stack.resources.clear();
+                    stack.outputs.clear();
+                }
+                // Drop this stack's exports + import-consumer entries.
+                let stale_exports: Vec<String> = state
+                    .exports
+                    .iter()
+                    .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in stale_exports {
+                    state.exports.remove(&k);
+                }
+                for entries in state.imports.values_mut() {
+                    entries.retain(|s| s != &stack_name_for_notif);
+                }
+                state.imports.retain(|_, v| !v.is_empty());
+                drop(accounts);
+
+                Self::send_stack_notification(
+                    &self.deps.delivery,
+                    &notification_arns,
+                    &stack_name_for_notif,
+                    &stack_id,
+                    "DELETE_COMPLETE",
+                );
+
+                deleted_types = resources.iter().map(|r| r.resource_type.clone()).collect();
+            }
         }
+
+        // Persist every snapshot-backed service whose resource was deleted, so
+        // a CFN-deleted resource does not reappear after a restart. Done here,
+        // outside any state-guard scope, so the future stays `Send`.
+        persist_touched_services(&self.snapshot_hooks, deleted_types).await;
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1190,7 +1325,7 @@ impl CloudFormationService {
         ))
     }
 
-    fn update_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn update_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
@@ -1288,135 +1423,156 @@ impl CloudFormationService {
 
         let provisioner = self.provisioner(&found_stack_id, &req.account_id, &req.region);
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        // UpdateStack declares only `InsufficientCapabilitiesException` and
-        // `TokenAlreadyExistsException` — neither describes a missing stack.
-        // Real AWS returns `ValidationError` for this case, but that wire
-        // code isn't declared on UpdateStack. The conformance probe's
-        // Success variants supply placeholder `StackName` values that point
-        // at no real stack, so degrade to a synthetic-success response
-        // (echoing a generated StackId) rather than emit an undeclared
-        // error. Real callers always create the stack first.
-        let stack_exists = state.stacks.values().any(|s| {
-            (s.name == input.stack_name || s.stack_id == input.stack_name)
-                && s.status != "DELETE_COMPLETE"
-        });
-        if !stack_exists {
-            let stack_id = if found_stack_id.is_empty() {
-                format!(
-                    "arn:aws:cloudformation:{}:{}:stack/{}/{}",
-                    req.region,
-                    req.account_id,
-                    input.stack_name,
-                    uuid::Uuid::new_v4()
+        // All `RwLockWriteGuard` work happens inside this block so the (non-Send)
+        // guard is released before the persist `.await` below, keeping the
+        // handler future `Send`. The block yields everything the post-lock tail
+        // needs, including the resource types touched by the update.
+        let (touched_types, stack_id, stack_name_for_notif, notification_arns, resources_snapshot) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            // UpdateStack declares only `InsufficientCapabilitiesException` and
+            // `TokenAlreadyExistsException` -- neither describes a missing stack.
+            // Real AWS returns `ValidationError` for this case, but that wire
+            // code isn't declared on UpdateStack. The conformance probe's
+            // Success variants supply placeholder `StackName` values that point
+            // at no real stack, so degrade to a synthetic-success response
+            // (echoing a generated StackId) rather than emit an undeclared
+            // error. Real callers always create the stack first.
+            let stack_exists = state.stacks.values().any(|s| {
+                (s.name == input.stack_name || s.stack_id == input.stack_name)
+                    && s.status != "DELETE_COMPLETE"
+            });
+            if !stack_exists {
+                let stack_id = if found_stack_id.is_empty() {
+                    format!(
+                        "arn:aws:cloudformation:{}:{}:stack/{}/{}",
+                        req.region,
+                        req.account_id,
+                        input.stack_name,
+                        uuid::Uuid::new_v4()
+                    )
+                } else {
+                    found_stack_id.clone()
+                };
+                return Ok(AwsResponse::xml(
+                    StatusCode::OK,
+                    xml_responses::update_stack_response(&stack_id, &req.request_id),
+                ));
+            }
+            let (update_result, stack_id, stack_name_owned, resources_snapshot, notification_arns) = {
+                let stack = state
+                    .stacks
+                    .values_mut()
+                    .find(|s| {
+                        (s.name == input.stack_name || s.stack_id == input.stack_name)
+                            && s.status != "DELETE_COMPLETE"
+                    })
+                    .expect("stack existence checked above");
+
+                stack.status = "UPDATE_IN_PROGRESS".to_string();
+                let update_result = apply_resource_updates(
+                    stack,
+                    &parsed.resources,
+                    &input.template_body,
+                    &input.parameters,
+                    &provisioner,
+                );
+
+                let stack_id = stack.stack_id.clone();
+                let stack_name_owned = stack.name.clone();
+                stack.template = input.template_body.clone();
+                stack.status = if update_result.is_err() {
+                    "UPDATE_ROLLBACK_COMPLETE".to_string()
+                } else {
+                    "UPDATE_COMPLETE".to_string()
+                };
+                stack.parameters = input.parameters.clone();
+                if !input.tags.is_empty() {
+                    stack.tags = input.tags;
+                }
+                stack.updated_at = Some(Utc::now());
+                stack.description = parsed.description;
+                if !input.notification_arns.is_empty() {
+                    stack.notification_arns = input.notification_arns.clone();
+                }
+                if update_result.is_ok() {
+                    stack.outputs.clear();
+                }
+                (
+                    update_result,
+                    stack_id,
+                    stack_name_owned,
+                    stack.resources.clone(),
+                    stack.notification_arns.clone(),
                 )
-            } else {
-                found_stack_id.clone()
             };
-            return Ok(AwsResponse::xml(
-                StatusCode::OK,
-                xml_responses::update_stack_response(&stack_id, &req.request_id),
-            ));
-        }
-        let (update_result, stack_id, stack_name_owned, resources_snapshot, notification_arns) = {
-            let stack = state
-                .stacks
-                .values_mut()
-                .find(|s| {
-                    (s.name == input.stack_name || s.stack_id == input.stack_name)
-                        && s.status != "DELETE_COMPLETE"
-                })
-                .expect("stack existence checked above");
 
-            stack.status = "UPDATE_IN_PROGRESS".to_string();
-            let update_result = apply_resource_updates(
-                stack,
-                &parsed.resources,
-                &input.template_body,
-                &input.parameters,
-                &provisioner,
+            // Emit lifecycle events (now that the &mut Stack borrow is dropped).
+            record_stack_status_event(
+                state,
+                &stack_id,
+                &stack_name_owned,
+                "AWS::CloudFormation::Stack",
+                "UPDATE_IN_PROGRESS",
             );
-
-            let stack_id = stack.stack_id.clone();
-            let stack_name_owned = stack.name.clone();
-            stack.template = input.template_body.clone();
-            stack.status = if update_result.is_err() {
-                "UPDATE_ROLLBACK_COMPLETE".to_string()
-            } else {
-                "UPDATE_COMPLETE".to_string()
+            let update_result = match update_result {
+                Ok(changes) => {
+                    // Capture every service touched by the update (created,
+                    // updated, or deleted resources) so we can persist them once
+                    // the stack reaches UPDATE_COMPLETE.
+                    let touched_types: Vec<String> =
+                        changes.iter().map(|c| c.resource_type.clone()).collect();
+                    record_stack_events(state, &stack_id, &stack_name_owned, &changes);
+                    record_stack_status_event(
+                        state,
+                        &stack_id,
+                        &stack_name_owned,
+                        "AWS::CloudFormation::Stack",
+                        "UPDATE_COMPLETE",
+                    );
+                    Ok(touched_types)
+                }
+                Err(e) => {
+                    record_stack_status_event(
+                        state,
+                        &stack_id,
+                        &stack_name_owned,
+                        "AWS::CloudFormation::Stack",
+                        "UPDATE_ROLLBACK_COMPLETE",
+                    );
+                    Err(e)
+                }
             };
-            stack.parameters = input.parameters.clone();
-            if !input.tags.is_empty() {
-                stack.tags = input.tags;
-            }
-            stack.updated_at = Some(Utc::now());
-            stack.description = parsed.description;
-            if !input.notification_arns.is_empty() {
-                stack.notification_arns = input.notification_arns.clone();
-            }
-            if update_result.is_ok() {
-                stack.outputs.clear();
-            }
+            let stack_name_for_notif = stack_name_owned.clone();
+
+            let touched_types = match update_result {
+                Ok(types) => types,
+                Err(error_msg) => {
+                    drop(accounts);
+                    Self::send_stack_notification(
+                        &self.deps.delivery,
+                        &notification_arns,
+                        &stack_name_for_notif,
+                        &stack_id,
+                        "UPDATE_FAILED",
+                    );
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InsufficientCapabilitiesException",
+                        error_msg,
+                    ));
+                }
+            };
+
+            drop(accounts);
             (
-                update_result,
+                touched_types,
                 stack_id,
-                stack_name_owned,
-                stack.resources.clone(),
-                stack.notification_arns.clone(),
+                stack_name_for_notif,
+                notification_arns,
+                resources_snapshot,
             )
         };
-
-        // Emit lifecycle events (now that the &mut Stack borrow is dropped).
-        record_stack_status_event(
-            state,
-            &stack_id,
-            &stack_name_owned,
-            "AWS::CloudFormation::Stack",
-            "UPDATE_IN_PROGRESS",
-        );
-        let update_result = match update_result {
-            Ok(changes) => {
-                record_stack_events(state, &stack_id, &stack_name_owned, &changes);
-                record_stack_status_event(
-                    state,
-                    &stack_id,
-                    &stack_name_owned,
-                    "AWS::CloudFormation::Stack",
-                    "UPDATE_COMPLETE",
-                );
-                Ok(())
-            }
-            Err(e) => {
-                record_stack_status_event(
-                    state,
-                    &stack_id,
-                    &stack_name_owned,
-                    "AWS::CloudFormation::Stack",
-                    "UPDATE_ROLLBACK_COMPLETE",
-                );
-                Err(e)
-            }
-        };
-        let stack_name_for_notif = stack_name_owned.clone();
-
-        if let Err(error_msg) = update_result {
-            drop(accounts);
-            Self::send_stack_notification(
-                &self.deps.delivery,
-                &notification_arns,
-                &stack_name_for_notif,
-                &stack_id,
-                "UPDATE_FAILED",
-            );
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InsufficientCapabilitiesException",
-                error_msg,
-            ));
-        }
-
-        drop(accounts);
 
         let outputs = Self::resolve_template_outputs(
             &input.template_body,
@@ -1451,6 +1607,10 @@ impl CloudFormationService {
             &stack_id,
             "UPDATE_COMPLETE",
         );
+
+        // Persist every snapshot-backed service the update touched, so created
+        // or deleted resources are reflected on disk after a restart.
+        persist_touched_services(&self.snapshot_hooks, touched_types).await;
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1525,12 +1685,12 @@ impl AwsService for CloudFormationService {
         );
         let result = match action {
             "CreateStack" => self.create_stack(&req).await,
-            "DeleteStack" => self.delete_stack(&req),
+            "DeleteStack" => self.delete_stack(&req).await,
             "DescribeStacks" => self.describe_stacks(&req),
             "ListStacks" => self.list_stacks(&req),
             "ListStackResources" => self.list_stack_resources(&req),
             "DescribeStackResources" => self.describe_stack_resources(&req),
-            "UpdateStack" => self.update_stack(&req),
+            "UpdateStack" => self.update_stack(&req).await,
             "GetTemplate" => self.get_template(&req),
             _ => self.handle_extra_action(&req),
         };
@@ -2248,7 +2408,7 @@ mod tests {
             r#"{"Resources":{"MyQueue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"q1"}},"BadSub":{"Type":"AWS::SNS::Subscription","Properties":{"TopicArn":"arn:aws:sns:us-east-1:123456789012:nope","Protocol":"sqs","Endpoint":"arn:aws:sqs:us-east-1:123456789012:q1"}}}}"#.to_string(),
         );
         let req = make_request("UpdateStack", update_params);
-        let result = svc.update_stack(&req);
+        let result = svc.update_stack(&req).await;
 
         // Should return an error
         assert!(result.is_err());
@@ -2452,13 +2612,13 @@ mod tests {
             .expect("bad-body create succeeds");
     }
 
-    #[test]
-    fn delete_stack_unknown_is_noop() {
+    #[tokio::test]
+    async fn delete_stack_unknown_is_noop() {
         let svc = make_service();
         let mut params = HashMap::new();
         params.insert("StackName".to_string(), "ghost".to_string());
         let req = make_request("DeleteStack", params);
-        assert!(svc.delete_stack(&req).is_ok());
+        assert!(svc.delete_stack(&req).await.is_ok());
     }
 
     #[test]
@@ -2552,17 +2712,17 @@ mod tests {
         svc.get_template(&req).expect("unknown is empty");
     }
 
-    #[test]
-    fn update_stack_missing_name_errors() {
+    #[tokio::test]
+    async fn update_stack_missing_name_errors() {
         let svc = make_service();
         let mut params = HashMap::new();
         params.insert("TemplateBody".to_string(), "{}".to_string());
         let req = make_request("UpdateStack", params);
-        assert!(svc.update_stack(&req).is_err());
+        assert!(svc.update_stack(&req).await.is_err());
     }
 
-    #[test]
-    fn update_stack_unknown_stack_returns_synthetic_id() {
+    #[tokio::test]
+    async fn update_stack_unknown_stack_returns_synthetic_id() {
         // UpdateStack declares only `InsufficientCapabilitiesException`
         // and `TokenAlreadyExistsException`, neither of which fits
         // "stack does not exist". Synthetic conformance inputs target
@@ -2577,7 +2737,10 @@ mod tests {
             r#"{"Resources":{}}"#.to_string(),
         );
         let req = make_request("UpdateStack", params);
-        let resp = svc.update_stack(&req).expect("ghost update is synthetic");
+        let resp = svc
+            .update_stack(&req)
+            .await
+            .expect("ghost update is synthetic");
         let b = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         assert!(b.contains("UpdateStackResult"));
     }
@@ -2782,7 +2945,7 @@ mod tests {
         // Producer delete must fail while consumer still imports.
         let mut p = HashMap::new();
         p.insert("StackName".to_string(), "producer".to_string());
-        match svc.delete_stack(&make_request("DeleteStack", p)) {
+        match svc.delete_stack(&make_request("DeleteStack", p)).await {
             Ok(_) => panic!("delete must fail while imports exist"),
             Err(e) => {
                 let msg = format!("{e:?}");
@@ -2794,17 +2957,289 @@ mod tests {
         let mut p = HashMap::new();
         p.insert("StackName".to_string(), "consumer".to_string());
         svc.delete_stack(&make_request("DeleteStack", p))
+            .await
             .expect("consumer delete");
 
         // Now producer delete succeeds.
         let mut p = HashMap::new();
         p.insert("StackName".to_string(), "producer".to_string());
         svc.delete_stack(&make_request("DeleteStack", p))
+            .await
             .expect("producer delete after consumer gone");
 
         let accounts = svc.state.read();
         let state = accounts.get("123456789012").unwrap();
         assert!(state.exports.is_empty(), "exports cleared after delete");
         assert!(state.imports.is_empty(), "imports cleared after delete");
+    }
+
+    // ---- CFN provisioner persistence (issue: CFN resources lost on restart) ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A snapshot hook that counts how many times it fires, standing in for a
+    /// real service's whole-state persist.
+    fn counting_hook(counter: Arc<AtomicUsize>) -> fakecloud_persistence::SnapshotHook {
+        Arc::new(move || {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    }
+
+    fn disk_s3_store(tmp: &tempfile::TempDir) -> Arc<fakecloud_persistence::s3::DiskS3Store> {
+        let cache = Arc::new(fakecloud_persistence::cache::BodyCache::new(1024 * 1024));
+        Arc::new(fakecloud_persistence::s3::DiskS3Store::new(
+            tmp.path().to_path_buf(),
+            cache,
+        ))
+    }
+
+    // A stack touching SQS + SNS (snapshot-backed) and an S3 bucket (S3Store
+    // write-through). Lambda is registered as a hook below but NOT in the
+    // template, so it must not fire -- proving per-service selectivity.
+    const PERSIST_TEMPLATE: &str = r#"{"Resources":{
+        "Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cfn-q"}},
+        "T":{"Type":"AWS::SNS::Topic","Properties":{"TopicName":"cfn-t"}},
+        "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cfn-bucket"}}
+    }}"#;
+
+    fn create_req(stack: &str) -> AwsRequest {
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), stack.to_string());
+        p.insert("TemplateBody".to_string(), PERSIST_TEMPLATE.to_string());
+        make_request("CreateStack", p)
+    }
+
+    #[tokio::test]
+    async fn cfn_create_persists_touched_services_and_writes_bucket_to_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        hooks.insert("sns", counting_hook(counter.clone()));
+        // Registered but not in the template -> must not fire.
+        hooks.insert("lambda", counting_hook(counter.clone()));
+        let svc = make_service()
+            .with_s3_store(store.clone())
+            .with_snapshot_hooks(hooks);
+
+        svc.create_stack(&create_req("probe")).await.unwrap();
+
+        // sqs + sns fired once each; lambda untouched.
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        // The bucket was written through to the S3 store, not just the in-memory map.
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        assert!(
+            loaded.buckets.contains_key("cfn-bucket"),
+            "CFN bucket should be persisted to the S3 store"
+        );
+    }
+
+    #[tokio::test]
+    async fn cfn_delete_persists_touched_services_and_removes_bucket_from_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        hooks.insert("sns", counting_hook(counter.clone()));
+        let svc = make_service()
+            .with_s3_store(store.clone())
+            .with_snapshot_hooks(hooks);
+
+        svc.create_stack(&create_req("probe")).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "create fired sqs + sns");
+
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "probe".to_string());
+        svc.delete_stack(&make_request("DeleteStack", p))
+            .await
+            .unwrap();
+
+        // Delete fired the touched services again (sqs + sns).
+        assert_eq!(counter.load(Ordering::SeqCst), 4, "delete fired sqs + sns");
+        // And the CFN-deleted bucket is gone from the store, so it does not
+        // reappear after a restart.
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        assert!(
+            !loaded.buckets.contains_key("cfn-bucket"),
+            "CFN-deleted bucket should be removed from the S3 store"
+        );
+    }
+
+    #[tokio::test]
+    async fn cfn_persist_skips_services_without_a_registered_hook() {
+        // Only "sqs" has a hook; the stack also touches SNS and S3. The missing
+        // hooks must be silently skipped (no panic), and "sqs" fires once.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        let svc = make_service()
+            .with_s3_store(store.clone())
+            .with_snapshot_hooks(hooks);
+
+        svc.create_stack(&create_req("probe")).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "only sqs has a hook");
+    }
+
+    #[tokio::test]
+    async fn cfn_update_persists_touched_services() {
+        // Create with just SQS, then update to a template that adds SNS + a
+        // bucket; the update must persist the services it touches.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        hooks.insert("sns", counting_hook(counter.clone()));
+        let svc = make_service()
+            .with_s3_store(store.clone())
+            .with_snapshot_hooks(hooks);
+
+        let mut create = HashMap::new();
+        create.insert("StackName".to_string(), "upd".to_string());
+        create.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"u-q"}}}}"#
+                .to_string(),
+        );
+        svc.create_stack(&make_request("CreateStack", create))
+            .await
+            .unwrap();
+        let after_create = counter.load(Ordering::SeqCst);
+
+        let mut update = HashMap::new();
+        update.insert("StackName".to_string(), "upd".to_string());
+        update.insert("TemplateBody".to_string(), PERSIST_TEMPLATE.to_string());
+        svc.update_stack(&make_request("UpdateStack", update))
+            .await
+            .unwrap();
+
+        // The update touched at least SNS (added); the hook count must grow.
+        assert!(
+            counter.load(Ordering::SeqCst) > after_create,
+            "update should persist the services it touched"
+        );
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        assert!(loaded.buckets.contains_key("cfn-bucket"));
+    }
+
+    #[test]
+    fn service_key_for_type_maps_services_and_aliases() {
+        // Direct service segments.
+        assert_eq!(
+            service_key_for_type("AWS::Lambda::Function"),
+            Some("lambda")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::SecretsManager::Secret"),
+            Some("secretsmanager")
+        );
+        assert_eq!(service_key_for_type("AWS::SQS::Queue"), Some("sqs"));
+        assert_eq!(service_key_for_type("AWS::IAM::Role"), Some("iam"));
+        assert_eq!(
+            service_key_for_type("AWS::StepFunctions::StateMachine"),
+            Some("stepfunctions")
+        );
+        // Namespace aliases that differ from the fakecloud service name.
+        assert_eq!(
+            service_key_for_type("AWS::Events::Rule"),
+            Some("eventbridge")
+        );
+        assert_eq!(service_key_for_type("AWS::Logs::LogGroup"), Some("logs"));
+        // S3 has no snapshot hook (it persists via the S3Store write-through).
+        assert_eq!(service_key_for_type("AWS::S3::Bucket"), None);
+        // Non-snapshot-backed services.
+        assert_eq!(
+            service_key_for_type("AWS::CertificateManager::Certificate"),
+            None
+        );
+        // Malformed / non-AWS types.
+        assert_eq!(service_key_for_type("AWS::Lambda"), None);
+        assert_eq!(service_key_for_type("Custom::Thing::Resource"), None);
+        assert_eq!(service_key_for_type("AWS"), None);
+        assert_eq!(service_key_for_type(""), None);
+    }
+
+    #[tokio::test]
+    async fn persist_touched_services_noop_with_empty_hooks() {
+        // No registered hooks -> nothing to do, must not panic.
+        let hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> = BTreeMap::new();
+        persist_touched_services(&hooks, vec!["AWS::SQS::Queue".to_string()]).await;
+    }
+
+    #[tokio::test]
+    async fn cfn_bucket_policy_write_through_create_update_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let svc = make_service().with_s3_store(store.clone());
+
+        // Create a bucket + bucket policy.
+        let mut create = HashMap::new();
+        create.insert("StackName".to_string(), "pol".to_string());
+        create.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{
+                "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Principal":"*"}]}}}
+            }}"#
+            .to_string(),
+        );
+        svc.create_stack(&make_request("CreateStack", create))
+            .await
+            .unwrap();
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        let policy = loaded.buckets["pol-bucket"]
+            .subresources
+            .get("policy.toml")
+            .cloned()
+            .expect("bucket policy persisted on create");
+        assert!(policy.contains("s3:GetObject"));
+
+        // Update the policy document; the update must write through.
+        let mut update = HashMap::new();
+        update.insert("StackName".to_string(), "pol".to_string());
+        update.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{
+                "B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"pol-bucket"}},
+                "BP":{"Type":"AWS::S3::BucketPolicy","Properties":{"Bucket":"pol-bucket","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Principal":"*"}]}}}
+            }}"#
+            .to_string(),
+        );
+        svc.update_stack(&make_request("UpdateStack", update))
+            .await
+            .unwrap();
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        let policy = loaded.buckets["pol-bucket"]
+            .subresources
+            .get("policy.toml")
+            .cloned()
+            .expect("bucket policy still persisted after update");
+        assert!(
+            policy.contains("s3:PutObject"),
+            "updated policy should be written through"
+        );
+
+        // Delete the stack; the bucket (and its policy) must be removed from disk.
+        let mut del = HashMap::new();
+        del.insert("StackName".to_string(), "pol".to_string());
+        svc.delete_stack(&make_request("DeleteStack", del))
+            .await
+            .unwrap();
+        let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
+        assert!(
+            !loaded.buckets.contains_key("pol-bucket"),
+            "CFN-deleted bucket and policy should be gone from the store"
+        );
     }
 }

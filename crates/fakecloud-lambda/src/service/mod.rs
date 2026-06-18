@@ -946,26 +946,62 @@ impl LambdaService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = LambdaSnapshot {
-            schema_version: LAMBDA_SNAPSHOT_SCHEMA_VERSION,
-            accounts: Some(self.state.read().clone()),
-            state: None,
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_lambda_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write lambda snapshot"),
-            Err(err) => tracing::error!(%err, "lambda snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current Lambda state when invoked, or
+    /// `None` in memory mode (no snapshot store). The CloudFormation provisioner
+    /// mutates `state` directly and uses this to write a CFN-provisioned
+    /// function through to disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_lambda_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current Lambda state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `LambdaService::save_snapshot` and the
+/// CloudFormation provisioner's post-provision persist hook so both route
+/// through the same serialize-and-write path.
+pub async fn save_lambda_snapshot(
+    state: &SharedLambdaState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = LambdaSnapshot {
+        schema_version: LAMBDA_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+        state: None,
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write lambda snapshot"),
+        Err(err) => tracing::error!(%err, "lambda snapshot task panicked"),
     }
 }
 

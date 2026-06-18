@@ -1800,3 +1800,26 @@ fn get_records_skips_records_past_retention() {
         .unwrap();
     assert_eq!(data, b"fresh");
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let (svc, _state) = make_service();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating Kinesis
+/// state directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let (svc, _state) = make_service();
+    let svc = svc.with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    // Must not panic; exercises the closure and the snapshot save path.
+    hook().await;
+}

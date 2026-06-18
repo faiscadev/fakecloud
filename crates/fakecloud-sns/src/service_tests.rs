@@ -3146,3 +3146,26 @@ fn get_data_protection_policy_unknown_topic_errors() {
     };
     assert_eq!(err.code(), "NotFound");
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let (svc, _state) = make_sns();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating SNS
+/// state directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    use std::sync::Arc;
+    let (svc, _state) = make_sns();
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = svc.with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

@@ -2599,3 +2599,24 @@ fn message_size_includes_attributes() {
     let err = expect_err(svc.send_message(&big_req));
     assert_eq!(err.code(), "InvalidParameterValue");
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let svc = make_service();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating SQS
+/// state directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = make_service().with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

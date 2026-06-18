@@ -1832,3 +1832,42 @@ mod p5_polish_tests {
         assert!(detail["lastInUseAt"].is_i64());
     }
 }
+
+#[cfg(test)]
+mod snapshot_hook_tests {
+    use super::super::EcrService;
+    use crate::state::SharedEcrState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_state() -> SharedEcrState {
+        Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                "111111111111",
+                "us-east-1",
+                "http://fakecloud:4566",
+            ),
+        ))
+    }
+
+    /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+    #[test]
+    fn snapshot_hook_is_none_without_store() {
+        let svc = EcrService::new(make_state());
+        assert!(svc.snapshot_hook().is_none());
+    }
+
+    /// With a store, the hook is present and invoking it runs the whole-state
+    /// persist path the CloudFormation provisioner uses after mutating ECR
+    /// state directly.
+    #[tokio::test]
+    async fn snapshot_hook_fires_with_store() {
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+        let svc = EcrService::new(make_state()).with_snapshot_store(store);
+        let hook = svc
+            .snapshot_hook()
+            .expect("hook present when a store is set");
+        hook().await;
+    }
+}

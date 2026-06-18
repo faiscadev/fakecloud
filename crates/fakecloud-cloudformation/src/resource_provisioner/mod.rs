@@ -93,11 +93,13 @@ use fakecloud_organizations::{
     OrganizationState, OrganizationalUnit, Policy as OrgPolicy, SharedOrganizationsState,
     POLICY_TYPE_SCP,
 };
+use fakecloud_persistence::{BucketSubresource, S3Store};
 use fakecloud_rds::{DbInstance, DbParameterGroup, DbSubnetGroup, RdsTag, SharedRdsState};
 use fakecloud_route53::{
     model::{HealthCheckConfig, HostedZoneFeatures, ResourceRecordSet},
     SharedRoute53State, StoredHealthCheck, StoredHostedZone,
 };
+use fakecloud_s3::persistence::bucket_meta_snapshot;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_ses::{
@@ -897,6 +899,11 @@ pub struct ResourceProvisioner {
     /// images (see `CloudFormationDeps::lambda_runtime`). `None` outside a
     /// configured runtime (e.g. unit tests).
     pub lambda_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
+    /// Fine-grained S3 disk store. Bucket create/delete (and bucket-policy
+    /// updates) write through this so a CFN-provisioned bucket lands on disk,
+    /// matching the real `CreateBucket`/`DeleteBucket` handlers. A
+    /// `MemoryS3Store` (memory mode) makes the writes no-ops.
+    pub s3_store: Arc<dyn S3Store>,
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
@@ -6044,6 +6051,7 @@ mod tests {
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
+            s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),

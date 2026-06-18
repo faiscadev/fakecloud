@@ -123,26 +123,63 @@ impl StepFunctionsService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = StepFunctionsSnapshot {
-            schema_version: STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
-            state: None,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_stepfunctions_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write stepfunctions snapshot"),
-            Err(err) => tracing::error!(%err, "stepfunctions snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current Step Functions state when invoked,
+    /// or `None` in memory mode (no snapshot store). The CloudFormation
+    /// provisioner mutates `state` directly and uses this to write a
+    /// CFN-provisioned resource through to disk, the same way a direct mutating
+    /// API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_stepfunctions_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current Step Functions state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `StepFunctionsService::save_snapshot` and the
+/// CloudFormation provisioner's post-provision persist hook so both route
+/// through the same serialize-and-write path.
+pub async fn save_stepfunctions_snapshot(
+    state: &SharedStepFunctionsState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = StepFunctionsSnapshot {
+        schema_version: STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
+        state: None,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write stepfunctions snapshot"),
+        Err(err) => tracing::error!(%err, "stepfunctions snapshot task panicked"),
     }
 }
 
@@ -1646,6 +1683,27 @@ mod tests {
         let req = make_request("StartSyncExecution", &body.to_string());
         let err = expect_err(svc.start_sync_execution(&req).await);
         assert!(err.to_string().contains("InvalidExecutionInput"));
+    }
+
+    /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+    #[test]
+    fn snapshot_hook_is_none_without_store() {
+        let svc = StepFunctionsService::new(make_state());
+        assert!(svc.snapshot_hook().is_none());
+    }
+
+    /// With a store, the hook is present and invoking it runs the whole-state
+    /// persist path the CloudFormation provisioner uses after mutating Step
+    /// Functions state directly.
+    #[tokio::test]
+    async fn snapshot_hook_fires_with_store() {
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+        let svc = StepFunctionsService::new(make_state()).with_snapshot_store(store);
+        let hook = svc
+            .snapshot_hook()
+            .expect("hook present when a store is set");
+        hook().await;
     }
 }
 

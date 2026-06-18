@@ -1,5 +1,21 @@
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+
+/// A type-erased, owned closure that persists one service's whole state as a
+/// snapshot when invoked. Built by a service from its own `state` / store /
+/// serializing lock (see each service's `snapshot_hook()`), so the
+/// serialization stays in the owning crate.
+///
+/// The CloudFormation resource provisioner mutates services' shared state
+/// directly and cannot reach their private `save_snapshot()` paths. After a
+/// stack op it invokes the hook for each touched service to write that state
+/// through to disk -- the same persistence a direct API mutation would
+/// trigger. A `None` hook (memory mode / no store) is simply never collected,
+/// so invoking a present hook is always a real persist.
+pub type SnapshotHook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Generic opaque-blob snapshot store used by services that persist their
 /// whole state as a single serialized document (DynamoDB tables, SQS queues,

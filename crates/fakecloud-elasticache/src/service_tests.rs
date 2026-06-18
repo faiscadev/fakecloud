@@ -4786,3 +4786,30 @@ async fn create_replication_group_with_existing_snapshot_creates_metadata_only()
     let group = state.replication_groups.get("rg-restore").unwrap();
     assert!(group.container_id.is_empty());
 }
+
+fn make_snapshot_state() -> crate::state::SharedElastiCacheState {
+    std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ))
+}
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let svc = ElastiCacheService::new(make_snapshot_state());
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating ElastiCache
+/// state directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: std::sync::Arc<dyn fakecloud_persistence::SnapshotStore> =
+        std::sync::Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = ElastiCacheService::new(make_snapshot_state()).with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

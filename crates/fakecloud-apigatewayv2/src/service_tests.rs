@@ -2662,3 +2662,24 @@ async fn execute_api_access_log_emitted_on_error_paths() {
     let log_line = &events[0].3[0].1;
     assert!(log_line.contains("\"status\":\"404\""));
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a snapshot store set, the hook is present and runs to completion.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state).with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

@@ -44,7 +44,14 @@ impl ResourceProvisioner {
         let state = __s3_mas.get_or_create(&self.account_id);
         let region = state.region.clone();
         let bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
+        // Write the bucket through to the S3 disk store, exactly as the real
+        // CreateBucket handler does, so a CFN-provisioned bucket survives a
+        // restart instead of living only in the in-memory map.
+        let meta = bucket_meta_snapshot(&bucket);
         state.buckets.insert(bucket_name.to_string(), bucket);
+        self.s3_store
+            .put_bucket_meta(bucket_name, &meta)
+            .map_err(|e| format!("failed to persist bucket {bucket_name}: {e}"))?;
 
         let arn = Arn::s3(bucket_name).to_string();
         let domain_name = format!("{bucket_name}.s3.amazonaws.com");
@@ -63,6 +70,11 @@ impl ResourceProvisioner {
         let mut __s3_mas = self.s3_state.write();
         let state = __s3_mas.get_or_create(&self.account_id);
         state.buckets.remove(physical_id);
+        // Remove the bucket from disk too, so a CFN-deleted bucket does not
+        // reappear after a restart.
+        self.s3_store
+            .delete_bucket(physical_id)
+            .map_err(|e| format!("failed to remove bucket {physical_id}: {e}"))?;
         Ok(())
     }
 
@@ -87,7 +99,11 @@ impl ResourceProvisioner {
             .buckets
             .get_mut(&bucket_name)
             .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
-        bucket.policy = Some(policy);
+        bucket.policy = Some(policy.clone());
+        // Persist the policy subresource to disk, as PutBucketPolicy does.
+        self.s3_store
+            .put_bucket_subresource(&bucket_name, BucketSubresource::Policy, &policy)
+            .map_err(|e| format!("failed to persist bucket policy for {bucket_name}: {e}"))?;
         Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
     }
 
@@ -110,12 +126,18 @@ impl ResourceProvisioner {
             if let Some(bucket) = state.buckets.get_mut(old_bucket) {
                 bucket.policy = None;
             }
+            self.s3_store
+                .delete_bucket_subresource(old_bucket, BucketSubresource::Policy)
+                .map_err(|e| format!("failed to clear bucket policy for {old_bucket}: {e}"))?;
         }
         let bucket = state
             .buckets
             .get_mut(&bucket_name)
             .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
-        bucket.policy = Some(policy);
+        bucket.policy = Some(policy.clone());
+        self.s3_store
+            .put_bucket_subresource(&bucket_name, BucketSubresource::Policy, &policy)
+            .map_err(|e| format!("failed to persist bucket policy for {bucket_name}: {e}"))?;
         Ok(ProvisionResult::new(format!("{bucket_name}-policy")))
     }
 
@@ -126,6 +148,9 @@ impl ResourceProvisioner {
         if let Some(bucket) = state.buckets.get_mut(bucket_name) {
             bucket.policy = None;
         }
+        self.s3_store
+            .delete_bucket_subresource(bucket_name, BucketSubresource::Policy)
+            .map_err(|e| format!("failed to remove bucket policy for {bucket_name}: {e}"))?;
         Ok(())
     }
 }

@@ -277,25 +277,61 @@ impl ApiGatewayService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = ApiGatewaySnapshot {
-            schema_version: APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_apigateway_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write apigateway snapshot"),
-            Err(err) => tracing::error!(%err, "apigateway snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current API Gateway state when invoked, or
+    /// `None` in memory mode (no snapshot store). The CloudFormation provisioner
+    /// mutates `state` directly and uses this to write a CFN-provisioned
+    /// resource through to disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_apigateway_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current API Gateway state as a snapshot. Cloned + serialized
+/// under the snapshot lock. Noop when `store` is `None` (memory mode). Shared by
+/// `ApiGatewayService::save_snapshot` and the CloudFormation provisioner's
+/// post-provision persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_apigateway_snapshot(
+    state: &SharedApiGatewayState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = ApiGatewaySnapshot {
+        schema_version: APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write apigateway snapshot"),
+        Err(err) => tracing::error!(%err, "apigateway snapshot task panicked"),
     }
 }
 
@@ -382,3 +418,34 @@ mod service_extras;
 #[path = "helpers.rs"]
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
+
+#[cfg(test)]
+mod snapshot_hook_tests {
+    use super::ApiGatewayService;
+    use std::sync::Arc;
+
+    fn svc() -> ApiGatewayService {
+        let state = Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        ApiGatewayService::new(state)
+    }
+
+    /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+    #[test]
+    fn snapshot_hook_is_none_without_store() {
+        let svc = svc();
+        assert!(svc.snapshot_hook().is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_fires_with_store() {
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+        let svc = svc().with_snapshot_store(store);
+        let hook = svc
+            .snapshot_hook()
+            .expect("hook present when a store is set");
+        hook().await;
+    }
+}

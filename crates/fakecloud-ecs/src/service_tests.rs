@@ -395,4 +395,28 @@ mod scheduler_reconcile {
             "no extra tasks once desiredCount is met (no over-provisioning)"
         );
     }
+
+    fn empty_state() -> SharedEcsState {
+        let accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new(ACCOUNT, "us-east-1", "http://localhost:4566");
+        Arc::new(RwLock::new(accounts))
+    }
+
+    /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+    #[test]
+    fn snapshot_hook_is_none_without_store() {
+        let svc = EcsService::new(empty_state());
+        assert!(svc.snapshot_hook().is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_fires_with_store() {
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+        let svc = EcsService::new(empty_state()).with_snapshot_store(store);
+        let hook = svc
+            .snapshot_hook()
+            .expect("hook present when a store is set");
+        hook().await;
+    }
 }
