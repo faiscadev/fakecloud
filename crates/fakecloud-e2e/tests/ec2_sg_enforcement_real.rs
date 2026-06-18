@@ -215,6 +215,11 @@ async fn security_group_actually_drops_and_allows_packets() {
     );
 
     // 2) Authorize ICMP ingress -> reconcile applies the allow -> ping works.
+    // Allow from 0.0.0.0/0 (anywhere): the container-backed instances carry
+    // docker-bridge IPs, not the AWS subnet's address space, so a specific-CIDR
+    // allow keyed on the AWS subnet wouldn't match the real source — only
+    // "anywhere" or a referenced security group (member /32s) does. That's an
+    // inherent container-IP-vs-AWS-IP gap, documented in ec2.md.
     c.authorize_security_group_ingress()
         .group_id(&sg)
         .ip_permissions(
@@ -224,7 +229,7 @@ async fn security_group_actually_drops_and_allows_packets() {
                 .to_port(-1)
                 .ip_ranges(
                     aws_sdk_ec2::types::IpRange::builder()
-                        .cidr_ip("10.77.0.0/16")
+                        .cidr_ip("0.0.0.0/0")
                         .build(),
                 )
                 .build(),
