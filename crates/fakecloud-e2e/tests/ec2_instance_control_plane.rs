@@ -543,3 +543,101 @@ async fn run_instances_without_subnet_lands_in_default_vpc() {
         "instance should attach the default security group"
     );
 }
+
+// ---- Default-VPC coherence (bug-hunt 2026-06-18: 1.1, 1.2, 1.3 + delete-protection) ----
+
+#[tokio::test]
+async fn create_default_vpc_is_idempotent() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    // The account already ships a seeded default VPC; CreateDefaultVpc must
+    // return THAT one, never mint a second isDefault=true VPC.
+    let a = c.create_default_vpc().send().await.unwrap();
+    let b = c.create_default_vpc().send().await.unwrap();
+    assert_eq!(a.vpc().unwrap().vpc_id(), b.vpc().unwrap().vpc_id());
+    let vpcs = c.describe_vpcs().send().await.unwrap();
+    let defaults = vpcs
+        .vpcs()
+        .iter()
+        .filter(|v| v.is_default() == Some(true))
+        .count();
+    assert_eq!(defaults, 1, "exactly one default VPC must exist");
+}
+
+#[tokio::test]
+async fn create_default_subnet_attaches_to_real_default_vpc() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let default_vpc = c
+        .describe_vpcs()
+        .send()
+        .await
+        .unwrap()
+        .vpcs()
+        .iter()
+        .find(|v| v.is_default() == Some(true))
+        .and_then(|v| v.vpc_id())
+        .unwrap()
+        .to_string();
+    let r = c
+        .create_default_subnet()
+        .availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    let subnet = r.subnet().unwrap();
+    // Must be in the real default VPC, not the bogus literal "vpc-default".
+    assert_eq!(subnet.vpc_id(), Some(default_vpc.as_str()));
+    assert_ne!(subnet.vpc_id(), Some("vpc-default"));
+}
+
+#[tokio::test]
+async fn default_security_group_cannot_be_deleted() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let default_sg = c
+        .describe_security_groups()
+        .send()
+        .await
+        .unwrap()
+        .security_groups()
+        .iter()
+        .find(|g| g.group_name() == Some("default"))
+        .and_then(|g| g.group_id())
+        .unwrap()
+        .to_string();
+    let err = c
+        .delete_security_group()
+        .group_id(&default_sg)
+        .send()
+        .await
+        .expect_err("deleting the default SG must be rejected");
+    assert!(format!("{err:?}").contains("CannotDelete"), "got {err:?}");
+}
+
+#[tokio::test]
+async fn default_network_acl_cannot_be_deleted() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let default_acl = c
+        .describe_network_acls()
+        .send()
+        .await
+        .unwrap()
+        .network_acls()
+        .iter()
+        .find(|a| a.is_default() == Some(true))
+        .and_then(|a| a.network_acl_id())
+        .unwrap()
+        .to_string();
+    let err = c
+        .delete_network_acl()
+        .network_acl_id(&default_acl)
+        .send()
+        .await
+        .expect_err("deleting the default NACL must be rejected");
+    assert!(
+        format!("{err:?}").contains("CannotDeleteDefaultNetworkAcl"),
+        "got {err:?}"
+    );
+}

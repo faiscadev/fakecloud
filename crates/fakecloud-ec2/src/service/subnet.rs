@@ -123,19 +123,34 @@ pub(crate) fn create_default_subnet(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let az = default_az(req);
-    let subnet = build_subnet(
-        "vpc-default".to_string(),
-        "172.31.0.0/20".to_string(),
-        &az,
-        true,
-    );
-    let id = subnet.subnet_id.clone();
     let owner = req.account_id.clone();
     let region = req.region.clone();
     let body = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        state.subnets.insert(id.clone(), subnet.clone());
+        // Attach to the account's real default VPC, not the literal
+        // `vpc-default` (which matches no VPC and orphaned the subnet —
+        // bug-hunt 2026-06-18 finding 1.2). If a default subnet already exists
+        // for this AZ (the bootstrap seeds one per AZ), return it instead of
+        // minting a duplicate, matching CreateDefaultSubnet's idempotency.
+        let default_vpc = state
+            .vpcs
+            .values()
+            .find(|v| v.is_default)
+            .map(|v| v.vpc_id.clone())
+            .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id));
+        let subnet = if let Some(existing) = state
+            .subnets
+            .values()
+            .find(|s| s.vpc_id == default_vpc && s.default_for_az && s.availability_zone == az)
+            .cloned()
+        {
+            existing
+        } else {
+            let s = build_subnet(default_vpc, "172.31.0.0/20".to_string(), &az, true);
+            state.subnets.insert(s.subnet_id.clone(), s.clone());
+            s
+        };
         format!(
             "<subnet>{}</subnet>",
             subnet_xml(&subnet, &[], &owner, &region)
