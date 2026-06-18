@@ -4473,3 +4473,24 @@ async fn test_event_destination_kinesis_firehose_cloudwatch() {
         "EventType"
     );
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let svc = SesV2Service::new(make_state());
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating SES state
+/// directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = SesV2Service::new(make_state()).with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

@@ -750,6 +750,23 @@ impl RdsService {
             )
         })
     }
+
+    /// Build a hook that persists the current state when invoked, or `None` in
+    /// memory mode. The CloudFormation provisioner mutates `state` directly and
+    /// uses this to write a CFN-provisioned resource through to disk.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_snapshot_static(state, Some(store), lock).await;
+            })
+        }))
+    }
 }
 
 #[async_trait]

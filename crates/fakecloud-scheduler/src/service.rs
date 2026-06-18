@@ -47,25 +47,30 @@ impl SchedulerService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = SchedulerSnapshot {
-            schema_version: SCHEDULER_SNAPSHOT_SCHEMA_VERSION,
-            accounts: self.state.read().clone(),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_scheduler_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write scheduler snapshot"),
-            Err(err) => tracing::error!(%err, "scheduler snapshot task panicked"),
-        }
+    }
+
+    /// Build a hook that persists the current Scheduler state when invoked, or
+    /// `None` in memory mode (no snapshot store). The CloudFormation provisioner
+    /// mutates `state` directly and uses this to write a CFN-provisioned
+    /// resource through to disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_scheduler_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, PathArgs)> {
@@ -606,6 +611,37 @@ impl SchedulerService {
             StatusCode::OK,
             json!({ "Tags": tags }).to_string(),
         ))
+    }
+}
+
+/// Persist the current Scheduler state as a snapshot. Cloned + serialized under
+/// the snapshot lock. Noop when `store` is `None` (memory mode). Shared by
+/// `SchedulerService::save_snapshot` and the CloudFormation provisioner's
+/// post-provision persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_scheduler_snapshot(
+    state: &SharedSchedulerState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = SchedulerSnapshot {
+        schema_version: SCHEDULER_SNAPSHOT_SCHEMA_VERSION,
+        accounts: state.read().clone(),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write scheduler snapshot"),
+        Err(err) => tracing::error!(%err, "scheduler snapshot task panicked"),
     }
 }
 
@@ -1247,6 +1283,24 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+    #[test]
+    fn snapshot_hook_is_none_without_store() {
+        let svc = SchedulerService::new(make_state());
+        assert!(svc.snapshot_hook().is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_hook_fires_with_store() {
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+        let svc = SchedulerService::new(make_state()).with_snapshot_store(store);
+        let hook = svc
+            .snapshot_hook()
+            .expect("hook present when a store is set");
+        hook().await;
     }
 
     #[tokio::test]

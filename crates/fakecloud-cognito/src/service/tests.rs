@@ -7393,3 +7393,25 @@ fn user_pool_replica_error_paths() {
         .unwrap();
     assert!(format!("{err:?}").contains("ResourceNotFound"));
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let (svc, _state) = make_svc();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+/// With a store, the hook is present and invoking it runs the whole-state
+/// persist path the CloudFormation provisioner uses after mutating Cognito
+/// state directly.
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let (_svc, state) = make_svc();
+    let store: std::sync::Arc<dyn fakecloud_persistence::SnapshotStore> =
+        std::sync::Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = CognitoService::new(state).with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

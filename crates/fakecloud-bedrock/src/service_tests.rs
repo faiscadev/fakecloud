@@ -1226,3 +1226,23 @@ fn automated_reasoning_policy_delete_not_found() {
     );
     assert!(result.is_err());
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let state = make_state();
+    let svc = BedrockService::new(state);
+    assert!(svc.snapshot_hook().is_none());
+}
+
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let state = make_state();
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = BedrockService::new(state).with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}

@@ -433,3 +433,21 @@ async fn introspection_collapses_metric_series() {
     assert_eq!(latest.value, Some(5.0));
     assert_eq!(latest.unit.as_deref(), Some("Count"));
 }
+
+/// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
+#[test]
+fn snapshot_hook_is_none_without_store() {
+    let svc = service();
+    assert!(svc.snapshot_hook().is_none());
+}
+
+#[tokio::test]
+async fn snapshot_hook_fires_with_store() {
+    let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+        Arc::new(fakecloud_persistence::MemorySnapshotStore::new());
+    let svc = service().with_snapshot_store(store);
+    let hook = svc
+        .snapshot_hook()
+        .expect("hook present when a store is set");
+    hook().await;
+}
