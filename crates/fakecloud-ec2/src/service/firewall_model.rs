@@ -54,8 +54,9 @@ fn flatten_rule(
 }
 
 /// NACL deny/allow entries that apply to a subnet, as the renderer's model.
-/// (Only denies become explicit nft lines; allows ride the default-accept
-/// policy. We still pass both so future ordering work has the full picture.)
+/// Both allows and denies are carried with their `rule_number` so the renderer
+/// can apply AWS first-match-by-rule-number precedence (allow shadows a
+/// higher-numbered deny).
 fn nacl_rules(acl: &NetworkAcl) -> Vec<NaclRule> {
     acl.entries
         .iter()
@@ -63,6 +64,7 @@ fn nacl_rules(acl: &NetworkAcl) -> Vec<NaclRule> {
         // user rule — skip it so it doesn't blackhole everything.
         .filter(|e| e.rule_number != 32767)
         .map(|e| NaclRule {
+            rule_number: e.rule_number,
             egress: e.egress,
             allow: e.rule_action == "allow",
             protocol: e.protocol.clone(),

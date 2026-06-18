@@ -63,10 +63,14 @@ pub struct InstanceRules {
     pub egress: Vec<FirewallRule>,
 }
 
-/// A subnet-level NACL entry (allow/deny, ordered by rule number by the
-/// caller). NACLs are stateless and apply to the whole subnet.
+/// A subnet-level NACL entry. NACLs are stateless and apply to the whole
+/// subnet; AWS evaluates them in ascending `rule_number` order, first match
+/// wins (so a lower-numbered `allow` shadows a higher-numbered `deny` for the
+/// same traffic).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NaclRule {
+    /// AWS rule number; lower numbers evaluate first.
+    pub rule_number: i64,
     pub egress: bool,
     /// True = allow, false = deny.
     pub allow: bool,
@@ -114,8 +118,26 @@ pub fn render_ruleset(subnets: &[SubnetFirewall]) -> String {
     for subnet in subnets {
         out.push_str(&format!("    # subnet {}\n", subnet.network_name));
 
-        // Subnet-wide NACL denies first (stateless, highest precedence).
-        for rule in subnet.nacl.iter().filter(|r| !r.allow) {
+        // Subnet-wide NACL denies, evaluated in ascending rule-number order so
+        // a lower-numbered `allow` shadows a higher-numbered `deny` for the
+        // same traffic (AWS first-match semantics). A deny is emitted as a drop
+        // only when no earlier-numbered allow covers the identical
+        // direction/protocol/ports/CIDR — otherwise the allow wins and the deny
+        // never fires (bug-hunt 2026-06-18 finding 1.4). NACL allows ride the
+        // default-accept policy (the SG layer below still applies; NACL and SG
+        // are independent gates, both must permit).
+        let mut ordered = subnet.nacl.clone();
+        ordered.sort_by_key(|r| r.rule_number);
+        for (i, rule) in ordered.iter().enumerate() {
+            if rule.allow {
+                continue;
+            }
+            let shadowed = ordered[..i]
+                .iter()
+                .any(|earlier| earlier.allow && nacl_same_traffic(earlier, rule));
+            if shadowed {
+                continue;
+            }
             if let Some(line) = render_nacl_drop(rule) {
                 out.push_str(&format!("    {line}\n"));
             }
@@ -180,6 +202,19 @@ fn render_rule(rule: &FirewallRule, dir: Direction, instance_ip: &str) -> String
     push_proto_ports(&mut parts, &rule.protocol, rule.from_port, rule.to_port);
     parts.push("accept".to_string());
     parts.join(" ")
+}
+
+/// Whether two NACL entries match the *same* traffic (same direction,
+/// protocol, port range, CIDR) — used to decide when a lower-numbered allow
+/// shadows a higher-numbered deny. Conservative: only exact matches shadow, so
+/// partially-overlapping rules still emit their drop (safer to over-deny than
+/// to silently allow).
+fn nacl_same_traffic(a: &NaclRule, b: &NaclRule) -> bool {
+    a.egress == b.egress
+        && a.protocol == b.protocol
+        && a.from_port == b.from_port
+        && a.to_port == b.to_port
+        && a.cidr == b.cidr
 }
 
 /// Render a NACL deny as a drop line scoped to its direction + match. Returns
@@ -407,6 +442,7 @@ mod tests {
                 egress: vec![],
             }],
             nacl: vec![NaclRule {
+                rule_number: 100,
                 egress: false,
                 allow: false,
                 protocol: "tcp".into(),
@@ -426,6 +462,44 @@ mod tests {
         );
         // allow NACL entries produce no explicit line
         assert!(!rs.contains("nacl-allow"));
+    }
+
+    #[test]
+    fn nacl_lower_numbered_allow_shadows_higher_numbered_deny() {
+        // AWS first-match-by-rule-number: `100 allow tcp/22 10/8` must win over
+        // `200 deny tcp/22 10/8`, so the deny is NOT emitted (finding 1.4).
+        let nacl_entry = |rule_number, allow| NaclRule {
+            rule_number,
+            egress: false,
+            allow,
+            protocol: "tcp".into(),
+            from_port: 22,
+            to_port: 22,
+            cidr: Some("10.0.0.0/8".into()),
+        };
+        let model = vec![SubnetFirewall {
+            network_name: "fakecloud-subnet-a".into(),
+            instances: vec![InstanceFirewall {
+                private_ip: "172.30.0.2".into(),
+                ingress: vec![],
+                egress: vec![],
+            }],
+            // Intentionally out of order to exercise the sort.
+            nacl: vec![nacl_entry(200, false), nacl_entry(100, true)],
+        }];
+        let rs = render_ruleset(&model);
+        assert!(
+            !rs.contains("ip saddr 10.0.0.0/8 tcp dport 22 drop"),
+            "a lower-numbered allow must shadow the deny:\n{rs}"
+        );
+
+        // Reverse the precedence: deny 100 before allow 200 -> deny fires.
+        let model2 = vec![SubnetFirewall {
+            network_name: "fakecloud-subnet-a".into(),
+            instances: vec![],
+            nacl: vec![nacl_entry(100, false), nacl_entry(200, true)],
+        }];
+        assert!(render_ruleset(&model2).contains("ip saddr 10.0.0.0/8 tcp dport 22 drop"));
     }
 
     #[test]
@@ -479,6 +553,7 @@ mod tests {
         nacls.insert(
             "net-a".to_string(),
             vec![NaclRule {
+                rule_number: 100,
                 egress: false,
                 allow: false,
                 protocol: "-1".into(),
