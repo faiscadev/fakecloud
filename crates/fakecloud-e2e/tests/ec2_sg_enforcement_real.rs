@@ -81,10 +81,11 @@ fn can_ping(from_container: &str, to_ip: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Poll `can_ping` until it matches `want`, up to ~10s (enforcement reconcile
-/// is async/background). Returns the final observed reachability.
+/// Poll `can_ping` until it matches `want`, up to ~30s (enforcement reconcile
+/// is async/background and CI runners can be loaded). Returns the final
+/// observed reachability.
 fn wait_ping(from: &str, to_ip: &str, want: bool) -> bool {
-    for _ in 0..40 {
+    for _ in 0..120 {
         if can_ping(from, to_ip) == want {
             return want;
         }
@@ -93,12 +94,21 @@ fn wait_ping(from: &str, to_ip: &str, want: bool) -> bool {
     can_ping(from, to_ip)
 }
 
-/// Poll up to ~15s for fakecloud's own nft table to be installed (the reconcile
-/// is async). Returns whether it appeared.
-fn wait_nft_table() -> bool {
-    for _ in 0..60 {
-        if cmd_ok("nft", &["list", "table", "inet", "fakecloud_ec2"]) {
-            return true;
+/// Poll up to ~30s for the per-instance default-deny rule targeting `ip` to be
+/// installed in fakecloud's nft table. Waiting for the *specific* rule (not
+/// just the table's existence) closes a race: the table can appear from one
+/// instance's reconcile while the other instance's drop rule is still pending,
+/// so a deny check fired on table-presence alone would flake on a slow runner.
+fn wait_for_deny_rule(ip: &str) -> bool {
+    let needle = format!("ip daddr {ip} drop");
+    for _ in 0..120 {
+        let out = std::process::Command::new("nft")
+            .args(["list", "table", "inet", "fakecloud_ec2"])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() && String::from_utf8_lossy(&o.stdout).contains(&needle) {
+                return true;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
@@ -198,13 +208,13 @@ async fn security_group_actually_drops_and_allows_packets() {
     let b_ip = wait_running(&c, &b).await;
     let ca = container_for(&a);
 
-    // Enforcement must have engaged: the reconcile creates fakecloud's own nft
-    // table. If it never appears, enforcement silently disabled (nft not found
-    // / no CAP_NET_ADMIN) — fail with that specific signal instead of a vague
-    // "packet not dropped".
+    // Enforcement must have engaged AND B's default-deny rule must be installed
+    // before we check the drop — otherwise the ping races the async reconcile.
+    // A missing rule means enforcement silently disabled (nft not found / no
+    // CAP_NET_ADMIN) — fail with that specific signal, not a vague "not dropped".
     assert!(
-        wait_nft_table(),
-        "fakecloud nft table `inet fakecloud_ec2` never appeared — SG enforcement \
+        wait_for_deny_rule(&b_ip),
+        "fakecloud nft default-deny rule for {b_ip} never appeared — SG enforcement \
          did not engage (check that `nft` is on PATH and the process has CAP_NET_ADMIN)"
     );
 
