@@ -688,6 +688,13 @@ pub(crate) async fn reboot_instances(
                     }
                 }
             }
+            // A reboot can change the instance's IP (k8s Pod recreate), which
+            // leaves a stale /32 in every peer's security-group rules until an
+            // unrelated reconcile fires. Re-apply the firewall now (#1745;
+            // bug-hunt 2026-06-18 finding 4.2). No-op when enforcement is off.
+            if rt.network_isolation_enforced() {
+                super::firewall_model::reconcile(&svc_state, &rt).await;
+            }
         });
     }
     Ok(Ec2Service::respond(
