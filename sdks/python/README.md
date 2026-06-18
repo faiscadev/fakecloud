@@ -124,6 +124,13 @@ Pass `base_url` (default `http://localhost:4566`).
 | `get_images(repository_name=None)` | List images, optionally filtered by repo |
 | `get_pull_through_rules()` | List pull-through cache rules |
 
+### `fc.ec2`
+
+| Method | Description |
+|---|---|
+| `get_instances()` | List EC2 instances with control-plane + runtime metadata |
+| `get_instance_networks()` | Inspect each instance's backing network (Docker/Podman network or k8s NetworkPolicy), container IP, isolation backend, and whether security-group enforcement is active |
+
 ### `fc.ecs`
 
 | Method | Description |
