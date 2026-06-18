@@ -1016,10 +1016,11 @@ impl Ec2Service {
             "recovering backing containers for persisted ec2 instances",
         );
 
+        let mut handles = Vec::new();
         for p in pending {
             let runtime = runtime.clone();
             let state = self.state.clone();
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 let running = runtime
                     .run_instance(&p.id, p.user_data.as_deref(), &p.tags, p.network.as_ref())
                     .await;
@@ -1062,6 +1063,26 @@ impl Ec2Service {
                 };
                 if reap {
                     runtime.terminate_instance(&p.id).await;
+                }
+            }));
+        }
+
+        // Once every instance is back up, (re)apply the security-group
+        // firewall. The startup reaper cleared the previous process's nft
+        // table / NetworkPolicies, and the per-instance recovery tasks above
+        // don't reconcile — without this, recovered instances would run
+        // unfiltered until some unrelated later op happened to trigger a
+        // reconcile (#1745; bug-hunt 2026-06-18 finding 4.1). No-op when
+        // enforcement is disabled.
+        {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                for h in handles {
+                    let _ = h.await;
+                }
+                if runtime.network_isolation_enforced() {
+                    firewall_model::reconcile(&state, &runtime).await;
                 }
             });
         }
