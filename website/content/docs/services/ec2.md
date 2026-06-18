@@ -37,7 +37,15 @@ VPC/subnet/security-group/NACL metadata isn't just stored — fakecloud gives in
 
 - **Default VPC** — every account+region ships a default VPC (`172.31.0.0/16`) with an internet gateway, a main route table, one default subnet per AZ, a `default` security group, and a default NACL, exactly like AWS. `RunInstances` with no `SubnetId` lands in the default subnet and attaches the `default` security group.
 - **L3 isolation (Docker/Podman)** — each subnet gets its own daemon network (`fakecloud-subnet-<id>`); instances in the same subnet share a bridge and can talk, while instances in different VPCs/subnets land on different bridges and **cannot route to each other**. Private subnets (no `0.0.0.0/0 → igw` route) back onto `--internal` networks with no NAT to the host.
-- **Security-group + NACL enforcement (Docker/Podman)** — when enabled, security-group and NACL rules are translated into an **nftables** ruleset applied on the host, so SG rules actually block/allow traffic. This needs `CAP_NET_ADMIN` + `nft`, so it is **opt-in** via `FAKECLOUD_EC2_SG_ENFORCEMENT=1` and **degrades gracefully**: without the capability (CI, Docker Desktop, rootless podman) the rules are tracked but not enforced, with a one-time startup warning — L3 isolation still holds.
+- **Security-group + NACL enforcement (Docker/Podman)** — when enabled, security-group and NACL rules are translated into an **nftables** ruleset applied on the host, so SG rules actually block/allow traffic. This needs `CAP_NET_ADMIN` + `nft`, so it is **opt-in** via `FAKECLOUD_EC2_SG_ENFORCEMENT=1` and **degrades gracefully**: without the capability (CI, Docker Desktop, rootless podman) the rules are tracked but not enforced, with a one-time startup warning — L3 isolation still holds. The published image ships `nft`; you only need to grant the capability and set the env var. With `docker run`:
+
+  ```sh
+  docker run -e FAKECLOUD_EC2_SG_ENFORCEMENT=1 --cap-add=NET_ADMIN \
+    -p 4566:4566 -v /var/run/docker.sock:/var/run/docker.sock \
+    ghcr.io/faiscadev/fakecloud:latest
+  ```
+
+  or in `docker-compose.yml`, uncomment the `cap_add: [NET_ADMIN]` and `FAKECLOUD_EC2_SG_ENFORCEMENT` lines in the shipped compose. Confirm it took effect via `GET /_fakecloud/ec2/instance-networks` — `securityGroupEnforcement` reads `nftables` and `enforcementActive` is `true` when active.
 - **Kubernetes** — on the k8s backend, isolation is expressed as **NetworkPolicy** objects (one per instance, derived from its security groups) and enforced by the cluster CNI. fakecloud detects the CNI (Calico/Cilium enforce; kindnet does not) and warns when NetworkPolicy won't be enforced, but always creates the policies.
 - **Compose interop** — to let your own containers reach an instance by its private IP, attach them to the instance's subnet network: `docker network connect fakecloud-subnet-<id> <your-container>` (find `<id>` via `/_fakecloud/ec2/instance-networks`). Cross-VPC traffic stays isolated by design.
 
