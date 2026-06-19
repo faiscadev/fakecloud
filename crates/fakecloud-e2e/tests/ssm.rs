@@ -852,17 +852,31 @@ async fn ssm_association_batch_and_start() {
         .unwrap();
     assert_eq!(batch_resp.successful().len(), 2);
 
-    // StartAssociationsOnce
+    // StartAssociationsOnce against a real association id succeeds...
     let assoc_id = batch_resp.successful()[0]
         .association_id()
         .unwrap()
         .to_string();
-    let _ = client
+    client
         .start_associations_once()
         .association_ids(&assoc_id)
         .send()
         .await
         .unwrap();
+
+    // ...and leaves the association intact and resolvable.
+    let described = client
+        .describe_association()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        described
+            .association_description()
+            .and_then(|d| d.association_id()),
+        Some(assoc_id.as_str())
+    );
 }
 
 #[tokio::test]
