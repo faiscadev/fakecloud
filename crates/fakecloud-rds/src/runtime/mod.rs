@@ -1201,6 +1201,15 @@ impl RdsRuntime {
 pub(crate) fn bridge_image_tag(image: &str, major_version: &str) -> String {
     let registry = std::env::var("FAKECLOUD_POSTGRES_REGISTRY")
         .unwrap_or_else(|_| DEFAULT_POSTGRES_REGISTRY.to_string());
+    bridge_image_tag_with_registry(&registry, image, major_version)
+}
+
+/// Pure tag builder split out from [`bridge_image_tag`] so callers (and
+/// tests) can supply the registry explicitly. Keeping the env read in the
+/// thin wrapper means the formatting logic is testable without mutating the
+/// process-global `FAKECLOUD_POSTGRES_REGISTRY`, which `cargo test`'s parallel
+/// workers would otherwise race over.
+fn bridge_image_tag_with_registry(registry: &str, image: &str, major_version: &str) -> String {
     let registry = registry.trim_end_matches('/');
     format!(
         "{}/{}:{}-{}",
@@ -1215,58 +1224,56 @@ pub(crate) fn bridge_image_tag(image: &str, major_version: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Single test (rather than three) so the cases run sequentially —
-    /// `bridge_image_tag` reads a process-global env var and parallel
-    /// `cargo test` workers would race over it otherwise.
+    /// Exercises the pure tag builder with explicit registries so the cases
+    /// never touch the process-global `FAKECLOUD_POSTGRES_REGISTRY`. Parallel
+    /// `cargo test` workers used to race over that env var, which surfaced as
+    /// an override silently resolving to the default registry.
     #[test]
     fn bridge_image_tag_resolves_registry_overrides() {
-        let prev = std::env::var("FAKECLOUD_POSTGRES_REGISTRY").ok();
-
-        std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY");
+        // Default registry (matches the env-less `bridge_image_tag` path).
         assert_eq!(
-            bridge_image_tag("fakecloud-postgres", "16"),
+            bridge_image_tag_with_registry(DEFAULT_POSTGRES_REGISTRY, "fakecloud-postgres", "16"),
             format!(
                 "ghcr.io/faiscadev/fakecloud-postgres:16-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
         assert_eq!(
-            bridge_image_tag("fakecloud-mysql", "8.0"),
+            bridge_image_tag_with_registry(DEFAULT_POSTGRES_REGISTRY, "fakecloud-mysql", "8.0"),
             format!(
                 "ghcr.io/faiscadev/fakecloud-mysql:8.0-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
         assert_eq!(
-            bridge_image_tag("fakecloud-mariadb", "10.11"),
+            bridge_image_tag_with_registry(DEFAULT_POSTGRES_REGISTRY, "fakecloud-mariadb", "10.11"),
             format!(
                 "ghcr.io/faiscadev/fakecloud-mariadb:10.11-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
 
-        std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team");
+        // Custom registry override.
         assert_eq!(
-            bridge_image_tag("fakecloud-postgres", "15"),
+            bridge_image_tag_with_registry("registry.example.com/team", "fakecloud-postgres", "15"),
             format!(
                 "registry.example.com/team/fakecloud-postgres:15-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
 
-        std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team/");
+        // Trailing slash on the override is trimmed.
         assert_eq!(
-            bridge_image_tag("fakecloud-postgres", "13"),
+            bridge_image_tag_with_registry(
+                "registry.example.com/team/",
+                "fakecloud-postgres",
+                "13"
+            ),
             format!(
                 "registry.example.com/team/fakecloud-postgres:13-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
-
-        match prev {
-            Some(v) => std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", v),
-            None => std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY"),
-        }
     }
 
     fn running_stub(container_id: &str) -> RunningDbContainer {
