@@ -212,6 +212,18 @@ jobs:
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
 
+      # Same-subnet instances share one Linux bridge, so their traffic is L2-switched
+      # and only traverses the nft `forward` chain when bridge netfilter is active.
+      # The runtime tries to enable this in-process, but loading the module + setting
+      # the sysctl deterministically at the host level *before* any container network
+      # is created removes the race that intermittently let the "deny" packet through.
+      - name: Enable bridge netfilter
+        run: |
+          sudo modprobe br_netfilter
+          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables
+          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-ip6tables
+          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-arptables
+
       - name: Pre-pull the instance base image
         run: docker pull alpine:3
 
