@@ -965,6 +965,21 @@ impl SqsService {
                     continue;
                 }
             };
+            // AWS limits VisibilityTimeout to 0..=43200 seconds (12 h). Out-of-range values
+            // are a per-entry InvalidParameterValue, mirroring the single-op path; without
+            // this guard a huge value overflows `now + Duration::seconds(..)` and panics the
+            // request thread.
+            if !(0..=43200).contains(&visibility_timeout) {
+                failed.push(json!({
+                    "Id": id,
+                    "SenderFault": true,
+                    "Code": "InvalidParameterValue",
+                    "Message": format!(
+                        "VisibilityTimeout {visibility_timeout} is invalid. Reason: Must be between 0 and 43200 seconds."
+                    ),
+                }));
+                continue;
+            }
 
             let message_id = find_message_id_for_receipt(queue, receipt_handle);
 

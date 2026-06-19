@@ -361,11 +361,32 @@ impl S3Service {
         let src_bytes = state.read_body(&src_body_ref).map_err(super::io_to_aws)?;
         let src_data = if let Some(range_str) = copy_range {
             let range_part = range_str.strip_prefix("bytes=").unwrap_or(range_str);
+            let invalid_range = || {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    format!(
+                        "The x-amz-copy-source-range value \"{range_str}\" is not valid for \
+                         the source object of size {}.",
+                        src_bytes.len()
+                    ),
+                )
+            };
             if let Some((start_str, end_str)) = range_part.split_once('-') {
-                let start: usize = start_str.parse().unwrap_or(0);
-                let end: usize = end_str.parse().unwrap_or(src_bytes.len() - 1);
-                let end = std::cmp::min(end + 1, src_bytes.len());
-                src_bytes.slice(start..end)
+                // A copy-source-range over an empty object has no valid offsets, and a
+                // malformed/out-of-bounds range must be rejected rather than slicing past
+                // the buffer (which would panic the request thread).
+                let last = src_bytes.len().checked_sub(1).ok_or_else(invalid_range)?;
+                let start: usize = start_str.trim().parse().map_err(|_| invalid_range())?;
+                let end: usize = if end_str.trim().is_empty() {
+                    last
+                } else {
+                    end_str.trim().parse().map_err(|_| invalid_range())?
+                };
+                if start > end || end > last {
+                    return Err(invalid_range());
+                }
+                src_bytes.slice(start..end + 1)
             } else {
                 src_bytes.clone()
             }

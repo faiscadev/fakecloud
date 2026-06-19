@@ -660,6 +660,81 @@ async fn sqs_change_message_visibility_batch() {
     assert_eq!(recv_resp2.messages().len(), 3);
 }
 
+/// Regression: an out-of-range VisibilityTimeout in a batch entry used to overflow
+/// `now + Duration::seconds(..)` and panic the request thread (dropped connection).
+/// It must instead land in `failed` with InvalidParameterValue, like the single-op path,
+/// while valid entries in the same batch still succeed.
+#[tokio::test]
+async fn sqs_change_message_visibility_batch_rejects_out_of_range() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("cmvb-range-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    for i in 0..2 {
+        client
+            .send_message()
+            .queue_url(&queue_url)
+            .message_body(format!("range-msg-{i}"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let recv_resp = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    let messages = recv_resp.messages();
+    assert_eq!(messages.len(), 2);
+
+    // One valid entry (timeout 10) and one wildly out-of-range entry that previously
+    // overflowed the timestamp arithmetic.
+    let entries = vec![
+        ChangeMessageVisibilityBatchRequestEntry::builder()
+            .id("ok")
+            .receipt_handle(messages[0].receipt_handle().unwrap())
+            .visibility_timeout(10)
+            .build()
+            .unwrap(),
+        ChangeMessageVisibilityBatchRequestEntry::builder()
+            .id("overflow")
+            .receipt_handle(messages[1].receipt_handle().unwrap())
+            // > 43200 (12h max). Out-of-range values are what overflow the timestamp
+            // arithmetic when sent as a raw i64; the typed SDK caps at i32, but any value
+            // past the limit must still be soft-rejected before that arithmetic runs.
+            .visibility_timeout(50_000)
+            .build()
+            .unwrap(),
+    ];
+
+    // The request must complete (no panic / dropped connection).
+    let batch_resp = client
+        .change_message_visibility_batch()
+        .queue_url(&queue_url)
+        .set_entries(Some(entries))
+        .send()
+        .await
+        .unwrap();
+
+    let successful = batch_resp.successful();
+    let failed = batch_resp.failed();
+    assert_eq!(successful.len(), 1);
+    assert_eq!(successful[0].id(), "ok");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].id(), "overflow");
+    assert_eq!(failed[0].code(), "InvalidParameterValue");
+}
+
 /// Fair Queues: when multiple message groups exist on a standard queue,
 /// messages from groups with fewer in-flight messages are prioritized.
 #[tokio::test]
