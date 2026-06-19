@@ -961,7 +961,7 @@ impl Ec2Service {
                 let account_id = state.account_id.clone();
                 // Snapshot the tag map first so we don't hold two borrows of
                 // `state` at once when re-deriving per-instance Pod tags.
-                let tag_snapshot: std::collections::HashMap<String, Vec<crate::state::Tag>> =
+                let tag_snapshot: std::collections::BTreeMap<String, Vec<crate::state::Tag>> =
                     state.tags.clone();
                 // Which subnets are public (have an IGW default route), computed
                 // before the mutable instance loop so we can re-derive each
