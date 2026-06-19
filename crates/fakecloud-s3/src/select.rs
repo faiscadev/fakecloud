@@ -164,9 +164,25 @@ pub fn parse_sql(sql: &str) -> Result<Query, &'static str> {
     })
 }
 
+/// Case-insensitive search for an ASCII keyword that returns a byte offset into
+/// `s` itself (at a char boundary). Searching a `to_uppercase()` copy is unsafe
+/// because uppercasing can change byte length (e.g. `ﬀ` -> `FF`), so an offset
+/// from the uppercased string can land off a char boundary in the original and
+/// panic when used to slice it.
+fn find_ascii_keyword_ci(s: &str, kw: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let kw = kw.as_bytes();
+    if kw.len() > bytes.len() {
+        return None;
+    }
+    // A char-boundary match of an all-ASCII needle guarantees the matched bytes
+    // are ASCII, so `pos + kw.len()` is also a valid char boundary.
+    (0..=bytes.len() - kw.len())
+        .find(|&i| s.is_char_boundary(i) && bytes[i..i + kw.len()].eq_ignore_ascii_case(kw))
+}
+
 fn parse_where(s: &str) -> Result<WhereClause, &'static str> {
-    let upper = s.to_uppercase();
-    if let Some(pos) = upper.find(" LIKE ") {
+    if let Some(pos) = find_ascii_keyword_ci(s, " LIKE ") {
         let col = s[..pos].trim().to_string();
         let pattern = s[pos + 6..].trim();
         let pat = strip_quotes(pattern).unwrap_or(pattern).to_string();
@@ -409,6 +425,30 @@ mod tests {
     #[test]
     fn parse_where_like() {
         let q = parse_sql("SELECT * FROM s3object WHERE name LIKE 'a%'").unwrap();
+        assert!(
+            matches!(q.where_clause, Some(WhereClause::Like(ref col, ref pat)) if col == "name" && pat == "a%")
+        );
+    }
+
+    #[test]
+    fn parse_where_like_multibyte_column_does_not_panic() {
+        // `ﬀ` (U+FB00) uppercases to the two-byte "FF", so a byte offset taken from a
+        // `to_uppercase()` copy would land off a char boundary in the original string and
+        // panic when slicing. The case-insensitive keyword search must operate on the
+        // original bytes so this parses cleanly instead of crashing the request thread.
+        let q = parse_sql("SELECT * FROM s3object WHERE ﬀ LIKE 'x%'").unwrap();
+        match q.where_clause {
+            Some(WhereClause::Like(ref col, ref pat)) => {
+                assert_eq!(col, "ﬀ");
+                assert_eq!(pat, "x%");
+            }
+            other => panic!("expected LIKE clause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_where_like_is_case_insensitive() {
+        let q = parse_sql("SELECT * FROM s3object WHERE name like 'a%'").unwrap();
         assert!(
             matches!(q.where_clause, Some(WhereClause::Like(ref col, ref pat)) if col == "name" && pat == "a%")
         );

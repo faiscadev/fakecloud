@@ -1639,6 +1639,85 @@ async fn s3_complete_multipart_wrong_etag_returns_error() {
     );
 }
 
+/// Regression: UploadPartCopy with a malformed/out-of-bounds copy-source-range (start>end,
+/// or any range over a 0-byte source) used to underflow `len()-1` / slice past the buffer and
+/// panic the request thread. It must return InvalidArgument and leave the server responsive.
+#[tokio::test]
+async fn s3_upload_part_copy_bad_range_returns_error_not_panic() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("upc-range-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    // A small source object and an empty source object.
+    client
+        .put_object()
+        .bucket("upc-range-bucket")
+        .key("src-small.txt")
+        .body(ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("upc-range-bucket")
+        .key("src-empty.txt")
+        .body(ByteStream::from_static(b""))
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("upc-range-bucket")
+        .key("dst.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    // start > end against a non-empty source.
+    let inverted = client
+        .upload_part_copy()
+        .bucket("upc-range-bucket")
+        .key("dst.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .copy_source("upc-range-bucket/src-small.txt")
+        .copy_source_range("bytes=100-0")
+        .send()
+        .await;
+    assert!(inverted.is_err(), "inverted range must error, not panic");
+
+    // Any range over a 0-byte source (previously underflowed len()-1).
+    let empty_src = client
+        .upload_part_copy()
+        .bucket("upc-range-bucket")
+        .key("dst.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .copy_source("upc-range-bucket/src-empty.txt")
+        .copy_source_range("bytes=0-0")
+        .send()
+        .await;
+    assert!(empty_src.is_err(), "range over empty source must error");
+
+    // The server survived both: a normal request still succeeds.
+    let head = client
+        .head_object()
+        .bucket("upc-range-bucket")
+        .key("src-small.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.content_length(), Some(5));
+}
+
 /// Regression: AbortMultipartUpload with wrong key returns NoSuchUpload error.
 #[tokio::test]
 async fn s3_abort_multipart_wrong_key_returns_error() {
