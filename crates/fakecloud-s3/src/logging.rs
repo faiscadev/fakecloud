@@ -18,7 +18,7 @@ pub struct LoggingConfig {
 
 /// Parse a `<BucketLoggingStatus>` XML body into a `LoggingConfig`, if logging
 /// is enabled (i.e. the `<LoggingEnabled>` element is present).
-pub fn parse_logging_config(xml: &str) -> Option<LoggingConfig> {
+pub(crate) fn parse_logging_config(xml: &str) -> Option<LoggingConfig> {
     let le_start = xml.find("<LoggingEnabled>")?;
     let le_end = xml.find("</LoggingEnabled>")?;
     let le_body = &xml[le_start + 16..le_end];

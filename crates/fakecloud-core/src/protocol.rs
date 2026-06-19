@@ -362,12 +362,17 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
                 bucket: None,
             });
         }
-        let bucket = labels[..labels.len() - 2].join(".");
-        return Some(RoutingHost {
-            service: "s3".to_string(),
-            region: labels[labels.len() - 1].to_string(),
-            bucket: Some(bucket),
-        });
+        // Virtual-hosted form needs at least {alias}.{region}.s3-accesspoint, i.e.
+        // 3+ labels. A bare "s3-accesspoint" host (1 label) must not reach the
+        // `len() - 2` slice, which would underflow and panic.
+        if labels.len() >= 3 {
+            let bucket = labels[..labels.len() - 2].join(".");
+            return Some(RoutingHost {
+                service: "s3".to_string(),
+                region: labels[labels.len() - 1].to_string(),
+                bucket: Some(bucket),
+            });
+        }
     }
 
     // `s3-control.<region>` or `{account-id}.s3-control.<region>` — S3
@@ -1079,6 +1084,14 @@ mod tests {
         assert!(parse_routing_host("foo.bar.baz.localhost.localstack.cloud").is_none());
         assert!(parse_routing_host(".amazonaws.com").is_none());
         assert!(parse_routing_host("amazonaws.com").is_none());
+    }
+
+    #[test]
+    fn parse_routing_host_bare_s3_accesspoint_does_not_panic() {
+        // A single-label "s3-accesspoint" host has < 2 labels, so the
+        // virtual-hosted `len() - 2` slice would underflow and panic without
+        // the length guard. It must be rejected, not crash the router.
+        assert!(parse_routing_host("s3-accesspoint").is_none());
     }
 
     #[test]

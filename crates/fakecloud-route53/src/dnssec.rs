@@ -222,7 +222,7 @@ pub fn rrsig_signed_data(header: &RrsigHeader<'_>, rrset_canonical: &[u8]) -> Ve
 
 /// Sign `data` with the PKCS#8-PEM private key. Returns the raw 64-byte
 /// `r || s` ECDSA-P256 signature ready for the RRSIG `Signature` field.
-pub fn sign_with_pkcs8_pem(private_key_pem: &str, data: &[u8]) -> Vec<u8> {
+pub(crate) fn sign_with_pkcs8_pem(private_key_pem: &str, data: &[u8]) -> Vec<u8> {
     let signing_key =
         SigningKey::from_pkcs8_pem(private_key_pem).expect("valid pkcs8 pem from derive_keypair");
     let signature: Signature = signing_key.sign(data);

@@ -86,6 +86,12 @@ pub fn handle_v1_action(
     }
 }
 
+/// SES-flavored required-parameter check. Intentionally diverges from
+/// `fakecloud_core::query::required_param`: it returns a borrowed `&str` and
+/// emits SES's `ValidationError` / "Value for parameter X is required" wording
+/// (the AWS-correct response for the SES query protocol), where core emits
+/// `MissingParameter` / "The request must contain the parameter X." Do not
+/// "consolidate" this into the core helper - it would break SES error parity.
 pub(crate) fn required_param<'a>(
     params: &'a HashMap<String, String>,
     key: &str,

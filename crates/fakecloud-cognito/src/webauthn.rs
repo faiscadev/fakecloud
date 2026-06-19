@@ -63,7 +63,7 @@ fn cbor_map_get<'a>(map: &'a [(CborValue, CborValue)], key: &str) -> Option<&'a 
 
 /// Parse a base64url-encoded WebAuthn `attestationObject` and return the
 /// "packed" attestation pieces. Rejects every other `fmt`.
-pub fn parse_packed_attestation(
+pub(crate) fn parse_packed_attestation(
     attestation_object_b64: &str,
 ) -> Result<PackedAttestation, AttestationError> {
     let raw = b64url_decode(attestation_object_b64)?;
