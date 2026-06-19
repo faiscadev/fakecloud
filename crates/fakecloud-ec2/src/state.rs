@@ -5,7 +5,7 @@
 //! the backing store for `CreateTags`/`DeleteTags`/`DescribeTags` plus the
 //! `tag:`/`tag-key` describe filters shared across every resource family.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -999,43 +999,43 @@ pub struct Ec2State {
     pub region: String,
     /// resource-id -> tags. Shared by every Describe* `tag:` filter.
     #[serde(default)]
-    pub tags: HashMap<String, Vec<Tag>>,
+    pub tags: BTreeMap<String, Vec<Tag>>,
     #[serde(default)]
-    pub vpcs: HashMap<String, Vpc>,
+    pub vpcs: BTreeMap<String, Vpc>,
     #[serde(default)]
-    pub dhcp_options: HashMap<String, DhcpOptions>,
+    pub dhcp_options: BTreeMap<String, DhcpOptions>,
     #[serde(default)]
-    pub subnets: HashMap<String, Subnet>,
+    pub subnets: BTreeMap<String, Subnet>,
     #[serde(default)]
-    pub subnet_cidr_reservations: HashMap<String, SubnetCidrReservation>,
+    pub subnet_cidr_reservations: BTreeMap<String, SubnetCidrReservation>,
     #[serde(default)]
-    pub security_groups: HashMap<String, SecurityGroup>,
+    pub security_groups: BTreeMap<String, SecurityGroup>,
     #[serde(default)]
-    pub route_tables: HashMap<String, RouteTable>,
+    pub route_tables: BTreeMap<String, RouteTable>,
     #[serde(default)]
-    pub internet_gateways: HashMap<String, InternetGateway>,
+    pub internet_gateways: BTreeMap<String, InternetGateway>,
     #[serde(default)]
-    pub egress_only_igws: HashMap<String, InternetGateway>,
+    pub egress_only_igws: BTreeMap<String, InternetGateway>,
     #[serde(default)]
-    pub nat_gateways: HashMap<String, NatGateway>,
+    pub nat_gateways: BTreeMap<String, NatGateway>,
     /// keyed by allocation id.
     #[serde(default)]
-    pub elastic_ips: HashMap<String, ElasticIp>,
+    pub elastic_ips: BTreeMap<String, ElasticIp>,
     /// keyed by key name.
     #[serde(default)]
-    pub key_pairs: HashMap<String, KeyPair>,
+    pub key_pairs: BTreeMap<String, KeyPair>,
     /// keyed by group name.
     #[serde(default)]
-    pub placement_groups: HashMap<String, PlacementGroup>,
+    pub placement_groups: BTreeMap<String, PlacementGroup>,
     #[serde(default)]
-    pub network_interfaces: HashMap<String, NetworkInterface>,
+    pub network_interfaces: BTreeMap<String, NetworkInterface>,
     /// keyed by permission id.
     #[serde(default)]
-    pub eni_permissions: HashMap<String, NetworkInterfacePermission>,
+    pub eni_permissions: BTreeMap<String, NetworkInterfacePermission>,
     #[serde(default)]
-    pub instances: HashMap<String, Instance>,
+    pub instances: BTreeMap<String, Instance>,
     #[serde(default)]
-    pub volumes: HashMap<String, Volume>,
+    pub volumes: BTreeMap<String, Volume>,
     /// Account-level EBS default encryption toggle.
     #[serde(default)]
     pub ebs_encryption_default: bool,
@@ -1043,15 +1043,15 @@ pub struct Ec2State {
     #[serde(default)]
     pub ebs_default_kms_key_id: Option<String>,
     #[serde(default)]
-    pub snapshots: HashMap<String, Snapshot>,
+    pub snapshots: BTreeMap<String, Snapshot>,
     /// Account-level snapshot block-public-access state.
     #[serde(default)]
     pub snapshot_block_public_access: String,
     #[serde(default)]
-    pub images: HashMap<String, Image>,
+    pub images: BTreeMap<String, Image>,
     /// Watermarks attached to AMIs: image_id -> watermark_key -> watermark_name.
     #[serde(default)]
-    pub image_watermarks: HashMap<String, HashMap<String, String>>,
+    pub image_watermarks: BTreeMap<String, BTreeMap<String, String>>,
     /// Account-level image block-public-access state.
     #[serde(default)]
     pub image_block_public_access: String,
@@ -1059,169 +1059,169 @@ pub struct Ec2State {
     #[serde(default)]
     pub allowed_images_settings: String,
     #[serde(default)]
-    pub network_acls: HashMap<String, NetworkAcl>,
+    pub network_acls: BTreeMap<String, NetworkAcl>,
     #[serde(default)]
-    pub vpc_peerings: HashMap<String, VpcPeering>,
+    pub vpc_peerings: BTreeMap<String, VpcPeering>,
     #[serde(default)]
-    pub vpc_endpoints: HashMap<String, VpcEndpoint>,
+    pub vpc_endpoints: BTreeMap<String, VpcEndpoint>,
     #[serde(default)]
-    pub endpoint_services: HashMap<String, EndpointService>,
+    pub endpoint_services: BTreeMap<String, EndpointService>,
     #[serde(default)]
-    pub connection_notifications: HashMap<String, ConnectionNotification>,
+    pub connection_notifications: BTreeMap<String, ConnectionNotification>,
     #[serde(default)]
-    pub flow_logs: HashMap<String, FlowLog>,
+    pub flow_logs: BTreeMap<String, FlowLog>,
     #[serde(default)]
-    pub launch_templates: HashMap<String, LaunchTemplate>,
+    pub launch_templates: BTreeMap<String, LaunchTemplate>,
     #[serde(default)]
-    pub spot_requests: HashMap<String, SpotRequest>,
+    pub spot_requests: BTreeMap<String, SpotRequest>,
     #[serde(default)]
-    pub spot_fleets: HashMap<String, SpotFleet>,
+    pub spot_fleets: BTreeMap<String, SpotFleet>,
     #[serde(default)]
-    pub fleets: HashMap<String, Fleet>,
+    pub fleets: BTreeMap<String, Fleet>,
     /// Account-level spot datafeed subscription (bucket, prefix).
     #[serde(default)]
     pub spot_datafeed: Option<(String, String)>,
     #[serde(default)]
-    pub capacity_reservations: HashMap<String, CapacityReservation>,
+    pub capacity_reservations: BTreeMap<String, CapacityReservation>,
     /// Capacity reservation fleet ids (metadata-only).
     #[serde(default)]
-    pub capacity_reservation_fleets: HashMap<String, String>,
+    pub capacity_reservation_fleets: BTreeMap<String, String>,
     #[serde(default)]
-    pub reserved_instances: HashMap<String, ReservedInstances>,
+    pub reserved_instances: BTreeMap<String, ReservedInstances>,
     #[serde(default)]
-    pub reserved_instances_listings: HashMap<String, ReservedInstancesListing>,
+    pub reserved_instances_listings: BTreeMap<String, ReservedInstancesListing>,
     #[serde(default)]
-    pub reserved_instances_modifications: HashMap<String, ReservedInstancesModification>,
+    pub reserved_instances_modifications: BTreeMap<String, ReservedInstancesModification>,
     #[serde(default)]
-    pub dedicated_hosts: HashMap<String, DedicatedHost>,
+    pub dedicated_hosts: BTreeMap<String, DedicatedHost>,
     #[serde(default)]
-    pub transit_gateways: HashMap<String, TransitGateway>,
+    pub transit_gateways: BTreeMap<String, TransitGateway>,
     #[serde(default)]
-    pub tgw_attachments: HashMap<String, TgwAttachment>,
+    pub tgw_attachments: BTreeMap<String, TgwAttachment>,
     #[serde(default)]
-    pub tgw_route_tables: HashMap<String, TgwRouteTable>,
+    pub tgw_route_tables: BTreeMap<String, TgwRouteTable>,
     /// route-table-id -> static routes.
     #[serde(default)]
-    pub tgw_routes: HashMap<String, Vec<TgwRoute>>,
+    pub tgw_routes: BTreeMap<String, Vec<TgwRoute>>,
     /// route-table-id -> associated attachment ids.
     #[serde(default)]
-    pub tgw_rt_associations: HashMap<String, Vec<String>>,
+    pub tgw_rt_associations: BTreeMap<String, Vec<String>>,
     /// route-table-id -> propagated attachment ids.
     #[serde(default)]
-    pub tgw_rt_propagations: HashMap<String, Vec<String>>,
+    pub tgw_rt_propagations: BTreeMap<String, Vec<String>>,
     /// route-table-id -> prefix-list ids referenced.
     #[serde(default)]
-    pub tgw_prefix_list_refs: HashMap<String, Vec<String>>,
+    pub tgw_prefix_list_refs: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub tgw_peerings: HashMap<String, TgwPeering>,
+    pub tgw_peerings: BTreeMap<String, TgwPeering>,
     /// connect-attachment-id -> (transport attachment id, tgw id).
     #[serde(default)]
-    pub tgw_connects: HashMap<String, (String, String)>,
+    pub tgw_connects: BTreeMap<String, (String, String)>,
     /// connect-peer-id -> attachment id.
     #[serde(default)]
-    pub tgw_connect_peers: HashMap<String, String>,
+    pub tgw_connect_peers: BTreeMap<String, String>,
     /// policy-table-id -> tgw id.
     #[serde(default)]
-    pub tgw_policy_tables: HashMap<String, String>,
+    pub tgw_policy_tables: BTreeMap<String, String>,
     /// policy-table-id -> associated attachment ids.
     #[serde(default)]
-    pub tgw_policy_table_associations: HashMap<String, Vec<String>>,
+    pub tgw_policy_table_associations: BTreeMap<String, Vec<String>>,
     /// announcement-id -> (route-table id, peering-attachment id).
     #[serde(default)]
-    pub tgw_announcements: HashMap<String, (String, String)>,
+    pub tgw_announcements: BTreeMap<String, (String, String)>,
     #[serde(default)]
-    pub tgw_multicast_domains: HashMap<String, TgwMulticastDomain>,
+    pub tgw_multicast_domains: BTreeMap<String, TgwMulticastDomain>,
     #[serde(default)]
-    pub tgw_metering_policies: HashMap<String, TgwMeteringPolicy>,
+    pub tgw_metering_policies: BTreeMap<String, TgwMeteringPolicy>,
     #[serde(default)]
-    pub customer_gateways: HashMap<String, CustomerGateway>,
+    pub customer_gateways: BTreeMap<String, CustomerGateway>,
     #[serde(default)]
-    pub vpn_gateways: HashMap<String, VpnGateway>,
+    pub vpn_gateways: BTreeMap<String, VpnGateway>,
     #[serde(default)]
-    pub vpn_connections: HashMap<String, VpnConnection>,
+    pub vpn_connections: BTreeMap<String, VpnConnection>,
     #[serde(default)]
-    pub vpn_concentrators: HashMap<String, VpnConcentrator>,
+    pub vpn_concentrators: BTreeMap<String, VpnConcentrator>,
     #[serde(default)]
-    pub client_vpn_endpoints: HashMap<String, ClientVpnEndpoint>,
+    pub client_vpn_endpoints: BTreeMap<String, ClientVpnEndpoint>,
     #[serde(default)]
-    pub ipams: HashMap<String, Ipam>,
+    pub ipams: BTreeMap<String, Ipam>,
     #[serde(default)]
-    pub ipam_scopes: HashMap<String, IpamScope>,
+    pub ipam_scopes: BTreeMap<String, IpamScope>,
     #[serde(default)]
-    pub ipam_pools: HashMap<String, IpamPool>,
+    pub ipam_pools: BTreeMap<String, IpamPool>,
     /// pool-id -> provisioned (cidr, cidr-id).
     #[serde(default)]
-    pub ipam_pool_cidrs: HashMap<String, Vec<(String, String)>>,
+    pub ipam_pool_cidrs: BTreeMap<String, Vec<(String, String)>>,
     /// pool-id -> allocations (cidr, allocation-id).
     #[serde(default)]
-    pub ipam_pool_allocations: HashMap<String, Vec<(String, String)>>,
+    pub ipam_pool_allocations: BTreeMap<String, Vec<(String, String)>>,
     #[serde(default)]
-    pub ipam_resource_discoveries: HashMap<String, IpamResourceDiscovery>,
+    pub ipam_resource_discoveries: BTreeMap<String, IpamResourceDiscovery>,
     /// association-id -> (discovery-id, ipam-id).
     #[serde(default)]
-    pub ipam_rd_associations: HashMap<String, (String, String)>,
+    pub ipam_rd_associations: BTreeMap<String, (String, String)>,
     /// asn -> associated cidr.
     #[serde(default)]
-    pub ipam_byoasns: HashMap<String, String>,
+    pub ipam_byoasns: BTreeMap<String, String>,
     /// external-token-id -> ipam-id.
     #[serde(default)]
-    pub ipam_ext_tokens: HashMap<String, String>,
+    pub ipam_ext_tokens: BTreeMap<String, String>,
     #[serde(default)]
-    pub ipam_policies: HashMap<String, IpamPolicy>,
+    pub ipam_policies: BTreeMap<String, IpamPolicy>,
     #[serde(default)]
-    pub ipam_pl_resolvers: HashMap<String, IpamPrefixListResolver>,
+    pub ipam_pl_resolvers: BTreeMap<String, IpamPrefixListResolver>,
     #[serde(default)]
-    pub ipam_pl_resolver_targets: HashMap<String, IpamPrefixListResolverTarget>,
+    pub ipam_pl_resolver_targets: BTreeMap<String, IpamPrefixListResolverTarget>,
     /// policy-id -> (locale, resource-type) allocation-rule documents.
     #[serde(default)]
-    pub ipam_policy_alloc_rules: HashMap<String, Vec<(String, String)>>,
+    pub ipam_policy_alloc_rules: BTreeMap<String, Vec<(String, String)>>,
     /// The single enabled IPAM policy id, if any.
     #[serde(default)]
     pub ipam_enabled_policy: Option<String>,
     #[serde(default)]
-    pub va_instances: HashMap<String, VerifiedAccessInstance>,
+    pub va_instances: BTreeMap<String, VerifiedAccessInstance>,
     #[serde(default)]
-    pub va_trust_providers: HashMap<String, VerifiedAccessTrustProvider>,
+    pub va_trust_providers: BTreeMap<String, VerifiedAccessTrustProvider>,
     #[serde(default)]
-    pub va_groups: HashMap<String, VerifiedAccessGroup>,
+    pub va_groups: BTreeMap<String, VerifiedAccessGroup>,
     #[serde(default)]
-    pub va_endpoints: HashMap<String, VerifiedAccessEndpoint>,
+    pub va_endpoints: BTreeMap<String, VerifiedAccessEndpoint>,
     /// group-id -> policy document.
     #[serde(default)]
-    pub va_group_policies: HashMap<String, String>,
+    pub va_group_policies: BTreeMap<String, String>,
     /// endpoint-id -> policy document.
     #[serde(default)]
-    pub va_endpoint_policies: HashMap<String, String>,
+    pub va_endpoint_policies: BTreeMap<String, String>,
     #[serde(default)]
-    pub ni_paths: HashMap<String, NetworkInsightsPath>,
+    pub ni_paths: BTreeMap<String, NetworkInsightsPath>,
     #[serde(default)]
-    pub ni_analyses: HashMap<String, NetworkInsightsAnalysis>,
+    pub ni_analyses: BTreeMap<String, NetworkInsightsAnalysis>,
     #[serde(default)]
-    pub ni_access_scopes: HashMap<String, NetworkInsightsAccessScope>,
+    pub ni_access_scopes: BTreeMap<String, NetworkInsightsAccessScope>,
     #[serde(default)]
-    pub ni_scope_analyses: HashMap<String, NetworkInsightsAccessScopeAnalysis>,
+    pub ni_scope_analyses: BTreeMap<String, NetworkInsightsAccessScopeAnalysis>,
     #[serde(default)]
-    pub carrier_gateways: HashMap<String, CarrierGateway>,
+    pub carrier_gateways: BTreeMap<String, CarrierGateway>,
     #[serde(default)]
-    pub coip_pools: HashMap<String, CoipPool>,
+    pub coip_pools: BTreeMap<String, CoipPool>,
     /// coip-pool-id -> CIDRs.
     #[serde(default)]
-    pub coip_pool_cidrs: HashMap<String, Vec<String>>,
+    pub coip_pool_cidrs: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub lg_route_tables: HashMap<String, LocalGatewayRouteTable>,
+    pub lg_route_tables: BTreeMap<String, LocalGatewayRouteTable>,
     /// route-table-id -> destination CIDRs.
     #[serde(default)]
-    pub lg_routes: HashMap<String, Vec<String>>,
+    pub lg_routes: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub lg_rt_vpc_assocs: HashMap<String, LocalGatewayRouteTableVpcAssoc>,
+    pub lg_rt_vpc_assocs: BTreeMap<String, LocalGatewayRouteTableVpcAssoc>,
     #[serde(default)]
-    pub lg_virtual_interfaces: HashMap<String, LocalGatewayVif>,
+    pub lg_virtual_interfaces: BTreeMap<String, LocalGatewayVif>,
     #[serde(default)]
-    pub lg_vif_groups: HashMap<String, LocalGatewayVifGroup>,
+    pub lg_vif_groups: BTreeMap<String, LocalGatewayVifGroup>,
     #[serde(default)]
-    pub lg_rt_vifg_assocs: HashMap<String, LocalGatewayRouteTableVifgAssoc>,
+    pub lg_rt_vifg_assocs: BTreeMap<String, LocalGatewayRouteTableVifgAssoc>,
     #[serde(default)]
-    pub instance_connect_endpoints: HashMap<String, InstanceConnectEndpoint>,
+    pub instance_connect_endpoints: BTreeMap<String, InstanceConnectEndpoint>,
     /// Image ids with fast-launch enabled.
     #[serde(default)]
     pub fast_launch_images: std::collections::HashSet<String>,
