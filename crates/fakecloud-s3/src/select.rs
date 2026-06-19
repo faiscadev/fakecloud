@@ -112,7 +112,7 @@ pub struct Query {
 
 /// Parse a minimal SELECT statement. Errors are static strings for
 /// simplicity — callers map them to AWS error codes.
-pub fn parse_sql(sql: &str) -> Result<Query, &'static str> {
+pub(crate) fn parse_sql(sql: &str) -> Result<Query, &'static str> {
     let sql = sql.trim();
     let upper = sql.to_uppercase();
 
@@ -211,7 +211,7 @@ fn strip_quotes(s: &str) -> Option<&str> {
 
 // ── CSV parser ──────────────────────────────────────────────────────
 
-pub fn parse_csv(
+pub(crate) fn parse_csv(
     input: &[u8],
     has_header: bool,
     field_delimiter: char,
@@ -238,7 +238,7 @@ pub fn parse_csv(
 
 // ── JSON parser (newline-delimited) ─────────────────────────────────
 
-pub fn parse_json_lines(input: &[u8]) -> (Option<Vec<String>>, Vec<Vec<String>>) {
+pub(crate) fn parse_json_lines(input: &[u8]) -> (Option<Vec<String>>, Vec<Vec<String>>) {
     let text = String::from_utf8_lossy(input);
     let mut headers: Option<Vec<String>> = None;
     let mut rows = Vec::new();

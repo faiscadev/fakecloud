@@ -13,7 +13,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 /// Parse `smtp://host:port` (or `host:port`) into `(host, port)`.
-pub fn parse_relay_url(url: &str) -> Option<(String, u16)> {
+pub(crate) fn parse_relay_url(url: &str) -> Option<(String, u16)> {
     let s = url.trim().strip_prefix("smtp://").unwrap_or(url);
     let (host, port) = s.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;

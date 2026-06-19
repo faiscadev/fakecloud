@@ -78,7 +78,7 @@ pub fn sign(canonical: &str) -> String {
 ///
 /// Order is alphabetical by key, with each `Key\nValue\n` pair appended.
 /// `Subject` is included only when present.
-pub fn canonical_notification(
+pub(crate) fn canonical_notification(
     message: &str,
     message_id: &str,
     subject: Option<&str>,
