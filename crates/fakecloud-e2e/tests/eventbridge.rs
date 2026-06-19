@@ -602,8 +602,13 @@ async fn eb_delete_nonexistent_event_bus() {
     let server = TestServer::start().await;
     let client = server.eventbridge_client().await;
 
-    // Deleting a non-existent bus may return error or succeed silently
-    let _ = client.delete_event_bus().name("no-such-bus").send().await;
+    // DeleteEventBus is idempotent in AWS: deleting a bus that doesn't exist
+    // succeeds (200) rather than erroring.
+    let result = client.delete_event_bus().name("no-such-bus").send().await;
+    assert!(
+        result.is_ok(),
+        "DeleteEventBus on a missing bus should succeed idempotently, got: {result:?}"
+    );
 }
 
 // ---- EventBridge Multiple Targets ----

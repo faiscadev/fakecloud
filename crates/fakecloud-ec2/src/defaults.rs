@@ -294,9 +294,8 @@ fn deny_all_entry(egress: bool) -> NetworkAclEntry {
 /// without such a route is private and (phase 2) backs onto an `internal`
 /// network. Subnets default to their VPC's main route table when not
 /// explicitly associated.
-// Consumed by phase-2 per-subnet networking (chooses `internal` vs routable
-// backing networks) and exercised by the tests below.
-#[allow(dead_code)]
+// Drives per-subnet networking (chooses `internal` vs routable backing
+// networks) from `service/mod.rs` and `instance.rs`.
 pub(crate) fn subnet_is_public(state: &Ec2State, subnet_id: &str) -> bool {
     let Some(subnet) = state.subnets.get(subnet_id) else {
         return false;
