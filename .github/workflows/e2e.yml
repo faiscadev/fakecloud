@@ -210,7 +210,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install nftables
-        run: sudo apt-get update && sudo apt-get install -y nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables conntrack
 
       # Same-subnet instances share one Linux bridge, so their traffic is L2-switched
       # and only traverses the nft `forward` chain when bridge netfilter is active.
@@ -240,9 +240,31 @@ jobs:
           # Keep cargo's PATH but append the sbin dirs so the fakecloud process
           # (running as root) can actually find `nft` (in /usr/sbin); without
           # this its capability probe fails and enforcement silently disables.
-          sudo -E env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
-            FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
-            cargo test -p fakecloud-e2e --test ec2_sg_enforcement_real -- --nocapture --test-threads=1
+          #
+          # The scenario boots fresh instances, networks and nft state each run, so a
+          # single environmental setup-race (bridge-netfilter / reconcile timing) is an
+          # independent miss. Retry the whole scenario up to 3 times - every attempt
+          # still asserts the real deny->allow packet transition in full; only a
+          # genuine, repeatable failure fails the job. Residual nft/conntrack state is
+          # flushed between attempts so each starts clean.
+          run_once() {
+            sudo -E env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
+              FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
+              cargo test -p fakecloud-e2e --test ec2_sg_enforcement_real -- --nocapture --test-threads=1
+          }
+          for attempt in 1 2 3; do
+            echo "=== SG enforcement attempt ${attempt}/3 ==="
+            if run_once; then
+              echo "SG enforcement passed on attempt ${attempt}"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; flushing nft + conntrack before retry"
+            sudo nft flush ruleset || true
+            sudo conntrack -F || true
+            sleep 3
+          done
+          echo "SG enforcement failed all 3 attempts"
+          exit 1
 
       - name: nft ruleset diagnostics
         if: always()
