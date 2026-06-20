@@ -5073,3 +5073,41 @@ fn get_item_rejects_wrong_key_attribute_type() {
         Ok(_) => panic!("a wrong-typed key must be rejected on GetItem"),
     }
 }
+
+#[test]
+fn update_item_applies_legacy_attribute_updates() {
+    // Legacy AttributeUpdates (no UpdateExpression) used to write nothing and
+    // leave a key-only stub -- silent data loss (bug-audit 2026-06-20, 1.2).
+    let svc = make_service();
+    create_test_table(&svc);
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({ "TableName": "test-table", "Item": { "pk": { "S": "u1" }, "n": { "N": "5" } } }),
+    ))
+    .unwrap();
+
+    // PUT a new attr, ADD to the number, DELETE an attr -- all via the legacy API.
+    svc.update_item(&make_request(
+        "UpdateItem",
+        json!({
+            "TableName": "test-table",
+            "Key": { "pk": { "S": "u1" } },
+            "AttributeUpdates": {
+                "name": { "Value": { "S": "alice" }, "Action": "PUT" },
+                "n": { "Value": { "N": "3" }, "Action": "ADD" },
+            }
+        }),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .get_item(&make_request(
+            "GetItem",
+            json!({ "TableName": "test-table", "Key": { "pk": { "S": "u1" } } }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let item = &body["Item"];
+    assert_eq!(item["name"]["S"], "alice", "PUT must store the attribute");
+    assert_eq!(item["n"]["N"], "8", "ADD must increment 5 + 3 = 8");
+}

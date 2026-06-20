@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use http::StatusCode;
 use serde_json::json;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
@@ -396,6 +397,13 @@ impl DynamoDbService {
                 &expr_attr_names,
                 &expr_attr_values,
             )?;
+        } else if let Some(updates) = body["AttributeUpdates"].as_object() {
+            // Legacy AttributeUpdates (pre-2014 UpdateItem), still emitted by
+            // the AWS SDK for Java v1, older boto3, and the Terraform provider.
+            // Without this an UpdateItem using AttributeUpdates wrote nothing and
+            // (on a missing key) left a key-only stub item -- silent data loss
+            // (bug-audit 2026-06-20, 1.2).
+            apply_attribute_updates(&mut table.items[idx], updates)?;
         }
 
         // Compute the ReturnValues payload per AWS semantics:
@@ -548,6 +556,118 @@ fn diff_updated_attributes(
     }
 
     out
+}
+
+/// Apply a legacy `AttributeUpdates` map (pre-2014 UpdateItem) to an item.
+/// Each entry is `{ "Value": <AttributeValue>, "Action": "PUT"|"DELETE"|"ADD" }`
+/// (Action defaults to PUT). PUT sets the attribute; DELETE removes it (or
+/// removes set elements when a Value is given); ADD increments a number or
+/// unions a set (creating it when absent). See bug-audit 2026-06-20, 1.2.
+fn apply_attribute_updates(
+    item: &mut HashMap<String, AttributeValue>,
+    updates: &serde_json::Map<String, AttributeValue>,
+) -> Result<(), AwsServiceError> {
+    let invalid =
+        |m: String| AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", m);
+    for (attr, spec) in updates {
+        let action = spec.get("Action").and_then(|v| v.as_str()).unwrap_or("PUT");
+        match action {
+            "PUT" => {
+                if let Some(val) = spec.get("Value") {
+                    item.insert(attr.clone(), val.clone());
+                }
+            }
+            "DELETE" => match spec.get("Value") {
+                None => {
+                    item.remove(attr);
+                }
+                Some(val) => remove_set_elements(item, attr, val),
+            },
+            "ADD" => {
+                if let Some(val) = spec.get("Value") {
+                    add_to_attribute(item, attr, val)?;
+                }
+            }
+            other => return Err(invalid(format!("Unknown AttributeUpdates action: {other}"))),
+        }
+    }
+    Ok(())
+}
+
+/// ADD semantics: numeric increment for `N`, set union for `SS`/`NS`/`BS`.
+/// Creates the attribute when absent. Mismatched types are a ValidationException.
+fn add_to_attribute(
+    item: &mut HashMap<String, AttributeValue>,
+    attr: &str,
+    val: &AttributeValue,
+) -> Result<(), AwsServiceError> {
+    let invalid =
+        |m: String| AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", m);
+    let existing = item.get(attr).cloned();
+    match existing {
+        None => {
+            item.insert(attr.to_string(), val.clone());
+        }
+        Some(cur) => {
+            if let (Some(a), Some(b)) = (
+                cur.get("N").and_then(|v| v.as_str()),
+                val.get("N").and_then(|v| v.as_str()),
+            ) {
+                let sum = a
+                    .parse::<f64>()
+                    .map_err(|_| invalid("ADD operand is not a number".into()))?
+                    + b.parse::<f64>()
+                        .map_err(|_| invalid("ADD operand is not a number".into()))?;
+                // Format without a trailing `.0` for integral results, matching
+                // how DynamoDB returns numeric attributes.
+                let s = if sum.fract() == 0.0 {
+                    format!("{}", sum as i64)
+                } else {
+                    format!("{sum}")
+                };
+                item.insert(attr.to_string(), json!({ "N": s }));
+            } else {
+                // Set union for SS/NS/BS.
+                for set_type in ["SS", "NS", "BS"] {
+                    if let (Some(a), Some(b)) = (
+                        cur.get(set_type).and_then(|v| v.as_array()),
+                        val.get(set_type).and_then(|v| v.as_array()),
+                    ) {
+                        let mut merged = a.clone();
+                        for e in b {
+                            if !merged.contains(e) {
+                                merged.push(e.clone());
+                            }
+                        }
+                        item.insert(attr.to_string(), json!({ set_type: merged }));
+                        return Ok(());
+                    }
+                }
+                return Err(invalid(format!(
+                    "ADD is only supported for number and set types for attribute {attr}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DELETE with a Value removes the given elements from a set attribute.
+fn remove_set_elements(
+    item: &mut HashMap<String, AttributeValue>,
+    attr: &str,
+    val: &AttributeValue,
+) {
+    for set_type in ["SS", "NS", "BS"] {
+        if let Some(remove) = val.get(set_type).and_then(|v| v.as_array()) {
+            if let Some(cur) = item.get_mut(attr).and_then(|v| v.get_mut(set_type)) {
+                if let Some(arr) = cur.as_array_mut() {
+                    arr.retain(|e| !remove.contains(e));
+                }
+            }
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
