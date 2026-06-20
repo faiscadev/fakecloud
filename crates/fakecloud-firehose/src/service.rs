@@ -119,6 +119,12 @@ fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsService
         buffering_size_mb,
         buffering_interval_seconds,
         compression_format: val["CompressionFormat"].as_str().map(|s| s.to_string()),
+        processing_configuration: val["ProcessingConfiguration"]
+            .is_object()
+            .then(|| val["ProcessingConfiguration"].clone()),
+        data_format_conversion_configuration: val["DataFormatConversionConfiguration"]
+            .is_object()
+            .then(|| val["DataFormatConversionConfiguration"].clone()),
     }))
 }
 
@@ -197,10 +203,19 @@ fn s3_destination_json(dest: &S3Destination) -> Value {
     if let Some(ref p) = dest.error_output_prefix {
         s3["ErrorOutputPrefix"] = json!(p);
     }
+    // ProcessingConfiguration / DataFormatConversionConfiguration are only
+    // valid on the ExtendedS3 shape, not the legacy S3DestinationDescription.
+    let mut extended = s3.clone();
+    if let Some(ref pc) = dest.processing_configuration {
+        extended["ProcessingConfiguration"] = pc.clone();
+    }
+    if let Some(ref dfc) = dest.data_format_conversion_configuration {
+        extended["DataFormatConversionConfiguration"] = dfc.clone();
+    }
     json!({
         "DestinationId": dest.destination_id,
         "S3DestinationDescription": s3,
-        "ExtendedS3DestinationDescription": s3.clone(),
+        "ExtendedS3DestinationDescription": extended,
     })
 }
 
@@ -882,5 +897,43 @@ mod tests {
     #[test]
     fn buffering_interval_above_900_rejected() {
         assert!(validate_buffering(None, Some(1200)).is_err());
+    }
+
+    #[test]
+    fn create_with_processing_configuration_round_trips() {
+        // ProcessingConfiguration (Lambda transform) on an ExtendedS3 destination
+        // was dropped; it must round-trip through DescribeDeliveryStream
+        // (bug-audit 2026-06-20, 1.18).
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "proc-stream",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": "arn:aws:s3:::bucket",
+                    "ProcessingConfiguration": {
+                        "Enabled": true,
+                        "Processors": [{ "Type": "Lambda" }]
+                    }
+                }
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .describe_delivery_stream(&request(
+                "DescribeDeliveryStream",
+                json!({ "DeliveryStreamName": "proc-stream" }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dests = &body["DeliveryStreamDescription"]["Destinations"];
+        let ext = &dests[0]["ExtendedS3DestinationDescription"];
+        assert_eq!(ext["ProcessingConfiguration"]["Enabled"], true, "{body}");
+        assert_eq!(
+            ext["ProcessingConfiguration"]["Processors"][0]["Type"],
+            "Lambda"
+        );
     }
 }

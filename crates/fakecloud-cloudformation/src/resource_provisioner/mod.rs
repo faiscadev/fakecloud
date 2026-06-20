@@ -5922,6 +5922,8 @@ fn parse_firehose_s3_destination(value: &serde_json::Value) -> Result<S3Destinat
         buffering_size_mb,
         buffering_interval_seconds,
         compression_format,
+        processing_configuration: None,
+        data_format_conversion_configuration: None,
     })
 }
 
