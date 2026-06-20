@@ -449,24 +449,55 @@ fn load_models(models_dir: &std::path::Path) -> Vec<(String, smithy::ServiceMode
     })
 }
 
+/// The container-CLI value the probe-sweep server should run with, given the
+/// operator's current `FAKECLOUD_CONTAINER_CLI` (as `var_os`). Returns `Some`
+/// sentinel binary name to force every container runtime onto its metadata-only
+/// path when the operator hasn't pinned a CLI, and `None` (no override) when
+/// they have. Kept pure so the precedence is unit-testable without spawning a
+/// server. See `start_fakecloud` for why the sweep avoids real containers.
+fn disabling_container_cli(current: Option<std::ffi::OsString>) -> Option<&'static str> {
+    match current {
+        Some(_) => None,
+        None => Some("fakecloud-no-container-backend"),
+    }
+}
+
 fn start_fakecloud() -> (String, Child) {
     let port = find_available_port();
     let endpoint = format!("http://127.0.0.1:{}", port);
 
     let bin = find_binary();
 
-    let child = ProcessCommand::new(&bin)
-        .arg("--addr")
+    let mut cmd = ProcessCommand::new(&bin);
+    cmd.arg("--addr")
         .arg(format!("127.0.0.1:{}", port))
         .arg("--log-level")
         .arg("error")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to start fakecloud ({}): {}", bin, e);
-            std::process::exit(1);
-        });
+        .stderr(Stdio::null());
+
+    // The probe sweep exercises every operation of every service for API-shape
+    // conformance; it never asserts on runtime behaviour (that is e2e's job).
+    // But container-backed services (EC2 RunInstances, Lambda Invoke, ECS
+    // RunTask, RDS/ElastiCache create) would each shell out to Docker and spawn
+    // real containers + per-subnet networks for thousands of probe variants.
+    // On a CI runner that pulls base images and piles up containers until the
+    // host starves and the runner loses contact with GitHub (~2h, the "lost
+    // communication with the server" death introduced by EC2 VPC isolation in
+    // #1745). The synchronous API responses are identical with or without a
+    // backing container, so we point the container-CLI probe at a binary that
+    // does not exist: every runtime's detect_container_cli() returns None and
+    // they serve their documented metadata-only path. An operator who genuinely
+    // wants the sweep to drive real containers can still set
+    // FAKECLOUD_CONTAINER_CLI explicitly to override this default.
+    if let Some(sentinel) = disabling_container_cli(std::env::var_os("FAKECLOUD_CONTAINER_CLI")) {
+        cmd.env("FAKECLOUD_CONTAINER_CLI", sentinel);
+    }
+
+    let child = cmd.spawn().unwrap_or_else(|e| {
+        eprintln!("Failed to start fakecloud ({}): {}", bin, e);
+        std::process::exit(1);
+    });
 
     // Wait for server to be ready
     for _ in 0..50 {
@@ -677,4 +708,43 @@ fn cmd_update_baseline(
         baseline.total_variants,
         baseline.variants_passed as f64 / baseline.total_variants as f64 * 100.0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_disables_containers_when_cli_unset() {
+        // Unset operator CLI -> inject the sentinel that no container CLI
+        // resolves to, so the probe-sweep server serves metadata-only and
+        // never spawns containers that would starve a CI runner.
+        let sentinel = disabling_container_cli(None).expect("sentinel injected");
+        assert_eq!(sentinel, "fakecloud-no-container-backend");
+        // The sentinel must not resolve to a runnable binary, or a runtime's
+        // `detect_container_cli()` would treat it as a live CLI and the sweep
+        // would still spawn containers. This mirrors core's `cli_available`
+        // liveness probe (`<cli> info` succeeds) without taking a dep on it.
+        let resolves = ProcessCommand::new(sentinel)
+            .arg("info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(!resolves, "sentinel must not be a runnable container CLI");
+    }
+
+    #[test]
+    fn sweep_respects_explicit_container_cli() {
+        // An operator who pins FAKECLOUD_CONTAINER_CLI keeps it: no override.
+        assert_eq!(
+            disabling_container_cli(Some(std::ffi::OsString::from("docker"))),
+            None
+        );
+        assert_eq!(
+            disabling_container_cli(Some(std::ffi::OsString::from(""))),
+            None
+        );
+    }
 }
