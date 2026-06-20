@@ -1467,6 +1467,10 @@ async fn main() {
         } else {
             None
         };
+    // Clone the snapshot store for the rotation scheduler's /tick route, which
+    // mutates secret state outside the service's action-dispatch path and so
+    // must write through itself (bug-audit 2026-06-20, 0.A3).
+    let secretsmanager_rotation_snapshot_store = secretsmanager_snapshot_store.clone();
     let mut secretsmanager_service =
         SecretsManagerService::new(secretsmanager_state).with_delivery(delivery_for_secretsmanager);
     secretsmanager_service = secretsmanager_service.with_kms_hook(kms_hook_for_services.clone());
@@ -4658,9 +4662,14 @@ async fn main() {
             axum::routing::post({
                 let ss = secretsmanager_rotation_state;
                 let bus = delivery_for_rotation_scheduler;
+                let store = secretsmanager_rotation_snapshot_store;
                 move || async move {
-                    let rotated =
-                        fakecloud_secretsmanager::rotation::check_and_rotate(&ss, Some(&bus)).await;
+                    let rotated = fakecloud_secretsmanager::rotation::check_and_rotate(
+                        &ss,
+                        Some(&bus),
+                        store.clone(),
+                    )
+                    .await;
                     axum::Json(types::RotationTickResponse {
                         rotated_secrets: rotated,
                     })

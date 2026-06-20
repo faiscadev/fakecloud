@@ -14,9 +14,16 @@ use crate::state::{SecretVersion, SharedSecretsManagerState};
 /// invokes the rotation Lambda through all four steps.
 ///
 /// Returns the list of secret names that were rotated.
+///
+/// `snapshot_store`, when present, is written through after any rotation so the
+/// new AWSCURRENT version survives a restart. A scheduled rotation mutates
+/// secret state directly here, outside the normal action-dispatch path that is
+/// otherwise the only thing that snapshots -- without this the secret reverts to
+/// its pre-rotation value after a restart (bug-audit 2026-06-20, 0.A3).
 pub async fn check_and_rotate(
     state: &SharedSecretsManagerState,
     delivery_bus: Option<&Arc<DeliveryBus>>,
+    snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>>,
 ) -> Vec<String> {
     let now = Utc::now();
     let mut rotated = Vec::new();
@@ -164,6 +171,14 @@ pub async fn check_and_rotate(
         }
     }
 
+    // Write the rotated state through to disk. The snapshot file is written
+    // atomically (temp + rename), so a fresh local lock is sufficient to guard
+    // the in-memory clone for this one persist.
+    if !rotated.is_empty() {
+        let lock = tokio::sync::Mutex::new(());
+        crate::service::save_secretsmanager_snapshot(state, snapshot_store, &lock).await;
+    }
+
     rotated
 }
 
@@ -258,7 +273,7 @@ mod tests {
             .secrets
             .insert("due-secret".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert_eq!(rotated, vec!["due-secret"]);
 
         // Verify a new version was created (simple rotation without Lambda)
@@ -279,7 +294,7 @@ mod tests {
             .secrets
             .insert("not-due".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -293,7 +308,7 @@ mod tests {
             .secrets
             .insert("disabled".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -307,7 +322,7 @@ mod tests {
             .secrets
             .insert("no-rules".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -321,7 +336,7 @@ mod tests {
             .secrets
             .insert("no-last".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -336,7 +351,60 @@ mod tests {
             .secrets
             .insert("deleted".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None).await;
+        let rotated = check_and_rotate(&state, None, None).await;
         assert!(rotated.is_empty());
+    }
+
+    /// A SnapshotStore that records the last bytes saved, so a test can assert
+    /// the rotation wrote through (the real MemorySnapshotStore is a no-op).
+    #[derive(Default)]
+    struct RecordingStore {
+        bytes: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for RecordingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.bytes.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn rotation_persists_through_snapshot_store() {
+        // A scheduled (no-Lambda) rotation mutates secret state directly. Without
+        // write-through the new AWSCURRENT version is lost on restart and the
+        // secret reverts to its old value (bug-audit 2026-06-20, 0.A3).
+        let state = make_state();
+        let secret = make_secret("due-secret", true, Some(1), Some(2));
+        let original_vid = secret.current_version_id.clone();
+        state
+            .write()
+            .default_mut()
+            .secrets
+            .insert("due-secret".to_string(), secret);
+
+        let store = Arc::new(RecordingStore::default());
+        let rotated = check_and_rotate(
+            &state,
+            None,
+            Some(store.clone() as Arc<dyn fakecloud_persistence::SnapshotStore>),
+        )
+        .await;
+        assert_eq!(rotated, vec!["due-secret"]);
+
+        // The rotated state was written through, so a reload sees the new
+        // AWSCURRENT version, not the pre-rotation one.
+        let bytes = fakecloud_persistence::SnapshotStore::load(store.as_ref())
+            .unwrap()
+            .expect("rotation must persist a snapshot");
+        let snap: crate::SecretsManagerSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snap.accounts.expect("multi-account snapshot");
+        let persisted = &accounts.default_ref().secrets["due-secret"];
+        assert_ne!(
+            persisted.current_version_id, original_vid,
+            "persisted snapshot must hold the rotated version"
+        );
     }
 }
