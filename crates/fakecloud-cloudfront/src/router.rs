@@ -52,11 +52,11 @@ impl Route {
 pub fn route(method: &Method, path: &str, raw_query: &str) -> Option<Route> {
     let path = path.strip_prefix("/2020-05-31").unwrap_or(path);
     let path = path.trim_start_matches('/');
-    let segs: Vec<&str> = if path.is_empty() {
-        Vec::new()
-    } else {
-        path.split('/').collect()
-    };
+    // Filter out empty segments so a trailing slash (`/distribution/`, which
+    // botocore/AWS CLI < 1.40 and curl emit for a collection root) routes to the
+    // List op, not GetDistribution(id="") -> NoSuchDistribution (the #1645
+    // shape; bug-audit 2026-06-20, 1.1).
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let q = QueryFlags::parse(raw_query);
     match (method, segs.as_slice()) {
         // ─── Distributions ──────────────────────────────────────────
@@ -574,6 +574,14 @@ mod tests {
         let r = route(&Method::GET, "/2020-05-31/distribution/EDFDVBD632BHDS5", "").unwrap();
         assert_eq!(r.action, "GetDistribution");
         assert_eq!(r.id.as_deref(), Some("EDFDVBD632BHDS5"));
+    }
+
+    #[test]
+    fn trailing_slash_collection_routes_to_list() {
+        // A trailing slash on the collection root must list, not
+        // GetDistribution(id="") -> NoSuchDistribution (1.1).
+        let r = route(&Method::GET, "/2020-05-31/distribution/", "").unwrap();
+        assert_eq!(r.action, "ListDistributions");
     }
 
     #[test]
