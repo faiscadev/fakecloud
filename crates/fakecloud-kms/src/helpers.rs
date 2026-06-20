@@ -59,6 +59,7 @@ pub(crate) fn decode_ciphertext_envelope(
         return Ok(DecodedCiphertext {
             source_arn: key.arn.clone(),
             plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&decoded.plaintext),
+            encryption_algorithm: "SYMMETRIC_DEFAULT".to_string(),
         });
     }
 
@@ -97,6 +98,7 @@ pub(crate) fn decode_ciphertext_envelope(
         return Ok(DecodedCiphertext {
             source_arn: key.arn.clone(),
             plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&plaintext_bytes),
+            encryption_algorithm: "SYMMETRIC_DEFAULT".to_string(),
         });
     }
 
@@ -112,6 +114,38 @@ pub(crate) fn decode_ciphertext_envelope(
         return Ok(DecodedCiphertext {
             source_arn: key.arn.clone(),
             plaintext_b64: plaintext_b64.to_string(),
+            encryption_algorithm: "SYMMETRIC_DEFAULT".to_string(),
+        });
+    }
+
+    // Asymmetric RSA ciphertext produced by Encrypt against an RSA
+    // ENCRYPT_DECRYPT key: `fakecloud-rsa:<key_id>:<algorithm>:<b64>`. Reverse
+    // it with the key's private half (bug-audit 2026-06-20, 1.11).
+    if let Some(rest) = envelope.strip_prefix(RSA_ENVELOPE_PREFIX) {
+        let mut parts = rest.splitn(3, ':');
+        let key_id = parts.next().ok_or_else(invalid_ciphertext)?;
+        let algorithm = parts.next().ok_or_else(invalid_ciphertext)?;
+        let raw_b64 = parts.next().ok_or_else(invalid_ciphertext)?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(raw_b64)
+            .map_err(|_| invalid_ciphertext())?;
+        let key = state.keys.get(key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{key_id}' does not exist"),
+            )
+        })?;
+        let priv_der = key
+            .asymmetric_private_key_der
+            .as_ref()
+            .ok_or_else(invalid_ciphertext)?;
+        let plaintext = super::asym::rsa_oaep_unwrap(priv_der, algorithm, &ciphertext)
+            .map_err(|_| invalid_ciphertext())?;
+        return Ok(DecodedCiphertext {
+            source_arn: key.arn.clone(),
+            plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&plaintext),
+            encryption_algorithm: algorithm.to_string(),
         });
     }
 

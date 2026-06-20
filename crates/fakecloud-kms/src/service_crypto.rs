@@ -51,16 +51,80 @@ impl KmsService {
         })?;
         require_usable_key_state(key)?;
 
+        // Encrypt is only valid for ENCRYPT_DECRYPT keys. A SIGN_VERIFY /
+        // GENERATE_VERIFY_MAC / KEY_AGREEMENT key must be rejected, not silently
+        // encrypted under the symmetric path (bug-audit 2026-06-20, 1.11).
+        if key.key_usage != "ENCRYPT_DECRYPT" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!(
+                    "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
+                    key.arn, key.key_usage
+                ),
+            ));
+        }
+
+        let requested_alg = body["EncryptionAlgorithm"].as_str();
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
-        let ciphertext_b64 =
-            build_encrypt_ciphertext(state, key, plaintext_b64, &plaintext_bytes, &ec_aad);
+
+        let (ciphertext_b64, echoed_alg) = if key.key_spec.starts_with("RSA_") {
+            // Asymmetric ENCRYPT_DECRYPT (RSA): real RSA-OAEP under the key's
+            // public half, so the ciphertext round-trips through external RSA
+            // tooling and KMS Decrypt -- not the symmetric AES blob the old code
+            // returned regardless of key type and key spec.
+            let alg = requested_alg.unwrap_or("RSAES_OAEP_SHA_256");
+            if alg != "RSAES_OAEP_SHA_1" && alg != "RSAES_OAEP_SHA_256" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidKeyUsageException",
+                    format!(
+                        "Algorithm '{alg}' is incompatible with the key spec '{}'.",
+                        key.key_spec
+                    ),
+                ));
+            }
+            let pub_der = key.asymmetric_public_key_der.as_ref().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    "asymmetric public key missing",
+                )
+            })?;
+            let raw = super::asym::rsa_oaep_wrap(pub_der, alg, &plaintext_bytes).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidKeyUsageException",
+                    format!("RSA encrypt failed: {e}"),
+                )
+            })?;
+            let raw_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+            let envelope = format!("fakecloud-rsa:{}:{}:{}", key.key_id, alg, raw_b64);
+            let env_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+            (env_b64, alg.to_string())
+        } else {
+            // Symmetric key: only SYMMETRIC_DEFAULT is valid.
+            if let Some(alg) = requested_alg {
+                if alg != "SYMMETRIC_DEFAULT" {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidKeyUsageException",
+                        format!(
+                            "Algorithm '{alg}' is incompatible with the key spec 'SYMMETRIC_DEFAULT'."
+                        ),
+                    ));
+                }
+            }
+            let ct = build_encrypt_ciphertext(state, key, plaintext_b64, &plaintext_bytes, &ec_aad);
+            (ct, "SYMMETRIC_DEFAULT".to_string())
+        };
 
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({
                 "CiphertextBlob": ciphertext_b64,
                 "KeyId": key.arn,
-                "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+                "EncryptionAlgorithm": echoed_alg,
             }))
             .unwrap(),
         ))
@@ -143,7 +207,7 @@ impl KmsService {
             serde_json::to_string(&json!({
                 "Plaintext": decoded.plaintext_b64,
                 "KeyId": decoded.source_arn,
-                "EncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+                "EncryptionAlgorithm": decoded.encryption_algorithm,
             }))
             .unwrap(),
         ))

@@ -2960,3 +2960,96 @@ async fn snapshot_hook_fires_with_store() {
     // Must not panic; exercises the closure and the snapshot save path.
     hook().await;
 }
+
+#[test]
+fn encrypt_rejects_non_encrypt_decrypt_key() {
+    // A SIGN_VERIFY key must not encrypt -- the old code ignored key_usage and
+    // encrypted symmetrically regardless (bug-audit 2026-06-20, 1.11).
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+    );
+    let req = make_request(
+        "Encrypt",
+        json!({
+            "KeyId": key_id,
+            "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"x"),
+        }),
+    );
+    match svc.encrypt(&req) {
+        Err(e) => assert_eq!(e.code(), "InvalidKeyUsageException"),
+        Ok(_) => panic!("a SIGN_VERIFY key must not encrypt"),
+    }
+}
+
+#[test]
+fn encrypt_symmetric_rejects_asymmetric_algorithm() {
+    // A symmetric key only supports SYMMETRIC_DEFAULT; the old code ignored the
+    // requested EncryptionAlgorithm entirely (1.11).
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    let req = make_request(
+        "Encrypt",
+        json!({
+            "KeyId": key_id,
+            "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"x"),
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    );
+    match svc.encrypt(&req) {
+        Err(e) => assert_eq!(e.code(), "InvalidKeyUsageException"),
+        Ok(_) => panic!("a symmetric key must reject an RSA algorithm"),
+    }
+}
+
+#[test]
+fn encrypt_rsa_key_uses_real_oaep_and_roundtrips() {
+    // An RSA ENCRYPT_DECRYPT key encrypts with real RSA-OAEP under its public
+    // half (not the symmetric AES blob), echoes the requested algorithm, and
+    // Decrypt recovers the plaintext via the private half (1.11).
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "RSA_2048" }),
+    );
+    let plaintext = b"asymmetric hello";
+    let pt_b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
+
+    let resp = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": pt_b64,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["EncryptionAlgorithm"], "RSAES_OAEP_SHA_256");
+    let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
+    let env = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(&ciphertext)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        env.starts_with("fakecloud-rsa:"),
+        "RSA key must use the RSA envelope, got {env}"
+    );
+
+    let resp = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({ "CiphertextBlob": ciphertext }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["EncryptionAlgorithm"], "RSAES_OAEP_SHA_256");
+    let decrypted = base64::engine::general_purpose::STANDARD
+        .decode(body["Plaintext"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decrypted, plaintext);
+}

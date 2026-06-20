@@ -21,6 +21,7 @@ use crate::state::{
 
 const FAKE_ENVELOPE_PREFIX: &str = "fakecloud-kms:";
 const IMPORTED_ENVELOPE_PREFIX: &str = "fakecloud-imported:";
+const RSA_ENVELOPE_PREFIX: &str = "fakecloud-rsa:";
 
 /// Result of decoding a FakeCloud KMS ciphertext blob. We carry the
 /// plaintext as base64 so the two callers that care (`Decrypt` returns
@@ -29,6 +30,10 @@ const IMPORTED_ENVELOPE_PREFIX: &str = "fakecloud-imported:";
 pub(crate) struct DecodedCiphertext {
     source_arn: String,
     plaintext_b64: String,
+    /// EncryptionAlgorithm to echo on the Decrypt response. `SYMMETRIC_DEFAULT`
+    /// for the symmetric AES envelope; the `RSAES_OAEP_*` value for an
+    /// asymmetric RSA ciphertext.
+    encryption_algorithm: String,
 }
 
 const VALID_KEY_SPECS: &[&str] = &[
