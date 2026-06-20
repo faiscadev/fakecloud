@@ -531,6 +531,61 @@ fn get_shard_iterator_and_records_happy_path() {
 }
 
 #[test]
+fn get_records_returns_null_iterator_for_closed_drained_shard() {
+    // After SplitShard/MergeShards closes a shard and the consumer has read it
+    // to the end, GetRecords must return NextShardIterator: null so the consumer
+    // advances to the child shard(s). Returning a live iterator forever traps
+    // KCL-style consumers on the parent (bug-audit 2026-06-20, 1.7).
+    let (svc, state) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": base64::engine::general_purpose::STANDARD.encode(b"hi"),
+            "PartitionKey": "k1",
+        }),
+    ))
+    .unwrap();
+
+    // Close the shard, as SplitShard/MergeShards would.
+    let shard_id = {
+        let mut g = state.write();
+        let stream = g.default_mut().streams.get_mut("orders").unwrap();
+        stream.shards[0].is_open = false;
+        stream.shards[0].shard_id.clone()
+    };
+
+    let iter = json_response(
+        svc.get_shard_iterator(&request(
+            "GetShardIterator",
+            json!({
+                "StreamName": "orders",
+                "ShardId": shard_id,
+                "ShardIteratorType": "TRIM_HORIZON",
+            }),
+        ))
+        .unwrap(),
+    )["ShardIterator"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The single record is drained in this call; the shard is closed and fully
+    // read, so NextShardIterator must be null.
+    let body = json_response(
+        svc.get_records(&request("GetRecords", json!({ "ShardIterator": iter })))
+            .unwrap(),
+    );
+    assert_eq!(body["Records"].as_array().unwrap().len(), 1);
+    assert!(
+        body["NextShardIterator"].is_null(),
+        "closed drained shard must return null NextShardIterator, got {:?}",
+        body["NextShardIterator"]
+    );
+}
+
+#[test]
 fn get_records_requires_shard_iterator() {
     let (svc, _) = make_service();
     assert_code_kinesis(
