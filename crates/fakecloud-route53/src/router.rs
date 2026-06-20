@@ -44,11 +44,11 @@ pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
         return None;
     }
     let path = path.trim_start_matches('/');
-    let segs: Vec<&str> = if path.is_empty() {
-        Vec::new()
-    } else {
-        path.split('/').collect()
-    };
+    // Filter out empty segments so a trailing slash (`/hostedzone/`, which
+    // botocore/AWS CLI < 1.40 and curl emit for a collection root) routes to the
+    // List op, not GetHostedZone(id="") -> NoSuchHostedZone (the #1645 shape;
+    // bug-audit 2026-06-20, 1.1).
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     match (method, segs.as_slice()) {
         // ─── Hosted Zones ────────────────────────────────────────────
@@ -263,6 +263,21 @@ mod tests {
         assert_eq!(
             route(&Method::POST, "/2013-04-01/hostedzone/Z123/rrset", ""),
             Some(Route::with_id("ChangeResourceRecordSets", "Z123"))
+        );
+    }
+
+    #[test]
+    fn trailing_slash_collection_routes_to_list() {
+        // botocore/AWS CLI < 1.40 and curl append `/` to a bare collection URI;
+        // it must route to the List op, not GetHostedZone(id="") (1.1).
+        assert_eq!(
+            route(&Method::GET, "/2013-04-01/hostedzone/", ""),
+            Some(Route::just("ListHostedZones"))
+        );
+        // Without a trailing slash still lists.
+        assert_eq!(
+            route(&Method::GET, "/2013-04-01/hostedzone", ""),
+            Some(Route::just("ListHostedZones"))
         );
     }
 }
