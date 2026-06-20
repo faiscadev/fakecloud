@@ -2564,6 +2564,17 @@ async fn main() {
                     "failed to read stepfunctions persistence snapshot: {err}"
                 )),
             }
+            // Executions that were RUNNING when the server stopped have no
+            // interpreter driving them anymore; abort them so they don't report
+            // RUNNING forever (bug-audit 2026-06-20, 0.A2).
+            let aborted =
+                fakecloud_stepfunctions::reconcile_interrupted_executions(&stepfunctions_state);
+            if aborted > 0 {
+                tracing::info!(
+                    aborted,
+                    "aborted stepfunctions executions interrupted by restart"
+                );
+            }
             Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
         } else {
             None

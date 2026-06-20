@@ -183,6 +183,43 @@ pub async fn save_stepfunctions_snapshot(
     }
 }
 
+/// Abort executions that were RUNNING (or PENDING_REDRIVE) when the server
+/// stopped, called once after a persistence snapshot is loaded on startup.
+///
+/// The in-memory interpreter that was driving each one is gone after a restart,
+/// so the execution can never advance. Real Step Functions resumes from durable
+/// interpreter state; fakecloud can't, so leaving them RUNNING would strand them
+/// forever (DescribeExecution would report RUNNING with no way to ever finish).
+/// Aborting with a terminal stop date + error/cause is the honest outcome
+/// (bug-audit 2026-06-20, 0.A2). Returns the number reconciled.
+pub fn reconcile_interrupted_executions(state: &SharedStepFunctionsState) -> usize {
+    let now = Utc::now();
+    let mut count = 0;
+    let mut accounts = state.write();
+    let account_ids: Vec<String> = accounts.iter().map(|(id, _)| id.to_string()).collect();
+    for account_id in account_ids {
+        let Some(s) = accounts.get_mut(&account_id) else {
+            continue;
+        };
+        for exec in s.executions.values_mut() {
+            if matches!(
+                exec.status,
+                ExecutionStatus::Running | ExecutionStatus::PendingRedrive
+            ) {
+                exec.status = ExecutionStatus::Aborted;
+                exec.stop_date = Some(now);
+                exec.error = Some("Fakecloud.Restart".to_string());
+                exec.cause = Some(
+                    "Execution was interrupted by a fakecloud restart and cannot be resumed"
+                        .to_string(),
+                );
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 fn is_mutating_action(action: &str) -> bool {
     matches!(
         action,
@@ -1704,6 +1741,58 @@ mod tests {
             .snapshot_hook()
             .expect("hook present when a store is set");
         hook().await;
+    }
+
+    fn make_execution(arn: &str, status: ExecutionStatus) -> Execution {
+        Execution {
+            execution_arn: arn.to_string(),
+            state_machine_arn: "arn:aws:states:us-east-1:123456789012:stateMachine:sm".to_string(),
+            state_machine_name: "sm".to_string(),
+            name: arn.to_string(),
+            status,
+            input: None,
+            output: None,
+            start_date: Utc::now(),
+            stop_date: None,
+            error: None,
+            cause: None,
+            history_events: vec![],
+            parent_execution_arn: None,
+            is_sync: false,
+            billed_duration_ms: None,
+            billed_memory_mb: None,
+        }
+    }
+
+    #[test]
+    fn reconcile_aborts_running_executions_on_restart() {
+        // After a restart a RUNNING execution has no interpreter driving it, so
+        // it must be aborted rather than left RUNNING forever (0.A2). A
+        // completed execution is untouched.
+        let state = make_state();
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("123456789012");
+            s.executions.insert(
+                "running".into(),
+                make_execution("running", ExecutionStatus::Running),
+            );
+            s.executions.insert(
+                "done".into(),
+                make_execution("done", ExecutionStatus::Succeeded),
+            );
+        }
+
+        let n = reconcile_interrupted_executions(&state);
+        assert_eq!(n, 1, "only the RUNNING execution is reconciled");
+
+        let accounts = state.read();
+        let s = accounts.get("123456789012").unwrap();
+        let running = &s.executions["running"];
+        assert_eq!(running.status, ExecutionStatus::Aborted);
+        assert!(running.stop_date.is_some());
+        assert_eq!(running.error.as_deref(), Some("Fakecloud.Restart"));
+        assert_eq!(s.executions["done"].status, ExecutionStatus::Succeeded);
     }
 }
 
