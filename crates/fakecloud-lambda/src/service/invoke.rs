@@ -11,6 +11,30 @@ impl LambdaService {
         invocation_type: InvocationType,
         qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // An unknown alias must 404 like GetFunction does, not silently fall
+        // through to $LATEST. resolve_qualifier_to_version returns None for both
+        // "$LATEST" and a non-existent alias, conflating "run live" with "not
+        // found" -- so a typo'd alias quietly invoked prod $LATEST. Reject an
+        // alias qualifier that doesn't exist here (bug-audit 2026-06-20, 1.9).
+        // Numeric versions keep the existing lenient fallback (a missing version
+        // snapshot is legacy state, handled below).
+        if let Some(q) = qualifier {
+            if q != "$LATEST" && !q.chars().all(|c| c.is_ascii_digit()) {
+                let accounts = self.state.read();
+                let empty = LambdaState::new(account_id, "");
+                let state = accounts.get(account_id).unwrap_or(&empty);
+                if !state.aliases.contains_key(&format!("{function_name}:{q}")) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ResourceNotFoundException",
+                        format!(
+                            "Function not found: arn:aws:lambda:{}:{}:function:{function_name}:{q}",
+                            state.region, state.account_id
+                        ),
+                    ));
+                }
+            }
+        }
         // Resolve qualifier (alias / numeric version / $LATEST) to a
         // concrete version string. Aliases with a
         // `RoutingConfig.AdditionalVersionWeights` map do a weighted
@@ -236,11 +260,25 @@ impl LambdaService {
                 InvocationType::RequestResponse | InvocationType::DryRun => {
                     match runtime.invoke(&func, payload, &layer_zips).await {
                         Ok(response_bytes) => {
+                            // A handler that throws still returns HTTP 200 with
+                            // the error payload in the body; AWS signals it with
+                            // the `X-Amz-Function-Error` header (surfaced as
+                            // `FunctionError` by the SDKs). Without it, boto3/JS
+                            // callers treat a failed invocation as success. The
+                            // async Event branch already detects this envelope;
+                            // mirror it here (bug-audit 2026-06-20, 1.8).
+                            let is_function_error = is_function_error_payload(&response_bytes);
                             let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
                             if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
                                 resp.headers.insert(
                                     http::header::HeaderName::from_static("x-amz-executed-version"),
                                     v,
+                                );
+                            }
+                            if is_function_error {
+                                resp.headers.insert(
+                                    http::header::HeaderName::from_static("x-amz-function-error"),
+                                    http::header::HeaderValue::from_static("Unhandled"),
                                 );
                             }
                             Ok(resp)
@@ -347,5 +385,41 @@ impl LambdaService {
             }
         }
         None
+    }
+}
+
+/// True when a synchronous invoke's response body is a Lambda function-error
+/// envelope (`{"errorMessage": ..., "errorType": ...}`). The runtime returns
+/// HTTP 200 with this body when the handler throws; the caller sets
+/// `X-Amz-Function-Error` so SDKs surface it as `FunctionError`
+/// (bug-audit 2026-06-20, 1.8).
+pub(crate) fn is_function_error_payload(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|m| m.contains_key("errorMessage") || m.contains_key("errorType"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod invoke_error_tests {
+    use super::is_function_error_payload;
+
+    #[test]
+    fn detects_function_error_envelope() {
+        assert!(is_function_error_payload(
+            br#"{"errorMessage":"boom","errorType":"Error"}"#
+        ));
+        assert!(is_function_error_payload(
+            br#"{"errorType":"Runtime.Error"}"#
+        ));
+    }
+
+    #[test]
+    fn plain_result_is_not_a_function_error() {
+        assert!(!is_function_error_payload(br#"{"statusCode":200}"#));
+        assert!(!is_function_error_payload(br#""just a string""#));
+        assert!(!is_function_error_payload(b"not json"));
     }
 }
