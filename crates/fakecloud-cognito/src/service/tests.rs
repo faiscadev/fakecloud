@@ -1,7 +1,8 @@
 use super::*;
 
 use crate::state::{
-    default_schema_attributes, AccessTokenData, AuthEvent, ChallengeResult, SessionData,
+    default_schema_attributes, AccessTokenData, AuthEvent, AuthorizationCodeData, ChallengeResult,
+    SessionData,
 };
 use crate::triggers;
 
@@ -7414,4 +7415,81 @@ async fn snapshot_hook_fires_with_store() {
         .snapshot_hook()
         .expect("hook present when a store is set");
     hook().await;
+}
+
+/// A SnapshotStore that records the last bytes saved (the real
+/// MemorySnapshotStore is a no-op), so a test can assert a write happened.
+#[derive(Default)]
+struct RecordingStore {
+    bytes: std::sync::Mutex<Option<Vec<u8>>>,
+}
+impl fakecloud_persistence::SnapshotStore for RecordingStore {
+    fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.bytes.lock().unwrap().clone())
+    }
+    fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+        *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn oauth_token_maps_survive_snapshot_roundtrip() {
+    // The Hosted-UI OAuth2 routes (/oauth2/token, /authorize, /revoke, and the
+    // code-mint helper) mutate these maps directly; the restart fix writes them
+    // through via save_cognito_snapshot (bug-audit 2026-06-20, 0.A4). Prove the
+    // maps round-trip through the snapshot so a restart restores issued
+    // tokens/codes instead of invalidating them.
+    let (svc, pool_id) = setup_svc_with_pool();
+    {
+        let mut mas = svc.state.write();
+        let acct = mas.default_mut();
+        acct.access_tokens.insert(
+            "access-1".to_string(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "alice".to_string(),
+                client_id: "client-1".to_string(),
+                issued_at: Utc::now(),
+            },
+        );
+        acct.authorization_codes.insert(
+            "code-1".to_string(),
+            AuthorizationCodeData {
+                user_pool_id: pool_id.clone(),
+                client_id: "client-1".to_string(),
+                username: "alice".to_string(),
+                redirect_uri: "https://app/callback".to_string(),
+                scopes: vec!["openid".to_string()],
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                issued_at: Utc::now(),
+            },
+        );
+    }
+
+    let store: std::sync::Arc<dyn fakecloud_persistence::SnapshotStore> =
+        std::sync::Arc::new(RecordingStore::default());
+    let lock = tokio::sync::Mutex::new(());
+    block_on(save_cognito_snapshot(
+        &svc.state,
+        Some(store.clone()),
+        &lock,
+    ));
+
+    let bytes = fakecloud_persistence::SnapshotStore::load(store.as_ref())
+        .unwrap()
+        .expect("oauth mutation must be written through");
+    let snap: CognitoSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let accounts = snap.accounts.expect("multi-account snapshot");
+    let acct = accounts.default_ref();
+    assert!(
+        acct.access_tokens.contains_key("access-1"),
+        "issued access token must persist"
+    );
+    assert!(
+        acct.authorization_codes.contains_key("code-1"),
+        "issued authorization code must persist"
+    );
 }

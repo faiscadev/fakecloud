@@ -1942,6 +1942,15 @@ async fn main() {
         } else {
             None
         };
+    // The Cognito Hosted-UI OAuth2 endpoints (/oauth2/token, /oauth2/authorize,
+    // /oauth2/revoke, and the code-mint helper) mutate the token/code maps
+    // directly from their own axum routes, outside the service's action-dispatch
+    // path that snapshots -- so without writing through here, refresh/access
+    // tokens, authorization codes, and revocations were lost on restart
+    // (bug-audit 2026-06-20, 0.A4). Hand the routes a clone of the store and a
+    // shared lock; snapshot files are written atomically.
+    let cognito_oauth2_snapshot_store = cognito_snapshot_store.clone();
+    let cognito_oauth2_snapshot_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut cognito_service =
         CognitoService::new(cognito_state.clone()).with_delivery(cognito_delivery_ctx);
     if let Some(store) = cognito_snapshot_store {
@@ -4930,10 +4939,14 @@ async fn main() {
             "/oauth2/authorize",
             axum::routing::get({
                 let cs = cognito_authorize_state;
+                let store = cognito_oauth2_snapshot_store.clone();
+                let lock = cognito_oauth2_snapshot_lock.clone();
                 move |axum::extract::Query(q): axum::extract::Query<
                     std::collections::BTreeMap<String, String>,
                 >| {
                     let cs = cs.clone();
+                    let store = store.clone();
+                    let lock = lock.clone();
                     async move {
                         let region = std::env::var("AWS_DEFAULT_REGION")
                             .or_else(|_| std::env::var("AWS_REGION"))
@@ -4991,6 +5004,15 @@ async fn main() {
                         };
                         match fakecloud_cognito::handle_oauth2_authorize(&cs, &req, &region).await {
                             Ok(fakecloud_cognito::OAuth2AuthorizeOutcome::Redirect(url)) => {
+                                // A successful authorize minted an authorization
+                                // code (or implicit-grant token) in state; write
+                                // it through so it survives a restart (0.A4).
+                                fakecloud_cognito::save_cognito_snapshot(
+                                    &cs,
+                                    store.clone(),
+                                    &lock,
+                                )
+                                .await;
                                 let mut headers = axum::http::HeaderMap::new();
                                 if let Ok(loc) = axum::http::HeaderValue::from_str(&url) {
                                     headers.insert(axum::http::header::LOCATION, loc);
@@ -5032,8 +5054,12 @@ async fn main() {
             "/oauth2/token",
             axum::routing::post({
                 let cs = cognito_token_state;
+                let store = cognito_oauth2_snapshot_store.clone();
+                let lock = cognito_oauth2_snapshot_lock.clone();
                 move |headers: axum::http::HeaderMap, body: String| {
                     let cs = cs.clone();
+                    let store = store.clone();
+                    let lock = lock.clone();
                     async move {
                         let params: std::collections::BTreeMap<String, String> =
                             match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
@@ -5055,7 +5081,17 @@ async fn main() {
                         )
                         .await
                         {
-                            Ok(resp) => (axum::http::StatusCode::OK, axum::Json(resp.to_json())),
+                            Ok(resp) => {
+                                // A successful grant minted refresh/access tokens
+                                // in state; write them through (0.A4).
+                                fakecloud_cognito::save_cognito_snapshot(
+                                    &cs,
+                                    store.clone(),
+                                    &lock,
+                                )
+                                .await;
+                                (axum::http::StatusCode::OK, axum::Json(resp.to_json()))
+                            }
                             Err(err) => {
                                 let status = axum::http::StatusCode::from_u16(err.status_code())
                                     .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
@@ -5162,8 +5198,12 @@ async fn main() {
             "/oauth2/revoke",
             axum::routing::post({
                 let cs = cognito_revoke_state;
+                let store = cognito_oauth2_snapshot_store.clone();
+                let lock = cognito_oauth2_snapshot_lock.clone();
                 move |body: String| {
                     let cs = cs.clone();
+                    let store = store.clone();
+                    let lock = lock.clone();
                     async move {
                         let params: std::collections::BTreeMap<String, String> =
                             match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
@@ -5171,10 +5211,20 @@ async fn main() {
                                 Err(_) => std::collections::BTreeMap::new(),
                             };
                         match fakecloud_cognito::handle_oauth2_revoke(&cs, &params) {
-                            Ok(()) => (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::Value::Object(serde_json::Map::new())),
-                            ),
+                            Ok(()) => {
+                                // A successful revoke deleted the token from
+                                // state; write that deletion through (0.A4).
+                                fakecloud_cognito::save_cognito_snapshot(
+                                    &cs,
+                                    store.clone(),
+                                    &lock,
+                                )
+                                .await;
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::Value::Object(serde_json::Map::new())),
+                                )
+                            }
                             Err(err) => {
                                 let (code, status) = match err {
                                     fakecloud_cognito::OAuthRevokeError::InvalidClient => (
@@ -5228,8 +5278,12 @@ async fn main() {
             "/_fakecloud/cognito/authorization-codes",
             axum::routing::post({
                 let cs = cognito_state.clone();
+                let store = cognito_oauth2_snapshot_store.clone();
+                let lock = cognito_oauth2_snapshot_lock.clone();
                 move |axum::Json(body): axum::Json<types::MintAuthorizationCodeRequest>| {
                     let cs = cs.clone();
+                    let store = store.clone();
+                    let lock = lock.clone();
                     async move {
                         let req = fakecloud_cognito::MintAuthorizationCodeRequest {
                             user_pool_id: body.user_pool_id,
@@ -5242,12 +5296,23 @@ async fn main() {
                             nonce: body.nonce,
                         };
                         match fakecloud_cognito::mint_authorization_code(&cs, &req) {
-                            Ok(code) => (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!(
-                                    types::MintAuthorizationCodeResponse { code }
-                                )),
-                            ),
+                            Ok(code) => {
+                                // The minted authorization code lives in state;
+                                // write it through so it survives a restart
+                                // (0.A4).
+                                fakecloud_cognito::save_cognito_snapshot(
+                                    &cs,
+                                    store.clone(),
+                                    &lock,
+                                )
+                                .await;
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!(
+                                        types::MintAuthorizationCodeResponse { code }
+                                    )),
+                                )
+                            }
                             Err(err) => {
                                 let (status, msg) = match err {
                                     fakecloud_cognito::MintAuthorizationCodeError::InvalidClient => (
