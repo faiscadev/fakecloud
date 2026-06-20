@@ -303,48 +303,49 @@ pub(crate) fn build_subscription_confirmation_envelope(
     token: &str,
     server_endpoint: &str,
 ) -> String {
+    // Compute every field once, sign over those exact values, then insert.
+    // Re-deriving the uuid/timestamp for the signature (the original bug) would
+    // sign a canonical string the verifier can never reconstruct.
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let message = format!(
+        "You have chosen to subscribe to the topic {topic_arn}.\nTo confirm the subscription, visit the SubscribeURL included in this message."
+    );
+    let base = server_endpoint.trim_end_matches('/');
+    let subscribe_url =
+        format!("{base}/?Action=ConfirmSubscription&TopicArn={topic_arn}&Token={token}");
+    let timestamp = Utc::now().to_rfc3339();
+    let canonical = crate::signing::canonical_subscription_confirmation(
+        &message,
+        &message_id,
+        &subscribe_url,
+        &timestamp,
+        token,
+        topic_arn,
+        "SubscriptionConfirmation",
+    );
+    let signature = crate::signing::sign(&canonical);
+
     let mut map = serde_json::Map::new();
     map.insert(
         "Type".to_string(),
         Value::String("SubscriptionConfirmation".to_string()),
     );
-    map.insert(
-        "MessageId".to_string(),
-        Value::String(uuid::Uuid::new_v4().to_string()),
-    );
+    map.insert("MessageId".to_string(), Value::String(message_id));
     map.insert("Token".to_string(), Value::String(token.to_string()));
     map.insert("TopicArn".to_string(), Value::String(topic_arn.to_string()));
-    map.insert(
-        "Message".to_string(),
-        Value::String(format!(
-            "You have chosen to subscribe to the topic {topic_arn}.\nTo confirm the subscription, visit the SubscribeURL included in this message."
-        )),
-    );
-    let base = server_endpoint.trim_end_matches('/');
-    map.insert(
-        "SubscribeURL".to_string(),
-        Value::String(format!(
-            "{base}/?Action=ConfirmSubscription&TopicArn={topic_arn}&Token={token}"
-        )),
-    );
-    map.insert(
-        "Timestamp".to_string(),
-        Value::String(Utc::now().to_rfc3339()),
-    );
+    map.insert("Message".to_string(), Value::String(message));
+    map.insert("SubscribeURL".to_string(), Value::String(subscribe_url));
+    map.insert("Timestamp".to_string(), Value::String(timestamp));
+    // SignatureVersion 2 corresponds to RSA-SHA256 signatures; v1 was SHA-1.
     map.insert(
         "SignatureVersion".to_string(),
-        Value::String("1".to_string()),
+        Value::String("2".to_string()),
     );
     map.insert(
         "SigningCertURL".to_string(),
-        Value::String(format!("{base}/SimpleNotificationService.pem")),
+        Value::String(crate::signing::cert_url(server_endpoint)),
     );
-    map.insert(
-        "Signature".to_string(),
-        Value::String(crate::signing::sign(&format!(
-            "Message\n{topic_arn}\nSubscriptionConfirmation\n{token}\n"
-        ))),
-    );
+    map.insert("Signature".to_string(), Value::String(signature));
     Value::Object(map).to_string()
 }
 
@@ -1390,12 +1391,63 @@ mod confirmation_envelope_tests {
         assert!(url.contains(topic));
         assert!(parsed["Timestamp"].is_string());
         assert!(parsed["MessageId"].is_string());
-        assert_eq!(parsed["SignatureVersion"], "1");
+        // SHA-256 signatures are SignatureVersion 2; the signer is RSA-SHA256.
+        assert_eq!(parsed["SignatureVersion"], "2");
         assert!(!parsed["Signature"].as_str().unwrap().is_empty());
-        assert!(parsed["SigningCertURL"]
-            .as_str()
-            .unwrap()
-            .starts_with(server));
+        assert_eq!(
+            parsed["SigningCertURL"].as_str().unwrap(),
+            "http://localhost:4566/_fakecloud/sns/cert.pem"
+        );
+    }
+
+    /// The Signature must actually cover the envelope: rebuild the AWS
+    /// canonical string from the envelope's own fields and verify it against
+    /// the public key in the signing cert. This is the guarantee real
+    /// `sns_message_validator` libraries rely on, and the assertion whose
+    /// absence let the broken canonical string ship.
+    #[test]
+    fn signature_verifies_over_envelope_fields() {
+        use base64::Engine;
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use rsa::pkcs8::DecodePublicKey;
+        use rsa::sha2::Sha256;
+        use rsa::signature::Verifier;
+        use rsa::RsaPublicKey;
+        use x509_cert::der::{DecodePem, Encode};
+        use x509_cert::Certificate;
+
+        let topic = "arn:aws:sns:us-east-1:123456789012:verify-topic";
+        let token = "tok-verify";
+        let server = "http://localhost:4566";
+        let body = build_subscription_confirmation_envelope(topic, token, server);
+        let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
+
+        let canonical = crate::signing::canonical_subscription_confirmation(
+            parsed["Message"].as_str().unwrap(),
+            parsed["MessageId"].as_str().unwrap(),
+            parsed["SubscribeURL"].as_str().unwrap(),
+            parsed["Timestamp"].as_str().unwrap(),
+            parsed["Token"].as_str().unwrap(),
+            parsed["TopicArn"].as_str().unwrap(),
+            parsed["Type"].as_str().unwrap(),
+        );
+
+        let cert = Certificate::from_pem(crate::signing::cert_pem().as_bytes()).unwrap();
+        let spki_der = cert
+            .tbs_certificate
+            .subject_public_key_info
+            .to_der()
+            .unwrap();
+        let public_key = RsaPublicKey::from_public_key_der(&spki_der).unwrap();
+        let verifying = VerifyingKey::<Sha256>::new(public_key);
+
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(parsed["Signature"].as_str().unwrap())
+            .unwrap();
+        let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+        verifying
+            .verify(canonical.as_bytes(), &signature)
+            .expect("confirmation signature must verify against the signing cert");
     }
 
     #[test]

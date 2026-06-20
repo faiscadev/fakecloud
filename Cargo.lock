@@ -4179,6 +4179,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "x509-cert",
 ]
 
 [[package]]
