@@ -93,4 +93,11 @@ pub struct S3Destination {
     pub buffering_size_mb: Option<i64>,
     pub buffering_interval_seconds: Option<i64>,
     pub compression_format: Option<String>,
+    /// Lambda data-transformation pipeline; stored + echoed so a Firehose with
+    /// a transform round-trips (bug-audit 2026-06-20, 1.18).
+    #[serde(default)]
+    pub processing_configuration: Option<serde_json::Value>,
+    /// Parquet/ORC conversion config; stored + echoed.
+    #[serde(default)]
+    pub data_format_conversion_configuration: Option<serde_json::Value>,
 }

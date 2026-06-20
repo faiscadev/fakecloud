@@ -109,6 +109,8 @@ mod tests {
                 buffering_size_mb: None,
                 buffering_interval_seconds: None,
                 compression_format: None,
+                processing_configuration: None,
+                data_format_conversion_configuration: None,
             }),
             tags: BTreeMap::new(),
             encryption,
