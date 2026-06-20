@@ -533,12 +533,23 @@ impl KinesisService {
             })
             .collect();
 
-        let millis_behind_latest = if end_index < shard.records.len() {
-            1
+        // Capture the shard fields before the borrow ends so the mutable
+        // `insert_iterator` call below can run.
+        let total_records = shard.records.len();
+        let shard_closed = !shard.is_open;
+
+        let millis_behind_latest = if end_index < total_records { 1 } else { 0 };
+
+        // A shard closed by SplitShard/MergeShards and then fully read returns a
+        // null NextShardIterator, signalling the consumer to move on to the
+        // child shard(s). Returning a live iterator forever (the old behaviour)
+        // makes KCL-style consumers loop on the parent shard and never advance
+        // past the split/merge (bug-audit 2026-06-20, 1.7).
+        let next_iterator = if shard_closed && end_index >= total_records {
+            Value::Null
         } else {
-            0
+            json!(state.insert_iterator(&lease.stream_name, &lease.shard_id, end_index))
         };
-        let next_iterator = state.insert_iterator(&lease.stream_name, &lease.shard_id, end_index);
 
         Ok(AwsResponse::ok_json(json!({
             "MillisBehindLatest": millis_behind_latest,
