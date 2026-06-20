@@ -287,6 +287,7 @@ pub(super) async fn mock_response(
 pub(super) async fn aws_direct_integration(
     req: &AwsRequest,
     uri: &str,
+    integration: &Integration,
     service: &ApiGatewayService,
 ) -> Result<AwsResponse, AwsServiceError> {
     let registry = service.registry().ok_or_else(|| {
@@ -315,6 +316,19 @@ pub(super) async fn aws_direct_integration(
         ))
     })?;
 
+    // For a non-proxy `AWS` integration the backend method is the one
+    // configured on the integration (`integrationHttpMethod`), NOT the
+    // client's front-facing method. On real AWS this is always `POST` for
+    // Lambda invoke integrations, so a `GET /users` resource still reaches
+    // Lambda over `POST`. Falling back to the client's method only when no
+    // integration method is set preserves prior behavior for any caller
+    // that omitted it.
+    let dispatch_method = integration
+        .integration_http_method
+        .as_deref()
+        .and_then(|m| Method::from_bytes(m.to_ascii_uppercase().as_bytes()).ok())
+        .unwrap_or_else(|| req.method.clone());
+
     let mut dispatch_req = AwsRequest {
         service: target_service.to_string(),
         action: req.action.clone(),
@@ -328,7 +342,7 @@ pub(super) async fn aws_direct_integration(
         path_segments: req.path_segments.clone(),
         raw_path: req.raw_path.clone(),
         raw_query: req.raw_query.clone(),
-        method: req.method.clone(),
+        method: dispatch_method,
         is_query_protocol: false,
         access_key_id: req.access_key_id.clone(),
         principal: req.principal.clone(),

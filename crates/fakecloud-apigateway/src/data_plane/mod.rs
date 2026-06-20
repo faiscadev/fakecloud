@@ -429,7 +429,7 @@ pub async fn handle(
                 .uri
                 .as_deref()
                 .ok_or_else(|| bad_gateway("AWS integration missing uri"))?;
-            aws_direct_integration(req, uri, service).await
+            aws_direct_integration(req, uri, &integration, service).await
         }
         other => Err(bad_gateway(format!(
             "Integration type '{other}' not supported in fakecloud's data plane",
@@ -2334,6 +2334,30 @@ mod tests {
 
     // ── AWS direct integration tests ──
 
+    /// Build an `AWS` (non-proxy) integration with the given
+    /// `integrationHttpMethod` for the direct-integration tests.
+    fn aws_integration(integration_http_method: Option<&str>) -> Integration {
+        Integration {
+            rest_api_id: "api1".to_string(),
+            resource_id: "res1".to_string(),
+            http_method: "GET".to_string(),
+            integration_type: "AWS".to_string(),
+            integration_http_method: integration_http_method.map(|m| m.to_string()),
+            uri: None,
+            credentials: None,
+            request_parameters: BTreeMap::new(),
+            request_templates: BTreeMap::new(),
+            passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+            timeout_in_millis: None,
+            cache_namespace: None,
+            cache_key_parameters: vec![],
+            content_handling: None,
+            connection_type: None,
+            connection_id: None,
+            tls_config: None,
+        }
+    }
+
     struct StubAwsService {
         name: String,
         last_request: parking_lot::Mutex<Option<AwsRequest>>,
@@ -2371,9 +2395,13 @@ mod tests {
         let mut req = make_request(HeaderMap::new());
         req.body = bytes::Bytes::from(r#"{"TableName":"t","Item":{"id":{"S":"1"}}}"#);
 
+        // Front-facing method is GET (make_request default) but the
+        // integration is configured for POST: the backend must receive POST.
+        let integration = aws_integration(Some("POST"));
         let resp = aws_direct_integration(
             &req,
             "arn:aws:apigateway:us-east-1:dynamodb:action/PutItem",
+            &integration,
             &service,
         )
         .await
@@ -2386,6 +2414,49 @@ mod tests {
         assert_eq!(dispatched.service, "dynamodb");
         assert_eq!(dispatched.account_id, TEST_ACCOUNT);
         assert_eq!(dispatched.region, TEST_REGION);
+        // The integration's POST overrides the client's GET.
+        assert_eq!(dispatched.method, Method::POST);
+    }
+
+    #[tokio::test]
+    async fn aws_direct_integration_uses_integration_method_not_client_method() {
+        // Regression for #1776: a `GET` resource with an `AWS` Lambda
+        // integration (`integrationHttpMethod = POST`) must reach the
+        // backend over POST, the way real AWS always calls Lambda invoke.
+        let stub = Arc::new(StubAwsService {
+            name: "lambda".to_string(),
+            last_request: parking_lot::Mutex::new(None),
+        });
+        let mut registry = fakecloud_core::registry::ServiceRegistry::new();
+        registry.register(stub.clone());
+        let registry_arc = Arc::new(registry);
+        let registry_handle = Arc::new(std::sync::OnceLock::new());
+        let _ = registry_handle.set(registry_arc);
+
+        let state = build_state("NONE", None);
+        let service = ApiGatewayService::new(state).with_registry(registry_handle);
+
+        let mut req = make_request(HeaderMap::new());
+        req.method = Method::GET;
+
+        let integration = aws_integration(Some("POST"));
+        let resp = aws_direct_integration(
+            &req,
+            "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:my-fn/invocations",
+            &integration,
+            &service,
+        )
+        .await
+        .expect("dispatch must succeed");
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let locked = stub.last_request.lock();
+        let dispatched = locked.as_ref().expect("stub must have received a request");
+        assert_eq!(dispatched.method, Method::POST);
+        assert_eq!(
+            dispatched.raw_path,
+            "/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:my-fn/invocations"
+        );
     }
 
     #[tokio::test]
@@ -2407,9 +2478,15 @@ mod tests {
         req.method = Method::POST;
         req.body = bytes::Bytes::from("Action=SendMessage&QueueUrl=http://q");
 
-        let resp = aws_direct_integration(&req, "arn:aws:apigateway:us-east-1:sqs:path/", &service)
-            .await
-            .expect("dispatch must succeed");
+        let integration = aws_integration(Some("POST"));
+        let resp = aws_direct_integration(
+            &req,
+            "arn:aws:apigateway:us-east-1:sqs:path/",
+            &integration,
+            &service,
+        )
+        .await
+        .expect("dispatch must succeed");
         assert_eq!(resp.status, StatusCode::OK);
 
         let locked = stub.last_request.lock();
