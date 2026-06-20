@@ -1697,6 +1697,22 @@ impl AwsService for CloudFormationService {
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
         }
+        // ExecuteChangeSet provisions resources by mutating each service's
+        // shared state directly but -- unlike CreateStack/UpdateStack/DeleteStack
+        // -- never triggered the per-service snapshot hook, so the provisioned
+        // resources were never written through to disk (#1766 class). `cdk
+        // deploy`, `aws cloudformation deploy`, and SAM all provision via
+        // CreateChangeSet + ExecuteChangeSet (not CreateStack), so without this
+        // their resources reported CREATE_COMPLETE yet vanished on restart.
+        // save_snapshot above only persists CloudFormation's own stack metadata;
+        // flush every snapshot-backed service the changeset could have touched.
+        if action == "ExecuteChangeSet"
+            && matches!(result.as_ref(), Ok(resp) if resp.status.is_success())
+        {
+            for hook in self.snapshot_hooks.values() {
+                hook().await;
+            }
+        }
         result
     }
 
@@ -3131,6 +3147,52 @@ mod tests {
         );
         let loaded = fakecloud_persistence::S3Store::load(store.as_ref()).unwrap();
         assert!(loaded.buckets.contains_key("cfn-bucket"));
+    }
+
+    #[tokio::test]
+    async fn cfn_execute_change_set_persists_touched_services() {
+        // The changeset path -- CreateChangeSet + ExecuteChangeSet -- is how
+        // `cdk deploy`, `aws cloudformation deploy`, and SAM provision. It must
+        // write provisioned services through to disk the same way CreateStack
+        // does, or the resources report CREATE_COMPLETE yet vanish on restart
+        // (bug-audit 2026-06-20, 0.A1 / #1766 class).
+        let tmp = tempfile::tempdir().unwrap();
+        let store = disk_s3_store(&tmp);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        let svc = make_service()
+            .with_s3_store(store.clone())
+            .with_snapshot_hooks(hooks);
+
+        let mut create = HashMap::new();
+        create.insert("StackName".to_string(), "cs-stack".to_string());
+        create.insert("ChangeSetName".to_string(), "cs1".to_string());
+        create.insert("ChangeSetType".to_string(), "CREATE".to_string());
+        create.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cs-q"}}}}"#
+                .to_string(),
+        );
+        svc.handle(make_request("CreateChangeSet", create))
+            .await
+            .unwrap();
+        // CreateChangeSet doesn't provision -- it must not persist a service yet.
+        let before = counter.load(Ordering::SeqCst);
+
+        let mut exec = HashMap::new();
+        exec.insert("StackName".to_string(), "cs-stack".to_string());
+        exec.insert("ChangeSetName".to_string(), "cs1".to_string());
+        svc.handle(make_request("ExecuteChangeSet", exec))
+            .await
+            .unwrap();
+
+        assert!(
+            counter.load(Ordering::SeqCst) > before,
+            "ExecuteChangeSet must fire the sqs snapshot hook so the provisioned \
+             queue survives a restart"
+        );
     }
 
     #[test]
