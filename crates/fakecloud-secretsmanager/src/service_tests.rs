@@ -2295,3 +2295,66 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+/// A KMS hook that "encrypts" by prefixing `ENC:` and "decrypts" by stripping
+/// it, so a test can prove a read path returns plaintext, not the stored
+/// ciphertext.
+struct PrefixKmsHook;
+impl fakecloud_core::delivery::KmsHook for PrefixKmsHook {
+    fn encrypt(
+        &self,
+        _account_id: &str,
+        _region: &str,
+        _key_id: &str,
+        plaintext: &[u8],
+        _service_principal: &str,
+        _ctx: std::collections::HashMap<String, String>,
+    ) -> Result<String, String> {
+        Ok(format!("ENC:{}", String::from_utf8_lossy(plaintext)))
+    }
+    fn decrypt(
+        &self,
+        _account_id: &str,
+        ciphertext_b64: &str,
+        _service_principal: &str,
+        _ctx: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        Ok(ciphertext_b64
+            .strip_prefix("ENC:")
+            .unwrap_or(ciphertext_b64)
+            .as_bytes()
+            .to_vec())
+    }
+}
+
+#[tokio::test]
+async fn batch_get_secret_value_returns_plaintext_not_ciphertext() {
+    // GetSecretValue decrypts a KMS-backed secret, but BatchGetSecretValue
+    // pushed the raw stored ciphertext -- so a batch fetch returned an
+    // unusable encrypted blob (bug-audit 2026-06-20, 1.10).
+    let state = make_state();
+    let svc = SecretsManagerService::new(state).with_kms_hook(std::sync::Arc::new(PrefixKmsHook));
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name":"enc-secret","SecretString":"topsecret","KmsKeyId":"alias/test"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    // Sanity: single-get decrypts.
+    let req = make_request("GetSecretValue", r#"{"SecretId":"enc-secret"}"#);
+    let single: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(single["SecretString"], "topsecret");
+
+    // The fix: batch must decrypt too.
+    let body = serde_json::json!({ "SecretIdList": ["enc-secret"] });
+    let req = make_request("BatchGetSecretValue", &body.to_string());
+    let batch: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    let v = &batch["SecretValues"].as_array().unwrap()[0];
+    assert_eq!(
+        v["SecretString"], "topsecret",
+        "BatchGetSecretValue must return plaintext, not ciphertext"
+    );
+}
