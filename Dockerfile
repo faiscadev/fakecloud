@@ -41,7 +41,7 @@ RUN apt-get update \
 FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates nftables \
+    && apt-get install -y --no-install-recommends ca-certificates nftables kmod procps \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 # `nft` (nftables) backs EC2 security-group / NACL packet enforcement when the
@@ -49,6 +49,13 @@ RUN apt-get update \
 # (cap_add: NET_ADMIN). Without the binary in the image the feature could never
 # activate and silently degraded to metadata-only even with the capability —
 # the same "documented feature, missing binary" shape as issue #1539 Bug 4.
+# `kmod` (modprobe) and `procps` (sysctl) ship alongside it: same-subnet
+# instances share one Linux bridge, so their L2-switched traffic only reaches
+# the nft `forward` chain once bridge netfilter is loaded + enabled
+# (`modprobe br_netfilter` + `sysctl net.bridge.bridge-nf-call-iptables=1`).
+# debian:bookworm-slim ships neither binary, so without these the ruleset
+# applied but filtered nothing — the missing-binary shape one layer down from
+# #1760 (bug-audit 2026-06-20, 0.B1).
 # The docker CLI is required for Lambda / RDS / ElastiCache / ECS
 # container orchestration when running fakecloud-in-Docker with the host
 # socket bind-mounted (the documented setup at
