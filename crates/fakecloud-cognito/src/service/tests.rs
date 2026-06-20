@@ -3492,6 +3492,45 @@ fn update_user_pool() {
 }
 
 #[test]
+fn update_user_pool_applies_verification_and_device_config() {
+    // The custom verification copy + device/add-ons configs were silently
+    // dropped by UpdateUserPool (bug-audit 2026-06-20, 1.16).
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+
+    let body = json!({
+        "UserPoolId": pool_id,
+        "EmailVerificationMessage": "Your code is {####}",
+        "SmsVerificationMessage": "SMS {####}",
+        "DeviceConfiguration": { "ChallengeRequiredOnNewDevice": true },
+        "UserPoolAddOns": { "AdvancedSecurityMode": "AUDIT" },
+    });
+    svc.update_user_pool(&make_req("UpdateUserPool", &body.to_string()))
+        .unwrap();
+
+    let resp = svc
+        .describe_user_pool(&make_req(
+            "DescribeUserPool",
+            &json!({ "UserPoolId": pool_id }).to_string(),
+        ))
+        .unwrap();
+    let b = resp_json(&resp);
+    assert_eq!(
+        b["UserPool"]["EmailVerificationMessage"],
+        "Your code is {####}"
+    );
+    assert_eq!(b["UserPool"]["SmsVerificationMessage"], "SMS {####}");
+    assert_eq!(
+        b["UserPool"]["DeviceConfiguration"]["ChallengeRequiredOnNewDevice"],
+        true
+    );
+    assert_eq!(
+        b["UserPool"]["UserPoolAddOns"]["AdvancedSecurityMode"],
+        "AUDIT"
+    );
+}
+
+#[test]
 fn delete_user_pool() {
     let (svc, _) = make_svc();
     let pool_id = create_pool(&svc);
