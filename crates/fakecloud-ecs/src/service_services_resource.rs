@@ -398,6 +398,67 @@ impl EcsService {
                 service_cluster_arn = svc.cluster_arn.clone();
                 launch_type_clone = svc.launch_type.clone();
 
+                // Apply the remaining mutable service fields UpdateService
+                // accepts. AWS updates each only when present in the request;
+                // omitting one leaves it unchanged. The old handler read only
+                // desiredCount / taskDefinition / lifecycleHooks and silently
+                // dropped everything else, so ECS Exec enablement, subnet/SG
+                // changes, deployment tuning, load-balancer swaps, etc. all
+                // no-op'd (bug-audit 2026-06-20, 1.15).
+                if let Some(dc) = body.get("deploymentConfiguration") {
+                    if let Some(n) = dc.get("minimumHealthyPercent").and_then(|v| v.as_i64()) {
+                        svc.minimum_healthy_percent = Some(n as i32);
+                    }
+                    if let Some(n) = dc.get("maximumPercent").and_then(|v| v.as_i64()) {
+                        svc.maximum_percent = Some(n as i32);
+                    }
+                    if let Some(c) = dc.get("deploymentCircuitBreaker") {
+                        svc.circuit_breaker = Some(CircuitBreakerConfig {
+                            enable: c.get("enable").and_then(|v| v.as_bool()).unwrap_or(false),
+                            rollback: c.get("rollback").and_then(|v| v.as_bool()).unwrap_or(false),
+                        });
+                    }
+                }
+                if let Some(v) = body.get("networkConfiguration") {
+                    svc.network_configuration = Some(v.clone());
+                }
+                if let Some(s) = opt_str(&body, "platformVersion") {
+                    svc.platform_version = Some(s.to_string());
+                }
+                if let Some(n) = body
+                    .get("healthCheckGracePeriodSeconds")
+                    .and_then(|v| v.as_i64())
+                {
+                    svc.health_check_grace_period_seconds = Some(n as i32);
+                }
+                if let Some(b) = body.get("enableExecuteCommand").and_then(|v| v.as_bool()) {
+                    svc.enable_execute_command = b;
+                }
+                if let Some(b) = body.get("enableECSManagedTags").and_then(|v| v.as_bool()) {
+                    svc.enable_ecs_managed_tags = b;
+                }
+                if let Some(s) = opt_str(&body, "propagateTags") {
+                    svc.propagate_tags = Some(s.to_string());
+                }
+                if let Some(a) = body
+                    .get("capacityProviderStrategy")
+                    .and_then(|v| v.as_array())
+                {
+                    svc.capacity_provider_strategy = a.clone();
+                }
+                if let Some(a) = body.get("placementConstraints").and_then(|v| v.as_array()) {
+                    svc.placement_constraints = a.clone();
+                }
+                if let Some(a) = body.get("placementStrategy").and_then(|v| v.as_array()) {
+                    svc.placement_strategy = a.clone();
+                }
+                if let Some(a) = body.get("loadBalancers").and_then(|v| v.as_array()) {
+                    svc.load_balancers = a.clone();
+                }
+                if let Some(a) = body.get("serviceRegistries").and_then(|v| v.as_array()) {
+                    svc.service_registries = a.clone();
+                }
+
                 if let Some(n) = new_desired {
                     let n = n.max(0) as i32;
                     svc.desired_count = n;
