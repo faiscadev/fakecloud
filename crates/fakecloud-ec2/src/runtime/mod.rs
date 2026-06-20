@@ -205,15 +205,41 @@ impl FirewallEnforcer {
         // L2-switched and only traverses the `forward` chain (where our SG rules
         // live) when bridge netfilter is enabled. Without this, same-subnet SG
         // rules silently filter nothing — exactly what the real-packet E2E
-        // caught. Best-effort (needs CAP_NET_ADMIN, which the enforcer holds).
-        let _ = tokio::process::Command::new("modprobe")
+        // caught. Needs CAP_NET_ADMIN (which the enforcer holds) and the
+        // `modprobe`/`sysctl` binaries (shipped via kmod/procps in the image).
+        // Warn rather than swallow the error: a missing binary or a failed call
+        // means enforcement degrades to filtering nothing, and the operator who
+        // opted in deserves to know (bug-audit 2026-06-20, 0.B1).
+        match tokio::process::Command::new("modprobe")
             .arg("br_netfilter")
             .output()
-            .await;
-        let _ = tokio::process::Command::new("sysctl")
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => tracing::warn!(
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "modprobe br_netfilter failed; same-subnet security-group enforcement may filter nothing"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not run modprobe (is kmod installed?); same-subnet security-group enforcement may filter nothing"
+            ),
+        }
+        match tokio::process::Command::new("sysctl")
             .args(["-w", "net.bridge.bridge-nf-call-iptables=1"])
             .output()
-            .await;
+            .await
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => tracing::warn!(
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "sysctl bridge-nf-call-iptables=1 failed; same-subnet security-group enforcement may filter nothing"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not run sysctl (is procps installed?); same-subnet security-group enforcement may filter nothing"
+            ),
+        }
         let ruleset = render_ruleset(subnets);
         use tokio::io::AsyncWriteExt;
         let mut child = match tokio::process::Command::new("nft")
