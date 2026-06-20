@@ -243,6 +243,30 @@ fn rsa_verify_prehashed(
     }
 }
 
+/// RSA-OAEP encrypt `plaintext` under the supplied SubjectPublicKeyInfo
+/// DER public key, for Encrypt against an asymmetric ENCRYPT_DECRYPT key.
+/// `algorithm` is the KMS `EncryptionAlgorithm` (`RSAES_OAEP_SHA_1` /
+/// `RSAES_OAEP_SHA_256`). The ciphertext is decryptable by any standard RSA
+/// tool holding the private key, and by KMS Decrypt via [`rsa_oaep_unwrap`].
+pub fn rsa_oaep_wrap(
+    pub_der: &[u8],
+    algorithm: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, AsymError> {
+    use rsa::pkcs8::DecodePublicKey;
+    let public = RsaPublicKey::from_public_key_der(pub_der)
+        .map_err(|e| AsymError::CorruptKey(format!("decode spki: {e}")))?;
+    let padding = match algorithm {
+        "RSAES_OAEP_SHA_1" => rsa::Oaep::new::<sha1::Sha1>(),
+        "RSAES_OAEP_SHA_256" => rsa::Oaep::new::<Sha256>(),
+        other => return Err(AsymError::UnsupportedAlgorithm(other.to_string())),
+    };
+    let mut rng = rand::thread_rng();
+    public
+        .encrypt(&mut rng, padding, plaintext)
+        .map_err(|e| AsymError::CryptoFailure(format!("oaep wrap: {e}")))
+}
+
 /// RSA-OAEP unwrap encrypted key material under the supplied private
 /// key. KMS callers wrap their key material under the public key
 /// returned by GetParametersForImport using one of the documented
