@@ -217,12 +217,24 @@ jobs:
       # The runtime tries to enable this in-process, but loading the module + setting
       # the sysctl deterministically at the host level *before* any container network
       # is created removes the race that intermittently let the "deny" packet through.
+      #
+      # Crucially, this is *verified*, not fire-and-forget: a silent `tee` failure (the
+      # sysctl path doesn't exist until br_netfilter is loaded, or the value doesn't
+      # stick) used to surface downstream as a misleading "must DROP" assertion failure
+      # — the rule was installed but bridged traffic bypassed the forward chain. Read
+      # the value back and fail *this* step with the real signal if it isn't 1.
       - name: Enable bridge netfilter
         run: |
           sudo modprobe br_netfilter
-          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables
-          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-ip6tables
-          echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-arptables
+          for knob in bridge-nf-call-iptables bridge-nf-call-ip6tables bridge-nf-call-arptables; do
+            echo 1 | sudo tee "/proc/sys/net/bridge/$knob" >/dev/null
+          done
+          got=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)
+          if [ "$got" != "1" ]; then
+            echo "::error::bridge-nf-call-iptables is '$got', not 1 — br_netfilter did not engage; SG enforcement cannot filter same-subnet traffic"
+            exit 1
+          fi
+          echo "bridge-nf-call-iptables=$got (bridge netfilter active)"
 
       - name: Pre-pull the instance base image
         run: docker pull alpine:3
@@ -245,8 +257,22 @@ jobs:
           # single environmental setup-race (bridge-netfilter / reconcile timing) is an
           # independent miss. Retry the whole scenario up to 3 times - every attempt
           # still asserts the real deny->allow packet transition in full; only a
-          # genuine, repeatable failure fails the job. Residual nft/conntrack state is
-          # flushed between attempts so each starts clean.
+          # genuine, repeatable failure fails the job.
+          #
+          # Each attempt is made genuinely fresh at the *host* level, not just the
+          # instance level: residual nft/conntrack state is flushed AND bridge
+          # netfilter is re-asserted+verified before the run. Docker can reset
+          # bridge-nf-call-iptables when it (re)creates the per-subnet bridges mid-run,
+          # which would otherwise poison every subsequent attempt identically — making
+          # an environmental miss masquerade as a real, repeatable regression. Pinning
+          # it per attempt means a failure that survives all 3 is a real enforcement
+          # bug, not a leaked host-firewall state from a prior attempt.
+          ensure_bridge_nf() {
+            sudo modprobe br_netfilter || true
+            echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables >/dev/null || true
+            got=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing)
+            echo "bridge-nf-call-iptables=${got}"
+          }
           run_once() {
             sudo -E env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
               FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
@@ -254,16 +280,20 @@ jobs:
           }
           for attempt in 1 2 3; do
             echo "=== SG enforcement attempt ${attempt}/3 ==="
+            ensure_bridge_nf
             if run_once; then
               echo "SG enforcement passed on attempt ${attempt}"
               exit 0
             fi
-            echo "attempt ${attempt} failed; flushing nft + conntrack before retry"
+            echo "attempt ${attempt} failed; host state at failure:"
+            echo "--- bridge-nf-call-iptables ---"; cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing
+            echo "--- nft fakecloud_ec2 table ---"; sudo nft list table inet fakecloud_ec2 2>/dev/null || echo "(no table)"
+            echo "flushing nft + conntrack before retry"
             sudo nft flush ruleset || true
             sudo conntrack -F || true
             sleep 3
           done
-          echo "SG enforcement failed all 3 attempts"
+          echo "SG enforcement failed all 3 attempts (bridge-nf verified active each attempt -> real enforcement regression, not flake)"
           exit 1
 
       - name: nft ruleset diagnostics
