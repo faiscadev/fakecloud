@@ -3227,3 +3227,25 @@ async fn snapshot_hook_fires_with_store() {
     // Must not panic; exercises the closure and `save_lambda_snapshot`.
     hook().await;
 }
+
+#[tokio::test]
+async fn invoke_unknown_alias_returns_not_found() {
+    // A typo'd or nonexistent alias must 404 like GetFunction does, not silently
+    // fall through to $LATEST and run prod code (bug-audit 2026-06-20, 1.9).
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "afn").await;
+
+    let result = svc
+        .invoke(
+            "afn",
+            b"{}",
+            "123456789012",
+            InvocationType::RequestResponse,
+            Some("no-such-alias"),
+        )
+        .await;
+    match result {
+        Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
+        Ok(_) => panic!("expected ResourceNotFoundException for an unknown alias"),
+    }
+}
