@@ -4589,3 +4589,66 @@ fn access_point_data_plane_routes_to_bucket() {
     assert_eq!(req.path_segments[0], "ap-data-bucket");
     assert_eq!(req.raw_path, "/ap-data-bucket/key.txt");
 }
+
+#[tokio::test]
+async fn mpu_complete_on_versioned_bucket_pushes_new_version() {
+    // On a versioned bucket, CompleteMultipartUpload must add a NEW version
+    // (not mutate/corrupt the prior version's body in place) -- bug-audit
+    // 2026-06-20, 4.1.
+    let svc = make_service();
+    seed_bucket(&svc, "ver");
+    {
+        let mut mas = svc.state.write();
+        let b = mas.default_mut().buckets.get_mut("ver").unwrap();
+        b.versioning = Some("Enabled".to_string());
+    }
+
+    // v1 via a normal PutObject.
+    let put_req = make_request(Method::PUT, "/ver/k", &[], b"original-v1");
+    svc.put_object("123456789012", &put_req, "ver", "k")
+        .await
+        .unwrap();
+
+    // v2 via a single-part multipart upload.
+    let init_req = make_request(Method::POST, "/ver/k", &[("uploads", "")], b"");
+    let resp = svc
+        .create_multipart_upload("123456789012", &init_req, "ver", "k")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    let start = body.find("<UploadId>").unwrap() + "<UploadId>".len();
+    let end = body.find("</UploadId>").unwrap();
+    let upload_id = body[start..end].to_string();
+
+    let part = b"multipart-v2-body".to_vec();
+    let part_req = make_request(Method::PUT, "/ver/k", &[("partNumber", "1")], &part);
+    let r = svc
+        .upload_part("123456789012", &part_req, "ver", "k", &upload_id, 1)
+        .await
+        .unwrap();
+    let etag = r.headers.get("etag").unwrap().to_str().unwrap().to_string();
+
+    let complete_xml = format!(
+        r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>"#,
+    );
+    let complete_req = make_request(
+        Method::POST,
+        "/ver/k",
+        &[("uploadId", &upload_id)],
+        complete_xml.as_bytes(),
+    );
+    svc.complete_multipart_upload("123456789012", &complete_req, "ver", "k", &upload_id)
+        .unwrap();
+
+    let mas = svc.state.read();
+    let b = mas.default_ref().buckets.get("ver").unwrap();
+    let versions = b
+        .object_versions
+        .get("k")
+        .expect("k must be tracked in object_versions");
+    assert_eq!(
+        versions.len(),
+        2,
+        "PutObject + completed MPU must yield 2 versions, got {}",
+        versions.len()
+    );
+}

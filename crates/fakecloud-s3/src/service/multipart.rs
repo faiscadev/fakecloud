@@ -713,15 +713,27 @@ impl S3Service {
                 .buckets
                 .get_mut(bucket)
                 .ok_or_else(|| no_such_bucket(bucket))?;
-            b.objects.insert(key.to_string(), obj);
             b.multipart_uploads.remove(upload_id);
+            // On a versioned bucket the completed upload is a NEW version. The
+            // old code never pushed it -- it mutated the last existing version's
+            // body in place (corrupting a prior version, or no-op'ing when none
+            // existed), so the MPU version was missing from ListObjectVersions
+            // and `?versionId=<mpu>` 404'd. Mirror put_object: push the new
+            // object as a version (bug-audit 2026-06-20, 4.1).
             if versioning_enabled {
-                if let Some(versions) = b.object_versions.get_mut(key) {
-                    if let Some(last) = versions.last_mut() {
-                        last.body = returned_body;
+                let versions = b.object_versions.entry(key.to_string()).or_default();
+                // Preserve an untracked pre-versioning current object as the
+                // first version before appending the new one.
+                if versions.is_empty() {
+                    if let Some(existing) = b.objects.get(key) {
+                        if existing.version_id.is_none() {
+                            versions.push(existing.clone());
+                        }
                     }
                 }
+                versions.push(obj.clone());
             }
+            b.objects.insert(key.to_string(), obj);
         }
 
         let mut headers = HeaderMap::new();
