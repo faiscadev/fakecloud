@@ -86,9 +86,19 @@ impl StepFunctionsService {
         let delivery = self.delivery.clone();
         let dynamodb_state = self.dynamodb_state.clone();
         let registry = self.registry.clone();
+        // The interpreter flips the execution to its terminal status
+        // (Succeeded/Failed/TimedOut) directly in shared state, outside the
+        // action-dispatch path that snapshots -- so the post-StartExecution
+        // save below only ever captured the RUNNING execution. Without writing
+        // through when the interpreter finishes, a completed execution reported
+        // stale RUNNING (with no output/history) after a restart, and an
+        // in-flight one came back RUNNING forever with no driver to advance it
+        // (bug-audit 2026-06-20, 0.A2).
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             interpreter::execute_state_machine(
-                shared_state,
+                shared_state.clone(),
                 exec_arn_clone,
                 definition,
                 input_clone,
@@ -98,6 +108,7 @@ impl StepFunctionsService {
                 logging_config,
             )
             .await;
+            super::save_stepfunctions_snapshot(&shared_state, snapshot_store, &snapshot_lock).await;
         });
 
         Ok(AwsResponse::ok_json(json!({
