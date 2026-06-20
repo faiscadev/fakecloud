@@ -72,10 +72,15 @@ pub(crate) fn normalize_replication_xml(xml: &str) -> String {
             let status =
                 extract_xml_value(rule_body, "Status").unwrap_or_else(|| "Enabled".to_string());
 
-            // Extract Destination block (keep as-is)
+            // Extract Destination block (keep as-is). The open/close tags are
+            // located independently, so a body with the closing tag before the
+            // opening one would slice with begin > end and panic (dropping the
+            // connection -- a reachable DoS). Guard each slice so a malformed
+            // ordering is skipped instead of crashing.
             let destination = rule_body.find("<Destination>").and_then(|ds| {
                 rule_body
                     .find("</Destination>")
+                    .filter(|&de| de >= ds)
                     .map(|de| rule_body[ds..de + 14].to_string())
             });
 
@@ -83,6 +88,7 @@ pub(crate) fn normalize_replication_xml(xml: &str) -> String {
             let filter_block = rule_body.find("<Filter>").and_then(|fs| {
                 rule_body
                     .find("</Filter>")
+                    .filter(|&fe| fe >= fs)
                     .map(|fe| rule_body[fs..fe + 9].to_string())
             });
 
@@ -90,6 +96,7 @@ pub(crate) fn normalize_replication_xml(xml: &str) -> String {
             let dmr_block = rule_body.find("<DeleteMarkerReplication>").and_then(|ds| {
                 rule_body
                     .find("</DeleteMarkerReplication>")
+                    .filter(|&de| de >= ds)
                     .map(|de| rule_body[ds..de + "</DeleteMarkerReplication>".len()].to_string())
             });
 
@@ -956,5 +963,36 @@ mod tests {
         assert_eq!(records[0]["s3"]["object"]["size"], 42);
         assert_eq!(records[0]["s3"]["object"]["eTag"], "etag");
         assert_eq!(records[0]["awsRegion"], "us-east-1");
+    }
+
+    #[test]
+    fn normalize_replication_xml_inverted_tags_does_not_panic() {
+        // A rule whose closing tags precede their opening tags would slice with
+        // begin > end and panic (dropping the connection -- a reachable DoS via
+        // PutBucketReplication). The normalizer must return without crashing
+        // (bug-audit 2026-06-20, 2.2).
+        let inverted_destination = "<ReplicationConfiguration><Rule><Status>Enabled</Status>\
+            </Destination>ZZZZZ<Destination></Rule></ReplicationConfiguration>";
+        let _ = normalize_replication_xml(inverted_destination);
+
+        let inverted_filter = "<ReplicationConfiguration><Rule><Status>Enabled</Status>\
+            </Filter>ZZZZZ<Filter></Rule></ReplicationConfiguration>";
+        let _ = normalize_replication_xml(inverted_filter);
+
+        let inverted_dmr = "<ReplicationConfiguration><Rule><Status>Enabled</Status>\
+            </DeleteMarkerReplication>ZZ<DeleteMarkerReplication></Rule></ReplicationConfiguration>";
+        let _ = normalize_replication_xml(inverted_dmr);
+    }
+
+    #[test]
+    fn validate_lifecycle_xml_inverted_filter_tags_is_malformed_not_panic() {
+        // `</Filter>` before `<Filter>` would slice the filter body with
+        // begin > end and panic (reachable DoS via
+        // PutBucketLifecycleConfiguration). It must be rejected as malformed
+        // instead (bug-audit 2026-06-20, 2.1).
+        let xml = "<LifecycleConfiguration><Rule><Status>Enabled</Status>\
+            </Filter>XXXXXXXX<Filter></Rule></LifecycleConfiguration>";
+        let result = crate::service::validate_lifecycle_xml(xml);
+        assert!(result.is_err(), "inverted <Filter> tags must be malformed");
     }
 }
