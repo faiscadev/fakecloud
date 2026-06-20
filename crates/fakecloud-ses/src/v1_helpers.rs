@@ -685,6 +685,9 @@ pub(crate) fn verify_email_identity(
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         });
     Ok(xml_metadata_only("VerifyEmailIdentity", &req.request_id))
 }
@@ -717,6 +720,9 @@ pub(crate) fn verify_email_address(
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         });
     Ok(xml_metadata_only("VerifyEmailAddress", &req.request_id))
 }
@@ -796,6 +802,9 @@ pub(crate) fn verify_domain_identity(
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         });
     // Return a verification token
     let token = format!("{:x}{:x}{:x}", rand_u64(), rand_u64(), rand_u64());
@@ -833,6 +842,9 @@ pub(crate) fn verify_domain_dkim(
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         });
     // VerifyDomainDkim is the moment SES tells you "ok, I generated DKIM
     // keys, here are the CNAMEs you must publish". Lazily create the
@@ -1042,22 +1054,36 @@ pub(crate) fn set_identity_notification_topic(
     state: &SharedSesState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let _identity = required_param(&req.query_params, "Identity")?;
-    let _notification_type = required_param(&req.query_params, "NotificationType")?;
-    // SnsTopic is optional — if absent, disables notification
-    let _sns_topic = req.query_params.get("SnsTopic");
-    // We store this on the identity but currently don't have notification topic fields.
-    // For fakecloud, accepting the call is sufficient — notifications aren't sent.
-    // Verify identity exists
-    let accounts = state.read();
-    let empty = SesState::new(&req.account_id, &req.region);
-    let st = accounts.get(&req.account_id).unwrap_or(&empty);
-    if !st.identities.contains_key(_identity) {
-        return Err(AwsServiceError::aws_error(
+    let identity = required_param(&req.query_params, "Identity")?;
+    let notification_type = required_param(&req.query_params, "NotificationType")?;
+    // SnsTopic is optional, and an empty value clears the topic (disables SNS
+    // notifications for that type), matching AWS.
+    let topic = req
+        .query_params
+        .get("SnsTopic")
+        .filter(|s| !s.is_empty())
+        .cloned();
+
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(&req.account_id);
+    let id = st.identities.get_mut(identity).ok_or_else(|| {
+        AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidParameterValue",
-            format!("Identity '{_identity}' does not exist"),
-        ));
+            format!("Identity '{identity}' does not exist"),
+        )
+    })?;
+    match notification_type {
+        "Bounce" => id.bounce_topic = topic,
+        "Complaint" => id.complaint_topic = topic,
+        "Delivery" => id.delivery_topic = topic,
+        other => {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("Invalid notification type: {other}"),
+            ));
+        }
     }
     Ok(xml_metadata_only(
         "SetIdentityNotificationTopic",
@@ -1111,6 +1137,21 @@ pub(crate) fn get_identity_notification_attributes(
                          <HeadersInDeliveryNotificationsEnabled>false</HeadersInDeliveryNotificationsEnabled>",
                         identity.email_forwarding_enabled,
                     ));
+                    // Per-type SNS topics set via SetIdentityNotificationTopic
+                    // (1.19). Only emitted when configured, like AWS.
+                    if let Some(t) = &identity.bounce_topic {
+                        inner.push_str(&format!("<BounceTopic>{}</BounceTopic>", xml_escape(t)));
+                    }
+                    if let Some(t) = &identity.complaint_topic {
+                        inner.push_str(&format!(
+                            "<ComplaintTopic>{}</ComplaintTopic>",
+                            xml_escape(t)
+                        ));
+                    }
+                    if let Some(t) = &identity.delivery_topic {
+                        inner
+                            .push_str(&format!("<DeliveryTopic>{}</DeliveryTopic>", xml_escape(t)));
+                    }
                 } else {
                     inner.push_str(
                         "<ForwardingEnabled>true</ForwardingEnabled>\

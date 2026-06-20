@@ -62,6 +62,9 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             mail_from_domain_status: "NotStarted".to_string(),
             dkim_public_key_b64: None,
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         },
     );
 }

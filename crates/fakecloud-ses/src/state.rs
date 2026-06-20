@@ -33,6 +33,14 @@ pub struct EmailIdentity {
     pub mail_from_domain_status: String,
     // Configuration set association
     pub configuration_set_name: Option<String>,
+    // SNS notification topics per type, set by SetIdentityNotificationTopic and
+    // surfaced by GetIdentityNotificationAttributes (bug-audit 2026-06-20, 1.19).
+    #[serde(default)]
+    pub bounce_topic: Option<String>,
+    #[serde(default)]
+    pub complaint_topic: Option<String>,
+    #[serde(default)]
+    pub delivery_topic: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

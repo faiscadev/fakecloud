@@ -42,6 +42,9 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             mail_from_domain_status: "NotStarted".to_string(),
             dkim_public_key_b64: None,
             configuration_set_name: None,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         },
     );
 }
@@ -1800,4 +1803,70 @@ fn test_send_bounce_v1_missing_recipient() {
         Err(e) => assert_eq!(e.code(), "MissingParameter"),
         Ok(_) => panic!("expected MissingParameter"),
     }
+}
+
+#[test]
+fn set_and_get_identity_notification_topic() {
+    // SetIdentityNotificationTopic was a silent no-op and
+    // GetIdentityNotificationAttributes never emitted the topics, so SNS
+    // bounce/complaint wiring was lost (bug-audit 2026-06-20, 1.19).
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request("VerifyEmailIdentity", vec![("EmailAddress", "a@test.com")]),
+    )
+    .unwrap();
+
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "SetIdentityNotificationTopic",
+            vec![
+                ("Identity", "a@test.com"),
+                ("NotificationType", "Bounce"),
+                ("SnsTopic", "arn:aws:sns:us-east-1:123456789012:bounces"),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "GetIdentityNotificationAttributes",
+            vec![("Identities.member.1", "a@test.com")],
+        ),
+    )
+    .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("<BounceTopic>arn:aws:sns:us-east-1:123456789012:bounces</BounceTopic>"),
+        "{body}"
+    );
+    // Untouched types are not emitted.
+    assert!(!body.contains("<ComplaintTopic>"), "{body}");
+
+    // An empty SnsTopic clears it.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "SetIdentityNotificationTopic",
+            vec![
+                ("Identity", "a@test.com"),
+                ("NotificationType", "Bounce"),
+                ("SnsTopic", ""),
+            ],
+        ),
+    )
+    .unwrap();
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "GetIdentityNotificationAttributes",
+            vec![("Identities.member.1", "a@test.com")],
+        ),
+    )
+    .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(!body.contains("<BounceTopic>"), "cleared: {body}");
 }

@@ -96,6 +96,9 @@ impl SesV2Service {
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         };
 
         state.identities.insert(identity_name.clone(), identity);
