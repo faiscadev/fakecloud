@@ -589,16 +589,17 @@ pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
 fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
     let dir = TempDir::new().ok()?;
     let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime");
-    // Authorize both hostnames fakecloud's ECR can be addressed by:
-    // `127.0.0.1` on the host, and `host.docker.internal` when fakecloud
-    // runs in a container and the pull URI is rewritten to the sibling
-    // host (issue #1539, bug 0.8).
-    let config = serde_json::json!({
-        "auths": {
-            format!("127.0.0.1:{server_port}"): { "auth": auth },
-            format!("host.docker.internal:{server_port}"): { "auth": auth },
-        }
-    });
+    // Authorize every hostname fakecloud's ECR can be addressed by:
+    // `127.0.0.1` on the host, `host.docker.internal` (Docker) and
+    // `host.containers.internal` (podman) when fakecloud runs in a container and
+    // the pull URI is rewritten to the sibling host. Centralized in
+    // container_net so Lambda and ECS can't drift (bug-audit 2026-06-20, 0.B2).
+    let auths: serde_json::Map<String, serde_json::Value> =
+        fakecloud_core::container_net::registry_auth_hosts(server_port)
+            .into_iter()
+            .map(|host| (host, serde_json::json!({ "auth": auth })))
+            .collect();
+    let config = serde_json::json!({ "auths": auths });
     std::fs::write(dir.path().join("config.json"), config.to_string()).ok()?;
     Some(dir)
 }
