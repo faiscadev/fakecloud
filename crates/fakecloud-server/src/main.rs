@@ -2821,6 +2821,11 @@ async fn main() {
         } else {
             None
         };
+    // Clone the snapshot store for the background ticker, which mutates
+    // schedule state (last_fired, one-shot deletion) outside the service's
+    // action-dispatch path and so must write through itself (bug-audit
+    // 2026-06-20, 0.A5).
+    let scheduler_ticker_snapshot_store = scheduler_snapshot_store.clone();
     let mut scheduler_service = SchedulerService::new(scheduler_state.clone());
     if let Some(store) = scheduler_snapshot_store {
         scheduler_service = scheduler_service.with_snapshot_store(store);
@@ -2927,8 +2932,11 @@ async fn main() {
     let delivery_for_scheduler_fire = delivery_for_scheduler.clone();
     let default_account_for_scheduler_fire = cli.account_id.clone();
     let default_region_for_scheduler_fire = cli.region.clone();
-    let scheduler_ticker =
+    let mut scheduler_ticker =
         fakecloud_scheduler::ticker::Ticker::new(scheduler_state.clone(), delivery_for_scheduler);
+    if let Some(store) = scheduler_ticker_snapshot_store {
+        scheduler_ticker = scheduler_ticker.with_snapshot_store(store);
+    }
     tokio::spawn(scheduler_ticker.run());
     // Spawn background tasks
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state.clone());

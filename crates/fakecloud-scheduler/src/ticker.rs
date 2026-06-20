@@ -12,14 +12,24 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
 use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_persistence::SnapshotStore;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::delivery::{deliver_target, route_to_dlq};
 use crate::expr::{self, Expr};
+use crate::service::save_scheduler_snapshot;
 use crate::state::{ScheduleKey, SharedSchedulerState};
 
 pub struct Ticker {
     state: SharedSchedulerState,
     delivery: Arc<DeliveryBus>,
+    /// Persist hook. The ticker mutates schedule state directly (sets
+    /// `last_fired`, deletes one-shot `at(...)` runs on completion) outside the
+    /// service's action-dispatch path that is otherwise the only thing that
+    /// snapshots -- so without writing through here a fired one-shot reappears,
+    /// and rate-rule timing resets, after a restart (bug-audit 2026-06-20, 0.A5).
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 /// Bookkeeping for an in-flight retry: how many delivery attempts the
@@ -44,7 +54,19 @@ struct PendingFire {
 
 impl Ticker {
     pub fn new(state: SharedSchedulerState, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+        Self {
+            state,
+            delivery,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    /// Wire the snapshot store so each tick that mutates schedule state is
+    /// written through to disk (see the `snapshot_store` field).
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub async fn run(self) {
@@ -58,16 +80,41 @@ impl Ticker {
         let mut retries: HashMap<(String, ScheduleKey), RetryState> = HashMap::new();
         loop {
             interval.tick().await;
-            self.tick(&mut cron_last_minute, &mut pending_fires, &mut retries);
+            self.tick_and_persist(&mut cron_last_minute, &mut pending_fires, &mut retries)
+                .await;
         }
     }
 
-    fn tick(
+    /// Run one tick and, if it changed persisted schedule state, write the
+    /// snapshot through. `last_fired` updates and one-shot `at(...)` deletions
+    /// are otherwise only in memory and lost on restart. Only persists on a
+    /// mutating tick, to avoid a snapshot every idle second.
+    async fn tick_and_persist(
         &self,
         cron_last_minute: &mut HashMap<(String, ScheduleKey), CronFireStamp>,
         pending_fires: &mut HashMap<(String, ScheduleKey), PendingFire>,
         retries: &mut HashMap<(String, ScheduleKey), RetryState>,
     ) {
+        let mutated = self.tick(cron_last_minute, pending_fires, retries);
+        if mutated {
+            save_scheduler_snapshot(
+                &self.state,
+                self.snapshot_store.clone(),
+                &self.snapshot_lock,
+            )
+            .await;
+        }
+    }
+
+    /// Run one firing pass. Returns `true` if it mutated persisted schedule
+    /// state (set `last_fired` on a fired schedule or deleted a completed
+    /// one-shot), so the caller knows to write the snapshot through.
+    fn tick(
+        &self,
+        cron_last_minute: &mut HashMap<(String, ScheduleKey), CronFireStamp>,
+        pending_fires: &mut HashMap<(String, ScheduleKey), PendingFire>,
+        retries: &mut HashMap<(String, ScheduleKey), RetryState>,
+    ) -> bool {
         let now = Utc::now();
         // Phase 1: collect due schedules while holding a short write lock.
         let mut due: Vec<(String, ScheduleKey)> = Vec::new();
@@ -246,6 +293,10 @@ impl Ticker {
                 }
             }
         }
+
+        // Any schedule that fired had its `last_fired` advanced (and a
+        // completed one-shot was deleted), so persisted state changed.
+        !due.is_empty()
     }
 }
 
@@ -874,6 +925,67 @@ mod tests {
         assert!(
             retries.is_empty(),
             "retry state must be cleared after success"
+        );
+    }
+
+    /// A SnapshotStore that records the last bytes saved (the real
+    /// MemorySnapshotStore is a no-op), so a test can assert the ticker wrote
+    /// through.
+    #[derive(Default)]
+    struct RecordingSnap {
+        bytes: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for RecordingSnap {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.bytes.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fired_schedule_is_written_through() {
+        // A fired schedule advances last_fired in memory; without write-through
+        // it (and a self-deleted one-shot) is lost on restart (0.A5). A tick
+        // that fires must persist; an idle tick must not.
+        let state = make_state();
+        seed_schedule(
+            &state,
+            "r",
+            "rate(1 minute)",
+            "arn:aws:sqs:us-east-1:111122223333:q",
+        );
+        let store = Arc::new(RecordingSnap::default());
+        let ticker = Ticker::new(state.clone(), Arc::new(DeliveryBus::new()))
+            .with_snapshot_store(store.clone());
+        let mut cron = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+
+        // First tick: rate schedule is due -> fires -> writes through.
+        ticker
+            .tick_and_persist(&mut cron, &mut pending, &mut retries)
+            .await;
+        assert!(
+            fakecloud_persistence::SnapshotStore::load(store.as_ref())
+                .unwrap()
+                .is_some(),
+            "a fired schedule must be written through to the snapshot"
+        );
+
+        // Reset the recorder; a second tick in the same minute isn't due again,
+        // so it must NOT snapshot (avoid a write every idle second).
+        *store.bytes.lock().unwrap() = None;
+        ticker
+            .tick_and_persist(&mut cron, &mut pending, &mut retries)
+            .await;
+        assert!(
+            fakecloud_persistence::SnapshotStore::load(store.as_ref())
+                .unwrap()
+                .is_none(),
+            "an idle tick must not snapshot"
         );
     }
 }
