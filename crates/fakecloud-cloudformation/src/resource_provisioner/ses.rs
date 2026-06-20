@@ -314,6 +314,9 @@ impl ResourceProvisioner {
             mail_from_behavior_on_mx_failure: mail_from_behavior,
             mail_from_domain_status: "Success".to_string(),
             configuration_set_name,
+            bounce_topic: None,
+            complaint_topic: None,
+            delivery_topic: None,
         };
         let mut accounts = self.ses_state.write();
         let state = accounts.get_or_create(&self.account_id);
