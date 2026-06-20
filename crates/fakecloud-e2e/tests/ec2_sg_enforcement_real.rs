@@ -54,6 +54,17 @@ fn require_enforcement_or_skip() -> bool {
     true
 }
 
+/// Read `bridge-nf-call-iptables` for failure diagnostics: `0`/`1`, or a marker
+/// when the knob is absent (br_netfilter not loaded) or unreadable. When this is
+/// `0`/missing, same-subnet bridged traffic never reaches fakecloud's nft
+/// `forward` chain, so an installed deny rule filters nothing.
+fn bridge_nf_call_iptables() -> String {
+    match std::fs::read_to_string("/proc/sys/net/bridge/bridge-nf-call-iptables") {
+        Ok(v) => v.trim().to_string(),
+        Err(_) => "missing (br_netfilter not loaded)".to_string(),
+    }
+}
+
 fn docker(args: &[&str]) -> String {
     let out = std::process::Command::new("docker")
         .args(args)
@@ -218,10 +229,17 @@ async fn security_group_actually_drops_and_allows_packets() {
          did not engage (check that `nft` is on PATH and the process has CAP_NET_ADMIN)"
     );
 
-    // 1) Enforced deny: with no ingress allow, A cannot reach B.
+    // 1) Enforced deny: with no ingress allow, A cannot reach B. If the packet
+    // still flows despite the deny rule being installed (asserted above), the most
+    // common cause is bridge netfilter being off — same-subnet traffic is then
+    // L2-switched straight past the nft `forward` chain. Surface that state in the
+    // failure so it reads as the real cause, not a vague "not dropped".
     assert!(
         !wait_ping(&ca, &b_ip, false),
-        "SG with no ingress allow must DROP the packet (real enforcement)"
+        "SG with no ingress allow must DROP the packet (real enforcement); \
+         deny rule for {b_ip} IS installed, so the packet bypassed the forward chain. \
+         bridge-nf-call-iptables={}",
+        bridge_nf_call_iptables()
     );
 
     // 2) Authorize ICMP ingress -> reconcile applies the allow -> ping works.
