@@ -179,6 +179,30 @@ pub fn resolve_sibling_host(host_alias: &str, env_value: Option<String>) -> Stri
     }
 }
 
+/// Hostnames fakecloud's bundled ECR/OCI registry can be addressed by from a
+/// sibling container, each at `server_port`.
+///
+/// A container-spawning service rewrites the image pull URI to the runtime's
+/// sibling host -- `host.docker.internal` under Docker, `host.containers.internal`
+/// under podman -- or leaves it `127.0.0.1` when fakecloud runs on the host. The
+/// registry enforces auth, and the Docker/Podman CLI only attaches the
+/// `Authorization` header for hosts present in `config.json`, so the isolated
+/// pull config must list *every* alias or the pull gets a 401. The map
+/// previously omitted the podman alias, so image-based Lambda/ECS pulls failed
+/// under podman-in-a-container (bug-audit 2026-06-20, 0.B2). Authorize all of
+/// them with the same credential; centralized here so the two builders can't
+/// drift again.
+pub fn registry_auth_hosts(server_port: u16) -> Vec<String> {
+    [
+        "127.0.0.1",
+        "host.docker.internal",
+        "host.containers.internal",
+    ]
+    .iter()
+    .map(|host| format!("{host}:{server_port}"))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +211,19 @@ mod tests {
     fn is_podman_binary_matches_bare_name() {
         assert!(is_podman_binary("podman"));
         assert!(is_podman_binary("podman-remote"));
+    }
+
+    #[test]
+    fn registry_auth_hosts_includes_podman_alias() {
+        // The podman sibling alias (host.containers.internal) must be authorized
+        // or image-based Lambda/ECS pulls 401 under podman-in-a-container (0.B2).
+        let hosts = registry_auth_hosts(4566);
+        assert!(hosts.contains(&"127.0.0.1:4566".to_string()));
+        assert!(hosts.contains(&"host.docker.internal:4566".to_string()));
+        assert!(
+            hosts.contains(&"host.containers.internal:4566".to_string()),
+            "podman sibling alias must be authorized: {hosts:?}"
+        );
     }
 
     #[test]
