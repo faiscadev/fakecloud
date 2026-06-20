@@ -5025,3 +5025,51 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[test]
+fn put_item_rejects_wrong_key_attribute_type() {
+    // The `pk` key is declared S; PutItem with `pk: {N: ...}` must be a
+    // ValidationException, not a silent store of a malformed key that a
+    // correctly-typed GetItem can never find (bug-audit 2026-06-20, 1.13).
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let bad = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": { "pk": { "N": "1" } }
+        }),
+    );
+    match svc.put_item(&bad) {
+        Err(e) => assert_eq!(e.code(), "ValidationException"),
+        Ok(_) => panic!("a wrong-typed key must be rejected"),
+    }
+
+    // The correctly-typed key still works.
+    let good = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": { "pk": { "S": "ok" } }
+        }),
+    );
+    svc.put_item(&good).unwrap();
+}
+
+#[test]
+fn get_item_rejects_wrong_key_attribute_type() {
+    let svc = make_service();
+    create_test_table(&svc);
+    let bad = make_request(
+        "GetItem",
+        json!({
+            "TableName": "test-table",
+            "Key": { "pk": { "N": "1" } }
+        }),
+    );
+    match svc.get_item(&bad) {
+        Err(e) => assert_eq!(e.code(), "ValidationException"),
+        Ok(_) => panic!("a wrong-typed key must be rejected on GetItem"),
+    }
+}

@@ -163,6 +163,7 @@ impl DynamoDbService {
             let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
             let table = get_table(&state.tables, table_name)?;
+            validate_key_attributes_in_key(table, &key)?;
             let needs_insights = table.contributor_insights_status == "ENABLED";
 
             let mut result = match table.find_item_index(&key) {

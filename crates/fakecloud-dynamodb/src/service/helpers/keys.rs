@@ -91,6 +91,10 @@ pub(crate) fn validate_key_in_item(
             ));
         }
     }
+    check_key_type(table, item, hash_key)?;
+    if let Some(range_key) = table.range_key_name() {
+        check_key_type(table, item, range_key)?;
+    }
     Ok(())
 }
 
@@ -117,6 +121,48 @@ pub(crate) fn validate_key_attributes_in_key(
                 format!("Missing the key {range_key} in the item"),
             ));
         }
+    }
+    check_key_type(table, key, hash_key)?;
+    if let Some(range_key) = table.range_key_name() {
+        check_key_type(table, key, range_key)?;
+    }
+    Ok(())
+}
+
+/// Verify a key attribute present in `attrs` carries the scalar type declared
+/// in the table's AttributeDefinitions. AWS rejects a wrong-typed key with
+/// ValidationException; without this a `pk: S` table silently stored
+/// `{"pk":{"N":"1"}}`, after which a correctly-typed GetItem couldn't find the
+/// row -- the data appeared to vanish (bug-audit 2026-06-20, 1.13). The
+/// PartiQL path already enforced this; the classic item API didn't.
+fn check_key_type(
+    table: &DynamoTable,
+    attrs: &HashMap<String, AttributeValue>,
+    name: &str,
+) -> Result<(), AwsServiceError> {
+    let Some(val) = attrs.get(name) else {
+        return Ok(());
+    };
+    let Some(expected) = table
+        .attribute_definitions
+        .iter()
+        .find(|d| d.attribute_name == name)
+        .map(|d| d.attribute_type.as_str())
+    else {
+        return Ok(());
+    };
+    let actual = val
+        .as_object()
+        .and_then(|o| o.keys().next().map(|k| k.as_str()));
+    if actual != Some(expected) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!(
+                "One or more parameter values were invalid: Type mismatch for key {name} expected: {expected} actual: {}",
+                actual.unwrap_or("NULL"),
+            ),
+        ));
     }
     Ok(())
 }
