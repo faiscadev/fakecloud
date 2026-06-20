@@ -2664,6 +2664,13 @@ pub(crate) fn validate_lifecycle_xml(xml: &str) -> Result<(), AwsServiceError> {
             if has_filter {
                 if let Some(fs) = rule_body.find("<Filter>") {
                     if let Some(fe) = rule_body.find("</Filter>") {
+                        // `find` locates the two tags independently, so a body
+                        // with `</Filter>` before `<Filter>` would slice with
+                        // begin > end and panic (dropping the connection -- a
+                        // reachable DoS). Reject as malformed instead.
+                        if fe < fs + 8 {
+                            return Err(malformed());
+                        }
                         let filter_body = &rule_body[fs + 8..fe];
                         let has_prefix_in_filter = filter_body.contains("<Prefix");
                         let has_tag_in_filter = filter_body.contains("<Tag>");
