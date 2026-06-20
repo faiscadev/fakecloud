@@ -28,3 +28,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+x509-cert = { version = "0.2", features = ["pem"] }

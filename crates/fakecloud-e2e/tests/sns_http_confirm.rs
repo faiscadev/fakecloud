@@ -17,6 +17,61 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// Fetch the signing cert from the envelope's SigningCertURL, rebuild the AWS
+/// SubscriptionConfirmation canonical string from the envelope's own fields,
+/// and verify the RSA-SHA256 signature against the cert's public key. This is
+/// exactly what `sns_message_validator` libraries do across languages.
+async fn verify_confirmation_signature(body: &serde_json::Value) {
+    use base64::Engine;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+    use x509_cert::der::{DecodePem, Encode};
+    use x509_cert::Certificate;
+
+    let cert_url = body["SigningCertURL"].as_str().unwrap();
+    assert!(cert_url.ends_with("/_fakecloud/sns/cert.pem"), "{cert_url}");
+    let pem = reqwest::get(cert_url).await.unwrap().text().await.unwrap();
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
+
+    let cert = Certificate::from_pem(pem.as_bytes()).unwrap();
+    let spki_der = cert
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .unwrap();
+    let public_key = RsaPublicKey::from_public_key_der(&spki_der).unwrap();
+    let verifying = VerifyingKey::<Sha256>::new(public_key);
+
+    // Canonical string: alphabetical Key\nValue\n pairs for a
+    // SubscriptionConfirmation envelope.
+    let mut canonical = String::new();
+    for key in [
+        "Message",
+        "MessageId",
+        "SubscribeURL",
+        "Timestamp",
+        "Token",
+        "TopicArn",
+        "Type",
+    ] {
+        canonical.push_str(key);
+        canonical.push('\n');
+        canonical.push_str(body[key].as_str().unwrap());
+        canonical.push('\n');
+    }
+
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(body["Signature"].as_str().unwrap())
+        .unwrap();
+    let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+    verifying
+        .verify(canonical.as_bytes(), &signature)
+        .expect("confirmation signature must verify against fakecloud's public cert");
+}
+
 /// Locate the end-of-headers `\r\n\r\n` marker in a raw HTTP buffer.
 /// Returns the index of the first byte of the marker.
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -199,10 +254,16 @@ async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after
     assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
     assert!(body["MessageId"].is_string());
     assert!(body["Timestamp"].is_string());
-    assert_eq!(body["SignatureVersion"], "1");
+    assert_eq!(body["SignatureVersion"], "2");
     let subscribe_url = body["SubscribeURL"].as_str().unwrap();
     assert!(subscribe_url.contains("Action=ConfirmSubscription"));
     assert!(subscribe_url.contains(&token));
+
+    // The SubscriptionConfirmation signature must verify the same way a real
+    // SNS verifier library would: fetch the cert from SigningCertURL, rebuild
+    // the AWS canonical string from the envelope's own fields, and check the
+    // RSA-SHA256 signature against the cert's public key.
+    verify_confirmation_signature(&body).await;
 
     // Publish before confirmation — endpoint must NOT receive it.
     sns.publish()
