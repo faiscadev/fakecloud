@@ -1570,7 +1570,19 @@ impl SecretsManagerService {
                                     "CreatedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
                                 });
                                 if let Some(ref s) = version.secret_string {
-                                    entry["SecretString"] = json!(s);
+                                    // Decrypt the same way GetSecretValue does;
+                                    // pushing the raw stored value leaked
+                                    // ciphertext when a KMS hook + KmsKeyId were
+                                    // configured (bug-audit 2026-06-20, 1.10).
+                                    let plaintext = self
+                                        .maybe_decrypt_secret_string(
+                                            &req.account_id,
+                                            &secret.arn,
+                                            secret.kms_key_id.as_deref(),
+                                            Some(s.as_str()),
+                                        )
+                                        .unwrap_or_else(|| s.clone());
+                                    entry["SecretString"] = json!(plaintext);
                                 }
                                 if let Some(ref b) = version.secret_binary {
                                     entry["SecretBinary"] = json!(base64_encode(b));
@@ -1647,7 +1659,17 @@ impl SecretsManagerService {
                             "CreatedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
                         });
                         if let Some(ref s) = version.secret_string {
-                            entry["SecretString"] = json!(s);
+                            // Decrypt like GetSecretValue; the raw stored value
+                            // is ciphertext under a configured KMS hook (1.10).
+                            let plaintext = self
+                                .maybe_decrypt_secret_string(
+                                    &req.account_id,
+                                    &secret.arn,
+                                    secret.kms_key_id.as_deref(),
+                                    Some(s.as_str()),
+                                )
+                                .unwrap_or_else(|| s.clone());
+                            entry["SecretString"] = json!(plaintext);
                         }
                         if let Some(ref b) = version.secret_binary {
                             entry["SecretBinary"] = json!(base64_encode(b));
