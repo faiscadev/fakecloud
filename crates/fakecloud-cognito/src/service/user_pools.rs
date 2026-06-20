@@ -353,6 +353,32 @@ impl CognitoService {
             pool.deletion_protection = Some(dp.to_string());
         }
 
+        // Settable fields the handler previously dropped: custom verification
+        // copy and the device/attribute-update/add-ons configs. The most common
+        // UpdateUserPool change (custom verification email/SMS) was silently
+        // lost (bug-audit 2026-06-20, 1.16). Update each only when present.
+        if let Some(s) = body["EmailVerificationMessage"].as_str() {
+            pool.email_verification_message = Some(s.to_string());
+        }
+        if let Some(s) = body["EmailVerificationSubject"].as_str() {
+            pool.email_verification_subject = Some(s.to_string());
+        }
+        if let Some(s) = body["SmsVerificationMessage"].as_str() {
+            pool.sms_verification_message = Some(s.to_string());
+        }
+        if let Some(s) = body["SmsAuthenticationMessage"].as_str() {
+            pool.sms_authentication_message = Some(s.to_string());
+        }
+        if body["DeviceConfiguration"].is_object() {
+            pool.device_configuration = Some(body["DeviceConfiguration"].clone());
+        }
+        if body["UserAttributeUpdateSettings"].is_object() {
+            pool.user_attribute_update_settings = Some(body["UserAttributeUpdateSettings"].clone());
+        }
+        if body["UserPoolAddOns"].is_object() {
+            pool.user_pool_add_ons = Some(body["UserPoolAddOns"].clone());
+        }
+
         pool.last_modified_date = Utc::now();
 
         Ok(AwsResponse::ok_json(json!({})))
