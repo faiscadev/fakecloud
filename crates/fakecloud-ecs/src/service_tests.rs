@@ -402,6 +402,75 @@ mod scheduler_reconcile {
         Arc::new(RwLock::new(accounts))
     }
 
+    fn ecs_request(action: &str, body: serde_json::Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecs".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: ACCOUNT.into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn update_service_applies_extended_fields() {
+        // UpdateService previously read only desiredCount/taskDefinition/
+        // lifecycleHooks and dropped everything else (bug-audit 2026-06-20, 1.15).
+        let state = empty_state();
+        {
+            let mut g = state.write();
+            let st = g.get_or_create(ACCOUNT);
+            st.services
+                .insert("default/api".to_string(), make_service(2));
+        }
+        let svc = EcsService::new(state.clone());
+
+        let body = serde_json::json!({
+            "service": "api",
+            "cluster": "default",
+            "enableExecuteCommand": true,
+            "enableECSManagedTags": true,
+            "healthCheckGracePeriodSeconds": 120,
+            "platformVersion": "1.4.0",
+            "propagateTags": "SERVICE",
+            "networkConfiguration": { "awsvpcConfiguration": { "subnets": ["subnet-aaa"] } },
+            "deploymentConfiguration": {
+                "minimumHealthyPercent": 50,
+                "maximumPercent": 200,
+                "deploymentCircuitBreaker": { "enable": true, "rollback": true }
+            }
+        });
+        svc.update_service(&ecs_request("UpdateService", body))
+            .expect("UpdateService");
+
+        let g = state.read();
+        let s = &g.get(ACCOUNT).unwrap().services["default/api"];
+        assert!(s.enable_execute_command, "enableExecuteCommand must apply");
+        assert!(s.enable_ecs_managed_tags);
+        assert_eq!(s.health_check_grace_period_seconds, Some(120));
+        assert_eq!(s.platform_version.as_deref(), Some("1.4.0"));
+        assert_eq!(s.propagate_tags.as_deref(), Some("SERVICE"));
+        assert!(s.network_configuration.is_some());
+        assert_eq!(s.minimum_healthy_percent, Some(50));
+        assert_eq!(s.maximum_percent, Some(200));
+        assert!(s
+            .circuit_breaker
+            .as_ref()
+            .map(|c| c.enable)
+            .unwrap_or(false));
+    }
+
     /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
     #[test]
     fn snapshot_hook_is_none_without_store() {
