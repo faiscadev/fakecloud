@@ -55,6 +55,20 @@ impl CognitoService {
             // Validate pool exists
             ensure_user_pool_exists(state, pool_id)?;
 
+            // A supplied TemporaryPassword must satisfy the pool's password
+            // policy, like SignUp and AdminSetUserPassword do. The old code
+            // stored it unchecked, bypassing the policy for admin-provisioned
+            // users (bug-audit 2026-06-20, 1.12).
+            if let Some(temp_pw) = body["TemporaryPassword"].as_str() {
+                let policy = state
+                    .user_pools
+                    .get(pool_id)
+                    .map(|p| p.policies.password_policy.clone());
+                if let Some(policy) = policy {
+                    validate_password(temp_pw, &policy)?;
+                }
+            }
+
             // Check username doesn't already exist
             let pool_users = state.users.entry(pool_id.to_string()).or_default();
             if pool_users.contains_key(username) {

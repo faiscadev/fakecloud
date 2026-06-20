@@ -7493,3 +7493,46 @@ fn oauth_token_maps_survive_snapshot_roundtrip() {
         "issued authorization code must persist"
     );
 }
+
+#[test]
+fn admin_create_user_validates_temporary_password_against_policy() {
+    // A supplied TemporaryPassword must satisfy the pool's password policy,
+    // exactly like SignUp/AdminSetUserPassword; the old code stored it
+    // unchecked, bypassing the policy for admin-provisioned users
+    // (bug-audit 2026-06-20, 1.12).
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        r#"{"PoolName":"p","Policies":{"PasswordPolicy":{"MinimumLength":8,"RequireUppercase":true}}}"#,
+    )))
+    .unwrap();
+    let pool_id = serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["UserPool"]
+        ["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Weak temporary password -> rejected.
+    let weak = make_req(
+        "AdminCreateUser",
+        &format!(r#"{{"UserPoolId":"{pool_id}","Username":"u1","TemporaryPassword":"short"}}"#),
+    );
+    match block_on(svc.admin_create_user(&weak)) {
+        Err(e) => assert_eq!(e.code(), "InvalidPasswordException"),
+        Ok(_) => panic!("a weak TemporaryPassword must be rejected"),
+    }
+
+    // Policy-conforming temporary password -> accepted.
+    let strong = make_req(
+        "AdminCreateUser",
+        &format!(r#"{{"UserPoolId":"{pool_id}","Username":"u2","TemporaryPassword":"Strong123"}}"#),
+    );
+    block_on(svc.admin_create_user(&strong)).unwrap();
+}
