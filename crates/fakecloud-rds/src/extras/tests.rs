@@ -1077,6 +1077,46 @@ fn modify_db_cluster_persists_extended_fields() {
 }
 
 #[test]
+fn describe_db_clusters_renders_modified_fields() {
+    // ModifyDBCluster persisted these, but the DescribeDBClusters renderer
+    // omitted them, so a describe echoed the create-time defaults
+    // (bug-audit 2026-06-20, 1.17).
+    let svc = svc();
+    create_cluster(&svc, "c1");
+    svc.handle_extra_action(&req(
+        "ModifyDBCluster",
+        &[
+            ("DBClusterIdentifier", "c1"),
+            ("StorageType", "io1"),
+            ("Iops", "3000"),
+            ("BacktrackWindow", "86400"),
+            ("EnableIAMDatabaseAuthentication", "true"),
+            ("ServerlessV2ScalingConfiguration.MinCapacity", "0.5"),
+            ("ServerlessV2ScalingConfiguration.MaxCapacity", "8.0"),
+        ],
+    ))
+    .expect("ModifyDBCluster");
+
+    let resp = svc
+        .handle_extra_action(&req("DescribeDBClusters", &[]))
+        .expect("DescribeDBClusters");
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(xml.contains("<StorageType>io1</StorageType>"), "{xml}");
+    assert!(xml.contains("<Iops>3000</Iops>"), "{xml}");
+    assert!(
+        xml.contains("<BacktrackWindow>86400</BacktrackWindow>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<IAMDatabaseAuthenticationEnabled>true</IAMDatabaseAuthenticationEnabled>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<ServerlessV2ScalingConfiguration>"), "{xml}");
+    assert!(xml.contains("<MinCapacity>0.5</MinCapacity>"), "{xml}");
+    assert!(xml.contains("<MaxCapacity>8.0</MaxCapacity>"), "{xml}");
+}
+
+#[test]
 fn failover_db_cluster_picks_replica_when_no_target() {
     let svc = svc();
     create_cluster(&svc, "c1");

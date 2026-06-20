@@ -194,6 +194,73 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
         }
         out.push_str("          </DBClusterMembers>\n");
     }
+
+    // Scalar fields ModifyDBCluster (and CreateDBCluster) persist that the
+    // hand-written renderer above omitted, so DescribeDBClusters reflects a
+    // modify instead of always echoing the create-time defaults (bug-audit
+    // 2026-06-20, 1.17). Keys already rendered above are deliberately excluded.
+    for key in [
+        "StorageType",
+        "DBClusterInstanceClass",
+        "EngineMode",
+        "NetworkType",
+        "MonitoringRoleArn",
+        "PerformanceInsightsKMSKeyId",
+        "Domain",
+        "DomainIAMRoleName",
+        "CACertificateIdentifier",
+        "MasterUserSecretKmsKeyId",
+        "AwsBackupRecoveryPointArn",
+        "GlobalWriteForwardingStatus",
+        "LocalWriteForwardingStatus",
+    ] {
+        if let Some(s) = v[key].as_str() {
+            out.push_str(&format!("          <{key}>{}</{key}>\n", xml_escape(s)));
+        }
+    }
+    for key in [
+        "Iops",
+        "BacktrackWindow",
+        "MonitoringInterval",
+        "PerformanceInsightsRetentionPeriod",
+    ] {
+        if let Some(n) = v[key].as_i64() {
+            out.push_str(&format!("          <{key}>{n}</{key}>\n"));
+        }
+    }
+    for key in [
+        "IAMDatabaseAuthenticationEnabled",
+        "CopyTagsToSnapshot",
+        "AutoMinorVersionUpgrade",
+        "HttpEndpointEnabled",
+        "PerformanceInsightsEnabled",
+        "ManageMasterUserPassword",
+    ] {
+        if let Some(b) = v[key].as_bool() {
+            out.push_str(&format!("          <{key}>{b}</{key}>\n"));
+        }
+    }
+    // ServerlessV2ScalingConfiguration is stored as flattened
+    // `ServerlessV2ScalingConfiguration.{Min,Max}Capacity` keys; render it back
+    // as the nested element AWS returns.
+    let v2_min = v["ServerlessV2ScalingConfiguration.MinCapacity"].as_str();
+    let v2_max = v["ServerlessV2ScalingConfiguration.MaxCapacity"].as_str();
+    if v2_min.is_some() || v2_max.is_some() {
+        out.push_str("          <ServerlessV2ScalingConfiguration>\n");
+        if let Some(m) = v2_min {
+            out.push_str(&format!(
+                "            <MinCapacity>{}</MinCapacity>\n",
+                xml_escape(m)
+            ));
+        }
+        if let Some(m) = v2_max {
+            out.push_str(&format!(
+                "            <MaxCapacity>{}</MaxCapacity>\n",
+                xml_escape(m)
+            ));
+        }
+        out.push_str("          </ServerlessV2ScalingConfiguration>\n");
+    }
     out
 }
 
