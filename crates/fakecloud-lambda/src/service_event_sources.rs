@@ -220,18 +220,48 @@ impl LambdaService {
     pub(super) fn list_event_source_mappings(
         &self,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let marker = req.query_params.get("Marker").map(String::as_str);
+        let max_items = crate::service::marker_page_size(req);
+        // Optional FunctionName / EventSourceArn filters. FunctionName may
+        // arrive as a bare name or an ARN; match on the ARN suffix so either
+        // form selects the right mappings.
+        let function_filter = req
+            .query_params
+            .get("FunctionName")
+            .map(|f| crate::service::normalize_function_name(f));
+        let event_source_filter = req.query_params.get("EventSourceArn").cloned();
+
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
-        let mappings: Vec<Value> = state
+        let mappings: Vec<crate::state::EventSourceMapping> = state
             .event_source_mappings
             .values()
+            .filter(|m| {
+                function_filter
+                    .as_deref()
+                    .is_none_or(|f| crate::service::normalize_function_name(&m.function_arn) == f)
+            })
+            .filter(|m| {
+                event_source_filter
+                    .as_deref()
+                    .is_none_or(|e| m.event_source_arn == e)
+            })
+            .cloned()
+            .collect();
+
+        let (page, next_marker) =
+            crate::service::paginate_marker(mappings, marker, max_items, |m| m.uuid.clone());
+        let mappings_json: Vec<Value> = page
+            .iter()
             .map(|m| self.event_source_mapping_json(m))
             .collect();
 
         let response = json!({
-            "EventSourceMappings": mappings,
+            "EventSourceMappings": mappings_json,
+            "NextMarker": next_marker,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))

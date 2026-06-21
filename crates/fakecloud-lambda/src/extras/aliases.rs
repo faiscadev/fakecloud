@@ -86,17 +86,26 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let marker = req.query_params.get("Marker").map(String::as_str);
+        let max_items = crate::service::marker_page_size(req);
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
             let prefix = format!("{function_name}:");
-            let aliases: Vec<&FunctionAlias> = state
+            let aliases: Vec<FunctionAlias> = state
                 .aliases
                 .iter()
                 .filter(|(k, _)| k.starts_with(&prefix))
-                .map(|(_, v)| v)
+                .map(|(_, v)| v.clone())
                 .collect();
-            ok(json!({"Aliases": aliases}))
+            let (page, next_marker) =
+                crate::service::paginate_marker(aliases, marker, max_items, |a| a.name.clone());
+            let page_json: Vec<Value> = page
+                .iter()
+                .map(|a| serde_json::to_value(a).unwrap_or_default())
+                .collect();
+            ok(json!({"Aliases": page_json, "NextMarker": next_marker}))
         })
     }
 
