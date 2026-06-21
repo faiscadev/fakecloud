@@ -351,18 +351,23 @@ impl RdsRuntime {
             args.push("--privileged".to_string());
         }
 
-        // Persist the data directory in a named volume keyed to the instance
-        // so a container recreated after a fakecloud restart reattaches the
-        // same data instead of coming back empty (bug-audit 2026-06-20, 4.2).
-        // Only the official-image engines with a well-known, volume-friendly
-        // data dir; the heavier engines (oracle/mssql/db2) manage their own
-        // state and stay out of scope.
-        if let Some(data_dir) = engine_data_dir(engine) {
-            args.push("-v".to_string());
-            args.push(format!(
-                "{}:{data_dir}",
-                data_volume_name(account_id, db_instance_identifier)
-            ));
+        // Optionally persist the data directory in a named volume keyed to the
+        // instance so a container recreated after a fakecloud restart reattaches
+        // the same data instead of coming back empty (bug-audit 2026-06-20, 4.2).
+        // OFF by default: a process-stable volume name persists on the host
+        // across instances/test cases, so a later instance reusing an
+        // identifier (e.g. restore-from-snapshot) would inherit stale data
+        // (`relation already exists`). Opt in with FAKECLOUD_PERSIST_DB_VOLUMES=1
+        // for a long-lived dev server. Only the official-image engines with a
+        // well-known, volume-friendly data dir.
+        if db_volumes_enabled() {
+            if let Some(data_dir) = engine_data_dir(engine) {
+                args.push("-v".to_string());
+                args.push(format!(
+                    "{}:{data_dir}",
+                    data_volume_name(account_id, db_instance_identifier)
+                ));
+            }
         }
 
         // Bridge-aware engines (postgres aws_lambda, mysql/mariadb
@@ -757,7 +762,7 @@ impl RdsRuntime {
     /// k8s backend (PVC lifecycle is handled there) and for engines without a
     /// managed volume.
     pub async fn remove_data_volume(&self, account_id: &str, db_instance_identifier: &str) {
-        if self.k8s.is_some() {
+        if self.k8s.is_some() || !db_volumes_enabled() {
             return;
         }
         let name = data_volume_name(account_id, db_instance_identifier);
@@ -1218,6 +1223,16 @@ impl RdsRuntime {
 
         Ok(())
     }
+}
+
+/// Whether DB data should survive a fakecloud restart via a named Docker
+/// volume. OFF by default (ephemeral, matching pre-#1826 behavior and keeping
+/// restore-from-snapshot / repeated-identifier flows clean); opt in with
+/// `FAKECLOUD_PERSIST_DB_VOLUMES=1` on a long-lived dev server.
+fn db_volumes_enabled() -> bool {
+    std::env::var("FAKECLOUD_PERSIST_DB_VOLUMES")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
 }
 
 /// The in-container data directory to persist for an engine, or `None` for
