@@ -425,6 +425,57 @@ fn is_function_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Lambda's `Marker`/`MaxItems` list pagination. The items are sorted by their
+/// opaque per-item key (`marker_of`) for a stable order, then sliced: a
+/// non-empty `Marker` resumes after the item whose key equals it, and
+/// `MaxItems` bounds the page. Returns `(page, next_marker)` where the marker
+/// is the last returned item's key when more remain, else `""` (AWS emits an
+/// empty-string `NextMarker` on the final page rather than omitting it).
+///
+/// An unrecognised marker (its item was deleted between calls) yields an empty
+/// final page, matching AWS's "resume past the end" behaviour.
+pub(crate) fn paginate_marker<T, F>(
+    mut items: Vec<T>,
+    marker: Option<&str>,
+    max_items: Option<usize>,
+    marker_of: F,
+) -> (Vec<T>, String)
+where
+    F: Fn(&T) -> String,
+{
+    items.sort_by_key(&marker_of);
+
+    let start = match marker {
+        Some(m) if !m.is_empty() => items
+            .iter()
+            .position(|it| marker_of(it) == m)
+            .map(|p| p + 1)
+            .unwrap_or(items.len()),
+        _ => 0,
+    };
+    if start >= items.len() {
+        return (Vec::new(), String::new());
+    }
+
+    let limit = max_items.filter(|&n| n > 0).unwrap_or(usize::MAX);
+    let end = start.saturating_add(limit).min(items.len());
+    let next_marker = if end < items.len() {
+        marker_of(&items[end - 1])
+    } else {
+        String::new()
+    };
+    let page: Vec<T> = items.drain(start..end).collect();
+    (page, next_marker)
+}
+
+/// Parse `MaxItems` from the query (already range-validated upstream) into a
+/// page size, returning `None` when absent.
+pub(crate) fn marker_page_size(req: &AwsRequest) -> Option<usize> {
+    req.query_params
+        .get("MaxItems")
+        .and_then(|s| s.parse::<usize>().ok())
+}
+
 /// Extract a version/alias qualifier embedded in a function reference, the
 /// mirror of [`normalize_function_name`] (which strips it). AWS accepts the
 /// qualifier inline -- `...:function:MyFn:PROD`, `123:function:MyFn:PROD`,
@@ -1288,6 +1339,8 @@ impl AwsService for LambdaService {
             "ListFunctions" => self.list_functions(
                 aid,
                 req.query_params.get("FunctionVersion").map(String::as_str),
+                req.query_params.get("Marker").map(String::as_str),
+                marker_page_size(&req),
             ),
             "GetFunction" => self.get_function(
                 &req,
@@ -1382,7 +1435,7 @@ impl AwsService for LambdaService {
                         ));
                     }
                 }
-                self.list_event_source_mappings(aid)
+                self.list_event_source_mappings(aid, &req)
             }
             "GetEventSourceMapping" => {
                 self.get_event_source_mapping(resource_name.as_deref().unwrap_or(""), aid)

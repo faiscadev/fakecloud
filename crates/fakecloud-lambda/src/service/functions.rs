@@ -373,6 +373,8 @@ impl LambdaService {
         &self,
         account_id: &str,
         function_version: Option<&str>,
+        marker: Option<&str>,
+        max_items: Option<usize>,
     ) -> Result<AwsResponse, AwsServiceError> {
         // `FunctionVersion` is an enum with the single member `ALL`; reject
         // any other value rather than silently ignoring it.
@@ -394,14 +396,14 @@ impl LambdaService {
             .map(|f| self.function_config_json(f))
             .collect();
 
-        // AWS's documented example carries `NextMarker` as a string even
-        // on the final page. We don't paginate yet, so emit an empty
-        // string rather than a true sentinel — closer to AWS's
-        // observed behavior than omitting the field, and string-typed
-        // so strict shape validators don't trip.
+        // Honor Marker/MaxItems. AWS orders ListFunctions by FunctionName and
+        // carries NextMarker as a string even on the final page (empty there).
+        let (page, next_marker) = super::paginate_marker(functions, marker, max_items, |f| {
+            f["FunctionName"].as_str().unwrap_or_default().to_string()
+        });
         let response = json!({
-            "Functions": functions,
-            "NextMarker": "",
+            "Functions": page,
+            "NextMarker": next_marker,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))

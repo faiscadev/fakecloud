@@ -1333,15 +1333,77 @@ async fn delete_event_source_mapping_unknown_errors() {
 #[tokio::test]
 async fn list_functions_empty_ok() {
     let svc = LambdaService::new(make_state());
-    let resp = svc.list_functions("123456789012", None).unwrap();
+    let resp = svc
+        .list_functions("123456789012", None, None, None)
+        .unwrap();
     assert_eq!(resp.status, http::StatusCode::OK);
 }
 
 #[tokio::test]
 async fn list_event_source_mappings_empty_ok() {
     let svc = LambdaService::new(make_state());
-    let resp = svc.list_event_source_mappings("123456789012").unwrap();
+    let req = make_request(Method::GET, "/2015-03-31/event-source-mappings", "");
+    let resp = svc
+        .list_event_source_mappings("123456789012", &req)
+        .unwrap();
     assert_eq!(resp.status, http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn list_functions_paginates_by_marker_and_max_items() {
+    use serde_json::Value;
+    let svc = LambdaService::new(make_state());
+    // Seed five functions out of name order.
+    for name in ["fn-c", "fn-a", "fn-e", "fn-b", "fn-d"] {
+        let body = format!(
+            r#"{{"FunctionName":"{name}","Runtime":"python3.12","Role":"arn:aws:iam::123456789012:role/r","Handler":"h","Code":{{"ZipFile":""}}}}"#
+        );
+        let req = make_request(Method::POST, "/2015-03-31/functions", &body);
+        svc.create_function(&req).unwrap();
+    }
+
+    // First page of 2 -> fn-a, fn-b, with a NextMarker.
+    let resp = svc
+        .list_functions("123456789012", None, None, Some(2))
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let names: Vec<&str> = v["Functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["FunctionName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["fn-a", "fn-b"]);
+    let marker = v["NextMarker"].as_str().unwrap().to_string();
+    assert_eq!(marker, "fn-b");
+
+    // Resume: next page of 2 -> fn-c, fn-d.
+    let resp = svc
+        .list_functions("123456789012", None, Some(&marker), Some(2))
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let names: Vec<&str> = v["Functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["FunctionName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["fn-c", "fn-d"]);
+
+    // Final page: fn-e, empty NextMarker.
+    let marker2 = v["NextMarker"].as_str().unwrap().to_string();
+    let resp = svc
+        .list_functions("123456789012", None, Some(&marker2), Some(2))
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let names: Vec<&str> = v["Functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["FunctionName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["fn-e"]);
+    assert_eq!(v["NextMarker"].as_str().unwrap(), "");
 }
 
 #[tokio::test]

@@ -145,7 +145,13 @@ impl LambdaService {
         }))
     }
 
-    pub(super) fn list_layers(&self, account_id: &str) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn list_layers(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let marker = req.query_params.get("Marker").map(String::as_str);
+        let max_items = crate::service::marker_page_size(req);
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
             let layers: Vec<Value> = state
@@ -166,7 +172,11 @@ impl LambdaService {
                     })
                 })
                 .collect();
-            ok(json!({"Layers": layers}))
+            let (page, next_marker) =
+                crate::service::paginate_marker(layers, marker, max_items, |l| {
+                    l["LayerName"].as_str().unwrap_or_default().to_string()
+                });
+            ok(json!({"Layers": page, "NextMarker": next_marker}))
         })
     }
 
@@ -174,7 +184,10 @@ impl LambdaService {
         &self,
         layer_name: &str,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let marker = req.query_params.get("Marker").map(String::as_str);
+        let max_items = crate::service::marker_page_size(req);
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
             let versions: Vec<Value> = state
@@ -197,7 +210,13 @@ impl LambdaService {
                         .collect()
                 })
                 .unwrap_or_default();
-            ok(json!({"LayerVersions": versions}))
+            // Paginate by Version using a zero-padded key so the string sort
+            // matches numeric order (preserving the existing ascending order).
+            let (page, next_marker) =
+                crate::service::paginate_marker(versions, marker, max_items, |v| {
+                    format!("{:020}", v["Version"].as_i64().unwrap_or(0))
+                });
+            ok(json!({"LayerVersions": page, "NextMarker": next_marker}))
         })
     }
 

@@ -27,7 +27,7 @@ impl LambdaService {
             // Aliases
             "CreateAlias" => self.create_alias(res, req),
             "GetAlias" => self.get_alias(res, req),
-            "ListAliases" => self.list_aliases(res, aid),
+            "ListAliases" => self.list_aliases(res, aid, req),
             "UpdateAlias" => self.update_alias(res, req),
             "DeleteAlias" => self.delete_alias(res, req),
 
@@ -37,7 +37,7 @@ impl LambdaService {
             "GetLayerVersionByArn" => self.get_layer_version_by_arn(req),
             "ListLayers" => {
                 validate_layer_filters(req)?;
-                self.list_layers(aid)
+                self.list_layers(aid, req)
             }
             "ListLayerVersions" => {
                 validate_layer_filters(req)?;
@@ -54,7 +54,7 @@ impl LambdaService {
                         "LayerName exceeds the 140-character maximum",
                     ));
                 }
-                self.list_layer_versions(res, aid)
+                self.list_layer_versions(res, aid, req)
             }
             "DeleteLayerVersion" => self.delete_layer_version(req),
             "GetLayerVersionPolicy" => self.get_layer_version_policy(req),
