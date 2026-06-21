@@ -1684,6 +1684,7 @@ Resources:
             &params,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .unwrap();
         let props = reresolved.properties.as_object().unwrap();
@@ -2120,6 +2121,7 @@ Resources:
         let reresolved = resolve_resource_properties_with_attrs(
             resource,
             template,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),

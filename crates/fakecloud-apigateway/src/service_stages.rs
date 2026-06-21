@@ -165,6 +165,33 @@ impl ApiGatewayService {
                         s.tracing_enabled = b;
                     }
                 }
+                // Previously dropped (bug-audit 2026-06-20, 1.21).
+                "/cacheClusterEnabled" => {
+                    if let Some(b) = value.as_bool() {
+                        s.cache_cluster_enabled = b;
+                    } else if let Some(v) = value.as_str() {
+                        s.cache_cluster_enabled = v == "true";
+                    }
+                }
+                "/cacheClusterSize" => s.cache_cluster_size = value.as_str().map(String::from),
+                "/webAclArn" => s.web_acl_arn = value.as_str().map(String::from),
+                // Per-method settings: AWS PATCHes them at
+                // `/{resourcePath}/{httpMethod}/{setting}` (e.g.
+                // `/~1pets/GET/throttling/rateLimit`). Store each under
+                // method_settings keyed by its path so DescribeStage reflects
+                // the change instead of silently dropping it.
+                _ if path.contains("/throttling/")
+                    || path.contains("/logging/")
+                    || path.contains("/metrics/")
+                    || path.contains("/caching/") =>
+                {
+                    let key = path.trim_start_matches('/').to_string();
+                    if op == "remove" {
+                        s.method_settings.remove(&key);
+                    } else {
+                        s.method_settings.insert(key, value.clone());
+                    }
+                }
                 _ if path.starts_with("/variables/") => {
                     let k = path.trim_start_matches("/variables/").to_string();
                     if op == "remove" {
@@ -178,5 +205,97 @@ impl ApiGatewayService {
         });
         s.last_updated_date = chrono::Utc::now();
         ok(stage_to_json(s))
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+    use crate::state::Stage;
+    use crate::ApiGatewayService;
+
+    fn patch_req(ops: Value) -> AwsRequest {
+        AwsRequest {
+            service: "apigateway".into(),
+            action: "UpdateStage".into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_vec(&json!({ "patchOperations": ops })).unwrap(),
+            ),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::PATCH,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn update_stage_applies_cache_and_webacl_patches() {
+        // cacheClusterEnabled/Size, webAclArn, and per-method settings were
+        // dropped (bug-audit 2026-06-20, 1.21).
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create("123456789012");
+            st.stages.entry("api1".to_string()).or_default().insert(
+                "prod".to_string(),
+                Stage {
+                    stage_name: "prod".into(),
+                    deployment_id: "d1".into(),
+                    description: None,
+                    cache_cluster_enabled: false,
+                    cache_cluster_size: None,
+                    variables: Default::default(),
+                    method_settings: Default::default(),
+                    created_date: chrono::Utc::now(),
+                    last_updated_date: chrono::Utc::now(),
+                    tracing_enabled: false,
+                    web_acl_arn: None,
+                    canary_settings: None,
+                    access_log_settings: None,
+                    tags: Default::default(),
+                },
+            );
+        }
+        let svc = ApiGatewayService::new(state.clone());
+        let params: BTreeMap<String, String> = [
+            ("restApiId".to_string(), "api1".to_string()),
+            ("stageName".to_string(), "prod".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        svc.update_stage(
+            &patch_req(json!([
+                { "op": "replace", "path": "/cacheClusterEnabled", "value": "true" },
+                { "op": "replace", "path": "/cacheClusterSize", "value": "0.5" },
+                { "op": "replace", "path": "/webAclArn", "value": "arn:aws:wafv2:::webacl/x" },
+                { "op": "replace", "path": "/~1pets/GET/throttling/rateLimit", "value": "10" },
+            ])),
+            &params,
+        )
+        .unwrap();
+
+        let accounts = state.read();
+        let s = &accounts.get("123456789012").unwrap().stages["api1"]["prod"];
+        assert!(s.cache_cluster_enabled);
+        assert_eq!(s.cache_cluster_size.as_deref(), Some("0.5"));
+        assert_eq!(s.web_acl_arn.as_deref(), Some("arn:aws:wafv2:::webacl/x"));
+        assert!(s
+            .method_settings
+            .contains_key("~1pets/GET/throttling/rateLimit"));
     }
 }

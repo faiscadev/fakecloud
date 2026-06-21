@@ -1559,6 +1559,14 @@ fn s3_detect_action(
         }
     }
 
+    // GET on an object with `?torrent` is GetObjectTorrent, authorized under
+    // s3:GetObjectTorrent -- not s3:GetObject. Without this arm a policy that
+    // allows GetObject but not GetObjectTorrent would wrongly permit it
+    // (bug-audit 2026-06-20, 5.3).
+    if is_get && has_key && has("torrent") {
+        return Some("GetObjectTorrent");
+    }
+
     // Plain bucket/object methods.
     match (method, has_key) {
         ("GET", true) => Some("GetObject"),
@@ -2974,6 +2982,22 @@ mod s3_iam_service_prefix_tests {
             action.action_string(),
             "s3-object-lambda:WriteGetObjectResponse"
         );
+    }
+
+    #[test]
+    fn get_object_torrent_maps_to_its_own_action() {
+        // GET object with `?torrent` must authorize under s3:GetObjectTorrent,
+        // not s3:GetObject (bug-audit 2026-06-20, 5.3).
+        let svc = make_service();
+        let action = svc
+            .iam_action_for(&req(Method::GET, "/mybucket/key.txt", &[("torrent", "")]))
+            .expect("must be mapped");
+        assert_eq!(action.action, "GetObjectTorrent");
+        // A plain GET still maps to GetObject.
+        let plain = svc
+            .iam_action_for(&req(Method::GET, "/mybucket/key.txt", &[]))
+            .expect("must be mapped");
+        assert_eq!(plain.action, "GetObject");
     }
 }
 

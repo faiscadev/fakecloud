@@ -6093,6 +6093,30 @@ mod tests {
     }
 
     #[test]
+    fn ecr_repository_uri_uses_bound_endpoint_not_public_dns() {
+        // A CFN-provisioned RepositoryUri must point at fakecloud's own registry
+        // endpoint, not the public AWS DNS, so `docker push` against the GetAtt
+        // RepositoryUri reaches it (bug-audit 2026-06-20, 1.4).
+        let prov = make_provisioner();
+        let sr = prov
+            .create_resource(&make_resource(
+                "AWS::ECR::Repository",
+                "Repo",
+                serde_json::json!({ "RepositoryName": "my-repo" }),
+            ))
+            .expect("ECR repo provisions");
+        let uri = sr
+            .attributes
+            .get("RepositoryUri")
+            .expect("RepositoryUri attribute");
+        assert!(
+            !uri.contains("amazonaws.com"),
+            "RepositoryUri must not use the public ECR DNS, got {uri}"
+        );
+        assert!(uri.contains("my-repo"), "uri should name the repo: {uri}");
+    }
+
+    #[test]
     fn sns_subscription_rejects_nonexistent_topic() {
         let prov = make_provisioner();
         let resource = make_resource(

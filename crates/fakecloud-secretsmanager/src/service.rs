@@ -1096,15 +1096,37 @@ impl SecretsManagerService {
         let body = req.json_body();
         let secret_id = require_secret_id(&body)?;
         validate_optional_string_length("nextToken", body["NextToken"].as_str(), 1, 4096)?;
+        validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 100)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(100) as usize;
+        let next_token = body["NextToken"].as_str();
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
-        let versions: Vec<Value> = secret
-            .versions
-            .values()
+        // Stable order so the NextToken (a version id) resumes deterministically:
+        // newest first by CreatedDate, version id as a tiebreaker.
+        let mut versions: Vec<&_> = secret.versions.values().collect();
+        versions.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.version_id.cmp(&b.version_id))
+        });
+
+        let start_idx = if let Some(token) = next_token {
+            versions
+                .iter()
+                .position(|v| v.version_id == token)
+                .unwrap_or(versions.len())
+        } else {
+            0
+        };
+
+        let page: Vec<Value> = versions
+            .iter()
+            .skip(start_idx)
+            .take(max_results)
             .map(|v| {
                 json!({
                     "VersionId": v.version_id,
@@ -1114,11 +1136,16 @@ impl SecretsManagerService {
             })
             .collect();
 
-        let response = json!({
+        let mut response = json!({
             "ARN": secret.arn,
             "Name": secret.name,
-            "Versions": versions,
+            "Versions": page,
         });
+        if start_idx + max_results < versions.len() {
+            if let Some(next) = versions.get(start_idx + max_results) {
+                response["NextToken"] = json!(next.version_id);
+            }
+        }
 
         Ok(AwsResponse::ok_json(response))
     }

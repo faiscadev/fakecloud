@@ -406,6 +406,7 @@ pub(crate) enum LegacyConditionRole {
 pub(crate) fn translate_legacy_conditions(
     conditions: &serde_json::Map<String, Value>,
     role: LegacyConditionRole,
+    conditional_operator: &str,
     names: &mut HashMap<String, String>,
     values: &mut HashMap<String, Value>,
 ) -> Result<String, AwsServiceError> {
@@ -451,7 +452,124 @@ pub(crate) fn translate_legacy_conditions(
         fragments.push(build_legacy_fragment(&name_ph, operator, &value_phs, role)?);
     }
 
-    Ok(fragments.join(" AND "))
+    // KeyConditions are always implicitly AND-ed; ConditionalOperator only
+    // applies to the filter forms (QueryFilter/ScanFilter). A single fragment
+    // needs no joiner, so OR vs AND only matters with 2+ conditions.
+    let joiner =
+        if role == LegacyConditionRole::Filter && conditional_operator.eq_ignore_ascii_case("OR") {
+            " OR "
+        } else {
+            " AND "
+        };
+    Ok(fragments.join(joiner))
+}
+
+/// Resolve the effective condition for a write op (Put/Update/Delete): prefer
+/// `ConditionExpression`, otherwise translate the legacy `Expected` map,
+/// injecting its placeholders into `names`/`values`. Supplying both forms is
+/// rejected, matching real DynamoDB.
+pub(crate) fn resolve_write_condition(
+    body: &Value,
+    names: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Value>,
+) -> Result<Option<String>, AwsServiceError> {
+    let expression = body["ConditionExpression"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let expected = body["Expected"].as_object().filter(|m| !m.is_empty());
+    match (expression, expected) {
+        (Some(_), Some(_)) => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Can not use both expression and non-expression parameters in the same request: \
+             Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}",
+        )),
+        (Some(expr), None) => Ok(Some(expr.to_string())),
+        (None, Some(expected)) => {
+            let op = body["ConditionalOperator"].as_str().unwrap_or("AND");
+            Ok(Some(translate_legacy_expected(
+                expected, op, names, values,
+            )?))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Translate a legacy `Expected` map (pre-2014 conditional Put/Update/Delete)
+/// into a ConditionExpression, hoisting attribute names/values into the shared
+/// placeholder maps. `conditional_operator` is `"AND"` (default) or `"OR"`.
+///
+/// Each entry is either the newer `ComparisonOperator`/`AttributeValueList`
+/// form or the legacy `Value`/`Exists` shorthand:
+/// - `Exists: false` -> `attribute_not_exists`
+/// - `Exists: true` (or omitted) with `Value` -> equality
+/// - `Exists: true` without `Value` -> `attribute_exists`
+pub(crate) fn translate_legacy_expected(
+    expected: &serde_json::Map<String, Value>,
+    conditional_operator: &str,
+    names: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Value>,
+) -> Result<String, AwsServiceError> {
+    let mut entries: Vec<(&String, &Value)> = expected.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut fragments: Vec<String> = Vec::with_capacity(entries.len());
+    for (idx, (attr, spec)) in entries.iter().enumerate() {
+        let name_ph = format!("#exp{idx}");
+        names.insert(name_ph.clone(), (*attr).clone());
+
+        // Newer ComparisonOperator form takes precedence when present.
+        if spec.get("ComparisonOperator").is_some() {
+            let operator = spec
+                .get("ComparisonOperator")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let value_list: &[Value] = spec
+                .get("AttributeValueList")
+                .and_then(|v| v.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            let mut value_phs: Vec<String> = Vec::with_capacity(value_list.len());
+            for (vi, v) in value_list.iter().enumerate() {
+                let ph = format!(":expv{idx}_{vi}");
+                values.insert(ph.clone(), v.clone());
+                value_phs.push(ph);
+            }
+            fragments.push(build_legacy_fragment(
+                &name_ph,
+                operator,
+                &value_phs,
+                LegacyConditionRole::Filter,
+            )?);
+            continue;
+        }
+
+        // Legacy Value / Exists shorthand.
+        let exists = spec.get("Exists").and_then(|v| v.as_bool());
+        let value = spec.get("Value");
+        match (exists, value) {
+            (Some(false), _) => fragments.push(format!("attribute_not_exists({name_ph})")),
+            (_, Some(v)) => {
+                let ph = format!(":expv{idx}");
+                values.insert(ph.clone(), v.clone());
+                fragments.push(format!("{name_ph} = {ph}"));
+            }
+            (Some(true), None) => fragments.push(format!("attribute_exists({name_ph})")),
+            (None, None) => {
+                return Err(legacy_validation_err(format!(
+                    "One of Value or Exists must be provided for the Expected condition on attribute {attr}"
+                )));
+            }
+        }
+    }
+
+    let joiner = if conditional_operator.eq_ignore_ascii_case("OR") {
+        " OR "
+    } else {
+        " AND "
+    };
+    Ok(fragments.join(joiner))
 }
 
 fn legacy_validation_err(message: String) -> AwsServiceError {
@@ -627,6 +745,7 @@ mod legacy_translation_tests {
                 "sk": {"AttributeValueList": [{"S": "ord#"}], "ComparisonOperator": "BEGINS_WITH"},
             })),
             LegacyConditionRole::Key,
+            "AND",
             &mut names,
             &mut values,
         )
@@ -658,6 +777,7 @@ mod legacy_translation_tests {
                 },
             })),
             LegacyConditionRole::Key,
+            "AND",
             &mut names,
             &mut values,
         )
@@ -683,6 +803,7 @@ mod legacy_translation_tests {
                 "zzz": {"ComparisonOperator": "NOT_NULL"},
             })),
             LegacyConditionRole::Filter,
+            "AND",
             &mut names,
             &mut values,
         )
@@ -728,6 +849,7 @@ mod legacy_translation_tests {
                 "a": {"AttributeValueList": [{"S": "x"}], "ComparisonOperator": "WAT"},
             })),
             LegacyConditionRole::Filter,
+            "AND",
             &mut names,
             &mut values,
         )
@@ -744,6 +866,7 @@ mod legacy_translation_tests {
                 "n": {"AttributeValueList": [{"N": "10"}], "ComparisonOperator": "BETWEEN"},
             })),
             LegacyConditionRole::Key,
+            "AND",
             &mut names,
             &mut values,
         )
@@ -760,6 +883,7 @@ mod legacy_translation_tests {
                 "a": {"AttributeValueList": [{"S": "x"}], "ComparisonOperator": "CONTAINS"},
             })),
             LegacyConditionRole::Key,
+            "AND",
             &mut names,
             &mut values,
         )

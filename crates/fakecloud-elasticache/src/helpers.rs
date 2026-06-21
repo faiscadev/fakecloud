@@ -1,5 +1,30 @@
 use super::*;
 
+/// Engine default listening port: 11211 for memcached, 6379 for
+/// redis/valkey. Used so describe responses never emit `Port=0` when no
+/// container runtime assigned a host port.
+pub(crate) fn engine_default_port(engine: &str) -> u16 {
+    if engine.eq_ignore_ascii_case("memcached") {
+        11211
+    } else {
+        6379
+    }
+}
+
+/// Resolve the port to serialize for an endpoint. Prefer the live container
+/// port, then the configured `Port` from the create request, then the engine
+/// default — so the endpoint is never `0` even when no container runtime is
+/// available to assign a host port.
+pub(crate) fn effective_endpoint_port(live: u16, configured: u16, engine: &str) -> u16 {
+    if live != 0 {
+        live
+    } else if configured != 0 {
+        configured
+    } else {
+        engine_default_port(engine)
+    }
+}
+
 /// Match the Smithy constraints on `com.amazonaws.elasticache#UserId`:
 /// `@length(min=1)` and `@pattern("^[a-zA-Z][a-zA-Z0-9\\-]*$")`. Returns
 /// false for an empty value or one whose shape violates the pattern.
@@ -817,7 +842,7 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
         format!(
             "<ConfigurationEndpoint><Address>{}</Address><Port>{}</Port></ConfigurationEndpoint>",
             xml_escape(&cluster.endpoint_address),
-            cluster.endpoint_port
+            effective_endpoint_port(cluster.endpoint_port, cluster.port, &cluster.engine)
         )
     } else {
         String::new()
@@ -988,7 +1013,7 @@ pub(crate) fn cache_node_xml(cluster: &CacheCluster, node_id: usize) -> String {
         xml_escape(&cluster.cache_cluster_status),
         xml_escape(&cluster.created_at),
         xml_escape(&cluster.endpoint_address),
-        cluster.endpoint_port,
+        effective_endpoint_port(cluster.endpoint_port, cluster.port, &cluster.engine),
         xml_escape(&cluster.preferred_availability_zone),
     )
 }
@@ -1077,7 +1102,7 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
         (Some(addr), Some(port)) => format!(
             "<ConfigurationEndpoint><Address>{}</Address><Port>{}</Port></ConfigurationEndpoint>",
             xml_escape(addr),
-            port
+            effective_endpoint_port(port, 0, &g.engine)
         ),
         _ => String::new(),
     };
@@ -1130,7 +1155,7 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
     let description = xml_escape(&g.description);
     let status = xml_escape(&g.status);
     let endpoint_address = xml_escape(&g.endpoint_address);
-    let endpoint_port = g.endpoint_port;
+    let endpoint_port = effective_endpoint_port(g.endpoint_port, 0, &g.engine);
     let primary_az_xml = xml_escape(&primary_az);
     let automatic_failover = if g.automatic_failover_enabled {
         "enabled"
@@ -1798,6 +1823,39 @@ mod cluster_xml_tests {
         assert!(xml.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
         assert!(xml.contains("<LogType>slow-log</LogType>"));
         assert!(xml.contains("<ConfigurationEndpoint>"));
+    }
+
+    #[test]
+    fn no_runtime_port_falls_back_to_configured_then_engine_default() {
+        // No container runtime => endpoint_port stays 0. The node endpoint
+        // must still emit the configured Port (1.4, 2026-06-20) instead of 0.
+        let mut c = fixture();
+        c.endpoint_port = 0;
+        c.host_port = 0;
+        c.port = 6380;
+        let xml = cache_cluster_xml(&c, true);
+        assert!(xml.contains("<Port>6380</Port>"));
+        assert!(!xml.contains("<Port>0</Port>"));
+
+        // No configured port either => fall back to the engine default.
+        c.port = 0;
+        let xml = cache_cluster_xml(&c, true);
+        assert!(xml.contains("<Port>6379</Port>"));
+
+        // memcached emits its ConfigurationEndpoint on 11211 by default.
+        c.engine = "memcached".into();
+        c.port = 0;
+        let xml = cache_cluster_xml(&c, false);
+        assert!(xml.contains("<ConfigurationEndpoint>"));
+        assert!(xml.contains("<Port>11211</Port>"));
+        assert!(!xml.contains("<Port>0</Port>"));
+    }
+
+    #[test]
+    fn engine_default_port_maps_engines() {
+        assert_eq!(engine_default_port("redis"), 6379);
+        assert_eq!(engine_default_port("valkey"), 6379);
+        assert_eq!(engine_default_port("Memcached"), 11211);
     }
 }
 

@@ -3311,3 +3311,21 @@ async fn invoke_unknown_alias_returns_not_found() {
         Ok(_) => panic!("expected ResourceNotFoundException for an unknown alias"),
     }
 }
+
+#[test]
+fn qualifier_from_function_ref_extracts_embedded_qualifier() {
+    // Invoke must honor a qualifier embedded in the function ref when no
+    // ?Qualifier= is supplied; it used to be dropped -> ran $LATEST (1.3).
+    use crate::service::qualifier_from_function_ref as q;
+    assert_eq!(
+        q("arn:aws:lambda:us-east-1:123456789012:function:MyFn:PROD"),
+        Some("PROD".to_string())
+    );
+    assert_eq!(
+        q("arn:aws:lambda:us-east-1:123456789012:function:MyFn"),
+        None
+    );
+    assert_eq!(q("123456789012:function:MyFn:1"), Some("1".to_string()));
+    assert_eq!(q("MyFn:PROD"), Some("PROD".to_string()));
+    assert_eq!(q("MyFn"), None);
+}

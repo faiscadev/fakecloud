@@ -1007,8 +1007,21 @@ impl ApiGatewayV2Service {
                 no_content()
             }
             "DeleteDeployment" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
-                resource_id.ok_or_else(|| missing("DeploymentId"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let dep = resource_id.ok_or_else(|| missing("DeploymentId"))?;
+                // The old handler returned 204 without removing anything, so
+                // deployments accumulated and were un-deletable (bug-audit
+                // 2026-06-20, 1.23). Validate the deployment exists (AWS returns
+                // NotFound otherwise) and actually remove it.
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let deployments = state
+                    .deployments
+                    .get_mut(api)
+                    .ok_or_else(|| not_found("Deployment", dep))?;
+                if deployments.remove(dep).is_none() {
+                    return Err(not_found("Deployment", dep));
+                }
                 no_content()
             }
             "UpdateDeployment" => {
@@ -2079,13 +2092,58 @@ mod tests {
             Some("a1"),
             Some("prod"),
         );
-        ok(
-            "DeleteDeployment",
-            "",
-            &["v2", "apis", "a1", "deployments", "d1"],
-            Some("a1"),
-            Some("d1"),
-        );
+        // DeleteDeployment now validates + removes. Seed one, delete it,
+        // confirm it's gone, and that a second delete 404s (1.23).
+        {
+            let s = svc();
+            {
+                let mut accounts = s.state.write();
+                let state = accounts.get_or_create("000000000000");
+                state
+                    .deployments
+                    .entry("a1".to_string())
+                    .or_default()
+                    .insert(
+                        "d1".to_string(),
+                        crate::state::Deployment {
+                            deployment_id: "d1".to_string(),
+                            description: None,
+                            created_date: chrono::Utc::now(),
+                            auto_deployed: false,
+                        },
+                    );
+            }
+            run(
+                &s,
+                "DeleteDeployment",
+                "",
+                &["v2", "apis", "a1", "deployments", "d1"],
+                Some("a1"),
+                Some("d1"),
+            );
+            assert!(
+                s.state
+                    .read()
+                    .get("000000000000")
+                    .and_then(|st| st.deployments.get("a1"))
+                    .map(|d| !d.contains_key("d1"))
+                    .unwrap_or(true),
+                "DeleteDeployment must remove the deployment"
+            );
+            // Deleting the now-missing deployment is a NotFound.
+            assert!(s
+                .handle_extra_action(
+                    "DeleteDeployment",
+                    &req(
+                        "DeleteDeployment",
+                        "",
+                        &["v2", "apis", "a1", "deployments", "d1"],
+                    ),
+                    Some("a1"),
+                    Some("d1"),
+                )
+                .is_err());
+        }
         // UpdateDeployment now validates the deployment exists. Seed one
         // into a fresh service and exercise the patch on the real entry.
         {

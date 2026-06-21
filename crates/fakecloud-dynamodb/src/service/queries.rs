@@ -578,6 +578,7 @@ fn resolve_legacy_or_expression(
     names: &mut HashMap<String, String>,
     values: &mut HashMap<String, Value>,
 ) -> Result<Option<String>, AwsServiceError> {
+    let conditional_operator = body["ConditionalOperator"].as_str().unwrap_or("AND");
     let expression = body[expression_param]
         .as_str()
         .map(str::trim)
@@ -595,7 +596,11 @@ fn resolve_legacy_or_expression(
         )),
         (Some(expr), None) => Ok(Some(expr.to_string())),
         (None, Some(legacy)) => Ok(Some(translate_legacy_conditions(
-            legacy, role, names, values,
+            legacy,
+            role,
+            conditional_operator,
+            names,
+            values,
         )?)),
         (None, None) => Ok(None),
     }

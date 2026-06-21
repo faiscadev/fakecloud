@@ -165,20 +165,26 @@ impl ApiGatewayService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
         // UpdateAccount input is { patchOperations: [...] }; the Account
-        // output shape does not include patchOperations. Apply the ops
-        // (best-effort) and never echo input-only fields.
-        if let Ok(patch) = serde_json::from_slice::<Value>(&req.body) {
-            if let (Some(target), Some(extras)) =
-                (state.account_settings.as_object_mut(), patch.as_object())
-            {
-                for (k, v) in extras {
-                    if k == "patchOperations" {
-                        continue;
-                    }
-                    target.insert(k.clone(), v.clone());
+        // output shape does not include patchOperations. The old code only
+        // copied (non-existent) top-level body fields and so ignored the patch
+        // ops entirely -- cloudwatchRoleArn could never be set (bug-audit
+        // 2026-06-20, 1.21). Apply each op to account_settings instead.
+        apply_patch_operations(req, |op, path, value| {
+            if op != "replace" && op != "add" && op != "remove" {
+                return;
+            }
+            let key = path.trim_start_matches('/').to_string();
+            if key.is_empty() {
+                return;
+            }
+            if let Some(obj) = state.account_settings.as_object_mut() {
+                if op == "remove" {
+                    obj.remove(&key);
+                } else {
+                    obj.insert(key, value.clone());
                 }
             }
-        }
+        });
         ok(state.account_settings.clone())
     }
 
