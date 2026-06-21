@@ -1607,6 +1607,54 @@ fn send_message_batch_queue_not_found() {
 // ── Delete message batch ──
 
 #[tokio::test]
+async fn receive_honors_queue_receive_wait_time_default() {
+    // ReceiveMessageWaitTimeSeconds on the queue must drive long polling when
+    // the request omits WaitTimeSeconds (bug-audit 2026-06-20, 1.24). Empty
+    // queue + 1s queue default => the receive blocks ~1s, then returns empty.
+    let svc = make_service();
+    let url = create_queue(&svc, "longpoll-q");
+    svc.set_queue_attributes(&make_request(
+        "SetQueueAttributes",
+        json!({"QueueUrl": url, "Attributes": {"ReceiveMessageWaitTimeSeconds": "1"}}),
+    ))
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    let resp = svc
+        .receive_message(&make_request("ReceiveMessage", json!({"QueueUrl": url})))
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    let b = body_json(resp);
+    assert!(
+        b.get("Messages")
+            .and_then(|m| m.as_array())
+            .is_none_or(|a| a.is_empty()),
+        "empty queue should return no messages"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "receive should have long-polled ~1s from the queue default, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn receive_short_polls_when_no_wait_configured() {
+    // Control: no queue default and no request WaitTimeSeconds => short poll,
+    // returns immediately even when empty.
+    let svc = make_service();
+    let url = create_queue(&svc, "shortpoll-q");
+    let start = std::time::Instant::now();
+    svc.receive_message(&make_request("ReceiveMessage", json!({"QueueUrl": url})))
+        .await
+        .unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "short poll should return promptly"
+    );
+}
+
+#[tokio::test]
 async fn delete_message_batch_removes_messages() {
     let svc = make_service();
     let url = create_queue(&svc, "del-batch-q");

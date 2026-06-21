@@ -342,12 +342,19 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?
             .to_string();
 
-        // Resolve the queue URL (might be a name)
-        let queue_url = {
+        // Resolve the queue URL (might be a name) and read its configured
+        // long-poll default in the same lock acquisition.
+        let (queue_url, queue_wait_default) = {
             let _accts = self.state.read();
             let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
             let state = _accts.get(&req.account_id).unwrap_or(&_empty);
-            resolve_queue_url(&queue_url_input, state).ok_or_else(queue_not_found)?
+            let url = resolve_queue_url(&queue_url_input, state).ok_or_else(queue_not_found)?;
+            let default = state
+                .queues
+                .get(&url)
+                .and_then(|q| q.attributes.get("ReceiveMessageWaitTimeSeconds"))
+                .and_then(|v| v.parse::<i64>().ok());
+            (url, default)
         };
 
         let max_messages_raw = val_as_i64(&body["MaxNumberOfMessages"]);
@@ -382,7 +389,14 @@ impl SqsService {
                 ));
             }
         }
-        let wait_time_seconds = wait_time_raw.unwrap_or(0).clamp(0, 20) as u64;
+        // When the request omits WaitTimeSeconds, AWS applies the queue's
+        // ReceiveMessageWaitTimeSeconds attribute (queue-level long polling).
+        // Previously the queue default was ignored and every poll was a
+        // short poll (bug-audit 2026-06-20, 1.24).
+        let wait_time_seconds = wait_time_raw
+            .or(queue_wait_default)
+            .unwrap_or(0)
+            .clamp(0, 20) as u64;
 
         // Parse requested system attributes
         let attribute_names: Option<Vec<String>> = body["AttributeNames"].as_array().map(|arr| {
