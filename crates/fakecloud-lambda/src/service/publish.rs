@@ -137,13 +137,6 @@ impl LambdaService {
     }
 
     pub(crate) fn function_config_json(&self, func: &LambdaFunction) -> Value {
-        // AWS always emits Environment with at least an empty Variables map.
-        let env_vars = if func.environment.is_empty() {
-            json!({ "Variables": {} })
-        } else {
-            json!({ "Variables": func.environment })
-        };
-
         let tracing_mode = func.tracing_mode.as_deref().unwrap_or("PassThrough");
         let ephemeral_size = func.ephemeral_storage_size.unwrap_or(512);
 
@@ -162,7 +155,6 @@ impl LambdaService {
             "LastModified": func.last_modified.format("%Y-%m-%dT%H:%M:%S%.3f+0000").to_string(),
             "PackageType": func.package_type,
             "Architectures": func.architectures,
-            "Environment": env_vars,
             "State": "Active",
             "LastUpdateStatus": "Successful",
             "TracingConfig": { "Mode": tracing_mode },
@@ -173,6 +165,14 @@ impl LambdaService {
                 "OptimizationStatus": "Off",
             })),
         });
+        // Only emit Environment when the function actually has variables. AWS
+        // omits the Environment block entirely for a function created without
+        // one; returning `{"Variables":{}}` made the Terraform provider see a
+        // perpetual `variables = {} -> null` diff (surfaced by the CloudWatch
+        // Logs subscription-filter test, which provisions a Lambda destination).
+        if !func.environment.is_empty() {
+            config["Environment"] = json!({ "Variables": func.environment });
+        }
         if let Some(ref kms) = func.kms_key_arn {
             config["KMSKeyArn"] = json!(kms);
         }

@@ -281,6 +281,7 @@ impl LogsService {
                 metric_namespace: t["metricNamespace"].as_str().unwrap_or("").to_string(),
                 metric_value: t["metricValue"].as_str().unwrap_or("").to_string(),
                 default_value: t["defaultValue"].as_f64(),
+                unit: t["unit"].as_str().map(str::to_string),
             })
             .collect();
 
@@ -369,6 +370,8 @@ impl LogsService {
                             "metricName": t.metric_name,
                             "metricNamespace": t.metric_namespace,
                             "metricValue": t.metric_value,
+                            // AWS always reports a unit, defaulting to None.
+                            "unit": t.unit.as_deref().unwrap_or("None"),
                         });
                         if let Some(dv) = t.default_value {
                             obj["defaultValue"] = json!(dv);
@@ -644,6 +647,9 @@ mod tests {
             filters[0]["metricTransformations"][0]["metricName"],
             "ErrorCount"
         );
+        // AWS always reports a unit, defaulting to None when unset — the
+        // Terraform aws_cloudwatch_log_metric_filter resource asserts on it.
+        assert_eq!(filters[0]["metricTransformations"][0]["unit"], "None");
 
         // Describe by metric name
         let req = make_request(

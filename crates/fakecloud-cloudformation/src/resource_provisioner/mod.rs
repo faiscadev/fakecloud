@@ -3436,11 +3436,16 @@ impl ResourceProvisioner {
                     .unwrap_or("1")
                     .to_string();
                 let default_value = t.get("DefaultValue").and_then(|v| v.as_f64());
+                let unit = t
+                    .get("Unit")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 transformations.push(MetricTransformation {
                     metric_name,
                     metric_namespace,
                     metric_value,
                     default_value,
+                    unit,
                 });
             }
         }
