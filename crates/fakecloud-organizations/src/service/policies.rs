@@ -37,6 +37,12 @@ impl OrganizationsService {
         let policy = org
             .create_policy(name, description, content, policy_type)
             .map_err(org_error_to_aws)?;
+        // Apply create-time Tags so ListTagsForResource reflects them without a
+        // follow-up TagResource (bug-audit 2026-06-20, 1.24).
+        let tags = parse_tags(body.get("Tags"));
+        if !tags.is_empty() {
+            org.set_resource_tags(&policy.id, &tags);
+        }
         Ok(AwsResponse::ok_json(
             json!({ "Policy": policy_with_content(&policy) }),
         ))

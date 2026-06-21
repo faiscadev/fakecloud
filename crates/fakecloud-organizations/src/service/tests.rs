@@ -259,6 +259,88 @@ async fn create_ou_happy_path_and_describe() {
 }
 
 #[tokio::test]
+async fn create_ou_applies_create_time_tags() {
+    // Create-time Tags were dropped (bug-audit 2026-06-20, 1.24); they must be
+    // visible via ListTagsForResource without a follow-up TagResource.
+    let (svc, _state) = OrganizationsService::shared();
+    let root_id = create_org_with_root(&svc).await;
+    let created = svc
+        .handle(req_with(
+            "111111111111",
+            "CreateOrganizationalUnit",
+            json!({
+                "ParentId": root_id,
+                "Name": "eng",
+                "Tags": [{"Key": "team", "Value": "platform"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    let ou_id = body_json(&created)["OrganizationalUnit"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = svc
+        .handle(req_with(
+            "111111111111",
+            "ListTagsForResource",
+            json!({"ResourceId": ou_id}),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(&listed);
+    let tags = v["Tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|t| t["Key"] == "team" && t["Value"] == "platform"),
+        "create-time tag must be listed: {v}"
+    );
+}
+
+#[tokio::test]
+async fn create_policy_applies_create_time_tags() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let created = svc
+        .handle(req_with(
+            "111111111111",
+            "CreatePolicy",
+            json!({
+                "Name": "p1",
+                "Description": "d",
+                "Type": "SERVICE_CONTROL_POLICY",
+                "Content": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}",
+                "Tags": [{"Key": "env", "Value": "prod"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    let policy_id = body_json(&created)["Policy"]["PolicySummary"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = svc
+        .handle(req_with(
+            "111111111111",
+            "ListTagsForResource",
+            json!({"ResourceId": policy_id}),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(&listed);
+    assert!(
+        v["Tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["Key"] == "env" && t["Value"] == "prod"),
+        "create-time tag must be listed: {v}"
+    );
+}
+
+#[tokio::test]
 async fn create_ou_missing_parent_id_rejected() {
     let (svc, _state) = OrganizationsService::shared();
     create_org_with_root(&svc).await;
