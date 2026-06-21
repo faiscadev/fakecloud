@@ -5111,3 +5111,80 @@ fn update_item_applies_legacy_attribute_updates() {
     assert_eq!(item["name"]["S"], "alice", "PUT must store the attribute");
     assert_eq!(item["n"]["N"], "8", "ADD must increment 5 + 3 = 8");
 }
+
+#[test]
+fn put_item_honors_legacy_expected() {
+    // Legacy Expected (pre-2014 conditional writes) was ignored on Put/Delete
+    // (bug-audit 2026-06-20, 1.2): a put-if-absent guard silently overwrote.
+    let svc = make_service();
+    create_test_table(&svc);
+
+    // Exists:false guard succeeds for a brand-new key.
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": { "pk": { "S": "u1" }, "v": { "N": "1" } },
+            "Expected": { "pk": { "Exists": false } }
+        }),
+    ))
+    .expect("first put-if-absent should succeed");
+
+    // Same guard now fails because the item exists.
+    let err = svc.put_item(&make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": { "pk": { "S": "u1" }, "v": { "N": "2" } },
+            "Expected": { "pk": { "Exists": false } }
+        }),
+    ));
+    assert!(err.is_err(), "put-if-absent must fail when key exists");
+
+    // Value equality guard (implicit EQ) succeeds when it matches.
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": { "pk": { "S": "u1" }, "v": { "N": "3" } },
+            "Expected": { "v": { "Value": { "N": "1" } } }
+        }),
+    ))
+    .expect("equality guard should match stored value");
+}
+
+#[test]
+fn delete_item_legacy_expected_with_or_operator() {
+    // ConditionalOperator:OR was hard-coded to AND (bug-audit 2026-06-20, 1.2).
+    let svc = make_service();
+    create_test_table(&svc);
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({ "TableName": "test-table", "Item": { "pk": { "S": "u1" }, "status": { "S": "active" }, "n": { "N": "5" } } }),
+    ))
+    .unwrap();
+
+    // Only the status condition holds; with OR the delete must still proceed.
+    svc.delete_item(&make_request(
+        "DeleteItem",
+        json!({
+            "TableName": "test-table",
+            "Key": { "pk": { "S": "u1" } },
+            "ConditionalOperator": "OR",
+            "Expected": {
+                "status": { "Value": { "S": "active" } },
+                "n": { "Value": { "N": "999" } }
+            }
+        }),
+    ))
+    .expect("OR condition should pass when one branch holds");
+
+    let resp = svc
+        .get_item(&make_request(
+            "GetItem",
+            json!({ "TableName": "test-table", "Key": { "pk": { "S": "u1" } } }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body.get("Item").is_none(), "item should have been deleted");
+}

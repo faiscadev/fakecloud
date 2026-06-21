@@ -10,8 +10,8 @@ use super::{
     apply_update_expression, build_consumed_capacity, build_item_collection_metrics,
     evaluate_condition, extract_key, get_table, get_table_mut, parse_expression_attribute_names,
     parse_expression_attribute_values, project_item, require_object, require_str,
-    return_consumed_mode, return_icm_mode, validate_key_attributes_in_key, validate_key_in_item,
-    AttributeValue, DynamoDbService,
+    resolve_write_condition, return_consumed_mode, return_icm_mode, validate_key_attributes_in_key,
+    validate_key_in_item, AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -20,9 +20,10 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let item = require_object(&body, "Item")?;
-        let condition = body["ConditionExpression"].as_str().map(|s| s.to_string());
-        let expr_attr_names = parse_expression_attribute_names(&body);
-        let expr_attr_values = parse_expression_attribute_values(&body);
+        let mut expr_attr_names = parse_expression_attribute_names(&body);
+        let mut expr_attr_values = parse_expression_attribute_values(&body);
+        let condition =
+            resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE").to_string();
         let return_consumed = return_consumed_mode(&body).to_string();
         let return_icm = return_icm_mode(&body).to_string();
@@ -40,7 +41,7 @@ impl DynamoDbService {
             let key = extract_key(table, &item);
             let existing_idx = table.find_item_index(&key);
 
-            if let Some(ref cond) = condition {
+            if let Some(cond) = condition.as_deref() {
                 let existing = existing_idx.map(|i| &table.items[i]);
                 evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
             }
@@ -247,13 +248,14 @@ impl DynamoDbService {
             let region = state.region.clone();
             let table = get_table_mut(&mut state.tables, table_name)?;
 
-            let condition = body["ConditionExpression"].as_str();
-            let expr_attr_names = parse_expression_attribute_names(&body);
-            let expr_attr_values = parse_expression_attribute_values(&body);
+            let mut expr_attr_names = parse_expression_attribute_names(&body);
+            let mut expr_attr_values = parse_expression_attribute_values(&body);
+            let condition =
+                resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
 
             let existing_idx = table.find_item_index(&key);
 
-            if let Some(cond) = condition {
+            if let Some(cond) = condition.as_deref() {
                 let existing = existing_idx.map(|i| &table.items[i]);
                 evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
             }
@@ -338,14 +340,15 @@ impl DynamoDbService {
 
         validate_key_attributes_in_key(table, &key)?;
 
-        let condition = body["ConditionExpression"].as_str();
-        let expr_attr_names = parse_expression_attribute_names(&body);
-        let expr_attr_values = parse_expression_attribute_values(&body);
+        let mut expr_attr_names = parse_expression_attribute_names(&body);
+        let mut expr_attr_values = parse_expression_attribute_values(&body);
+        let condition =
+            resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
         let update_expression = body["UpdateExpression"].as_str();
 
         let existing_idx = table.find_item_index(&key);
 
-        if let Some(cond) = condition {
+        if let Some(cond) = condition.as_deref() {
             let existing = existing_idx.map(|i| &table.items[i]);
             evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
         }
