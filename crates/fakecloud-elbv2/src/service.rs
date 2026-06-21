@@ -1437,6 +1437,12 @@ impl Elbv2Service {
         if !alpn.is_empty() {
             listener.alpn_policy = alpn;
         }
+        // MutualAuthentication was dropped on modify, so a listener could never
+        // turn mTLS on/off or change its trust store after creation (bug-audit
+        // 2026-06-20, 1.24).
+        if let Some(mtls) = parse_mutual_authentication(req) {
+            listener.mutual_authentication = Some(mtls);
+        }
         let xml = render_listener_xml(listener);
         Ok(xml_resp(
             "ModifyListener",

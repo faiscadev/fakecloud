@@ -298,6 +298,62 @@ async fn create_lb_and_tg_for_listener_test(svc: &Elbv2Service) -> (String, Stri
 }
 
 #[tokio::test]
+async fn modify_listener_applies_mutual_authentication() {
+    // ModifyListener dropped MutualAuthentication (bug-audit 2026-06-20, 1.24):
+    // a listener could never toggle mTLS or change its trust store.
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    svc.handle(req(
+        "CreateListener",
+        &[
+            ("LoadBalancerArn", &lb_arn),
+            ("Protocol", "HTTP"),
+            ("Port", "80"),
+            ("DefaultActions.member.1.Type", "forward"),
+            ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+        ],
+    ))
+    .await
+    .unwrap();
+    let listener_arn = {
+        let st = svc.state.read();
+        st.get("123456789012")
+            .unwrap()
+            .listeners
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
+    };
+
+    let resp = svc
+        .handle(req(
+            "ModifyListener",
+            &[
+                ("ListenerArn", &listener_arn),
+                ("MutualAuthentication.Mode", "verify"),
+                (
+                    "MutualAuthentication.TrustStoreArn",
+                    "arn:aws:elasticloadbalancing:us-east-1:123456789012:truststore/ts/abc",
+                ),
+            ],
+        ))
+        .await
+        .unwrap();
+    let body = body_string(&resp);
+    assert!(body.contains("<Mode>verify</Mode>"), "{body}");
+    assert!(body.contains("truststore/ts/abc"), "{body}");
+
+    // Persisted, not just echoed.
+    let st = svc.state.read();
+    let mtls = st.get("123456789012").unwrap().listeners[&listener_arn]
+        .mutual_authentication
+        .as_ref()
+        .unwrap();
+    assert_eq!(mtls.mode.as_deref(), Some("verify"));
+}
+
+#[tokio::test]
 async fn create_listener_rejects_invalid_protocol() {
     let svc = svc();
     let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
