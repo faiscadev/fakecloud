@@ -3100,3 +3100,36 @@ fn encrypt_rsa_key_uses_real_oaep_and_roundtrips() {
         .unwrap();
     assert_eq!(decrypted, plaintext);
 }
+
+#[test]
+fn list_aliases_includes_aws_managed_service_aliases() {
+    // Real AWS pre-creates `alias/aws/<service>` in every account/region, so
+    // ListAliases returns them even before any KMS operation has run — and
+    // `data.aws_kms_alias` (used by several service acceptance tests) relies
+    // on that. A fresh service with no user aliases must still list them.
+    let svc = make_service();
+    let resp = svc
+        .list_aliases(&make_request("ListAliases", json!({})))
+        .unwrap();
+    let body = body_json(resp);
+    let names: Vec<&str> = body["Aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["AliasName"].as_str())
+        .collect();
+    for expected in ["alias/aws/dynamodb", "alias/aws/s3", "alias/aws/sqs"] {
+        assert!(
+            names.contains(&expected),
+            "ListAliases should include {expected}, got {names:?}"
+        );
+    }
+    // Every managed alias must point at a key that actually resolves.
+    let ddb = body["Aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["AliasName"] == "alias/aws/dynamodb")
+        .unwrap();
+    assert!(ddb["TargetKeyId"].as_str().is_some_and(|t| !t.is_empty()));
+}

@@ -538,6 +538,25 @@ impl DynamoDbService {
             }
         }
 
+        // Prune AttributeDefinitions down to the set actually referenced by
+        // the table key schema and every remaining index's key schema. Real
+        // DynamoDB enforces this invariant: DescribeTable only ever returns
+        // attributes used by a key. When Terraform deletes a GSI (and the
+        // attribute that backed its key), it sends an UpdateTable whose
+        // AttributeDefinitions no longer mention that attribute; without this
+        // prune fakecloud kept the orphan, and the provider's post-apply
+        // refresh saw a stale `attribute {}` block and reported drift.
+        let referenced: std::collections::HashSet<String> = table
+            .key_schema
+            .iter()
+            .chain(table.gsi.iter().flat_map(|g| g.key_schema.iter()))
+            .chain(table.lsi.iter().flat_map(|l| l.key_schema.iter()))
+            .map(|k| k.attribute_name.clone())
+            .collect();
+        table
+            .attribute_definitions
+            .retain(|ad| referenced.contains(&ad.attribute_name));
+
         let table_desc = build_table_description(table);
 
         Self::ok_json(json!({ "TableDescription": table_desc }))

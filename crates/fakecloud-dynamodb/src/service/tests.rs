@@ -5188,3 +5188,54 @@ fn delete_item_legacy_expected_with_or_operator() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body.get("Item").is_none(), "item should have been deleted");
 }
+
+#[test]
+fn update_table_prunes_attributes_orphaned_by_gsi_delete() {
+    // Real DynamoDB keeps AttributeDefinitions equal to the set of attributes
+    // referenced by the table key + every index key. When a GSI (and the
+    // attribute that backed its key) is deleted, DescribeTable no longer lists
+    // that attribute. Terraform's `aws_dynamodb_table` refresh treats a
+    // lingering orphan as drift, so update_table must prune it.
+    let svc = make_service();
+    svc.create_table(&make_request(
+        "CreateTable",
+        json!({
+            "TableName": "t",
+            "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+            "AttributeDefinitions": [
+                { "AttributeName": "pk", "AttributeType": "S" },
+                { "AttributeName": "gsiKey", "AttributeType": "S" }
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+            "GlobalSecondaryIndexes": [{
+                "IndexName": "gsi",
+                "KeySchema": [{ "AttributeName": "gsiKey", "KeyType": "HASH" }],
+                "Projection": { "ProjectionType": "ALL" }
+            }]
+        }),
+    ))
+    .unwrap();
+
+    // Delete the GSI; the provider sends the trimmed AttributeDefinitions too.
+    svc.update_table(&make_request(
+        "UpdateTable",
+        json!({
+            "TableName": "t",
+            "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }],
+            "GlobalSecondaryIndexUpdates": [{ "Delete": { "IndexName": "gsi" } }]
+        }),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .describe_table(&make_request("DescribeTable", json!({ "TableName": "t" })))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let attrs: Vec<&str> = body["Table"]["AttributeDefinitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["AttributeName"].as_str())
+        .collect();
+    assert_eq!(attrs, ["pk"], "orphaned gsiKey attribute should be pruned");
+}

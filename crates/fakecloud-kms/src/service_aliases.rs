@@ -176,6 +176,16 @@ impl KmsService {
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
         let marker = body["Marker"].as_str();
 
+        // Mirror real AWS: every account/region already carries the
+        // AWS-managed service aliases (`alias/aws/<service>`). Provision any
+        // missing ones so the listing — and `data.aws_kms_alias` on top of
+        // it — resolves them even before any KMS operation has touched them.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            crate::hook::ensure_default_managed_aliases(state, &req.region);
+        }
+
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);

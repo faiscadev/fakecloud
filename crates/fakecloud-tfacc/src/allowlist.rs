@@ -200,12 +200,13 @@ pub const SERVICES: &[Service] = &[
             "|QueueRedrivePolicy_basic",
             "|QueueRedriveAllowPolicy_basic)$",
         ),
-        deny: &[
-            // --- hung: runs clean locally but never completes in CI,
-            //          blocking the whole service at the 90m timeout.
-            //          Needs characterisation in a follow-up batch. ---
-            "TestAccSQSQueueRedriveAllowPolicy_basic",
-        ],
+        // Characterised: `TestAccSQSQueueRedriveAllowPolicy_basic` passes
+        // against fakecloud. It is slow (~2m) only because the SQS provider's
+        // `waitQueueAttributesPropagated` enforces `ContinuousTargetOccurence:
+        // 6` at `MinTimeout: 5s` — a client-side stabilisation wait that is
+        // backend-speed-independent. That cost is bounded and well under the
+        // shard timeout, so the test no longer needs to be denied.
+        deny: &[],
     },
     Service {
         name: "dynamodb",
@@ -241,13 +242,10 @@ pub const SERVICES: &[Service] = &[
             "TestAccDynamoDBTable_backupEncryption",
             "TestAccDynamoDBTable_backup_overrideEncryption",
             "TestAccDynamoDBTable_importTable",
-            // --- gap: encryption attribute round-trip ---
-            "TestAccDynamoDBTable_encryption",
-            // --- hung: did not complete in triage run; revisit in a later batch ---
-            "TestAccDynamoDBTable_attributeUpdate",
-            "TestAccDynamoDBTable_extended",
-            "TestAccDynamoDBTable_gsiUpdateNonKeyAttributes",
-            "TestAccDynamoDBTable_gsiUpdateOtherAttributes",
+            // --- unsupportable: the test sleeps 60m in a PreConfig because AWS
+            //     refuses to disable TTL within an hour of enabling it
+            //     (upstream issue #39195), so it can never finish inside CI
+            //     regardless of fakecloud behavior. ---
             "TestAccDynamoDBTable_TTL_updateDisable",
         ],
     },
