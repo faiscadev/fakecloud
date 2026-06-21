@@ -3173,6 +3173,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-glue",
+ "fakecloud-persistence",
  "fakecloud-s3",
  "http 1.4.0",
  "parking_lot",
@@ -3181,6 +3182,7 @@ dependencies = [
  "serde_json",
  "sqlparser",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]

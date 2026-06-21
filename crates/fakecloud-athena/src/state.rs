@@ -10,7 +10,7 @@ use serde_json::Value;
 
 pub type SharedAthenaState = Arc<RwLock<AthenaAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AthenaAccounts {
     pub accounts: BTreeMap<String, AccountState>,
 }
@@ -21,11 +21,26 @@ impl AthenaAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// On-disk snapshot envelope for Athena state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AthenaSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<AthenaAccounts>,
+}
+
+pub const ATHENA_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     pub work_groups: BTreeMap<String, WorkGroup>,
     pub data_catalogs: BTreeMap<String, DataCatalog>,
     pub named_queries: BTreeMap<String, NamedQuery>,
+    /// Keyed by `(workgroup, statement_name)`. JSON object keys must be
+    /// strings, so this tuple-keyed map is (de)serialized as a sequence of
+    /// `[workgroup, name, statement]` triples for persistence snapshots.
+    #[serde(with = "prepared_statements_serde")]
     pub prepared_statements: BTreeMap<(String, String), PreparedStatement>,
     pub query_executions: BTreeMap<String, QueryExecution>,
     pub notebooks: BTreeMap<String, Notebook>,
@@ -35,6 +50,36 @@ pub struct AccountState {
     pub capacity_assignment_config: Option<CapacityAssignmentConfiguration>,
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
     pub initialized: bool,
+}
+
+/// (De)serialize a `(workgroup, name) -> PreparedStatement` map as a sequence
+/// of `(workgroup, name, statement)` triples. JSON object keys must be strings,
+/// so the natural tuple-keyed map cannot be serialized directly.
+mod prepared_statements_serde {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::PreparedStatement;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<(String, String), PreparedStatement>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let entries: Vec<(&String, &String, &PreparedStatement)> =
+            map.iter().map(|((wg, name), ps)| (wg, name, ps)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<(String, String), PreparedStatement>, D::Error> {
+        let entries: Vec<(String, String, PreparedStatement)> = Vec::deserialize(deserializer)?;
+        Ok(entries
+            .into_iter()
+            .map(|(wg, name, ps)| ((wg, name), ps))
+            .collect())
+    }
 }
 
 impl AccountState {

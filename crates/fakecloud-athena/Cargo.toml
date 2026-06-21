@@ -11,6 +11,7 @@ version.workspace = true
 fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-glue = { workspace = true }
+fakecloud-persistence = { workspace = true }
 fakecloud-s3 = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -22,5 +23,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlparser = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

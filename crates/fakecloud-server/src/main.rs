@@ -2589,9 +2589,62 @@ async fn main() {
         wafv2_rate_limiter.clone(),
     );
     registry.register(Arc::new(wafv2_service));
-    let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone())
+    let athena_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("athena").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_athena::AthenaSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_athena::ATHENA_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "athena persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_athena::ATHENA_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *athena_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded athena persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse athena persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no athena persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read athena persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut athena_service = fakecloud_athena::AthenaService::new(athena_state.clone())
         .with_glue(glue_state.clone())
         .with_s3(s3_state.clone());
+    if let Some(store) = athena_snapshot_store.clone() {
+        athena_service = athena_service.with_snapshot_store(store);
+    }
+    if let Some(h) = athena_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("athena", h);
+    }
     registry.register(Arc::new(athena_service));
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
