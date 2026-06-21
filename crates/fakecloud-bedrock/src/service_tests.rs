@@ -77,6 +77,38 @@ fn resolve_action_list_foundation_models() {
 }
 
 #[test]
+fn resolve_action_trailing_slash_collection_lists() {
+    // botocore < 1.40 / curl append `/` to a bare collection URI; it must
+    // route to List, not GetFoundationModel("") (bug-audit 2026-06-20, 1.1).
+    let req = make_request(Method::GET, "/foundation-models/", "");
+    let (action, id, _) = BedrockService::resolve_action(&req).unwrap();
+    assert_eq!(action, "ListFoundationModels");
+    assert!(id.is_none());
+
+    let req = make_request(Method::GET, "/guardrails/", "");
+    assert_eq!(
+        BedrockService::resolve_action(&req).unwrap().0,
+        "ListGuardrails"
+    );
+}
+
+#[test]
+fn resolve_action_async_invoke_trailing_slash_still_validates() {
+    // async-invoke deliberately routes a trailing slash to GetAsyncInvoke("")
+    // so the length validator surfaces the missing identifier; the GET
+    // empty-filtering must not regress that.
+    let req = make_request(Method::GET, "/async-invoke", "");
+    assert_eq!(
+        BedrockService::resolve_action(&req).unwrap().0,
+        "ListAsyncInvokes"
+    );
+    let req = make_request(Method::GET, "/async-invoke/", "");
+    let (action, id, _) = BedrockService::resolve_action(&req).unwrap();
+    assert_eq!(action, "GetAsyncInvoke");
+    assert_eq!(id.unwrap(), "");
+}
+
+#[test]
 fn resolve_action_get_foundation_model() {
     let req = make_request(
         Method::GET,
