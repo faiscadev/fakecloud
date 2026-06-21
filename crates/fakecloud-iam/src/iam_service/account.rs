@@ -19,10 +19,11 @@ use fakecloud_aws::xml::xml_escape;
 /// Each `<member>` carries the user record plus its inline policies, group
 /// memberships, attached managed policies, and tags — exactly the fields
 /// AWS returns in the same call.
-fn build_user_details_xml(state: &IamState) -> String {
-    state
-        .users
-        .values()
+fn build_user_details_xml(state: &IamState) -> Vec<String> {
+    let mut users: Vec<_> = state.users.values().collect();
+    users.sort_by(|a, b| a.user_name.cmp(&b.user_name));
+    users
+        .into_iter()
         .map(|u| {
             let inline_policies: String = state
                 .user_inline_policies
@@ -73,17 +74,17 @@ fn build_user_details_xml(state: &IamState) -> String {
                 u.path, u.user_name, u.user_id, u.arn, u.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// Build the `<RoleDetailList>` body for `GetAccountAuthorizationDetails`.
 /// Each `<member>` carries the role plus its inline policies, attached
 /// managed policies, the instance profiles it lives in, and tags.
-fn build_role_details_xml(state: &IamState) -> String {
-    state
-        .roles
-        .values()
+fn build_role_details_xml(state: &IamState) -> Vec<String> {
+    let mut roles: Vec<_> = state.roles.values().collect();
+    roles.sort_by(|a, b| a.role_name.cmp(&b.role_name));
+    roles
+        .into_iter()
         .map(|r| {
             let inline_policies: String = state
                 .role_inline_policies
@@ -140,17 +141,17 @@ fn build_role_details_xml(state: &IamState) -> String {
                 url_encode(&r.assume_role_policy_document),
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// Build the `<GroupDetailList>` body for `GetAccountAuthorizationDetails`.
 /// Each `<member>` carries the group plus its inline policies and attached
 /// managed policies.
-fn build_group_details_xml(state: &IamState) -> String {
-    state
-        .groups
-        .values()
+fn build_group_details_xml(state: &IamState) -> Vec<String> {
+    let mut groups: Vec<_> = state.groups.values().collect();
+    groups.sort_by(|a, b| a.group_name.cmp(&b.group_name));
+    groups
+        .into_iter()
         .map(|g| {
             let inline_policies: String = g
                 .inline_policies
@@ -182,8 +183,7 @@ fn build_group_details_xml(state: &IamState) -> String {
                 g.path, g.group_name, g.group_id, g.arn, g.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// Validate the upper-bound constraints AWS enforces on the password
@@ -294,10 +294,11 @@ fn apply_password_policy_updates(policy: &mut AccountPasswordPolicy, req: &AwsRe
 /// Build the `<Policies>` body for `GetAccountAuthorizationDetails`. Each
 /// `<member>` carries the policy plus the full version list (so a caller
 /// can see every revision the policy has had, not just the default).
-fn build_policy_details_xml(state: &IamState) -> String {
-    state
-        .policies
-        .values()
+fn build_policy_details_xml(state: &IamState) -> Vec<String> {
+    let mut policies: Vec<_> = state.policies.values().collect();
+    policies.sort_by(|a, b| a.arn.cmp(&b.arn));
+    policies
+        .into_iter()
         .map(|p| {
             let versions: String = p
                 .versions
@@ -317,8 +318,7 @@ fn build_policy_details_xml(state: &IamState) -> String {
                 p.attachment_count, p.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 impl IamService {
@@ -408,21 +408,99 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _ = super::validate_list_pagination(req)?;
+        use base64::Engine;
+        let max_items = super::validate_list_pagination(req)? as usize;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let user_details = build_user_details_xml(state);
-        let role_details = build_role_details_xml(state);
-        let group_details = build_group_details_xml(state);
-        let policy_details = build_policy_details_xml(state);
+        // Optional Filter restricts which entity types are returned. Anything
+        // outside this set means "no filter".
+        let filters: Vec<String> = (1..=10)
+            .filter_map(|i| req.query_params.get(&format!("Filter.member.{i}")).cloned())
+            .collect();
+        let want = |cat: &str| filters.is_empty() || filters.iter().any(|f| f == cat);
+
+        // Flatten every entity into one ordered sequence tagged by category so
+        // a single Marker can walk across the four sections (AWS pages the
+        // combined set, not each list independently).
+        #[derive(Clone, Copy)]
+        enum Cat {
+            User,
+            Role,
+            Group,
+            Policy,
+        }
+        let mut combined: Vec<(Cat, String)> = Vec::new();
+        if want("User") {
+            combined.extend(
+                build_user_details_xml(state)
+                    .into_iter()
+                    .map(|f| (Cat::User, f)),
+            );
+        }
+        if want("Role") {
+            combined.extend(
+                build_role_details_xml(state)
+                    .into_iter()
+                    .map(|f| (Cat::Role, f)),
+            );
+        }
+        if want("Group") {
+            combined.extend(
+                build_group_details_xml(state)
+                    .into_iter()
+                    .map(|f| (Cat::Group, f)),
+            );
+        }
+        if want("LocalManagedPolicy") || want("AWSManagedPolicy") {
+            combined.extend(
+                build_policy_details_xml(state)
+                    .into_iter()
+                    .map(|f| (Cat::Policy, f)),
+            );
+        }
+
+        // Marker is an opaque base64 of the resume offset into `combined`.
+        let start: usize = req
+            .query_params
+            .get("Marker")
+            .and_then(|m| base64::engine::general_purpose::STANDARD.decode(m).ok())
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(combined.len());
+        let end = start.saturating_add(max_items).min(combined.len());
+        let is_truncated = end < combined.len();
+        let marker_xml = if is_truncated {
+            let token = base64::engine::general_purpose::STANDARD.encode(end.to_string());
+            format!("\n    <Marker>{token}</Marker>")
+        } else {
+            String::new()
+        };
+
+        let mut users = Vec::new();
+        let mut roles = Vec::new();
+        let mut groups = Vec::new();
+        let mut policies = Vec::new();
+        for (cat, frag) in &combined[start..end] {
+            match cat {
+                Cat::User => users.push(frag.clone()),
+                Cat::Role => roles.push(frag.clone()),
+                Cat::Group => groups.push(frag.clone()),
+                Cat::Policy => policies.push(frag.clone()),
+            }
+        }
+        let user_details = users.join("\n");
+        let role_details = roles.join("\n");
+        let group_details = groups.join("\n");
+        let policy_details = policies.join("\n");
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetAccountAuthorizationDetailsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <GetAccountAuthorizationDetailsResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_xml}
     <UserDetailList>
 {user_details}
     </UserDetailList>
