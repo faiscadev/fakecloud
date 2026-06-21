@@ -142,7 +142,7 @@ impl ApiGatewayService {
             .get_mut(&key)
             .ok_or_else(|| not_found("Integration not found"))?;
         apply_patch_operations(req, |op, path, value| {
-            if op != "replace" && op != "add" {
+            if op != "replace" && op != "add" && op != "remove" {
                 return;
             }
             match path {
@@ -154,6 +154,33 @@ impl ApiGatewayService {
                 }
                 "/timeoutInMillis" => {
                     integration.timeout_in_millis = value.as_i64().map(|v| v as i32);
+                }
+                // Previously dropped (bug-audit 2026-06-20, 1.21).
+                "/credentials" => integration.credentials = value.as_str().map(String::from),
+                "/connectionType" => integration.connection_type = value.as_str().map(String::from),
+                "/contentHandling" => {
+                    integration.content_handling = value.as_str().map(String::from)
+                }
+                "/passthroughBehavior" => {
+                    if let Some(s) = value.as_str() {
+                        integration.passthrough_behavior = s.to_string();
+                    }
+                }
+                _ if path.starts_with("/requestParameters/") => {
+                    let k = path.trim_start_matches("/requestParameters/").to_string();
+                    if op == "remove" {
+                        integration.request_parameters.remove(&k);
+                    } else if let Some(v) = value.as_str() {
+                        integration.request_parameters.insert(k, v.to_string());
+                    }
+                }
+                _ if path.starts_with("/requestTemplates/") => {
+                    let k = path.trim_start_matches("/requestTemplates/").to_string();
+                    if op == "remove" {
+                        integration.request_templates.remove(&k);
+                    } else if let Some(v) = value.as_str() {
+                        integration.request_templates.insert(k, v.to_string());
+                    }
                 }
                 _ => {}
             }

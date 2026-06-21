@@ -107,6 +107,23 @@ impl ApiGatewayService {
                     }
                 }
                 "/description" => plan.description = value.as_str().map(String::from),
+                // Throttle/quota patches were dropped, so rate/burst/quota
+                // changes no-op'd and quota metering used stale values
+                // (bug-audit 2026-06-20, 1.21).
+                _ if path.starts_with("/throttle/") => {
+                    let key = path.trim_start_matches("/throttle/").to_string();
+                    let obj = plan.throttle.get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = obj.as_object_mut() {
+                        m.insert(key, value.clone());
+                    }
+                }
+                _ if path.starts_with("/quota/") => {
+                    let key = path.trim_start_matches("/quota/").to_string();
+                    let obj = plan.quota.get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = obj.as_object_mut() {
+                        m.insert(key, value.clone());
+                    }
+                }
                 _ => {}
             }
         });
