@@ -97,8 +97,71 @@ impl AthenaService {
         if let Some(s) = body.get("State").and_then(Value::as_str) {
             wg.state = s.to_string();
         }
-        if let Some(c) = body.get("ConfigurationUpdates") {
-            wg.configuration = Some(c.clone());
+        // ConfigurationUpdates has a different shape than Configuration
+        // (ResultConfigurationUpdates vs ResultConfiguration, Remove* flags),
+        // so storing it verbatim corrupted GetWorkGroup's Configuration
+        // (bug-audit 2026-06-20, 1.24). Merge the updates into the existing
+        // Configuration with the correct field mapping instead.
+        if let Some(updates) = body.get("ConfigurationUpdates").and_then(Value::as_object) {
+            let mut config = wg
+                .configuration
+                .as_ref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for key in [
+                "EnforceWorkGroupConfiguration",
+                "PublishCloudWatchMetricsEnabled",
+                "RequesterPaysEnabled",
+                "EngineVersion",
+                "BytesScannedCutoffPerQuery",
+                "AdditionalConfiguration",
+                "ExecutionRole",
+                "CustomerContentEncryptionConfiguration",
+            ] {
+                if let Some(v) = updates.get(key) {
+                    config.insert(key.to_string(), v.clone());
+                }
+            }
+            if updates
+                .get("RemoveBytesScannedCutoffPerQuery")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                config.remove("BytesScannedCutoffPerQuery");
+            }
+            if let Some(rcu) = updates
+                .get("ResultConfigurationUpdates")
+                .and_then(Value::as_object)
+            {
+                let mut rc = config
+                    .get("ResultConfiguration")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                for key in [
+                    "OutputLocation",
+                    "EncryptionConfiguration",
+                    "ExpectedBucketOwner",
+                    "AclConfiguration",
+                ] {
+                    if let Some(v) = rcu.get(key) {
+                        rc.insert(key.to_string(), v.clone());
+                    }
+                }
+                for (flag, field) in [
+                    ("RemoveOutputLocation", "OutputLocation"),
+                    ("RemoveEncryptionConfiguration", "EncryptionConfiguration"),
+                    ("RemoveExpectedBucketOwner", "ExpectedBucketOwner"),
+                    ("RemoveAclConfiguration", "AclConfiguration"),
+                ] {
+                    if rcu.get(flag).and_then(Value::as_bool) == Some(true) {
+                        rc.remove(field);
+                    }
+                }
+                config.insert("ResultConfiguration".to_string(), Value::Object(rc));
+            }
+            wg.configuration = Some(Value::Object(config));
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

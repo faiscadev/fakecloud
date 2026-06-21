@@ -1141,6 +1141,51 @@ mod tests {
     }
 
     #[test]
+    fn update_work_group_merges_configuration_updates() {
+        // UpdateWorkGroup stored ConfigurationUpdates verbatim, corrupting
+        // Configuration's shape (bug-audit 2026-06-20, 1.24). It must merge the
+        // updates with the right field mapping and preserve untouched fields.
+        let svc = AthenaService::new(SharedAthenaState::default());
+        svc.create_work_group(&req(
+            "CreateWorkGroup",
+            json!({
+                "Name": "wg",
+                "Configuration": {
+                    "ResultConfiguration": {"OutputLocation": "s3://orig/"},
+                    "PublishCloudWatchMetricsEnabled": false
+                }
+            }),
+        ))
+        .unwrap();
+
+        svc.update_work_group(&req(
+            "UpdateWorkGroup",
+            json!({
+                "WorkGroup": "wg",
+                "ConfigurationUpdates": {
+                    "PublishCloudWatchMetricsEnabled": true,
+                    "ResultConfigurationUpdates": {"OutputLocation": "s3://new/"}
+                }
+            }),
+        ))
+        .unwrap();
+
+        let got = parse_json(
+            &svc.get_work_group(&req("GetWorkGroup", json!({ "WorkGroup": "wg" })))
+                .unwrap(),
+        );
+        let cfg = &got["WorkGroup"]["Configuration"];
+        // ResultConfigurationUpdates merged into ResultConfiguration (right shape).
+        assert_eq!(
+            cfg["ResultConfiguration"]["OutputLocation"], "s3://new/",
+            "{cfg}"
+        );
+        // Scalar update applied; no stray ConfigurationUpdates/ResultConfigurationUpdates keys.
+        assert_eq!(cfg["PublishCloudWatchMetricsEnabled"], true);
+        assert!(cfg.get("ResultConfigurationUpdates").is_none(), "{cfg}");
+    }
+
+    #[test]
     fn start_query_execution_with_named_query_id() {
         let svc = AthenaService::new(SharedAthenaState::default());
         let create_resp = svc
