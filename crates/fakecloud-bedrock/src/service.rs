@@ -138,7 +138,23 @@ impl BedrockService {
         let raw = req.raw_path.trim_start_matches('/');
         let segs_owned: Vec<String> = if raw.is_empty() {
             Vec::new()
+        } else if req.method == Method::GET {
+            // botocore < 1.40 and curl append a trailing slash to a bare
+            // collection URI (`GET /foundation-models/`). With empties kept
+            // that split to ["foundation-models", ""] and matched the `{id}`
+            // arm -> GetFoundationModel("") instead of the List op (the #1645
+            // shape; bug-audit 2026-06-20, 1.1). Filter empties on GET so a
+            // trailing slash routes to List. Routes that must still surface a
+            // missing identifier on GET (async-invoke) gate on
+            // `raw_path.ends_with('/')` directly, so they're unaffected.
+            raw.split('/')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
         } else {
+            // Non-GET keeps empty segments so missing-`@httpLabel` mutations
+            // (`DELETE /automated-reasoning-policies//`) land on the intended
+            // action with an empty id and emit the correct ValidationException.
             raw.split('/').map(|s| s.to_string()).collect()
         };
         let segs: &[String] = &segs_owned;
