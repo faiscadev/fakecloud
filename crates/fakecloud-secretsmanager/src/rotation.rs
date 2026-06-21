@@ -259,6 +259,7 @@ mod tests {
             }),
             last_rotated_at: last_rotated,
             resource_policy: None,
+            replica_regions: Vec::new(),
         }
     }
 
