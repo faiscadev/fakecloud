@@ -141,6 +141,7 @@ Running fakecloud inside Kubernetes? Set `FAKECLOUD_ELASTICACHE_BACKEND=k8s` (or
 
 ## Links
 
+- **Homebrew:** `brew install fakecloud`
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Local RDS for tests](/local-rds/), [Fake AWS server for tests](/fake-aws-server/)

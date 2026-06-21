@@ -149,6 +149,7 @@ If you need SQS + cross-service (SNS -> SQS, SQS -> Lambda actually firing), pic
 
 ## Links
 
+- **Homebrew:** `brew install fakecloud`
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [Test Lambda locally](/test-lambda-locally/), [Integration testing AWS in CI](/blog/integration-testing-aws-in-ci/)

@@ -98,6 +98,7 @@ Full operation surface across 27 modules:
 
 ## Links
 
+- **Homebrew**: `brew install fakecloud`
 - **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Deep dive**: [How to test Bedrock code locally, for free, deterministically](/blog/bedrock-local-testing/)

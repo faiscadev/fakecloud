@@ -109,6 +109,7 @@ Assert your code handles every Bedrock error code you read in the docs. No more 
 
 ## Links
 
+- **Homebrew**: `brew install fakecloud`
 - **Install**: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo**: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Tutorial**: [How to test Bedrock code locally](/blog/bedrock-local-testing/)

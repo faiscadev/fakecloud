@@ -131,7 +131,8 @@ No. fakecloud is written from scratch in Rust. No LocalStack code was used. Loca
 
 ## Get started
 
-- **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
+- **Homebrew:** `brew install fakecloud`
+- **Install script:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Docker:** `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`
 - **Cargo:** `cargo install fakecloud`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
