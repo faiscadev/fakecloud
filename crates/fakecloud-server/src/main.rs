@@ -2410,8 +2410,61 @@ async fn main() {
     registry.register(route53_service.clone());
     let acm_service = Arc::new(fakecloud_acm::AcmService::new(acm_state.clone()));
     registry.register(acm_service.clone());
-    let firehose_service =
+    let firehose_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("firehose").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_firehose::FirehoseSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_firehose::FIREHOSE_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "firehose persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_firehose::FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *firehose_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded firehose persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse firehose persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no firehose persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read firehose persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut firehose_service =
         fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
+    if let Some(store) = firehose_snapshot_store.clone() {
+        firehose_service = firehose_service.with_snapshot_store(store);
+    }
+    if let Some(h) = firehose_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("firehose", h);
+    }
     registry.register(Arc::new(firehose_service));
     let glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
     registry.register(Arc::new(glue_service));

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedFirehoseState = Arc<RwLock<FirehoseAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FirehoseAccounts {
     pub accounts: BTreeMap<String, FirehoseState>,
 }
@@ -28,7 +28,7 @@ impl FirehoseAccounts {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirehoseState {
     pub account_id: String,
     pub region: String,
@@ -55,6 +55,17 @@ impl FirehoseState {
             .or_default()
     }
 }
+
+/// On-disk snapshot envelope for Firehose state. Versioned so format changes
+/// fail loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FirehoseSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<FirehoseAccounts>,
+}
+
+pub const FIREHOSE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryStream {

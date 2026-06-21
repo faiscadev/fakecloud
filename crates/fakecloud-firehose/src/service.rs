@@ -9,14 +9,30 @@ use fakecloud_aws::arn::Arn;
 use http::StatusCode;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 use fakecloud_s3::{memory_body, S3Object, SharedS3State};
 
 use crate::state::{
-    DeliveryStream, EncryptionConfig, FirehoseAccounts, S3Destination, SharedFirehoseState,
+    DeliveryStream, EncryptionConfig, FirehoseAccounts, FirehoseSnapshot, S3Destination,
+    SharedFirehoseState, FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
 };
+
+/// Actions that mutate persisted Firehose state and therefore must trigger a
+/// snapshot write. PutRecord/PutRecordBatch deliver to S3 (persisted by the S3
+/// store) but do not change Firehose's own state, so they are excluded.
+const MUTATING_ACTIONS: &[&str] = &[
+    "CreateDeliveryStream",
+    "DeleteDeliveryStream",
+    "TagDeliveryStream",
+    "UntagDeliveryStream",
+    "UpdateDestination",
+    "StartDeliveryStreamEncryption",
+    "StopDeliveryStreamEncryption",
+];
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateDeliveryStream",
@@ -36,11 +52,18 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 pub struct FirehoseService {
     state: SharedFirehoseState,
     s3: Option<SharedS3State>,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl FirehoseService {
     pub fn new(state: SharedFirehoseState) -> Self {
-        Self { state, s3: None }
+        Self {
+            state,
+            s3: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
     }
 
     pub fn with_s3(mut self, s3: SharedS3State) -> Self {
@@ -48,8 +71,74 @@ impl FirehoseService {
         self
     }
 
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
     pub fn shared_state(&self) -> SharedFirehoseState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_firehose_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Firehose state when invoked, or
+    /// `None` in memory mode (no snapshot store). The CloudFormation provisioner
+    /// mutates `state` directly and uses this to write a CFN-provisioned
+    /// resource through to disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_firehose_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current Firehose state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `FirehoseService::save_snapshot` and the
+/// CloudFormation provisioner's post-provision persist hook so both route
+/// through the same serialize-and-write path.
+pub async fn save_firehose_snapshot(
+    state: &SharedFirehoseState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = FirehoseSnapshot {
+        schema_version: FIREHOSE_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write firehose snapshot"),
+        Err(err) => tracing::error!(%err, "firehose snapshot task panicked"),
     }
 }
 
@@ -70,7 +159,8 @@ impl AwsService for FirehoseService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = MUTATING_ACTIONS.contains(&req.action.as_str());
+        let result = match req.action.as_str() {
             "CreateDeliveryStream" => self.create_delivery_stream(&req),
             "DescribeDeliveryStream" => self.describe_delivery_stream(&req),
             "ListDeliveryStreams" => self.list_delivery_streams(&req),
@@ -84,7 +174,11 @@ impl AwsService for FirehoseService {
             "StartDeliveryStreamEncryption" => self.start_delivery_stream_encryption(&req),
             "StopDeliveryStreamEncryption" => self.stop_delivery_stream_encryption(&req),
             other => Err(AwsServiceError::action_not_implemented("firehose", other)),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 
