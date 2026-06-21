@@ -263,10 +263,37 @@ pub(crate) fn detach_network_interface(
 }
 
 pub(crate) fn modify_network_interface_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "NetworkInterfaceId")?;
+    let eni_id = require(&req.query_params, "NetworkInterfaceId")?;
+    // The old handler validated the id and returned true, persisting nothing --
+    // so SourceDestCheck (NAT-instance source/dest disable), Description, and
+    // Groups changes silently no-op'd (bug-audit 2026-06-20, 1.22). Apply each
+    // attribute present in the request.
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
+            if let Some(v) = req.query_params.get("SourceDestCheck.Value") {
+                eni.source_dest_check = v == "true";
+            }
+            if let Some(d) = req.query_params.get("Description.Value") {
+                eni.description = d.clone();
+            }
+            // Groups: SecurityGroupId.1, SecurityGroupId.2, ...
+            let mut groups = Vec::new();
+            for i in 1.. {
+                match req.query_params.get(&format!("SecurityGroupId.{i}")) {
+                    Some(g) => groups.push(g.clone()),
+                    None => break,
+                }
+            }
+            if !groups.is_empty() {
+                eni.group_ids = groups;
+            }
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyNetworkInterfaceAttribute",
         &req.request_id,
@@ -501,4 +528,82 @@ pub(crate) fn unassign_ipv6_addresses(
         &req.request_id,
         &body,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: "ModifyNetworkInterfaceAttribute".into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn modify_network_interface_attribute_persists_fields() {
+        // The handler was a validate-then-return-true stub; SourceDestCheck,
+        // Description, and Groups must actually persist (bug-audit 2026-06-20,
+        // 1.22).
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.network_interfaces.insert(
+                "eni-1".to_string(),
+                NetworkInterface {
+                    network_interface_id: "eni-1".into(),
+                    subnet_id: "subnet-1".into(),
+                    vpc_id: "vpc-1".into(),
+                    availability_zone: "us-east-1a".into(),
+                    description: "old".into(),
+                    mac_address: "02:00:00:00:00:01".into(),
+                    private_ip_address: "10.0.0.5".into(),
+                    status: "available".into(),
+                    interface_type: "interface".into(),
+                    source_dest_check: true,
+                    group_ids: vec!["sg-old".into()],
+                    private_ips: vec![],
+                    ipv6_addresses: vec![],
+                    attachment: None,
+                },
+            );
+        }
+
+        modify_network_interface_attribute(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("SourceDestCheck.Value", "false"),
+                ("Description.Value", "new-desc"),
+                ("SecurityGroupId.1", "sg-a"),
+                ("SecurityGroupId.2", "sg-b"),
+            ]),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        assert!(!eni.source_dest_check, "SourceDestCheck must persist");
+        assert_eq!(eni.description, "new-desc");
+        assert_eq!(eni.group_ids, vec!["sg-a".to_string(), "sg-b".to_string()]);
+    }
 }
