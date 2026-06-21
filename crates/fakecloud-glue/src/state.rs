@@ -162,6 +162,18 @@ pub struct Job {
     pub worker_type: Option<String>,
     pub number_of_workers: Option<i64>,
     pub execution_class: Option<String>,
+    /// Standard Job fields that were previously accepted then dropped
+    /// (bug-audit 2026-06-20, 1.24). Round-tripped verbatim.
+    #[serde(default)]
+    pub connections: Option<serde_json::Value>,
+    #[serde(default)]
+    pub execution_property: Option<serde_json::Value>,
+    #[serde(default)]
+    pub security_configuration: Option<String>,
+    #[serde(default)]
+    pub notification_property: Option<serde_json::Value>,
+    #[serde(default)]
+    pub non_overridable_arguments: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

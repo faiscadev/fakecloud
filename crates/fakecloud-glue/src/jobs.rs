@@ -63,7 +63,21 @@ pub(crate) fn job_to_json(j: &Job) -> Value {
         "WorkerType": j.worker_type,
         "NumberOfWorkers": j.number_of_workers,
         "ExecutionClass": j.execution_class,
+        "Connections": j.connections,
+        "ExecutionProperty": j.execution_property,
+        "SecurityConfiguration": j.security_configuration,
+        "NotificationProperty": j.notification_property,
+        "NonOverridableArguments": j.non_overridable_arguments,
     })
+}
+
+/// Clone a JSON value into `Some` unless it's null/absent.
+fn opt_value(v: &Value) -> Option<Value> {
+    if v.is_null() {
+        None
+    } else {
+        Some(v.clone())
+    }
 }
 
 fn job_run_to_json(r: &JobRun) -> Value {
@@ -110,6 +124,11 @@ impl GlueService {
             worker_type: body["WorkerType"].as_str().map(String::from),
             number_of_workers: body["NumberOfWorkers"].as_i64(),
             execution_class: body["ExecutionClass"].as_str().map(String::from),
+            connections: opt_value(&body["Connections"]),
+            execution_property: opt_value(&body["ExecutionProperty"]),
+            security_configuration: body["SecurityConfiguration"].as_str().map(String::from),
+            notification_property: opt_value(&body["NotificationProperty"]),
+            non_overridable_arguments: parse_string_map(&body["NonOverridableArguments"]),
         };
         state.jobs.insert(name.to_string(), job);
         Ok(AwsResponse::ok_json(json!({ "Name": name })))
@@ -183,6 +202,24 @@ impl GlueService {
         }
         if let Some(n) = update["NumberOfWorkers"].as_i64() {
             job.number_of_workers = Some(n);
+        }
+        if let Some(s) = update["ExecutionClass"].as_str() {
+            job.execution_class = Some(s.to_string());
+        }
+        if !update["Connections"].is_null() {
+            job.connections = opt_value(&update["Connections"]);
+        }
+        if !update["ExecutionProperty"].is_null() {
+            job.execution_property = opt_value(&update["ExecutionProperty"]);
+        }
+        if let Some(s) = update["SecurityConfiguration"].as_str() {
+            job.security_configuration = Some(s.to_string());
+        }
+        if !update["NotificationProperty"].is_null() {
+            job.notification_property = opt_value(&update["NotificationProperty"]);
+        }
+        if update["NonOverridableArguments"].is_object() {
+            job.non_overridable_arguments = parse_string_map(&update["NonOverridableArguments"]);
         }
         job.last_modified_on = Utc::now();
         Ok(AwsResponse::ok_json(json!({ "JobName": name })))
@@ -331,6 +368,57 @@ mod tests {
         assert!(svc
             .get_job(&req("GetJob", json!({"JobName": "etl"})))
             .is_err());
+    }
+
+    #[test]
+    fn create_and_update_job_round_trip_extended_fields() {
+        // Connections / ExecutionProperty / SecurityConfiguration /
+        // NotificationProperty / NonOverridableArguments were dropped
+        // (bug-audit 2026-06-20, 1.24).
+        let svc = GlueService::default();
+        svc.create_job(&req(
+            "CreateJob",
+            json!({
+                "Name": "etl",
+                "Role": "arn:aws:iam::123456789012:role/glue",
+                "Command": {"Name": "glueetl"},
+                "Connections": {"Connections": ["conn-a"]},
+                "ExecutionProperty": {"MaxConcurrentRuns": 3},
+                "SecurityConfiguration": "sec-cfg",
+                "NotificationProperty": {"NotifyDelayAfter": 10},
+                "NonOverridableArguments": {"--locked": "1"}
+            }),
+        ))
+        .unwrap();
+
+        let got = |svc: &GlueService| -> Value {
+            let resp = svc
+                .get_job(&req("GetJob", json!({"JobName": "etl"})))
+                .unwrap();
+            serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()["Job"].clone()
+        };
+        let j = got(&svc);
+        assert_eq!(j["Connections"]["Connections"][0], "conn-a", "{j}");
+        assert_eq!(j["ExecutionProperty"]["MaxConcurrentRuns"], 3);
+        assert_eq!(j["SecurityConfiguration"], "sec-cfg");
+        assert_eq!(j["NotificationProperty"]["NotifyDelayAfter"], 10);
+        assert_eq!(j["NonOverridableArguments"]["--locked"], "1");
+
+        // UpdateJob applies the same fields.
+        svc.update_job(&req(
+            "UpdateJob",
+            json!({
+                "JobName": "etl",
+                "JobUpdate": {
+                    "SecurityConfiguration": "sec-cfg-2",
+                    "ExecutionProperty": {"MaxConcurrentRuns": 7}
+                }
+            }),
+        ))
+        .unwrap();
+        let j = got(&svc);
+        assert_eq!(j["SecurityConfiguration"], "sec-cfg-2");
+        assert_eq!(j["ExecutionProperty"]["MaxConcurrentRuns"], 7);
     }
 
     #[test]
