@@ -3465,6 +3465,12 @@ fn describe_user_pool() {
     let b = resp_json(&resp);
     assert_eq!(b["UserPool"]["Id"], pool_id);
     assert_eq!(b["UserPool"]["Name"], "test-pool");
+    // Endpoint must be present for Terraform's OIDC issuer/JWKS wiring (1.4).
+    let endpoint = b["UserPool"]["Endpoint"]
+        .as_str()
+        .expect("Endpoint present");
+    assert!(endpoint.starts_with("cognito-idp."), "{endpoint}");
+    assert!(endpoint.ends_with(&pool_id), "{endpoint}");
 }
 
 #[test]
