@@ -1624,6 +1624,68 @@ fn get_account_authorization_details() {
     assert!(body.contains("<RoleName>auth-role</RoleName>"));
 }
 
+#[test]
+fn get_account_authorization_details_paginates_by_marker() {
+    // MaxItems/Marker were validated then ignored: everything returned with
+    // IsTruncated=false (bug-audit 2026-06-20, 1.14).
+    let svc = make_service();
+    for n in ["aaa", "bbb", "ccc"] {
+        svc.create_user(&make_request("CreateUser", vec![("UserName", n)]))
+            .unwrap();
+    }
+
+    // First page of 2 users is truncated and carries a Marker.
+    let resp = svc
+        .get_account_authorization_details(&make_request(
+            "GetAccountAuthorizationDetails",
+            vec![("MaxItems", "2")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"), "{body}");
+    assert!(body.contains("<UserName>aaa</UserName>"));
+    assert!(body.contains("<UserName>bbb</UserName>"));
+    assert!(!body.contains("<UserName>ccc</UserName>"));
+    let marker = extract_xml_tag(&body, "Marker").to_string();
+    assert!(!marker.is_empty());
+
+    // Resume: the last user, not truncated, no Marker.
+    let resp = svc
+        .get_account_authorization_details(&make_request(
+            "GetAccountAuthorizationDetails",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<IsTruncated>false</IsTruncated>"), "{body}");
+    assert!(body.contains("<UserName>ccc</UserName>"));
+    assert!(!body.contains("<UserName>aaa</UserName>"));
+}
+
+#[test]
+fn get_account_authorization_details_filter_restricts_types() {
+    // Filter was ignored; with Filter=Role only roles should appear.
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "f-user")]))
+        .unwrap();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![("RoleName", "f-role"), ("AssumeRolePolicyDocument", trust)],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .get_account_authorization_details(&make_request(
+            "GetAccountAuthorizationDetails",
+            vec![("Filter.member.1", "Role")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<RoleName>f-role</RoleName>"));
+    assert!(!body.contains("<UserName>f-user</UserName>"), "{body}");
+}
+
 // ---- ListEntitiesForPolicy Tests ----
 
 #[test]
