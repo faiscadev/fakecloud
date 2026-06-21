@@ -4813,3 +4813,17 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[test]
+fn recovery_predicate_redrives_transient_states() {
+    use crate::service::is_recoverable_status;
+    // Mid-transition states must be recovered (re-driven) on restart.
+    assert!(is_recoverable_status("available"));
+    assert!(is_recoverable_status("creating"));
+    assert!(is_recoverable_status("modifying"));
+    assert!(is_recoverable_status("rebooting cache cluster nodes"));
+    assert!(is_recoverable_status("starting"));
+    // Resources being torn down are not.
+    assert!(!is_recoverable_status("deleting"));
+    assert!(!is_recoverable_status("deleted"));
+}

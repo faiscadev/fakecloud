@@ -158,6 +158,15 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "TestMigration",
 ];
 
+/// On restart, recovery must re-drive every resource that isn't being torn
+/// down -- not just `available` ones. A resource snapshotted mid-transition
+/// (creating/modifying/rebooting/starting) would otherwise never have its
+/// background task re-spawned and stay stuck forever (bug-audit 2026-06-20,
+/// 4.5).
+pub(crate) fn is_recoverable_status(status: &str) -> bool {
+    !matches!(status, "deleting" | "deleted")
+}
+
 pub struct ElastiCacheService {
     state: SharedElastiCacheState,
     runtime: Option<Arc<ElastiCacheRuntime>>,
@@ -254,7 +263,12 @@ impl ElastiCacheService {
             for (_, state) in accounts.iter_mut() {
                 let account_id = state.account_id.clone();
                 for (id, cluster) in state.cache_clusters.iter_mut() {
-                    if cluster.cache_cluster_status == "available" {
+                    // Re-drive anything not being torn down. The old code only
+                    // recovered "available" resources, so one snapshotted
+                    // mid-transition (creating/modifying/rebooting) was never
+                    // re-spawned and stayed stuck forever (bug-audit 2026-06-20,
+                    // 4.5).
+                    if is_recoverable_status(&cluster.cache_cluster_status) {
                         cluster.cache_cluster_status = "starting".to_string();
                         clusters.push(PendingCluster {
                             account_id: account_id.clone(),
@@ -264,7 +278,7 @@ impl ElastiCacheService {
                     }
                 }
                 for (id, rg) in state.replication_groups.iter_mut() {
-                    if rg.status == "available" {
+                    if is_recoverable_status(&rg.status) {
                         rg.status = "starting".to_string();
                         replications.push(PendingReplication {
                             account_id: account_id.clone(),
@@ -274,7 +288,7 @@ impl ElastiCacheService {
                     }
                 }
                 for (name, sc) in state.serverless_caches.iter_mut() {
-                    if sc.status == "available" {
+                    if is_recoverable_status(&sc.status) {
                         sc.status = "creating".to_string();
                         serverless.push(PendingServerless {
                             account_id: account_id.clone(),
