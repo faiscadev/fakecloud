@@ -238,9 +238,15 @@ impl CognitoService {
             .filter(|e| e.user_pool_id == pool_id && e.username == username)
             .collect();
 
-        let start = next_token
-            .and_then(|t| events.iter().position(|e| e.event_id == t))
-            .unwrap_or(0);
+        // A stale token (its event aged out) ends the listing rather than
+        // silently restarting at page 1 (bug-audit 2026-06-20, 1.14).
+        let start = match next_token {
+            None => 0,
+            Some(t) => events
+                .iter()
+                .position(|e| e.event_id == t)
+                .unwrap_or(events.len()),
+        };
 
         let page: Vec<Value> = events
             .iter()

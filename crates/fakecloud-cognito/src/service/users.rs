@@ -577,7 +577,10 @@ impl CognitoService {
 
         // Find start index from PaginationToken
         let start_idx = if let Some(token) = pagination_token {
-            users.iter().position(|u| u.username == token).unwrap_or(0)
+            users
+                .iter()
+                .position(|u| u.username == token)
+                .unwrap_or(users.len())
         } else {
             0
         };

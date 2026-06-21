@@ -341,13 +341,15 @@ impl CognitoService {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let start = next_token
-            .and_then(|t| {
-                terms_list
-                    .iter()
-                    .position(|term| term["TermsId"].as_str() == Some(t))
-            })
-            .unwrap_or(0);
+        // A stale token (its item was deleted) ends the listing rather than
+        // silently restarting at page 1 (bug-audit 2026-06-20, 1.14).
+        let start = match next_token {
+            None => 0,
+            Some(t) => terms_list
+                .iter()
+                .position(|term| term["TermsId"].as_str() == Some(t))
+                .unwrap_or(terms_list.len()),
+        };
 
         let page: Vec<serde_json::Value> = terms_list
             .iter()
@@ -702,9 +704,13 @@ impl CognitoService {
 
         let creds: &[WebAuthnCredential] = all_creds.map(|v| v.as_slice()).unwrap_or(&[]);
 
-        let start = next_token
-            .and_then(|t| creds.iter().position(|c| c.credential_id == t))
-            .unwrap_or(0);
+        let start = match next_token {
+            None => 0,
+            Some(t) => creds
+                .iter()
+                .position(|c| c.credential_id == t)
+                .unwrap_or(creds.len()),
+        };
 
         let page: Vec<serde_json::Value> = creds
             .iter()
