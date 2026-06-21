@@ -1,6 +1,6 @@
 +++
 title = "Install"
-description = "Install fakecloud via script, Cargo, Docker, Docker Compose, or from source."
+description = "Install fakecloud via install script, Homebrew, Cargo, Docker, Docker Compose, or from source."
 weight = 1
 +++
 
@@ -8,12 +8,23 @@ fakecloud ships as a single ~19 MB binary. Pick whichever install path fits your
 
 ## Install script (recommended)
 
+Works on macOS and Linux, and in CI:
+
 ```sh
 curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
 The script downloads the latest release for your platform and puts the `fakecloud` binary somewhere on your `PATH`.
+
+## Homebrew
+
+```sh
+brew install fakecloud
+fakecloud
+```
+
+`fakecloud` is in [homebrew-core](https://formulae.brew.sh/formula/fakecloud), so no tap is needed. `brew upgrade fakecloud` tracks every release.
 
 ## Cargo
 

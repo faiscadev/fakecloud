@@ -8,6 +8,7 @@
   <a href="https://github.com/faiscadev/fakecloud/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <a href="https://github.com/faiscadev/fakecloud/pkgs/container/fakecloud"><img src="https://img.shields.io/badge/ghcr.io-fakecloud-blue?logo=docker" alt="GHCR"></a>
   <a href="https://crates.io/crates/fakecloud"><img src="https://img.shields.io/crates/v/fakecloud" alt="crates.io"></a>
+  <a href="https://formulae.brew.sh/formula/fakecloud"><img src="https://img.shields.io/homebrew/v/fakecloud" alt="Homebrew"></a>
   <a href="https://fakecloud.dev"><img src="https://img.shields.io/badge/docs-fakecloud.dev-green" alt="Docs"></a>
 </p>
 
@@ -20,7 +21,7 @@ In March 2026, LocalStack replaced its open-source Community Edition with a prop
 ## Quick start
 
 ```sh
-curl -fsSL https://fakecloud.dev/install.sh | bash
+curl -fsSL https://fakecloud.dev/install.sh | bash   # or: brew install fakecloud
 fakecloud
 ```
 
@@ -30,7 +31,7 @@ Then point any AWS SDK or CLI at `http://localhost:4566` with dummy credentials:
 aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name my-queue
 ```
 
-Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK (`cdklocal`), or any AWS SDK in any language. Other install options (Cargo, Docker, Docker Compose, source) and full guides: [fakecloud.dev/docs/getting-started](https://fakecloud.dev/docs/getting-started).
+Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK (`cdklocal`), or any AWS SDK in any language. Other install options (Homebrew, Cargo, Docker, Docker Compose, source) and full guides: [fakecloud.dev/docs/getting-started](https://fakecloud.dev/docs/getting-started).
 
 ## Why fakecloud
 

@@ -108,6 +108,7 @@ Secrets Manager secrets are encrypted with KMS by default. Rotation via Lambda w
 
 ## Links
 
+- **Homebrew:** `brew install fakecloud`
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [Local S3 for integration tests](/local-s3-for-tests/)

@@ -83,6 +83,7 @@ A fake AWS server on localhost is language-agnostic (any SDK works), runs real c
 
 ## Install options
 
+- Homebrew: `brew install fakecloud`
 - Binary: `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - Docker: `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`
 - Cargo: `cargo install fakecloud`

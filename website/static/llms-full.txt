@@ -23,6 +23,13 @@ fakecloud is NOT a production-ready cloud replacement. It is for integration tes
 ```sh
 curl -fsSL https://fakecloud.dev/install.sh | bash
 ```
+Works on macOS and Linux, and in CI.
+
+### Homebrew
+```sh
+brew install fakecloud
+```
+In homebrew-core (https://formulae.brew.sh/formula/fakecloud), no tap needed.
 
 Options:
 ```sh

@@ -128,6 +128,7 @@ If you need multi-language, free, real Lambda triggers, depth-first conformance:
 
 ## Links
 
+- **Homebrew:** `brew install fakecloud`
 - **Install:** `curl -fsSL https://fakecloud.dev/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **DynamoDB docs:** [fakecloud.dev/docs/services/dynamodb](/docs/services/dynamodb/)

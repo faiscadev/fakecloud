@@ -44,14 +44,14 @@ Yes, end-to-end. When an object is created in S3, any Lambda subscribed via buck
 
 ### How do I install fakecloud?
 
-One-line install script:
+One-line install script (macOS + Linux):
 
 ```sh
 curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
-Or Docker: `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`. Or `cargo install fakecloud`.
+Or Homebrew: `brew install fakecloud`. Or Docker: `docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud`. Or `cargo install fakecloud`.
 
 ### Does fakecloud work with Terraform?
 
