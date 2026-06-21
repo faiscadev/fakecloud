@@ -226,6 +226,7 @@ mod tests {
                     tags: Default::default(),
                     policy: String::new(),
                     key_rotation_enabled: false,
+                    rotation_period_in_days: None,
                     origin: "AWS_KMS".into(),
                     multi_region: false,
                     rotations: Vec::new(),

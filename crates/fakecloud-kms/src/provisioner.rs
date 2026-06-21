@@ -205,6 +205,7 @@ pub fn build_kms_key(
         tags: input.tags.clone(),
         policy,
         key_rotation_enabled: input.key_rotation_enabled,
+        rotation_period_in_days: None,
         origin: input.origin.clone(),
         multi_region: input.multi_region,
         rotations: Vec::new(),
