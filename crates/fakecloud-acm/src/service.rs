@@ -12,12 +12,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    AccountState, AcmAccounts, CertificateOptions, DomainValidation, RenewalSummary,
-    SharedAcmState, StoredCertificate,
+    AccountState, AcmAccounts, AcmSnapshot, CertificateOptions, DomainValidation, RenewalSummary,
+    SharedAcmState, StoredCertificate, ACM_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const SUPPORTED_ACTIONS: &[&str] = &[
@@ -40,6 +43,21 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "SearchCertificates",
 ];
 
+/// Actions that mutate persisted ACM state and therefore must trigger a
+/// snapshot write. Read-only actions (Describe/List/Get/Export/Search) and
+/// ResendValidationEmail (no state change) are excluded.
+const MUTATING_ACTIONS: &[&str] = &[
+    "RequestCertificate",
+    "DeleteCertificate",
+    "ImportCertificate",
+    "RenewCertificate",
+    "RevokeCertificate",
+    "AddTagsToCertificate",
+    "RemoveTagsFromCertificate",
+    "PutAccountConfiguration",
+    "UpdateCertificateOptions",
+];
+
 pub struct AcmService {
     state: SharedAcmState,
     /// How long the auto-issue tick sleeps before flipping a freshly
@@ -52,6 +70,8 @@ pub struct AcmService {
     /// (read at construction time) or via
     /// [`AcmService::with_pending_validation_delay`].
     pending_validation_delay: std::time::Duration,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 /// Default DNS auto-issue delay when `FAKECLOUD_ACM_AUTO_ISSUE_SECS` is
@@ -72,11 +92,138 @@ impl AcmService {
         Self {
             state,
             pending_validation_delay: auto_issue_delay_from_env(),
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared_state(&self) -> SharedAcmState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_acm_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current ACM state when invoked, or `None`
+    /// in memory mode. The CloudFormation provisioner mutates `state` directly
+    /// and uses this to write a CFN-provisioned certificate through to disk,
+    /// the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_acm_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+
+    /// Admin-endpoint flavour of [`set_certificate_status`](Self::set_certificate_status)
+    /// that persists the flip so a forced status survives a restart.
+    pub async fn set_certificate_status_persistent(
+        &self,
+        arn_or_id: &str,
+        status: &str,
+        reason: Option<String>,
+    ) -> bool {
+        let changed = self.set_certificate_status(arn_or_id, status, reason);
+        if changed {
+            self.save_snapshot().await;
+        }
+        changed
+    }
+
+    /// Admin-endpoint flavour of [`approve_certificate`](Self::approve_certificate)
+    /// that persists the flip to `ISSUED`.
+    pub async fn approve_certificate_persistent(&self, arn_or_id: &str) -> bool {
+        self.set_certificate_status_persistent(arn_or_id, "ISSUED", None)
+            .await
+    }
+
+    /// Re-arm the async auto-issue tick for any certificate that was still
+    /// `PENDING_VALIDATION` (DNS, AMAZON_ISSUED) when the previous process
+    /// exited. Without this, a restored pending cert would never transition to
+    /// `ISSUED`. Called by the server after loading a persistence snapshot.
+    pub fn rearm_pending_validations(&self) {
+        let pending: Vec<(String, String)> = {
+            let state = self.state.read();
+            let mut out = Vec::new();
+            for (account_id, account) in state.accounts.iter() {
+                for (arn, cert) in account.certificates.iter() {
+                    if cert.status == "PENDING_VALIDATION"
+                        && cert.cert_type == "AMAZON_ISSUED"
+                        && cert.validation_method.as_deref() == Some("DNS")
+                    {
+                        out.push((account_id.clone(), arn.clone()));
+                    }
+                }
+            }
+            out
+        };
+        for (account_id, arn) in pending {
+            self.spawn_auto_issue_tick(account_id, arn);
+        }
+    }
+
+    /// Spawn the background task that flips a DNS, AMAZON_ISSUED certificate
+    /// from `PENDING_VALIDATION` to `ISSUED` after `pending_validation_delay`,
+    /// then persists the transition. Shared by `request_certificate` and
+    /// `rearm_pending_validations`.
+    fn spawn_auto_issue_tick(&self, account_id: String, arn: String) {
+        let state_for_tick = Arc::clone(&self.state);
+        let delay = self.pending_validation_delay;
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let flipped = {
+                let mut state = state_for_tick.write();
+                let mut flipped = false;
+                if let Some(account) = state.accounts.get_mut(&account_id) {
+                    if let Some(cert) = account.certificates.get_mut(&arn) {
+                        if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED"
+                        {
+                            let now = Utc::now();
+                            cert.status = "ISSUED".to_string();
+                            cert.issued_at = Some(now);
+                            cert.renewal_eligibility = "ELIGIBLE".to_string();
+                            for dv in cert.domain_validation.iter_mut() {
+                                dv.validation_status = "SUCCESS".to_string();
+                            }
+                            cert.renewal_summary = Some(RenewalSummary {
+                                renewal_status: "PENDING_AUTO_RENEWAL".to_string(),
+                                domain_validation: cert.domain_validation.clone(),
+                                renewal_status_reason: None,
+                                updated_at: now,
+                            });
+                            flipped = true;
+                        }
+                    }
+                }
+                flipped
+            };
+            if flipped {
+                save_acm_snapshot(&state_for_tick, store, &lock).await;
+            }
+        });
     }
 
     /// Override the auto-issue delay. Used by unit tests so they don't
@@ -203,6 +350,37 @@ impl AcmService {
     }
 }
 
+/// Persist the current ACM state as a snapshot. Offloads the serde + blocking
+/// file write to the Tokio blocking pool. Noop when `store` is `None` (memory
+/// mode). Shared by `AcmService::save_snapshot`, the auto-issue tick, and the
+/// CloudFormation provisioner persist hook so all route through the same
+/// serialize-and-write path.
+pub async fn save_acm_snapshot(
+    state: &SharedAcmState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = AcmSnapshot {
+        schema_version: ACM_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write acm snapshot"),
+        Err(err) => tracing::error!(%err, "acm snapshot task panicked"),
+    }
+}
+
 impl Default for AcmService {
     fn default() -> Self {
         Self::new(Arc::new(RwLock::new(AcmAccounts::new())))
@@ -220,7 +398,8 @@ impl AwsService for AcmService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = MUTATING_ACTIONS.contains(&req.action.as_str());
+        let result = match req.action.as_str() {
             "RequestCertificate" => self.request_certificate(&req),
             "DescribeCertificate" => self.describe_certificate(&req),
             "ListCertificates" => self.list_certificates(&req),
@@ -239,7 +418,11 @@ impl AwsService for AcmService {
             "UpdateCertificateOptions" => self.update_certificate_options(&req),
             "SearchCertificates" => self.search_certificates(&req),
             other => Err(AwsServiceError::action_not_implemented("acm", other)),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 
@@ -407,34 +590,7 @@ impl AcmService {
         // ImportCertificate stays ISSUED-on-arrival (its own code path
         // never enters this branch).
         if validation_method == "DNS" {
-            let state_for_tick = Arc::clone(&self.state);
-            let arn_for_tick = arn.clone();
-            let account_for_tick = req.account_id.clone();
-            let delay = self.pending_validation_delay;
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let mut state = state_for_tick.write();
-                if let Some(account) = state.accounts.get_mut(&account_for_tick) {
-                    if let Some(cert) = account.certificates.get_mut(&arn_for_tick) {
-                        if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED"
-                        {
-                            let now = Utc::now();
-                            cert.status = "ISSUED".to_string();
-                            cert.issued_at = Some(now);
-                            cert.renewal_eligibility = "ELIGIBLE".to_string();
-                            for dv in cert.domain_validation.iter_mut() {
-                                dv.validation_status = "SUCCESS".to_string();
-                            }
-                            cert.renewal_summary = Some(RenewalSummary {
-                                renewal_status: "PENDING_AUTO_RENEWAL".to_string(),
-                                domain_validation: cert.domain_validation.clone(),
-                                renewal_status_reason: None,
-                                updated_at: now,
-                            });
-                        }
-                    }
-                }
-            });
+            self.spawn_auto_issue_tick(req.account_id.clone(), arn.clone());
         }
 
         Ok(AwsResponse::ok_json(json!({ "CertificateArn": arn })))

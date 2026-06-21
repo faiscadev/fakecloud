@@ -3,6 +3,6 @@ pub(crate) mod state;
 
 pub use service::AcmService;
 pub use state::{
-    AccountConfig, AccountState, AcmAccounts, CertificateOptions, DomainValidation, RenewalSummary,
-    SharedAcmState, StoredCertificate,
+    AccountConfig, AccountState, AcmAccounts, AcmSnapshot, CertificateOptions, DomainValidation,
+    RenewalSummary, SharedAcmState, StoredCertificate, ACM_SNAPSHOT_SCHEMA_VERSION,
 };
