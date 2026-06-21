@@ -351,6 +351,25 @@ impl RdsRuntime {
             args.push("--privileged".to_string());
         }
 
+        // Optionally persist the data directory in a named volume keyed to the
+        // instance so a container recreated after a fakecloud restart reattaches
+        // the same data instead of coming back empty (bug-audit 2026-06-20, 4.2).
+        // OFF by default: a process-stable volume name persists on the host
+        // across instances/test cases, so a later instance reusing an
+        // identifier (e.g. restore-from-snapshot) would inherit stale data
+        // (`relation already exists`). Opt in with FAKECLOUD_PERSIST_DB_VOLUMES=1
+        // for a long-lived dev server. Only the official-image engines with a
+        // well-known, volume-friendly data dir.
+        if db_volumes_enabled() {
+            if let Some(data_dir) = engine_data_dir(engine) {
+                args.push("-v".to_string());
+                args.push(format!(
+                    "{}:{data_dir}",
+                    data_volume_name(account_id, db_instance_identifier)
+                ));
+            }
+        }
+
         // Bridge-aware engines (postgres aws_lambda, mysql/mariadb
         // fakecloud_post UDF) call back into fakecloud over HTTP. Inject the
         // host-gateway `--add-host` mapping so the in-container code can
@@ -733,6 +752,22 @@ impl RdsRuntime {
     async fn remove_container(&self, container_id: &str) {
         let _ = tokio::process::Command::new(&self.cli)
             .args(["rm", "-f", container_id])
+            .output()
+            .await;
+    }
+
+    /// Remove the persisted data volume for an instance. Called on
+    /// DeleteDBInstance so a later instance reusing the same identifier starts
+    /// clean rather than inheriting the deleted instance's data. A no-op on the
+    /// k8s backend (PVC lifecycle is handled there) and for engines without a
+    /// managed volume.
+    pub async fn remove_data_volume(&self, account_id: &str, db_instance_identifier: &str) {
+        if self.k8s.is_some() || !db_volumes_enabled() {
+            return;
+        }
+        let name = data_volume_name(account_id, db_instance_identifier);
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["volume", "rm", "-f", &name])
             .output()
             .await;
     }
@@ -1190,6 +1225,50 @@ impl RdsRuntime {
     }
 }
 
+/// Whether DB data should survive a fakecloud restart via a named Docker
+/// volume. OFF by default (ephemeral, matching pre-#1826 behavior and keeping
+/// restore-from-snapshot / repeated-identifier flows clean); opt in with
+/// `FAKECLOUD_PERSIST_DB_VOLUMES=1` on a long-lived dev server.
+fn db_volumes_enabled() -> bool {
+    std::env::var("FAKECLOUD_PERSIST_DB_VOLUMES")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
+/// The in-container data directory to persist for an engine, or `None` for
+/// engines that manage their own state (oracle/mssql/db2) and aren't wired for
+/// volume persistence.
+fn engine_data_dir(engine: &str) -> Option<&'static str> {
+    match engine {
+        "postgres" => Some("/var/lib/postgresql/data"),
+        "mysql" | "mariadb" => Some("/var/lib/mysql"),
+        _ => None,
+    }
+}
+
+/// Deterministic Docker volume name for an instance's data dir. Keyed only on
+/// account + instance id (NOT the per-process fakecloud instance id) so the
+/// same volume reattaches after a fakecloud restart. Characters outside
+/// Docker's `[a-zA-Z0-9_.-]` volume-name set are replaced with `-`.
+fn data_volume_name(account_id: &str, db_instance_identifier: &str) -> String {
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    format!(
+        "fakecloud-rds-data-{}-{}",
+        sanitize(account_id),
+        sanitize(db_instance_identifier)
+    )
+}
+
 /// Build the prebuilt-image reference for a given engine + major
 /// version. Uses `<registry>/<image>:<major>-<fakecloud-version>`,
 /// where the registry comes from `FAKECLOUD_POSTGRES_REGISTRY` (kept
@@ -1223,6 +1302,35 @@ fn bridge_image_tag_with_registry(registry: &str, image: &str, major_version: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_data_dir_only_maps_volume_friendly_engines() {
+        assert_eq!(
+            engine_data_dir("postgres"),
+            Some("/var/lib/postgresql/data")
+        );
+        assert_eq!(engine_data_dir("mysql"), Some("/var/lib/mysql"));
+        assert_eq!(engine_data_dir("mariadb"), Some("/var/lib/mysql"));
+        // Heavier engines manage their own state and stay out of scope.
+        assert_eq!(engine_data_dir("oracle-ee"), None);
+        assert_eq!(engine_data_dir("sqlserver-ex"), None);
+        assert_eq!(engine_data_dir("db2-se"), None);
+    }
+
+    #[test]
+    fn data_volume_name_is_stable_and_sanitized() {
+        // Stable across calls (so recovery reattaches the same volume) and
+        // keyed on account + instance id, not the per-process instance id.
+        assert_eq!(
+            data_volume_name("123456789012", "my-db"),
+            "fakecloud-rds-data-123456789012-my-db"
+        );
+        // Characters outside Docker's volume-name set become '-'.
+        assert_eq!(
+            data_volume_name("123456789012", "weird/name:1"),
+            "fakecloud-rds-data-123456789012-weird-name-1"
+        );
+    }
 
     /// Exercises the pure tag builder with explicit registries so the cases
     /// never touch the process-global `FAKECLOUD_POSTGRES_REGISTRY`. Parallel

@@ -466,6 +466,12 @@ impl RdsService {
 
         if let Some(runtime) = &self.runtime {
             runtime.stop_container(&db_instance_identifier).await;
+            // Drop the persisted data volume so a future instance reusing this
+            // identifier starts clean instead of inheriting deleted data
+            // (bug-audit 2026-06-20, 4.2).
+            runtime
+                .remove_data_volume(&request.account_id, &db_instance_identifier)
+                .await;
         }
 
         self.emit_event(
