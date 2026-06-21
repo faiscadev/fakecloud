@@ -72,16 +72,17 @@ impl ResourceProvisioner {
             .unwrap_or(false);
 
         let mut accounts = self.ecr_state.write();
+        // Use the bound fakecloud endpoint (host:port) for RepositoryUri, like
+        // the direct CreateRepository path -- NOT the public AWS DNS. A CFN-
+        // provisioned repo's GetAtt RepositoryUri must point at fakecloud's own
+        // OCI registry so `docker push` reaches it (bug-audit 2026-06-20, 1.4).
+        let endpoint = accounts.endpoint().to_string();
         let state = accounts.get_or_create(&self.account_id);
         if state.repositories.contains_key(&repository_name) {
             return Err(format!("Repository {repository_name} already exists"));
         }
         let arn = state.repository_arn(&repository_name);
         let registry_id = state.account_id.clone();
-        let endpoint = format!(
-            "{}.dkr.ecr.{}.amazonaws.com",
-            state.account_id, state.region
-        );
         let mut repo = Repository::new(&repository_name, arn.clone(), &registry_id, &endpoint);
         repo.image_tag_mutability = image_tag_mutability;
         repo.image_scanning_configuration.scan_on_push = scan_on_push;
