@@ -7,20 +7,60 @@ use chrono::Utc;
 use http::StatusCode;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_glue::SharedGlueState;
+use fakecloud_persistence::SnapshotStore;
 use fakecloud_s3::SharedS3State;
 
 use crate::sql::{self, ExecutedQuery};
 use crate::state::{
-    AccountState, AthenaAccounts, Calculation, CapacityAssignmentConfiguration,
+    AccountState, AthenaAccounts, AthenaSnapshot, Calculation, CapacityAssignmentConfiguration,
     CapacityReservation, DataCatalog, NamedQuery, Notebook, PreparedStatement, QueryExecution,
-    Session, SharedAthenaState, WorkGroup,
+    Session, SharedAthenaState, WorkGroup, ATHENA_SNAPSHOT_SCHEMA_VERSION,
 };
+
+/// Actions that mutate persisted Athena state and therefore must trigger a
+/// snapshot write. Read-only actions (Batch*Get/Get*/List*, ExportNotebook,
+/// CreatePresignedNotebookUrl, GetResourceDashboard) are excluded. Query
+/// results are written to S3 (persisted by the S3 store); the QueryExecution
+/// metadata persists here.
+const MUTATING_ACTIONS: &[&str] = &[
+    "CancelCapacityReservation",
+    "CreateCapacityReservation",
+    "CreateDataCatalog",
+    "CreateNamedQuery",
+    "CreateNotebook",
+    "CreatePreparedStatement",
+    "CreateWorkGroup",
+    "DeleteCapacityReservation",
+    "DeleteDataCatalog",
+    "DeleteNamedQuery",
+    "DeleteNotebook",
+    "DeletePreparedStatement",
+    "DeleteWorkGroup",
+    "ImportNotebook",
+    "PutCapacityAssignmentConfiguration",
+    "StartCalculationExecution",
+    "StartQueryExecution",
+    "StartSession",
+    "StopCalculationExecution",
+    "StopQueryExecution",
+    "TagResource",
+    "TerminateSession",
+    "UntagResource",
+    "UpdateCapacityReservation",
+    "UpdateDataCatalog",
+    "UpdateNamedQuery",
+    "UpdateNotebook",
+    "UpdateNotebookMetadata",
+    "UpdatePreparedStatement",
+    "UpdateWorkGroup",
+];
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "BatchGetNamedQuery",
@@ -99,6 +139,8 @@ pub struct AthenaService {
     state: SharedAthenaState,
     glue: Option<SharedGlueState>,
     s3: Option<SharedS3State>,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 mod capacity;
@@ -118,6 +160,8 @@ impl AthenaService {
             state,
             glue: None,
             s3: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -131,8 +175,74 @@ impl AthenaService {
         self
     }
 
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
     pub fn shared_state(&self) -> SharedAthenaState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_athena_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Athena state when invoked, or
+    /// `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_athena_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current Athena state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `AthenaService::save_snapshot` and the
+/// CloudFormation provisioner persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_athena_snapshot(
+    state: &SharedAthenaState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = AthenaSnapshot {
+        schema_version: ATHENA_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write athena snapshot"),
+        Err(err) => tracing::error!(%err, "athena snapshot task panicked"),
     }
 }
 
@@ -153,7 +263,8 @@ impl AwsService for AthenaService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = MUTATING_ACTIONS.contains(&req.action.as_str());
+        let result = match req.action.as_str() {
             // Workgroups
             "CreateWorkGroup" => self.create_work_group(&req),
             "GetWorkGroup" => self.get_work_group(&req),
@@ -249,7 +360,11 @@ impl AwsService for AthenaService {
             "GetResourceDashboard" => self.get_resource_dashboard(&req),
 
             other => Err(AwsServiceError::action_not_implemented("athena", other)),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 

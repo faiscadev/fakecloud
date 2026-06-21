@@ -4,5 +4,6 @@ pub(crate) mod state;
 
 pub use service::AthenaService;
 pub use state::{
-    AthenaAccounts, DataCatalog, NamedQuery, PreparedStatement, SharedAthenaState, WorkGroup,
+    AthenaAccounts, AthenaSnapshot, DataCatalog, NamedQuery, PreparedStatement, SharedAthenaState,
+    WorkGroup, ATHENA_SNAPSHOT_SCHEMA_VERSION,
 };
