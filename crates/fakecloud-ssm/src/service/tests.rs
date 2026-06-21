@@ -3750,6 +3750,58 @@ fn update_maintenance_window_not_found() {
 }
 
 #[test]
+fn update_maintenance_window_applies_schedule_fields() {
+    // ScheduleTimezone/ScheduleOffset/StartDate/EndDate were dropped on update
+    // (ScheduleOffset even validated) -- bug-audit 2026-06-20, 1.24.
+    let svc = make_service();
+    let create = svc
+        .create_maintenance_window(&make_request(
+            "CreateMaintenanceWindow",
+            json!({
+                "Name": "win",
+                "Schedule": "rate(7 days)",
+                "Duration": 2,
+                "Cutoff": 1,
+                "AllowUnassociatedTargets": false
+            }),
+        ))
+        .unwrap();
+    let cb: Value = serde_json::from_slice(create.body.expect_bytes()).unwrap();
+    let window_id = cb["WindowId"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .update_maintenance_window(&make_request(
+            "UpdateMaintenanceWindow",
+            json!({
+                "WindowId": window_id,
+                "ScheduleTimezone": "America/New_York",
+                "ScheduleOffset": 2,
+                "StartDate": "2026-07-01T00:00:00Z",
+                "EndDate": "2026-12-31T00:00:00Z"
+            }),
+        ))
+        .unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(b["ScheduleTimezone"], "America/New_York", "{b}");
+    assert_eq!(b["ScheduleOffset"], 2);
+    assert_eq!(b["StartDate"], "2026-07-01T00:00:00Z");
+    assert_eq!(b["EndDate"], "2026-12-31T00:00:00Z");
+
+    // Persisted: DescribeMaintenanceWindows reflects them too.
+    let d = svc
+        .describe_maintenance_windows(&make_request("DescribeMaintenanceWindows", json!({})))
+        .unwrap();
+    let db: Value = serde_json::from_slice(d.body.expect_bytes()).unwrap();
+    let win = db["WindowIdentities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["WindowId"] == window_id.as_str())
+        .unwrap();
+    assert_eq!(win["ScheduleTimezone"], "America/New_York", "{win}");
+}
+
+#[test]
 fn register_target_unknown_window_errors() {
     let svc = make_service();
     let req = make_request(
