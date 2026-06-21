@@ -28,6 +28,24 @@ mod write;
 
 impl S3Service {}
 
+/// Run a blocking closure (synchronous disk IO) without starving the async
+/// runtime. On a multi-threaded tokio runtime this uses `block_in_place` so
+/// the worker hands its other tasks to a sibling thread for the duration of
+/// the IO; on a current-thread runtime (e.g. `#[tokio::test]`) `block_in_place`
+/// would panic, so we just run the closure inline. The lock-hold semantics of
+/// the caller are unchanged — this only stops a large body copy from blocking
+/// unrelated async tasks parked on the same worker.
+pub(crate) fn run_blocking_io<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 /// Build the response body for a full GetObject read. For memory-backed
 /// bodies this returns `ResponseBody::Bytes`; for disk-backed bodies it
 /// opens the file handle eagerly (while the caller still holds the per-state

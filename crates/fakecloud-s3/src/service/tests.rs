@@ -859,6 +859,26 @@ async fn upload_part_missing_upload_errors() {
     );
 }
 
+// PutObject's disk write is wrapped in run_blocking_io (bug-audit
+// 2026-06-20, 3.2). On a multi-threaded runtime that path uses
+// block_in_place, which panics if mis-guarded; this exercises it end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_object_runs_on_multi_thread_runtime() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let body = b"streamed-under-block-in-place";
+    let req = make_request(Method::PUT, "/b/k", &[], body);
+    let resp = svc
+        .put_object("123456789012", &req, "b", "k")
+        .await
+        .expect("put_object should succeed on a multi-thread runtime");
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let get_req = make_request(Method::GET, "/b/k", &[], b"");
+    let got = svc.get_object("123456789012", &get_req, "b", "k").unwrap();
+    assert_eq!(got.body.expect_bytes(), body);
+}
+
 #[tokio::test]
 async fn mpu_full_lifecycle_creates_object() {
     let svc = make_service();

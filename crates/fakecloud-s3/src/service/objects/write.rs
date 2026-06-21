@@ -522,16 +522,16 @@ impl S3Service {
                 let o = b2.objects.get(key).ok_or_else(|| no_such_key(key))?;
                 object_meta_snapshot(o)
             };
-            let returned_body = self
-                .store
-                .put_object(
+            let returned_body = super::run_blocking_io(|| {
+                self.store.put_object(
                     bucket,
                     key,
                     meta_version.version_id.as_deref(),
                     body_source,
                     &meta_version,
                 )
-                .map_err(crate::service::persistence_error)?;
+            })
+            .map_err(crate::service::persistence_error)?;
             if let Some(b2) = state.buckets.get_mut(bucket) {
                 if let Some(o) = b2.objects.get_mut(key) {
                     o.body = returned_body.clone();
@@ -1036,16 +1036,16 @@ impl S3Service {
         // for the BodyRef rewrite and subsequent replication/notification
         // work below.
         let _ = db;
-        let dest_body_ref = self
-            .store
-            .put_object(
+        let dest_body_ref = super::run_blocking_io(|| {
+            self.store.put_object(
                 dest_bucket,
                 dest_key,
                 dest_meta.version_id.as_deref(),
                 BodySource::Bytes(dest_stored_bytes.clone()),
                 &dest_meta,
             )
-            .map_err(crate::service::persistence_error)?;
+        })
+        .map_err(crate::service::persistence_error)?;
         if let Some(db2) = state.buckets.get_mut(dest_bucket) {
             if let Some(o) = db2.objects.get_mut(dest_key) {
                 o.body = dest_body_ref.clone();
