@@ -964,6 +964,77 @@ fn get_subscription_attributes_returns_defaults() {
 }
 
 #[test]
+fn get_subscription_attributes_reflects_pending_confirmation() {
+    // PendingConfirmation was hardcoded "false" (bug-audit 2026-06-20, 1.24):
+    // an unconfirmed http subscription must report "true".
+    let (svc, state) = make_sns();
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "pc-topic")])));
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:pc-topic";
+
+    // http subscriptions stay unconfirmed until the token is confirmed.
+    assert_ok(&svc.subscribe(&sns_request(
+        "Subscribe",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Protocol", "http"),
+            ("Endpoint", "http://example.com/hook"),
+        ],
+    )));
+    // email auto-confirms.
+    assert_ok(&svc.subscribe(&sns_request(
+        "Subscribe",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Protocol", "email"),
+            ("Endpoint", "u@example.com"),
+        ],
+    )));
+
+    let (http_arn, email_arn) = {
+        let s = state.read();
+        let subs = &s.default_ref().subscriptions;
+        let http = subs
+            .values()
+            .find(|sub| sub.protocol == "http")
+            .unwrap()
+            .subscription_arn
+            .clone();
+        let email = subs
+            .values()
+            .find(|sub| sub.protocol == "email")
+            .unwrap()
+            .subscription_arn
+            .clone();
+        (http, email)
+    };
+
+    let http_body = response_body(&svc.get_subscription_attributes(&sns_request(
+        "GetSubscriptionAttributes",
+        vec![("SubscriptionArn", &http_arn)],
+    )));
+    assert!(
+        http_body.contains("<key>PendingConfirmation</key>")
+            && http_body.contains("<value>true</value>"),
+        "http subscription must report PendingConfirmation=true: {http_body}"
+    );
+
+    let email_body = response_body(&svc.get_subscription_attributes(&sns_request(
+        "GetSubscriptionAttributes",
+        vec![("SubscriptionArn", &email_arn)],
+    )));
+    assert!(
+        email_body.contains("<key>PendingConfirmation</key>"),
+        "{email_body}"
+    );
+    // The PendingConfirmation entry for a confirmed sub is false.
+    let pc_idx = email_body.find("PendingConfirmation").unwrap();
+    assert!(
+        email_body[pc_idx..].contains("<value>false</value>"),
+        "email subscription must report PendingConfirmation=false: {email_body}"
+    );
+}
+
+#[test]
 fn set_subscription_attributes_updates_value() {
     let (svc, state) = make_sns();
     assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "setattr-topic")])));

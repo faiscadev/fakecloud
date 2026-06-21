@@ -1281,6 +1281,11 @@ impl SnsService {
             .get(&sub_arn)
             .ok_or_else(|| not_found("Subscription"))?;
 
+        // PendingConfirmation reflects the real subscription state: an
+        // http/https subscriber that hasn't confirmed its token is still
+        // pending. Previously hardcoded "false", which hid unconfirmed
+        // subscriptions (bug-audit 2026-06-20, 1.24).
+        let pending = if sub.confirmed { "false" } else { "true" };
         let mut entries = vec![
             format_attr("SubscriptionArn", &sub.subscription_arn),
             format_attr("TopicArn", &sub.topic_arn),
@@ -1288,7 +1293,7 @@ impl SnsService {
             format_attr("Endpoint", &sub.endpoint),
             format_attr("Owner", &sub.owner),
             format_attr("ConfirmationWasAuthenticated", "true"),
-            format_attr("PendingConfirmation", "false"),
+            format_attr("PendingConfirmation", pending),
         ];
 
         // Add RawMessageDelivery from attributes or default
