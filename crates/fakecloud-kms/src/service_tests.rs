@@ -2392,6 +2392,53 @@ fn enable_key_rotation_accepts_alias() {
 }
 
 #[test]
+fn enable_key_rotation_persists_rotation_period() {
+    // RotationPeriodInDays was dropped (bug-audit 2026-06-20, 1.24): it must
+    // round-trip through GetKeyRotationStatus, and default to 365.
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    // Default cadence is 365 when omitted.
+    svc.enable_key_rotation(&make_request(
+        "EnableKeyRotation",
+        json!({ "KeyId": key_id }),
+    ))
+    .unwrap();
+    let resp = svc
+        .get_key_rotation_status(&make_request(
+            "GetKeyRotationStatus",
+            json!({ "KeyId": key_id }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body["KeyRotationEnabled"].as_bool().unwrap());
+    assert_eq!(body["RotationPeriodInDays"].as_i64(), Some(365));
+
+    // A custom cadence is stored and echoed.
+    svc.enable_key_rotation(&make_request(
+        "EnableKeyRotation",
+        json!({ "KeyId": key_id, "RotationPeriodInDays": 120 }),
+    ))
+    .unwrap();
+    let resp = svc
+        .get_key_rotation_status(&make_request(
+            "GetKeyRotationStatus",
+            json!({ "KeyId": key_id }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["RotationPeriodInDays"].as_i64(), Some(120));
+
+    // Out-of-range cadence is rejected.
+    assert!(svc
+        .enable_key_rotation(&make_request(
+            "EnableKeyRotation",
+            json!({ "KeyId": key_id, "RotationPeriodInDays": 5 }),
+        ))
+        .is_err());
+}
+
+#[test]
 fn enable_disable_key_rotation_unknown_errors() {
     let svc = make_service();
     let req = make_request(

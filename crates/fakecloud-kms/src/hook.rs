@@ -319,6 +319,7 @@ fn provision_aws_managed_key(
         tags: BTreeMap::new(),
         policy,
         key_rotation_enabled: true,
+        rotation_period_in_days: None,
         origin: "AWS_KMS".to_string(),
         multi_region: false,
         rotations: Vec::new(),

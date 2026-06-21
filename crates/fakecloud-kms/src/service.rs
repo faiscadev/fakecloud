@@ -623,6 +623,7 @@ impl KmsService {
             tags: input.tags,
             policy: key_policy,
             key_rotation_enabled: false,
+            rotation_period_in_days: None,
             origin: input.origin,
             multi_region: input.multi_region,
             rotations: Vec::new(),
@@ -1134,12 +1135,18 @@ impl KmsService {
             )
         })?;
 
+        let mut result = json!({
+            "KeyRotationEnabled": key.key_rotation_enabled,
+        });
+        // AWS echoes the configured cadence (default 365) only while rotation
+        // is enabled.
+        if key.key_rotation_enabled {
+            result["RotationPeriodInDays"] = json!(key.rotation_period_in_days.unwrap_or(365));
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "KeyRotationEnabled": key.key_rotation_enabled,
-            }))
-            .unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -1169,6 +1176,19 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        // RotationPeriodInDays is optional; AWS validates 90..=2560 and
+        // defaults to 365. Persist it so GetKeyRotationStatus echoes it back
+        // instead of dropping it (bug-audit 2026-06-20, 1.24).
+        if let Some(period) = body.get("RotationPeriodInDays").and_then(|v| v.as_i64()) {
+            if !(90..=2560).contains(&period) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("RotationPeriodInDays must be between 90 and 2560, got {period}"),
+                ));
+            }
+            key.rotation_period_in_days = Some(period as i32);
+        }
         key.key_rotation_enabled = true;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1358,6 +1378,7 @@ impl KmsService {
             arn: replica_arn,
             deletion_date: None,
             key_rotation_enabled: false,
+            rotation_period_in_days: None,
             multi_region: true,
             rotations: Vec::new(),
             custom_key_store_id: None,

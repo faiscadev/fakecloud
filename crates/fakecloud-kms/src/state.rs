@@ -92,6 +92,11 @@ pub struct KmsKey {
     pub tags: BTreeMap<String, String>,
     pub policy: String,
     pub key_rotation_enabled: bool,
+    /// Customer-specified rotation cadence from EnableKeyRotation
+    /// (`RotationPeriodInDays`, 90..2560). `None` means AWS's 365-day
+    /// default. Echoed by GetKeyRotationStatus.
+    #[serde(default)]
+    pub rotation_period_in_days: Option<i32>,
     pub origin: String,
     pub multi_region: bool,
     pub rotations: Vec<KeyRotation>,
