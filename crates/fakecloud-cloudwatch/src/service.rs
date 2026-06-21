@@ -980,6 +980,9 @@ impl CloudWatchService {
         let treat_missing_data = optional_query_param(req, "TreatMissingData");
         let evaluate_low_sample_count_percentile =
             optional_query_param(req, "EvaluateLowSampleCountPercentile");
+        // Anomaly-detection alarms reference a metric-math id instead of a
+        // static Threshold; previously accepted then dropped (1.24).
+        let threshold_metric_id = optional_query_param(req, "ThresholdMetricId");
         let dimensions = parse_dimensions_query(req, "Dimensions");
 
         let mut ok_actions = Vec::new();
@@ -1038,6 +1041,7 @@ impl CloudWatchService {
             comparison_operator: comparison,
             treat_missing_data,
             evaluate_low_sample_count_percentile,
+            threshold_metric_id,
             configuration_updated_timestamp: existing
                 .as_ref()
                 .map(|a| a.configuration_updated_timestamp)
@@ -1490,6 +1494,12 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
     }
     if let Some(t) = alarm.threshold {
         s.push_str(&format!("<Threshold>{t}</Threshold>"));
+    }
+    if let Some(tid) = &alarm.threshold_metric_id {
+        s.push_str(&format!(
+            "<ThresholdMetricId>{}</ThresholdMetricId>",
+            xml_escape(tid)
+        ));
     }
     s.push_str(&format!(
         "<ComparisonOperator>{}</ComparisonOperator>",

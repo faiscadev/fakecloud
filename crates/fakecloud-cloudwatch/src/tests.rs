@@ -344,6 +344,38 @@ async fn list_tags_missing_arn_errors() {
 }
 
 #[tokio::test]
+async fn put_metric_alarm_round_trips_threshold_metric_id() {
+    // ThresholdMetricId (anomaly-detection band) was accepted then dropped
+    // (bug-audit 2026-06-20, 1.24); DescribeAlarms must echo it.
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "anomaly-alarm"),
+            ("Namespace", "AWS/EC2"),
+            ("MetricName", "CPUUtilization"),
+            ("ComparisonOperator", "GreaterThanUpperThreshold"),
+            ("ThresholdMetricId", "ad1"),
+            ("EvaluationPeriods", "1"),
+        ],
+    )
+    .await;
+
+    let described = call(
+        &svc,
+        "DescribeAlarms",
+        &[("AlarmNames.member.1", "anomaly-alarm")],
+    )
+    .await;
+    let body = body_of(&described);
+    assert!(
+        body.contains("<ThresholdMetricId>ad1</ThresholdMetricId>"),
+        "DescribeAlarms must echo ThresholdMetricId: {body}"
+    );
+}
+
+#[tokio::test]
 async fn introspection_lists_metric_and_composite_alarms() {
     use crate::introspection::list_all_alarms;
     let svc = service();

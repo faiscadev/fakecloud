@@ -242,6 +242,11 @@ pub struct MetricAlarm {
     pub comparison_operator: String,
     pub treat_missing_data: Option<String>,
     pub evaluate_low_sample_count_percentile: Option<String>,
+    /// `ThresholdMetricId` — references the metric-math id that produces an
+    /// anomaly-detection band (used with the `*UpperThreshold` /
+    /// `*LowerThreshold` comparison operators instead of a static Threshold).
+    #[serde(default)]
+    pub threshold_metric_id: Option<String>,
     pub configuration_updated_timestamp: DateTime<Utc>,
     pub alarm_configuration_updated_timestamp: DateTime<Utc>,
 }

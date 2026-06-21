@@ -125,6 +125,10 @@ impl ResourceProvisioner {
             comparison_operator,
             treat_missing_data,
             evaluate_low_sample_count_percentile,
+            threshold_metric_id: props
+                .get("ThresholdMetricId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             configuration_updated_timestamp: now,
             alarm_configuration_updated_timestamp: now,
         };
