@@ -1621,6 +1621,53 @@ async fn list_secret_version_ids() {
     assert_eq!(b["Versions"].as_array().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn list_secret_version_ids_paginates_by_token() {
+    // MaxResults/NextToken were ignored: every version returned at once with
+    // no token (bug-audit 2026-06-20, 1.14).
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "pager", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request(
+        "PutSecretValue",
+        r#"{"SecretId": "pager", "SecretString": "v2"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // Two staged versions (AWSCURRENT + AWSPREVIOUS); page 1 of 1 carries a
+    // NextToken.
+    let resp = svc
+        .handle(make_request(
+            "ListSecretVersionIds",
+            r#"{"SecretId": "pager", "MaxResults": 1}"#,
+        ))
+        .await
+        .unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(b["Versions"].as_array().unwrap().len(), 1);
+    let token = b["NextToken"]
+        .as_str()
+        .expect("NextToken present")
+        .to_string();
+
+    // Resume: remaining version, no NextToken.
+    let body = format!(r#"{{"SecretId": "pager", "MaxResults": 1, "NextToken": "{token}"}}"#);
+    let resp = svc
+        .handle(make_request("ListSecretVersionIds", &body))
+        .await
+        .unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(b["Versions"].as_array().unwrap().len(), 1);
+    assert!(b.get("NextToken").is_none());
+}
+
 // ── DescribeSecret with rotation info ──
 
 #[tokio::test]
