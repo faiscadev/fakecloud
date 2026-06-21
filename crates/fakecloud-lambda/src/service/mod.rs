@@ -425,6 +425,50 @@ fn is_function_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// Extract a version/alias qualifier embedded in a function reference, the
+/// mirror of [`normalize_function_name`] (which strips it). AWS accepts the
+/// qualifier inline -- `...:function:MyFn:PROD`, `123:function:MyFn:PROD`,
+/// `MyFn:PROD` -- and Invoke must honor it when no `?Qualifier=` is supplied;
+/// previously it was dropped and the invoke silently ran `$LATEST`
+/// (bug-audit 2026-06-20, 1.3). Returns `None` when no qualifier is present.
+pub(crate) fn qualifier_from_function_ref(input: &str) -> Option<String> {
+    if input.is_empty() {
+        return None;
+    }
+    let decoded = percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned();
+    let input = decoded.as_str();
+
+    if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
+        // [region, account, "function", name, qualifier?]
+        let parts: Vec<&str> = rest.splitn(5, ':').collect();
+        if parts.len() == 5 && parts[2] == "function" && !parts[4].is_empty() {
+            return Some(parts[4].to_string());
+        }
+        return None;
+    }
+    // Partial ARN: ACCOUNT:function:NAME[:QUALIFIER]
+    let parts: Vec<&str> = input.splitn(4, ':').collect();
+    if parts.len() == 4
+        && parts[1] == "function"
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && !parts[3].is_empty()
+    {
+        return Some(parts[3].to_string());
+    }
+    // Bare name with qualifier: NAME:QUALIFIER (exactly one colon, valid name).
+    if input.matches(':').count() == 1 {
+        if let Some((name, qualifier)) = input.split_once(':') {
+            if !name.is_empty() && name.chars().all(is_function_name_char) && !qualifier.is_empty()
+            {
+                return Some(qualifier.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// AWS bounds `EphemeralStorage.Size` to `[512, 10240]` MiB. Anything
 /// outside that range is rejected at the API edge with
 /// `InvalidParameterValueException`, matching the real Lambda control
@@ -1059,6 +1103,12 @@ impl AwsService for LambdaService {
         // bare name, name:qualifier, partial ARN, and full ARN in any URL
         // slot that names a function. Layer / event-source-mapping resource
         // names go through different routes and are left as-is.
+        // Capture a qualifier embedded in the raw function reference (e.g.
+        // `...:function:MyFn:PROD`) before normalization strips it, so Invoke
+        // can fall back to it when no `?Qualifier=` is supplied (1.3).
+        let arn_embedded_qualifier = resource_name
+            .as_deref()
+            .and_then(qualifier_from_function_ref);
         let resource_name = if action_takes_function_name(action) {
             // Enforce the Smithy length bound (`FunctionName.length 1..140`)
             // before normalization. Synthetic conformance variants drive
@@ -1257,7 +1307,13 @@ impl AwsService for LambdaService {
                         .get("x-amz-invocation-type")
                         .and_then(|v| v.to_str().ok()),
                 );
-                let qualifier = req.query_params.get("Qualifier").map(String::as_str);
+                // `?Qualifier=` wins; otherwise honor a qualifier embedded in
+                // the function ARN/ref (1.3).
+                let qualifier = req
+                    .query_params
+                    .get("Qualifier")
+                    .map(String::as_str)
+                    .or(arn_embedded_qualifier.as_deref());
                 self.invoke(
                     resource_name.as_deref().unwrap_or(""),
                     &req.body,
