@@ -4556,3 +4556,85 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[test]
+fn upload_server_certificate_strips_trailing_pem_newline() {
+    let svc = make_service();
+    // Caller sends a PEM with a trailing newline (as Terraform's file()/tls
+    // provider produce); AWS stores it trimmed and echoes it back without.
+    let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+    svc.upload_server_certificate(&make_request(
+        "UploadServerCertificate",
+        vec![
+            ("ServerCertificateName", "test"),
+            ("CertificateBody", pem),
+            (
+                "PrivateKey",
+                "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n",
+            ),
+        ],
+    ))
+    .unwrap();
+    let resp = svc
+        .get_server_certificate(&make_request(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "test")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    let stored = extract_xml_tag(&body, "CertificateBody");
+    assert!(
+        !stored.ends_with('\n') && stored.ends_with("-----END CERTIFICATE-----"),
+        "certificate_body should be stored without a trailing newline, got {stored:?}"
+    );
+}
+
+#[test]
+fn account_summary_reflects_set_token_version() {
+    let svc = make_service();
+    svc.set_security_token_service_preferences(&make_request(
+        "SetSecurityTokenServicePreferences",
+        vec![("GlobalEndpointTokenVersion", "v2Token")],
+    ))
+    .unwrap();
+    let resp = svc
+        .get_account_summary(&make_request("GetAccountSummary", vec![]))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    // GetAccountSummary reports the token version as a bare 1/2 integer. The
+    // Terraform aws_iam_security_token_service_preferences resource reads it
+    // here, so v2Token must surface as 2.
+    assert!(
+        body.contains("<key>GlobalEndpointTokenVersion</key><value>2</value>"),
+        "account summary should report token version 2 after setting v2Token"
+    );
+}
+
+#[test]
+fn list_service_specific_credentials_uses_member_framing() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "u")]))
+        .unwrap();
+    svc.create_service_specific_credential(&make_request(
+        "CreateServiceSpecificCredential",
+        vec![
+            ("UserName", "u"),
+            ("ServiceName", "codecommit.amazonaws.com"),
+        ],
+    ))
+    .unwrap();
+    let resp = svc
+        .list_service_specific_credentials(&make_request(
+            "ListServiceSpecificCredentials",
+            vec![("UserName", "u")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    // The IAM query protocol wraps every list element in <member>; emitting
+    // the singular <ServiceSpecificCredential> tag made the AWS SDK parse zero
+    // entries, so the provider's Read retried to timeout.
+    assert!(
+        body.contains("<member>") && body.contains("codecommit.amazonaws.com"),
+        "list should wrap credentials in <member>, got {body}"
+    );
+}

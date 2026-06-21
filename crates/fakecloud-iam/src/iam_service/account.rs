@@ -330,6 +330,16 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
+        // GetAccountSummary reports the STS global-endpoint token version as a
+        // bare integer (1 or 2). The Terraform `aws_iam_security_token_service
+        // _preferences` resource reads it from here, so it must reflect the
+        // version set via SetSecurityTokenServicePreferences rather than a
+        // hardcoded default.
+        let token_version = match state.global_endpoint_token_version.as_deref() {
+            Some("v2Token") => 2,
+            _ => 1,
+        };
+
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <GetAccountSummaryResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -366,7 +376,7 @@ impl IamService {
       <entry><key>AttachedPoliciesPerGroupQuota</key><value>10</value></entry>
       <entry><key>AttachedPoliciesPerRoleQuota</key><value>10</value></entry>
       <entry><key>AttachedPoliciesPerUserQuota</key><value>10</value></entry>
-      <entry><key>GlobalEndpointTokenVersion</key><value>1</value></entry>
+      <entry><key>GlobalEndpointTokenVersion</key><value>{token_version}</value></entry>
       <entry><key>AssumeRolePolicySizeQuota</key><value>2048</value></entry>
     </SummaryMap>
   </GetAccountSummaryResult>

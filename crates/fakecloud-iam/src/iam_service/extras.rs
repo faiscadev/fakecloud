@@ -186,7 +186,17 @@ fn parse_principal_arn(arn: &str) -> Option<(PrincipalKind, &str)> {
     }
 }
 
-fn service_credential_xml(c: &ServiceSpecificCredential, include_password: bool) -> String {
+/// Render one credential. `tag` is the wrapping element name: the singular
+/// `ServiceSpecificCredential` for Create/Reset results, but `member` inside
+/// a `ListServiceSpecificCredentials` list (the IAM query protocol wraps every
+/// list element in `<member>`). Emitting the singular tag inside the list made
+/// the AWS SDK parse zero members, so the provider's post-create Read saw an
+/// empty result and retried to timeout.
+fn service_credential_xml(
+    c: &ServiceSpecificCredential,
+    include_password: bool,
+    tag: &str,
+) -> String {
     let pw = if include_password {
         format!(
             "<ServicePassword>{}</ServicePassword>",
@@ -196,7 +206,7 @@ fn service_credential_xml(c: &ServiceSpecificCredential, include_password: bool)
         String::new()
     };
     format!(
-        "<ServiceSpecificCredential>{pw}<ServiceUserName>{}</ServiceUserName><CreateDate>{}</CreateDate><ServiceName>{}</ServiceName><UserName>{}</UserName><ServiceSpecificCredentialId>{}</ServiceSpecificCredentialId><Status>{}</Status></ServiceSpecificCredential>",
+        "<{tag}>{pw}<ServiceUserName>{}</ServiceUserName><CreateDate>{}</CreateDate><ServiceName>{}</ServiceName><UserName>{}</UserName><ServiceSpecificCredentialId>{}</ServiceSpecificCredentialId><Status>{}</Status></{tag}>",
         xml_escape(&c.service_user_name),
         c.create_date.format("%Y-%m-%dT%H:%M:%SZ"),
         xml_escape(&c.service_name),
@@ -336,7 +346,7 @@ impl IamService {
             .push(cred.clone());
         let body = format!(
             "  <CreateServiceSpecificCredentialResult>\n{}\n  </CreateServiceSpecificCredentialResult>",
-            service_credential_xml(&cred, true)
+            service_credential_xml(&cred, true, "ServiceSpecificCredential")
         );
         Ok(xml_response(
             "CreateServiceSpecificCredential",
@@ -425,7 +435,7 @@ impl IamService {
             .unwrap_or_default();
         let members: String = creds
             .iter()
-            .map(|c| service_credential_xml(c, false))
+            .map(|c| service_credential_xml(c, false, "member"))
             .collect::<Vec<_>>()
             .join("\n");
         let body = format!(
@@ -462,7 +472,7 @@ impl IamService {
         })?;
         let body = format!(
             "  <ResetServiceSpecificCredentialResult>\n{}\n  </ResetServiceSpecificCredentialResult>",
-            service_credential_xml(&cred, true)
+            service_credential_xml(&cred, true, "ServiceSpecificCredential")
         );
         Ok(xml_response(
             "ResetServiceSpecificCredential",

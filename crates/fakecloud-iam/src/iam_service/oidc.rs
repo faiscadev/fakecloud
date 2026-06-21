@@ -700,8 +700,12 @@ impl IamService {
             ),
             server_certificate_name: name.clone(),
             path,
-            certificate_body,
-            certificate_chain,
+            // AWS strips trailing whitespace from the PEM material on upload,
+            // so GetServerCertificate echoes the body without the trailing
+            // newline the caller may have sent. Match that, otherwise the
+            // Terraform provider sees a perpetual `certificate_body` diff.
+            certificate_body: certificate_body.trim_end().to_string(),
+            certificate_chain: certificate_chain.map(|c| c.trim_end().to_string()),
             upload_date: Utc::now(),
             expiration: Utc::now() + chrono::Duration::days(365),
             tags,
