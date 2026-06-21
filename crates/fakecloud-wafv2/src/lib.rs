@@ -11,5 +11,5 @@ pub use inspection::{evaluate_request, Decision, RequestContext, DEFAULT_BODY_IN
 pub use service::Wafv2Service;
 pub use state::{
     AccountState, IpSet, RegexPatternSet, RuleGroup, ScopedKey, SharedWafv2State, Wafv2Accounts,
-    WebAcl,
+    Wafv2Snapshot, WebAcl, WAFV2_SNAPSHOT_SCHEMA_VERSION,
 };
