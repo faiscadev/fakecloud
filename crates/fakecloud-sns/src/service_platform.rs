@@ -154,7 +154,7 @@ impl SnsService {
         let _empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
         let state = _accts.get(&req.account_id).unwrap_or(&_empty);
 
-        let members: String = state
+        let items: Vec<(String, String)> = state
             .platform_applications
             .values()
             .map(|app| {
@@ -164,7 +164,7 @@ impl SnsService {
                     .map(|(k, v)| format_attr(k, v))
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!(
+                let member = format!(
                     r#"      <member>
         <PlatformApplicationArn>{}</PlatformApplicationArn>
         <Attributes>
@@ -172,10 +172,14 @@ impl SnsService {
         </Attributes>
       </member>"#,
                     app.arn
-                )
+                );
+                (app.arn.clone(), member)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let (members, next_token) = paginate_sns_members(items, param(req, "NextToken").as_deref());
+        let next_token_xml = next_token
+            .map(|t| format!("\n    <NextToken>{t}</NextToken>"))
+            .unwrap_or_default();
 
         Ok(xml_resp(
             &format!(
@@ -183,7 +187,7 @@ impl SnsService {
   <ListPlatformApplicationsResult>
     <PlatformApplications>
 {members}
-    </PlatformApplications>
+    </PlatformApplications>{next_token_xml}
   </ListPlatformApplicationsResult>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
@@ -419,7 +423,7 @@ impl SnsService {
             .get(&app_arn)
             .ok_or_else(|| not_found("PlatformApplication"))?;
 
-        let members: String = app
+        let items: Vec<(String, String)> = app
             .endpoints
             .values()
             .map(|ep| {
@@ -429,7 +433,7 @@ impl SnsService {
                     .map(|(k, v)| format_attr(k, v))
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!(
+                let member = format!(
                     r#"      <member>
         <EndpointArn>{}</EndpointArn>
         <Attributes>
@@ -437,10 +441,14 @@ impl SnsService {
         </Attributes>
       </member>"#,
                     ep.arn
-                )
+                );
+                (ep.arn.clone(), member)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let (members, next_token) = paginate_sns_members(items, param(req, "NextToken").as_deref());
+        let next_token_xml = next_token
+            .map(|t| format!("\n    <NextToken>{t}</NextToken>"))
+            .unwrap_or_default();
 
         Ok(xml_resp(
             &format!(
@@ -448,7 +456,7 @@ impl SnsService {
   <ListEndpointsByPlatformApplicationResult>
     <Endpoints>
 {members}
-    </Endpoints>
+    </Endpoints>{next_token_xml}
   </ListEndpointsByPlatformApplicationResult>
   <ResponseMetadata>
     <RequestId>{}</RequestId>
@@ -461,4 +469,71 @@ impl SnsService {
     }
 
     // ===== SMS actions =====
+}
+
+/// SNS list page size for platform applications / endpoints. AWS returns at
+/// most 100 per page and a `NextToken` to fetch the rest.
+const SNS_LIST_PAGE_SIZE: usize = 100;
+
+/// Paginate `(sort_key, member_xml)` pairs with SNS's `NextToken` convention.
+/// The token is an opaque base64 of the first key on the next page; resuming
+/// starts inclusively at that key. Returns the joined member XML for the page
+/// plus the next token when more items remain.
+fn paginate_sns_members(
+    mut items: Vec<(String, String)>,
+    next_token: Option<&str>,
+) -> (String, Option<String>) {
+    use base64::Engine;
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let start = next_token
+        .and_then(|t| base64::engine::general_purpose::STANDARD.decode(t).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|key| items.iter().position(|(k, _)| *k == key))
+        .unwrap_or(0);
+    let end = (start + SNS_LIST_PAGE_SIZE).min(items.len());
+    let next = if end < items.len() {
+        Some(base64::engine::general_purpose::STANDARD.encode(&items[end].0))
+    } else {
+        None
+    };
+    let members = items[start..end]
+        .iter()
+        .map(|(_, m)| m.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (members, next)
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+
+    fn items(n: usize) -> Vec<(String, String)> {
+        (0..n)
+            .map(|i| (format!("arn-{i:04}"), format!("<member>{i}</member>")))
+            .collect()
+    }
+
+    #[test]
+    fn paginates_in_pages_of_100_with_next_token() {
+        // 150 items -> page 1 of 100 + a NextToken, page 2 of 50 + no token
+        // (bug-audit 2026-06-20, 1.14: NextToken was never emitted/honored).
+        let (page1, tok1) = paginate_sns_members(items(150), None);
+        assert_eq!(page1.matches("<member>").count(), 100);
+        let tok1 = tok1.expect("first page truncated");
+
+        let (page2, tok2) = paginate_sns_members(items(150), Some(&tok1));
+        assert_eq!(page2.matches("<member>").count(), 50);
+        assert!(tok2.is_none());
+        // Page 2 resumes exactly where page 1 stopped (item 100).
+        assert!(page2.contains("<member>100</member>"));
+        assert!(!page2.contains("<member>99</member>"));
+    }
+
+    #[test]
+    fn single_page_emits_no_token() {
+        let (page, tok) = paginate_sns_members(items(10), None);
+        assert_eq!(page.matches("<member>").count(), 10);
+        assert!(tok.is_none());
+    }
 }
