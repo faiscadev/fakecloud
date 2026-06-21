@@ -280,6 +280,55 @@ fn normalize_alias(key_id: &str) -> String {
     key_id.strip_prefix("alias/").unwrap_or(key_id).to_string()
 }
 
+/// Canonical AWS-managed service aliases (`alias/aws/<service>`). Real
+/// AWS pre-creates these in every account/region, so `aws kms list-aliases`
+/// returns them on a brand-new account and `data.aws_kms_alias` resolves
+/// them. The Terraform acceptance tests for several services
+/// (e.g. `aws_dynamodb_table` encryption) read `alias/aws/<service>` via
+/// that data source, so they must be listable even before any KMS use.
+pub const DEFAULT_AWS_MANAGED_ALIASES: &[&str] = &[
+    "aws/dynamodb",
+    "aws/s3",
+    "aws/sqs",
+    "aws/sns",
+    "aws/secretsmanager",
+    "aws/ssm",
+    "aws/rds",
+    "aws/lambda",
+    "aws/kinesis",
+    "aws/logs",
+    "aws/ebs",
+    "aws/glue",
+    "aws/elasticache",
+    "aws/backup",
+    "aws/es",
+    "aws/redshift",
+    "aws/xray",
+    "aws/elasticfilesystem",
+    "aws/cloudtrail",
+    "aws/sagemaker",
+];
+
+/// Idempotently provision every [`DEFAULT_AWS_MANAGED_ALIASES`] entry that
+/// isn't already present, so `ListAliases` mirrors real AWS. Provisioning a
+/// missing alias also mints its backing AWS-managed key, matching the
+/// auto-provision-on-first-use path in [`resolve_or_provision`].
+pub fn ensure_default_managed_aliases(state: &mut KmsState, region: &str) {
+    for alias in DEFAULT_AWS_MANAGED_ALIASES {
+        let alias_full = format!("alias/{alias}");
+        if state.aliases.contains_key(&alias_full) {
+            continue;
+        }
+        // `aws/<service>` -> `<service>.amazonaws.com`. The principal only
+        // shapes the default key policy; the data source asserts on the
+        // target key id, not the principal, so an approximate principal is
+        // fine here.
+        let service = alias.strip_prefix("aws/").unwrap_or(alias);
+        let principal = format!("{service}.amazonaws.com");
+        provision_aws_managed_key(state, region, alias, &principal);
+    }
+}
+
 fn provision_aws_managed_key(
     state: &mut KmsState,
     region: &str,
