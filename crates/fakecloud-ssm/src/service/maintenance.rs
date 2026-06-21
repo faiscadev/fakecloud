@@ -336,6 +336,21 @@ impl SsmService {
         if body.get("Description").is_some() {
             mw.description = body["Description"].as_str().map(|s| s.to_string());
         }
+        // ScheduleTimezone / ScheduleOffset / StartDate / EndDate were accepted
+        // (ScheduleOffset even validated) but dropped on update (bug-audit
+        // 2026-06-20, 1.24).
+        if let Some(tz) = body["ScheduleTimezone"].as_str() {
+            mw.schedule_timezone = Some(tz.to_string());
+        }
+        if let Some(offset) = body["ScheduleOffset"].as_i64() {
+            mw.schedule_offset = Some(offset);
+        }
+        if let Some(sd) = body["StartDate"].as_str() {
+            mw.start_date = Some(sd.to_string());
+        }
+        if let Some(ed) = body["EndDate"].as_str() {
+            mw.end_date = Some(ed.to_string());
+        }
 
         let mut resp = json!({
             "WindowId": mw.id,
@@ -348,6 +363,18 @@ impl SsmService {
         });
         if let Some(ref desc) = mw.description {
             resp["Description"] = json!(desc);
+        }
+        if let Some(ref tz) = mw.schedule_timezone {
+            resp["ScheduleTimezone"] = json!(tz);
+        }
+        if let Some(offset) = mw.schedule_offset {
+            resp["ScheduleOffset"] = json!(offset);
+        }
+        if let Some(ref sd) = mw.start_date {
+            resp["StartDate"] = json!(sd);
+        }
+        if let Some(ref ed) = mw.end_date {
+            resp["EndDate"] = json!(ed);
         }
 
         Ok(AwsResponse::ok_json(resp))
