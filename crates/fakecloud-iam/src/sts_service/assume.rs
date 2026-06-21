@@ -377,6 +377,27 @@ impl StsService {
         // trust policy gate can fire on real AWS-shaped policies.
         let jwt = decode_jwt(&web_identity_token_owned);
 
+        // Reject an expired token. Real OIDC tokens always carry `exp`; AWS
+        // returns ExpiredTokenException. We don't verify the signature (not a
+        // security boundary), but `exp` enforcement is non-crypto and callers
+        // verifying their security posture expect expired tokens to be rejected
+        // (bug-audit 2026-06-20, 5.1).
+        if let Some(ref claims) = jwt {
+            if let Some(exp) = claims
+                .raw
+                .get("exp")
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+            {
+                if exp < chrono::Utc::now().timestamp() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ExpiredTokenException",
+                        "The web identity token that was passed is expired.",
+                    ));
+                }
+            }
+        }
+
         // Pick the federated provider ARN. Preference order:
         //   1. JWT iss matched against a registered OpenIDConnectProvider —
         //      we use the provider's stored ARN.
