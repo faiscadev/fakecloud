@@ -614,199 +614,217 @@ impl S3Store for DiskS3Store {
                 continue;
             }
             let bdir = entry.path();
-            let meta_path = bdir.join("meta.toml");
-            if !meta_path.exists() {
-                continue;
-            }
-            let meta_text = std::fs::read_to_string(&meta_path)?;
-            let mut meta: BucketMeta =
-                toml::from_str(&meta_text).map_err(|e| StoreError::Serde(e.to_string()))?;
-            let mut snap = BucketSnapshot {
-                meta: meta.clone(),
-                objects: BTreeMap::new(),
-                object_versions: BTreeMap::new(),
-                subresources: BTreeMap::new(),
-                multipart_uploads: BTreeMap::new(),
-            };
-
-            for kind in ALL_SUBRESOURCES {
-                let fname = Self::subresource_filename(*kind);
-                let path = bdir.join(fname);
-                if path.exists() {
-                    let text = std::fs::read_to_string(&path)?;
-                    if *kind == BucketSubresource::Versioning && snap.meta.versioning.is_none() {
-                        let stripped = text.trim();
-                        if !stripped.is_empty() {
-                            snap.meta.versioning = Some(stripped.to_string());
-                            meta.versioning = snap.meta.versioning.clone();
-                        }
-                    }
-                    snap.subresources.insert(fname.to_string(), text);
+            // Isolate per-bucket load so one corrupt/partial bucket is skipped
+            // with a warning instead of aborting the whole store load -- a single
+            // truncated file used to make every bucket inaccessible (bug-audit
+            // 2026-06-20, 4.3).
+            let loaded: StoreResult<Option<BucketSnapshot>> = (|| {
+                let meta_path = bdir.join("meta.toml");
+                if !meta_path.exists() {
+                    return Ok(None);
                 }
-            }
+                let meta_text = std::fs::read_to_string(&meta_path)?;
+                let mut meta: BucketMeta =
+                    toml::from_str(&meta_text).map_err(|e| StoreError::Serde(e.to_string()))?;
+                let mut snap = BucketSnapshot {
+                    meta: meta.clone(),
+                    objects: BTreeMap::new(),
+                    object_versions: BTreeMap::new(),
+                    subresources: BTreeMap::new(),
+                    multipart_uploads: BTreeMap::new(),
+                };
 
-            let objects_root = bdir.join("objects");
-            if objects_root.exists() {
-                for okey_entry in std::fs::read_dir(&objects_root)? {
-                    let okey_entry = okey_entry?;
-                    if !okey_entry.file_type()?.is_dir() {
-                        continue;
-                    }
-                    let key_dir = okey_entry.path();
-                    let mut versioned: Vec<LoadedObject> = Vec::new();
-                    let mut key_name: Option<String> = None;
-                    for version_entry in std::fs::read_dir(&key_dir)? {
-                        let version_entry = version_entry?;
-                        let path = version_entry.path();
-                        let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
-                            continue;
-                        };
-                        if !fname.ends_with(".toml") {
-                            continue;
-                        }
-                        let version_tag = &fname[..fname.len() - 5];
-                        let toml_text = std::fs::read_to_string(&path)?;
-                        let obj_meta: ObjectMeta = toml::from_str(&toml_text)
-                            .map_err(|e| StoreError::Serde(e.to_string()))?;
-                        let bin_path = key_dir.join(format!("{}.bin", version_tag));
-                        let (body, size) = if obj_meta.is_delete_marker {
-                            (BodyRef::Memory(Bytes::new()), 0u64)
-                        } else if bin_path.exists() {
-                            let sz = std::fs::metadata(&bin_path)?.len();
-                            (
-                                BodyRef::Disk {
-                                    bucket: meta.name.clone(),
-                                    key: obj_meta.key.clone(),
-                                    version: if version_tag == "null" {
-                                        None
-                                    } else {
-                                        Some(version_tag.to_string())
-                                    },
-                                    path: bin_path,
-                                    size: sz,
-                                },
-                                sz,
-                            )
-                        } else {
-                            // Fail loud: the sidecar says this object has a
-                            // body but the .bin file is missing. Returning
-                            // silently would hand the caller a truncated
-                            // object and hide data loss.
-                            return Err(StoreError::Other(format!(
-                                "missing body file: {}",
-                                bin_path.display()
-                            )));
-                        };
-                        let _ = size;
-                        key_name.get_or_insert_with(|| obj_meta.key.clone());
-                        if version_tag == "null" && obj_meta.version_id.is_none() {
-                            snap.objects.insert(
-                                obj_meta.key.clone(),
-                                LoadedObject {
-                                    meta: obj_meta,
-                                    body,
-                                },
-                            );
-                        } else {
-                            versioned.push(LoadedObject {
-                                meta: obj_meta,
-                                body,
-                            });
-                        }
-                    }
-                    if !versioned.is_empty() {
-                        versioned.sort_by_key(|v| v.meta.last_modified);
-                        if let Some(key) = key_name {
-                            // Reconcile snap.objects with the newest version:
-                            // a trailing delete marker hides any prior null or
-                            // live version (remove it); otherwise overwrite
-                            // with the newest live version, even if a
-                            // pre-versioning null.toml had already been
-                            // inserted during the non-versioned scan.
-                            match versioned.last() {
-                                Some(newest) if newest.meta.is_delete_marker => {
-                                    snap.objects.remove(&key);
-                                }
-                                Some(newest) => {
-                                    snap.objects.insert(key.clone(), newest.clone());
-                                }
-                                None => {}
+                for kind in ALL_SUBRESOURCES {
+                    let fname = Self::subresource_filename(*kind);
+                    let path = bdir.join(fname);
+                    if path.exists() {
+                        let text = std::fs::read_to_string(&path)?;
+                        if *kind == BucketSubresource::Versioning && snap.meta.versioning.is_none()
+                        {
+                            let stripped = text.trim();
+                            if !stripped.is_empty() {
+                                snap.meta.versioning = Some(stripped.to_string());
+                                meta.versioning = snap.meta.versioning.clone();
                             }
-                            snap.object_versions.insert(key, versioned);
                         }
+                        snap.subresources.insert(fname.to_string(), text);
                     }
                 }
-            }
 
-            let mpu_root = bdir.join("mpu");
-            if mpu_root.exists() {
-                for upload_entry in std::fs::read_dir(&mpu_root)? {
-                    let upload_entry = upload_entry?;
-                    if !upload_entry.file_type()?.is_dir() {
-                        continue;
-                    }
-                    let upload_dir = upload_entry.path();
-                    let init_path = upload_dir.join("init.toml");
-                    if !init_path.exists() {
-                        continue;
-                    }
-                    let init_text = std::fs::read_to_string(&init_path)?;
-                    let init: MpuInit =
-                        toml::from_str(&init_text).map_err(|e| StoreError::Serde(e.to_string()))?;
-                    let mut loaded_parts: BTreeMap<u32, LoadedPart> = BTreeMap::new();
-                    let parts_dir = upload_dir.join("parts");
-                    if parts_dir.exists() {
-                        for part_entry in std::fs::read_dir(&parts_dir)? {
-                            let part_entry = part_entry?;
-                            let path = part_entry.path();
+                let objects_root = bdir.join("objects");
+                if objects_root.exists() {
+                    for okey_entry in std::fs::read_dir(&objects_root)? {
+                        let okey_entry = okey_entry?;
+                        if !okey_entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let key_dir = okey_entry.path();
+                        let mut versioned: Vec<LoadedObject> = Vec::new();
+                        let mut key_name: Option<String> = None;
+                        for version_entry in std::fs::read_dir(&key_dir)? {
+                            let version_entry = version_entry?;
+                            let path = version_entry.path();
                             let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
                                 continue;
                             };
                             if !fname.ends_with(".toml") {
                                 continue;
                             }
-                            let stem = &fname[..fname.len() - 5];
-                            let Ok(part_number) = stem.parse::<u32>() else {
-                                continue;
-                            };
+                            let version_tag = &fname[..fname.len() - 5];
                             let toml_text = std::fs::read_to_string(&path)?;
-                            let part_meta: UploadPartMeta = toml::from_str(&toml_text)
+                            let obj_meta: ObjectMeta = toml::from_str(&toml_text)
                                 .map_err(|e| StoreError::Serde(e.to_string()))?;
-                            let bin_path = parts_dir.join(format!("{}.bin", part_number));
-                            if !bin_path.exists() {
+                            let bin_path = key_dir.join(format!("{}.bin", version_tag));
+                            let (body, size) = if obj_meta.is_delete_marker {
+                                (BodyRef::Memory(Bytes::new()), 0u64)
+                            } else if bin_path.exists() {
+                                let sz = std::fs::metadata(&bin_path)?.len();
+                                (
+                                    BodyRef::Disk {
+                                        bucket: meta.name.clone(),
+                                        key: obj_meta.key.clone(),
+                                        version: if version_tag == "null" {
+                                            None
+                                        } else {
+                                            Some(version_tag.to_string())
+                                        },
+                                        path: bin_path,
+                                        size: sz,
+                                    },
+                                    sz,
+                                )
+                            } else {
+                                // Fail loud: the sidecar says this object has a
+                                // body but the .bin file is missing. Returning
+                                // silently would hand the caller a truncated
+                                // object and hide data loss.
                                 return Err(StoreError::Other(format!(
-                                    "missing multipart part body file: {}",
+                                    "missing body file: {}",
                                     bin_path.display()
                                 )));
-                            }
-                            let sz = std::fs::metadata(&bin_path)?.len();
-                            let body = BodyRef::Disk {
-                                bucket: meta.name.clone(),
-                                key: format!("__mpu__/{}", init.upload_id),
-                                version: Some(format!("part-{}", part_number)),
-                                path: bin_path,
-                                size: sz,
                             };
-                            loaded_parts.insert(
-                                part_number,
-                                LoadedPart {
-                                    meta: part_meta,
+                            let _ = size;
+                            key_name.get_or_insert_with(|| obj_meta.key.clone());
+                            if version_tag == "null" && obj_meta.version_id.is_none() {
+                                snap.objects.insert(
+                                    obj_meta.key.clone(),
+                                    LoadedObject {
+                                        meta: obj_meta,
+                                        body,
+                                    },
+                                );
+                            } else {
+                                versioned.push(LoadedObject {
+                                    meta: obj_meta,
                                     body,
-                                },
-                            );
+                                });
+                            }
+                        }
+                        if !versioned.is_empty() {
+                            versioned.sort_by_key(|v| v.meta.last_modified);
+                            if let Some(key) = key_name {
+                                // Reconcile snap.objects with the newest version:
+                                // a trailing delete marker hides any prior null or
+                                // live version (remove it); otherwise overwrite
+                                // with the newest live version, even if a
+                                // pre-versioning null.toml had already been
+                                // inserted during the non-versioned scan.
+                                match versioned.last() {
+                                    Some(newest) if newest.meta.is_delete_marker => {
+                                        snap.objects.remove(&key);
+                                    }
+                                    Some(newest) => {
+                                        snap.objects.insert(key.clone(), newest.clone());
+                                    }
+                                    None => {}
+                                }
+                                snap.object_versions.insert(key, versioned);
+                            }
                         }
                     }
-                    snap.multipart_uploads.insert(
-                        init.upload_id.clone(),
-                        LoadedMpu {
-                            init,
-                            parts: loaded_parts,
-                        },
-                    );
                 }
-            }
 
-            state.buckets.insert(meta.name.clone(), snap);
+                let mpu_root = bdir.join("mpu");
+                if mpu_root.exists() {
+                    for upload_entry in std::fs::read_dir(&mpu_root)? {
+                        let upload_entry = upload_entry?;
+                        if !upload_entry.file_type()?.is_dir() {
+                            continue;
+                        }
+                        let upload_dir = upload_entry.path();
+                        let init_path = upload_dir.join("init.toml");
+                        if !init_path.exists() {
+                            continue;
+                        }
+                        let init_text = std::fs::read_to_string(&init_path)?;
+                        let init: MpuInit = toml::from_str(&init_text)
+                            .map_err(|e| StoreError::Serde(e.to_string()))?;
+                        let mut loaded_parts: BTreeMap<u32, LoadedPart> = BTreeMap::new();
+                        let parts_dir = upload_dir.join("parts");
+                        if parts_dir.exists() {
+                            for part_entry in std::fs::read_dir(&parts_dir)? {
+                                let part_entry = part_entry?;
+                                let path = part_entry.path();
+                                let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                                    continue;
+                                };
+                                if !fname.ends_with(".toml") {
+                                    continue;
+                                }
+                                let stem = &fname[..fname.len() - 5];
+                                let Ok(part_number) = stem.parse::<u32>() else {
+                                    continue;
+                                };
+                                let toml_text = std::fs::read_to_string(&path)?;
+                                let part_meta: UploadPartMeta = toml::from_str(&toml_text)
+                                    .map_err(|e| StoreError::Serde(e.to_string()))?;
+                                let bin_path = parts_dir.join(format!("{}.bin", part_number));
+                                if !bin_path.exists() {
+                                    return Err(StoreError::Other(format!(
+                                        "missing multipart part body file: {}",
+                                        bin_path.display()
+                                    )));
+                                }
+                                let sz = std::fs::metadata(&bin_path)?.len();
+                                let body = BodyRef::Disk {
+                                    bucket: meta.name.clone(),
+                                    key: format!("__mpu__/{}", init.upload_id),
+                                    version: Some(format!("part-{}", part_number)),
+                                    path: bin_path,
+                                    size: sz,
+                                };
+                                loaded_parts.insert(
+                                    part_number,
+                                    LoadedPart {
+                                        meta: part_meta,
+                                        body,
+                                    },
+                                );
+                            }
+                        }
+                        snap.multipart_uploads.insert(
+                            init.upload_id.clone(),
+                            LoadedMpu {
+                                init,
+                                parts: loaded_parts,
+                            },
+                        );
+                    }
+                }
+
+                Ok(Some(snap))
+            })();
+            match loaded {
+                Ok(Some(snap)) => {
+                    state.buckets.insert(snap.meta.name.clone(), snap);
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    bucket = %bdir.display(),
+                    error = %e,
+                    "skipping unreadable S3 bucket during load"
+                ),
+            }
         }
         Ok(state)
     }
@@ -1133,6 +1151,15 @@ impl S3Store for DiskS3Store {
                     let _ = std::fs::remove_file(&only);
                 }
                 Err(e) => return Err(e.into()),
+            }
+            // fsync the parent directory so the rename that links the completed
+            // object is durable, matching the multi-part branch below. Without
+            // it a power-loss could leave a 200-OK'd single-part MPU not durably
+            // linked, poisoning the bucket load (bug-audit 2026-06-20, 4.4).
+            if let Some(parent) = bin_path.parent() {
+                if let Ok(dir_handle) = std::fs::File::open(parent) {
+                    let _ = dir_handle.sync_all();
+                }
             }
             sz
         } else {
@@ -2424,5 +2451,45 @@ mod disk_tests {
         let loaded = store.load().unwrap();
         let snap = loaded.buckets.get("b").unwrap();
         assert_eq!(snap.meta.versioning.as_deref(), Some("Enabled"));
+    }
+
+    #[test]
+    fn load_skips_corrupt_bucket_and_keeps_others() {
+        // One corrupt bucket must be skipped with a warning, not abort the
+        // whole store load (bug-audit 2026-06-20, 4.3).
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        store
+            .put_bucket_meta(
+                "good",
+                &BucketMeta {
+                    name: "good".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .put_object(
+                "good",
+                "k",
+                None,
+                BodySource::Bytes(Bytes::from_static(b"hi")),
+                &sample_meta("k", 2),
+            )
+            .unwrap();
+
+        let bad_dir = store.buckets_dir().join("bad");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("meta.toml"), b"not valid toml = = =").unwrap();
+
+        let loaded = store.load().unwrap();
+        assert!(
+            loaded.buckets.contains_key("good"),
+            "valid bucket must load"
+        );
+        assert!(
+            !loaded.buckets.contains_key("bad"),
+            "corrupt bucket must be skipped, not abort the load"
+        );
     }
 }
