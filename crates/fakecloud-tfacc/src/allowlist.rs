@@ -119,9 +119,12 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "sns",
-        // Batch 7: core `aws_sns_topic` smoke. Passes against fakecloud
-        // out of the box.
-        run_regex: "^TestAccSNSTopic_basic$",
+        // Batch 7 + widen: `_basic` smoke for every SNS resource and data
+        // source — topic, topic policy, topic subscription, topic data source,
+        // and the data-protection policy (which the widen batch fixed: AWS
+        // accepts an empty DataProtectionPolicy to clear it, fakecloud used to
+        // reject the empty body the provider sends on delete).
+        run_regex: "^TestAccSNS[A-Za-z]+_basic$",
         deny: &[],
     },
     Service {
@@ -136,10 +139,20 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "kms",
-        // Batch 6: core `aws_kms_key` smoke. Passes against fakecloud
-        // out of the box.
-        run_regex: "^TestAccKMSKey_basic$",
-        deny: &[],
+        // Batch 6 + widen: `_basic` smoke for every KMS resource and data
+        // source — keys, aliases, grants, key policies, ciphertext (data key)
+        // and its data source, public-key and secrets data sources, and
+        // external keys. The widen batch fixed external keys: an `EXTERNAL`
+        // origin key has no material yet, so it must come back disabled in
+        // `PendingImport`, which the provider asserts.
+        run_regex: "^TestAccKMS[A-Za-z]+_basic$",
+        deny: &[
+            // --- unsupportable: multi-region (replica) keys need cross-region
+            //     key replication, which fakecloud's single-region KMS state
+            //     does not model. ---
+            "TestAccKMSReplicaKey_basic",
+            "TestAccKMSReplicaExternalKey_basic",
+        ],
     },
     Service {
         name: "logs",
@@ -311,7 +324,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "sns",
         service: "sns",
-        run_regex: "^TestAccSNSTopic_basic$",
+        run_regex: "^TestAccSNS[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
@@ -323,7 +336,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "kms",
         service: "kms",
-        run_regex: "^TestAccKMSKey_basic$",
+        run_regex: "^TestAccKMS[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {

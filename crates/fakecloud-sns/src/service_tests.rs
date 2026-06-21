@@ -3205,6 +3205,42 @@ fn put_then_get_data_protection_policy_round_trips() {
 }
 
 #[test]
+fn put_empty_data_protection_policy_clears_it() {
+    // AWS accepts an empty DataProtectionPolicy to remove the policy; the
+    // Terraform resource sends "" on delete. fakecloud must not reject it as
+    // invalid JSON, and the policy must actually be cleared.
+    let (svc, _) = make_sns();
+    svc.create_topic(&sns_request("CreateTopic", vec![("Name", "dpp-clear")]))
+        .unwrap();
+    let arn = "arn:aws:sns:us-east-1:123456789012:dpp-clear";
+    svc.put_data_protection_policy(&sns_request(
+        "PutDataProtectionPolicy",
+        vec![
+            ("ResourceArn", arn),
+            ("DataProtectionPolicy", r#"{"Name":"p"}"#),
+        ],
+    ))
+    .unwrap();
+    // Empty body must succeed and clear.
+    svc.put_data_protection_policy(&sns_request(
+        "PutDataProtectionPolicy",
+        vec![("ResourceArn", arn), ("DataProtectionPolicy", "")],
+    ))
+    .unwrap();
+    let resp = svc
+        .get_data_protection_policy(&sns_request(
+            "GetDataProtectionPolicy",
+            vec![("ResourceArn", arn)],
+        ))
+        .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        !body.contains("&quot;Name&quot;"),
+        "policy not cleared: {body}"
+    );
+}
+
+#[test]
 fn get_data_protection_policy_unknown_topic_errors() {
     let (svc, _) = make_sns();
     let req = sns_request(

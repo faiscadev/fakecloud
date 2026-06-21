@@ -1709,8 +1709,11 @@ impl SnsService {
     fn put_data_protection_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let resource_arn = required(req, "ResourceArn")?;
         let policy = required(req, "DataProtectionPolicy")?;
-        // Validate JSON.
-        if serde_json::from_str::<Value>(&policy).is_err() {
+        // AWS accepts an empty DataProtectionPolicy to clear the topic's
+        // policy (this is how the Terraform resource deletes it). Only a
+        // non-empty value must be valid JSON.
+        let clearing = policy.trim().is_empty();
+        if !clearing && serde_json::from_str::<Value>(&policy).is_err() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameter",
@@ -1722,7 +1725,11 @@ impl SnsService {
         if !state.topics.contains_key(&resource_arn) {
             return Err(not_found("Topic"));
         }
-        state.data_protection_policies.insert(resource_arn, policy);
+        if clearing {
+            state.data_protection_policies.remove(&resource_arn);
+        } else {
+            state.data_protection_policies.insert(resource_arn, policy);
+        }
         Ok(xml_resp(
             &format!(
                 r#"<PutDataProtectionPolicyResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">

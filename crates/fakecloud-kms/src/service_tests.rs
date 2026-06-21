@@ -3133,3 +3133,31 @@ fn list_aliases_includes_aws_managed_service_aliases() {
         .unwrap();
     assert!(ddb["TargetKeyId"].as_str().is_some_and(|t| !t.is_empty()));
 }
+
+#[test]
+fn create_external_origin_key_is_pending_import_and_disabled() {
+    // A key created with Origin=EXTERNAL has no material yet, so AWS returns it
+    // disabled in KeyState PendingImport until ImportKeyMaterial runs. The
+    // Terraform aws_kms_external_key resource asserts enabled=false on create.
+    let svc = make_service();
+    let resp = svc
+        .create_key(&make_request("CreateKey", json!({ "Origin": "EXTERNAL" })))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let md = &body["KeyMetadata"];
+    assert_eq!(
+        md["Enabled"],
+        json!(false),
+        "external key should be disabled"
+    );
+    assert_eq!(md["KeyState"], json!("PendingImport"));
+    assert_eq!(md["Origin"], json!("EXTERNAL"));
+
+    // A normal (AWS_KMS) key is still created Enabled.
+    let resp = svc
+        .create_key(&make_request("CreateKey", json!({})))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["KeyMetadata"]["Enabled"], json!(true));
+    assert_eq!(body["KeyMetadata"]["KeyState"], json!("Enabled"));
+}
