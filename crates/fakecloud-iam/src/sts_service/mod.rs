@@ -980,6 +980,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assume_role_with_web_identity_rejects_expired_token() {
+        // A JWT whose `exp` is in the past must be rejected with
+        // ExpiredTokenException, not mint fresh credentials (bug-audit
+        // 2026-06-20, 5.1).
+        use base64::Engine;
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "web-role", trust);
+
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload_json = format!(
+            r#"{{"iss":"https://example.com","aud":"client","sub":"u","exp":{}}}"#,
+            chrono::Utc::now().timestamp() - 3600
+        );
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let token = format!("{header}.{payload}.sig");
+
+        let req = sts_request(
+            "AssumeRoleWithWebIdentity",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "web-session"),
+                ("WebIdentityToken", &token),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected ExpiredTokenException for an expired token"),
+        };
+        assert_eq!(err.code(), "ExpiredTokenException");
+    }
+
+    #[tokio::test]
     async fn assume_role_with_web_identity_nonexistent_role_denied() {
         // §5.2: a missing role must NOT fall through to credential minting.
         // AWS returns AccessDenied for AssumeRoleWithWebIdentity on a role
