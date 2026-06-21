@@ -121,18 +121,23 @@ impl RdsService {
             "CreateDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
+                let engine = get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string());
+                let port = get_param(req, "Port")
+                    .and_then(|p| p.parse::<i64>().ok())
+                    .unwrap_or(if engine.contains("mysql") { 3306 } else { 5432 });
                 let entry = json!({
                     "DBClusterIdentifier": id, "DBClusterArn": arn,
-                    "Status": "available", "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
+                    "DbClusterResourceId": new_cluster_resource_id(),
+                    "Status": "available", "Engine": engine,
                     "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
                     "Endpoint": format!("{id}.cluster-xxx.{region}.rds.amazonaws.com"),
                     "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
-                    "Port": 5432, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
+                    "Port": port, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
                 });
                 {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
-                    store(&mut state.extras, "clusters").insert(id.clone(), entry);
+                    store(&mut state.extras, "clusters").insert(id.clone(), entry.clone());
                 }
                 self.emit_event(
                     RdsSourceType::DbCluster,
@@ -142,7 +147,14 @@ impl RdsService {
                     &["creation"],
                     "DB cluster created",
                 );
-                Ok(xml_response("CreateDBCluster", db_cluster_xml(&id, &arn), &rid))
+                Ok(xml_response(
+                    "CreateDBCluster",
+                    format!(
+                        "    <DBCluster>\n{}\n    </DBCluster>",
+                        db_cluster_member_xml(&entry)
+                    ),
+                    &rid,
+                ))
             }
             "DeleteDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
@@ -1298,6 +1310,12 @@ impl RdsService {
                         "ReaderEndpoint".to_string(),
                         json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
                     );
+                    // Restored cluster is a distinct resource: mint a fresh
+                    // immutable resource id rather than reuse the source's.
+                    obj.insert(
+                        "DbClusterResourceId".to_string(),
+                        json!(new_cluster_resource_id()),
+                    );
                     obj.remove("ReplicationSourceIdentifier");
                     // The new cluster starts empty; the user is expected
                     // to call CreateDBInstance with DBClusterIdentifier
@@ -1325,7 +1343,7 @@ impl RdsService {
                         obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
                     }
                 }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry);
+                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
                 drop(accounts);
                 self.emit_event(
                     RdsSourceType::DbCluster,
@@ -1337,7 +1355,10 @@ impl RdsService {
                 );
                 Ok(xml_response(
                     "RestoreDBClusterFromSnapshot",
-                    db_cluster_xml(&target, &arn),
+                    format!(
+                        "    <DBCluster>\n{}\n    </DBCluster>",
+                        db_cluster_member_xml(&entry)
+                    ),
                     &rid,
                 ))
             }
@@ -1376,6 +1397,10 @@ impl RdsService {
                         "ReaderEndpoint".to_string(),
                         json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
                     );
+                    obj.insert(
+                        "DbClusterResourceId".to_string(),
+                        json!(new_cluster_resource_id()),
+                    );
                     obj.remove("DBClusterMembers");
                     obj.remove("WriterDBInstanceIdentifier");
                     if let Some(restore_time) = get_param(req, "RestoreToTime") {
@@ -1385,7 +1410,7 @@ impl RdsService {
                         obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
                     }
                 }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry);
+                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
                 drop(accounts);
                 self.emit_event(
                     RdsSourceType::DbCluster,
@@ -1397,7 +1422,10 @@ impl RdsService {
                 );
                 Ok(xml_response(
                     "RestoreDBClusterToPointInTime",
-                    db_cluster_xml(&target, &arn),
+                    format!(
+                        "    <DBCluster>\n{}\n    </DBCluster>",
+                        db_cluster_member_xml(&entry)
+                    ),
                     &rid,
                 ))
             }
@@ -1479,6 +1507,13 @@ impl RdsService {
 }
 
 // ── XML helpers per resource ──
+
+/// Generate a `DbClusterResourceId` in AWS's `cluster-XXXX` form. The suffix
+/// is immutable and survives rename, so IAM auth / CloudWatch dimensions key
+/// on it rather than the cluster identifier.
+pub(crate) fn new_cluster_resource_id() -> String {
+    format!("cluster-{}", uuid::Uuid::new_v4().simple())
+}
 
 pub(crate) fn db_cluster_xml(id: &str, arn: &str) -> String {
     format!(

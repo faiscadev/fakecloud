@@ -121,6 +121,45 @@ fn describe_events_filters_by_source_identifier() {
 }
 
 #[test]
+fn create_db_cluster_response_renders_computed_fields() {
+    // CreateDBCluster previously returned only id/arn/status via the canned
+    // db_cluster_xml; Endpoint/Port/Engine and DbClusterResourceId were
+    // dropped (bug-audit 2026-06-20, 1.4).
+    let svc = svc();
+    let resp = svc
+        .handle_extra_action(&req(
+            "CreateDBCluster",
+            &[
+                ("DBClusterIdentifier", "c1"),
+                ("Engine", "aurora-mysql"),
+                ("EngineVersion", "8.0"),
+            ],
+        ))
+        .expect("CreateDBCluster");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Engine>aurora-mysql</Engine>"), "{body}");
+    assert!(
+        body.contains("<EngineVersion>8.0</EngineVersion>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<Endpoint>c1.cluster-xxx.us-east-1.rds.amazonaws.com</Endpoint>"),
+        "{body}"
+    );
+    assert!(body.contains("<ReaderEndpoint>"), "{body}");
+    // aurora-mysql defaults to 3306, not the redis-ish 5432.
+    assert!(body.contains("<Port>3306</Port>"), "{body}");
+    assert!(body.contains("<DbClusterResourceId>cluster-"), "{body}");
+
+    // The same fields must survive into DescribeDBClusters.
+    let dr = svc
+        .handle_extra_action(&req("DescribeDBClusters", &[]))
+        .unwrap();
+    let dbody = String::from_utf8(dr.body.expect_bytes().to_vec()).unwrap();
+    assert!(dbody.contains("<DbClusterResourceId>cluster-"), "{dbody}");
+}
+
+#[test]
 fn cluster_lifecycle() {
     // The lifecycle ops require the cluster to actually exist and be
     // in the right state; share a single service so each call sees
