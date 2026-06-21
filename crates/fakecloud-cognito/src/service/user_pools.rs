@@ -475,7 +475,10 @@ impl CognitoService {
 
         // Find start index from NextToken
         let start_idx = if let Some(token) = next_token {
-            pools.iter().position(|p| p.id == token).unwrap_or(0)
+            pools
+                .iter()
+                .position(|p| p.id == token)
+                .unwrap_or(pools.len())
         } else {
             0
         };
@@ -851,7 +854,7 @@ impl CognitoService {
             clients
                 .iter()
                 .position(|c| c.client_id == token)
-                .unwrap_or(0)
+                .unwrap_or(clients.len())
         } else {
             0
         };

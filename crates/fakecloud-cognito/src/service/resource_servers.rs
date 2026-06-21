@@ -184,7 +184,7 @@ impl CognitoService {
             servers
                 .iter()
                 .position(|s| s.identifier == token)
-                .unwrap_or(0)
+                .unwrap_or(servers.len())
         } else {
             0
         };

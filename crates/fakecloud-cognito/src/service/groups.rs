@@ -179,10 +179,12 @@ impl CognitoService {
         groups.sort_by_key(|g| g.creation_date);
 
         let start_idx = if let Some(token) = next_token {
+            // A stale token (its group was deleted) must end the listing, not
+            // silently restart at page 1 (bug-audit 2026-06-20, 1.14).
             groups
                 .iter()
                 .position(|g| g.group_name == token)
-                .unwrap_or(0)
+                .unwrap_or(groups.len())
         } else {
             0
         };
@@ -362,10 +364,12 @@ impl CognitoService {
         groups.sort_by_key(|g| g.creation_date);
 
         let start_idx = if let Some(token) = next_token {
+            // A stale token (its group was deleted) must end the listing, not
+            // silently restart at page 1 (bug-audit 2026-06-20, 1.14).
             groups
                 .iter()
                 .position(|g| g.group_name == token)
-                .unwrap_or(0)
+                .unwrap_or(groups.len())
         } else {
             0
         };
@@ -443,7 +447,7 @@ impl CognitoService {
             users_in_group
                 .iter()
                 .position(|u| u.username == token)
-                .unwrap_or(0)
+                .unwrap_or(users_in_group.len())
         } else {
             0
         };

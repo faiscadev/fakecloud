@@ -229,9 +229,15 @@ impl CognitoService {
         let mut devices: Vec<&Device> = user.devices.values().collect();
         devices.sort_by_key(|a| a.device_create_date);
 
-        let start = pagination_token
-            .and_then(|t| devices.iter().position(|d| d.device_key == t))
-            .unwrap_or(0);
+        // A stale token (its device was forgotten) ends the listing rather
+        // than silently restarting at page 1 (bug-audit 2026-06-20, 1.14).
+        let start = match pagination_token {
+            None => 0,
+            Some(t) => devices
+                .iter()
+                .position(|d| d.device_key == t)
+                .unwrap_or(devices.len()),
+        };
 
         let page = &devices[start..devices.len().min(start + limit)];
         let next_token = if start + limit < devices.len() {
@@ -524,9 +530,15 @@ impl CognitoService {
         let mut devices: Vec<&Device> = user.devices.values().collect();
         devices.sort_by_key(|a| a.device_create_date);
 
-        let start = pagination_token
-            .and_then(|t| devices.iter().position(|d| d.device_key == t))
-            .unwrap_or(0);
+        // A stale token (its device was forgotten) ends the listing rather
+        // than silently restarting at page 1 (bug-audit 2026-06-20, 1.14).
+        let start = match pagination_token {
+            None => 0,
+            Some(t) => devices
+                .iter()
+                .position(|d| d.device_key == t)
+                .unwrap_or(devices.len()),
+        };
 
         let page = &devices[start..devices.len().min(start + limit)];
         let next_token = if start + limit < devices.len() {
@@ -961,9 +973,15 @@ impl CognitoService {
             .unwrap_or_default();
         jobs.sort_by_key(|a| a.creation_date);
 
-        let start = pagination_token
-            .and_then(|t| jobs.iter().position(|j| j.job_id == t))
-            .unwrap_or(0);
+        // A stale token (its job was pruned) ends the listing rather than
+        // silently restarting at page 1 (bug-audit 2026-06-20, 1.14).
+        let start = match pagination_token {
+            None => 0,
+            Some(t) => jobs
+                .iter()
+                .position(|j| j.job_id == t)
+                .unwrap_or(jobs.len()),
+        };
 
         let page = &jobs[start..jobs.len().min(start + max_results)];
         let next_token = if start + max_results < jobs.len() {

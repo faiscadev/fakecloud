@@ -1733,6 +1733,42 @@ fn setup_svc_with_pool() -> (CognitoService, String) {
 }
 
 #[test]
+fn list_groups_stale_token_does_not_restart_at_page_one() {
+    // A NextToken whose group was deleted between calls must end the listing,
+    // not silently restart at page 1 (bug-audit 2026-06-20, 1.14).
+    let (svc, pool_id) = setup_svc_with_pool();
+    for name in ["aaa", "bbb", "ccc"] {
+        let body = format!(r#"{{"UserPoolId":"{pool_id}","GroupName":"{name}"}}"#);
+        svc.create_group(&make_req("CreateGroup", &body)).unwrap();
+    }
+
+    // Page 1 of 2 -> aaa, bbb with NextToken pointing at ccc.
+    let body = format!(r#"{{"UserPoolId":"{pool_id}","Limit":2}}"#);
+    let resp = svc.list_groups(&make_req("ListGroups", &body)).unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(b["Groups"].as_array().unwrap().len(), 2);
+    let token = b["NextToken"]
+        .as_str()
+        .expect("NextToken present")
+        .to_string();
+
+    // Delete the group the token points at, then resume with the now-stale
+    // token: the page must be empty, NOT a restart that re-returns aaa/bbb.
+    let del = format!(r#"{{"UserPoolId":"{pool_id}","GroupName":"{token}"}}"#);
+    svc.delete_group(&make_req("DeleteGroup", &del)).unwrap();
+
+    let body = format!(r#"{{"UserPoolId":"{pool_id}","Limit":2,"NextToken":"{token}"}}"#);
+    let resp = svc.list_groups(&make_req("ListGroups", &body)).unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        b["Groups"].as_array().unwrap().len(),
+        0,
+        "stale token must yield an empty page, not page 1: {b}"
+    );
+    assert!(b.get("NextToken").is_none());
+}
+
+#[test]
 fn list_users_requires_user_pool_id() {
     let (svc, _) = setup_svc_with_pool();
 

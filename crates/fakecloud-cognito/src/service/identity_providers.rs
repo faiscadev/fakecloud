@@ -212,7 +212,7 @@ impl CognitoService {
             providers
                 .iter()
                 .position(|p| p.provider_name == token)
-                .unwrap_or(0)
+                .unwrap_or(providers.len())
         } else {
             0
         };

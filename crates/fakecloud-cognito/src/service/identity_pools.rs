@@ -445,7 +445,7 @@ impl CognitoIdentityService {
             pools
                 .iter()
                 .position(|p| p.identity_pool_id == token)
-                .unwrap_or(0)
+                .unwrap_or(pools.len())
         } else {
             0
         };
@@ -635,7 +635,7 @@ impl CognitoIdentityService {
             identities
                 .iter()
                 .position(|i| i.identity_id == token)
-                .unwrap_or(0)
+                .unwrap_or(identities.len())
         } else {
             0
         };
