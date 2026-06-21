@@ -428,6 +428,10 @@ impl ElastiCacheService {
 
         if let Some(ref runtime) = self.runtime {
             runtime.stop_container(&cache_cluster_id).await;
+            // Drop the persisted data volume so a later cluster reusing this id
+            // starts clean instead of reloading deleted data (bug-audit
+            // 2026-06-20, 4.2).
+            runtime.remove_data_volume(&cache_cluster_id).await;
         }
 
         let xml = match removed {

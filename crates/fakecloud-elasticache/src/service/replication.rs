@@ -644,6 +644,10 @@ impl ElastiCacheService {
 
         if let Some(ref runtime) = self.runtime {
             runtime.stop_container(&replication_group_id).await;
+            // Drop the persisted data volume so a later group reusing this id
+            // starts clean instead of reloading deleted data (bug-audit
+            // 2026-06-20, 4.2).
+            runtime.remove_data_volume(&replication_group_id).await;
         }
 
         let region = self.state.read().region().to_string();
