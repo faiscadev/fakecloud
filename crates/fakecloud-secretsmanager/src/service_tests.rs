@@ -233,6 +233,56 @@ async fn test_replication_ops_return_arn() {
 }
 
 #[tokio::test]
+async fn replicate_secret_to_regions_persists_replicas() {
+    // ReplicateSecretToRegions was a no-op returning empty ReplicationStatus
+    // (bug-audit 2026-06-20, 1.24): the added regions must persist and show up
+    // in ReplicationStatus and DescribeSecret, and be removable.
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "repl", "SecretString": "v"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .handle(make_request(
+            "ReplicateSecretToRegions",
+            r#"{"SecretId": "repl", "AddReplicaRegions": [{"Region": "us-west-2"}, {"Region": "eu-west-1"}]}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let statuses = body["ReplicationStatus"].as_array().unwrap();
+    assert_eq!(statuses.len(), 2, "{body}");
+    assert!(statuses
+        .iter()
+        .any(|s| s["Region"] == "us-west-2" && s["Status"] == "InSync"));
+
+    // DescribeSecret reflects the replicas.
+    let d = svc
+        .handle(make_request("DescribeSecret", r#"{"SecretId": "repl"}"#))
+        .await
+        .unwrap();
+    let db: Value = serde_json::from_slice(d.body.expect_bytes()).unwrap();
+    assert_eq!(db["ReplicationStatus"].as_array().unwrap().len(), 2);
+
+    // Removing one region drops it.
+    let r = svc
+        .handle(make_request(
+            "RemoveRegionsFromReplication",
+            r#"{"SecretId": "repl", "RemoveReplicaRegions": ["us-west-2"]}"#,
+        ))
+        .await
+        .unwrap();
+    let rb: Value = serde_json::from_slice(r.body.expect_bytes()).unwrap();
+    let left = rb["ReplicationStatus"].as_array().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["Region"], "eu-west-1");
+}
+
+#[tokio::test]
 async fn test_secret_id_length_validation() {
     let state = make_state();
     let svc = SecretsManagerService::new(state);
@@ -2114,6 +2164,7 @@ fn test_filter_name_prefix() {
         rotation_rules: None,
         last_rotated_at: None,
         resource_policy: None,
+        replica_regions: Vec::new(),
     };
     assert!(filter_name(&secret, &["prod/"]));
     assert!(!filter_name(&secret, &["staging/"]));
@@ -2140,6 +2191,7 @@ fn test_filter_tag_value() {
         rotation_rules: None,
         last_rotated_at: None,
         resource_policy: None,
+        replica_regions: Vec::new(),
     };
     assert!(filter_tag_value(&secret, &["prod"]));
     assert!(!filter_tag_value(&secret, &["staging"]));
@@ -2166,6 +2218,7 @@ fn test_filter_all_searches_name_desc_tags() {
         rotation_rules: None,
         last_rotated_at: None,
         resource_policy: None,
+        replica_regions: Vec::new(),
     };
     // Matches name
     assert!(filter_all(&secret, &["my"]));

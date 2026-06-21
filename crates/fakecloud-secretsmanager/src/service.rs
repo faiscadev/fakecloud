@@ -283,6 +283,7 @@ impl SecretsManagerService {
             rotation_rules: None,
             last_rotated_at: None,
             resource_policy: None,
+            replica_regions: Vec::new(),
         };
 
         state.secrets.insert(input.name.clone(), secret);
@@ -874,6 +875,9 @@ impl SecretsManagerService {
         }
         if let Some(last_rotated) = secret.last_rotated_at {
             response["LastRotatedDate"] = json!(last_rotated.timestamp_millis() as f64 / 1000.0);
+        }
+        if !secret.replica_regions.is_empty() {
+            response["ReplicationStatus"] = replication_status_json(&secret.replica_regions);
         }
         // Calculate NextRotationDate if rotation is enabled
         if secret.rotation_enabled == Some(true) {
@@ -1803,15 +1807,27 @@ impl SecretsManagerService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let secret_id = require_secret_id(&body)?;
+        // AddReplicaRegions[].Region — the regions to replicate into.
+        let add_regions: Vec<String> = body["AddReplicaRegions"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r["Region"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        let accounts = self.state.read();
-        let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let secret = self.find_secret_ref(state, &secret_id)?;
-
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let secret = self.find_secret_mut(state, &secret_id)?;
+        for region in add_regions {
+            if !secret.replica_regions.contains(&region) {
+                secret.replica_regions.push(region);
+            }
+        }
         let response = json!({
             "ARN": secret.arn,
-            "ReplicationStatus": [],
+            "ReplicationStatus": replication_status_json(&secret.replica_regions),
         });
         Ok(AwsResponse::ok_json(response))
     }
@@ -1822,15 +1838,24 @@ impl SecretsManagerService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let secret_id = require_secret_id(&body)?;
+        let remove_regions: Vec<String> = body["RemoveReplicaRegions"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        let accounts = self.state.read();
-        let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let secret = self.find_secret_ref(state, &secret_id)?;
-
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let secret = self.find_secret_mut(state, &secret_id)?;
+        secret
+            .replica_regions
+            .retain(|r| !remove_regions.contains(r));
         let response = json!({
             "ARN": secret.arn,
-            "ReplicationStatus": [],
+            "ReplicationStatus": replication_status_json(&secret.replica_regions),
         });
         Ok(AwsResponse::ok_json(response))
     }
@@ -2128,6 +2153,23 @@ pub(crate) use service_helpers::*;
 /// error is `InvalidParameterException`. Translate at the dispatcher
 /// boundary so the wire-level error code matches real AWS without
 /// duplicating every validator.
+/// Build the `ReplicationStatus` array from a secret's replica regions.
+/// Each replica reports `InSync`, matching a healthy replication.
+fn replication_status_json(regions: &[String]) -> Value {
+    Value::Array(
+        regions
+            .iter()
+            .map(|r| {
+                json!({
+                    "Region": r,
+                    "Status": "InSync",
+                    "StatusMessage": "Replication succeeded",
+                })
+            })
+            .collect(),
+    )
+}
+
 fn remap_validation_error(err: AwsServiceError) -> AwsServiceError {
     match err {
         AwsServiceError::AwsError {

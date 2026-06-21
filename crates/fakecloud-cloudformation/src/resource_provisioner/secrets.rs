@@ -112,6 +112,7 @@ impl ResourceProvisioner {
             rotation_rules: None,
             last_rotated_at: None,
             resource_policy: None,
+            replica_regions: Vec::new(),
         };
         state.secrets.insert(arn.clone(), secret);
 

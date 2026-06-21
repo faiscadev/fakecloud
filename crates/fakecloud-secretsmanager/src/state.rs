@@ -23,6 +23,10 @@ pub struct Secret {
     pub rotation_rules: Option<RotationRules>,
     pub last_rotated_at: Option<DateTime<Utc>>,
     pub resource_policy: Option<String>,
+    /// Replica regions added via ReplicateSecretToRegions. Reflected in
+    /// ReplicationStatus on describe/replicate responses.
+    #[serde(default)]
+    pub replica_regions: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -118,6 +122,7 @@ mod tests {
                 rotation_rules: None,
                 last_rotated_at: None,
                 resource_policy: None,
+                replica_regions: Vec::new(),
             },
         );
         state.reset();
