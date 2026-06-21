@@ -605,6 +605,48 @@ mod replication_tests {
     }
 
     #[test]
+    fn update_repository_creation_template_applies_all_fields() {
+        // customRoleArn / repositoryPolicy / lifecyclePolicy /
+        // encryptionConfiguration were dropped on update (bug-audit
+        // 2026-06-20, 1.24).
+        let (svc, _state) = fixture(Vec::new());
+        svc.create_repository_creation_template(&make_request(
+            "CreateRepositoryCreationTemplate",
+            json!({"prefix": "team/", "appliedFor": ["PULL_THROUGH_CACHE"]}),
+        ))
+        .unwrap();
+
+        svc.update_repository_creation_template(&make_request(
+            "UpdateRepositoryCreationTemplate",
+            json!({
+                "prefix": "team/",
+                "customRoleArn": "arn:aws:iam::111111111111:role/r",
+                "repositoryPolicy": "{\"Version\":\"2012-10-17\"}",
+                "lifecyclePolicy": "{\"rules\":[]}",
+                "encryptionConfiguration": {"encryptionType": "KMS", "kmsKey": "arn:kms:key"}
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .describe_repository_creation_templates(&make_request(
+                "DescribeRepositoryCreationTemplates",
+                json!({"prefixes": ["team/"]}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let tpl = &body["repositoryCreationTemplates"][0];
+        assert_eq!(
+            tpl["customRoleArn"], "arn:aws:iam::111111111111:role/r",
+            "{tpl}"
+        );
+        assert_eq!(tpl["repositoryPolicy"], "{\"Version\":\"2012-10-17\"}");
+        assert_eq!(tpl["lifecyclePolicy"], "{\"rules\":[]}");
+        assert_eq!(tpl["encryptionConfiguration"]["encryptionType"], "KMS");
+        assert_eq!(tpl["encryptionConfiguration"]["kmsKey"], "arn:kms:key");
+    }
+
+    #[test]
     fn put_image_triggers_replication_to_configured_destination() {
         const SOURCE: &str = "111111111111";
         const TARGET: &str = "222222222222";
