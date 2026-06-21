@@ -168,6 +168,32 @@ impl EcrService {
         if let Some(arr) = body.get("resourceTags").and_then(|v| v.as_array()) {
             tpl.resource_tags = arr.clone();
         }
+        // customRoleArn / repositoryPolicy / lifecyclePolicy /
+        // encryptionConfiguration were dropped on update (bug-audit
+        // 2026-06-20, 1.24).
+        if let Some(role) = opt_str(&body, "customRoleArn") {
+            tpl.custom_role_arn = Some(role.to_string());
+        }
+        if let Some(p) = opt_str(&body, "repositoryPolicy") {
+            tpl.repository_policy = Some(p.to_string());
+        }
+        if let Some(p) = opt_str(&body, "lifecyclePolicy") {
+            tpl.lifecycle_policy = Some(p.to_string());
+        }
+        if let Some(v) = body.get("encryptionConfiguration") {
+            use crate::state::EncryptionConfiguration as Enc;
+            tpl.encryption_configuration = Some(Enc {
+                encryption_type: v
+                    .get("encryptionType")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("AES256")
+                    .to_string(),
+                kms_key: v
+                    .get("kmsKey")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
         tpl.updated_at = Utc::now();
         Ok(AwsResponse::ok_json(json!({
             "registryId": state.account_id,
