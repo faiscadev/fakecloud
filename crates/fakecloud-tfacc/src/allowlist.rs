@@ -152,12 +152,35 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "iam",
-        // Batch 5: core CRUD smoke for the four most-used IAM resource
-        // types. Passes against fakecloud out of the box — no
-        // fakecloud-side changes needed. Later batches widen to
-        // attached-policy, group-membership, and instance-profile tests.
-        run_regex: "^TestAccIAM(Role|User|Policy|Group)_basic$",
-        deny: &[],
+        // Batch 5 + widen: the `_basic` smoke for every IAM resource and data
+        // source. Covers ~42 resource types (access keys, instance profiles,
+        // OIDC/SAML providers, server certificates, every policy-attachment and
+        // group-membership variant, service-specific credentials, signing
+        // certificates, virtual MFA devices, ...). The widen batch added the
+        // fakecloud-side fixes that unblocked server certificates (trailing-PEM
+        // newline), the STS global-endpoint token version in GetAccountSummary,
+        // and ListServiceSpecificCredentials `<member>` framing.
+        run_regex: "^TestAccIAM[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: SimulatePrincipalPolicy returns no per-statement
+            //          MatchedStatements detail (source_policy_id /
+            //          source_policy_type), which the data source asserts.
+            //          Needs the policy simulator to track which statement
+            //          produced each decision. ---
+            "TestAccIAMPrincipalPolicySimulationDataSource_basic",
+            // --- gap: the data source lists existing roles and asserts the
+            //          account is non-empty. Real accounts always carry
+            //          AWS-managed service-linked roles; fakecloud seeds none,
+            //          so a fresh account lists zero. Seeding default SLRs would
+            //          perturb other tests' exact role counts, so deferred. ---
+            "TestAccIAMRolesDataSource_basic",
+            // --- gap: CreateServiceLinkedRole derives the role name by naive
+            //          capitalisation (AWSServiceRoleForinspector) instead of
+            //          AWS's per-service canonical name
+            //          (AWSServiceRoleForAmazonInspector). Needs a
+            //          service-principal -> SLR-name mapping table. ---
+            "TestAccIAMServiceLinkedRole_basic",
+        ],
     },
     Service {
         name: "ssm",
@@ -312,7 +335,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "iam",
         service: "iam",
-        run_regex: "^TestAccIAM(Role|User|Policy|Group)_basic$",
+        run_regex: "^TestAccIAM[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
