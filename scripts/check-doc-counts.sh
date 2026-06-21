@@ -166,7 +166,7 @@ FILES=(
 # its local context (subset counts, rhetorical comparisons, etc.).
 EXCEPTIONS=(
     # tfacc covers a subset of services
-    "website/content/docs/about/conformance.md:services:12"
+    "website/content/docs/about/conformance.md:services:13"
     # real-AWS parity sandbox covers a subset
     "website/content/docs/about/conformance.md:services:7"
     # rhetorical comparison: "depth-first vs N services at 50%"
