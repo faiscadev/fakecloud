@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedAcmState = Arc<RwLock<AcmAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AcmAccounts {
     pub accounts: BTreeMap<String, AccountState>,
 }
@@ -20,7 +20,7 @@ impl AcmAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by full certificate ARN.
     pub certificates: BTreeMap<String, StoredCertificate>,
@@ -119,3 +119,14 @@ pub struct CertificateOptions {
     pub certificate_transparency_logging_preference: String,
     pub export: String,
 }
+
+/// On-disk snapshot envelope for ACM state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AcmSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<AcmAccounts>,
+}
+
+pub const ACM_SNAPSHOT_SCHEMA_VERSION: u32 = 1;

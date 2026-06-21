@@ -2408,7 +2408,63 @@ async fn main() {
             .with_s3(s3_state.clone()),
     );
     registry.register(route53_service.clone());
-    let acm_service = Arc::new(fakecloud_acm::AcmService::new(acm_state.clone()));
+    let acm_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("acm").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_acm::AcmSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version > fakecloud_acm::ACM_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "acm persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_acm::ACM_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *acm_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded acm persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse acm persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no acm persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read acm persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut acm_inner = fakecloud_acm::AcmService::new(acm_state.clone());
+    if let Some(store) = acm_snapshot_store.clone() {
+        acm_inner = acm_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = acm_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("acm", h);
+    }
+    // Re-arm auto-issue ticks for any DNS certs restored as PENDING_VALIDATION
+    // so they still transition to ISSUED after a restart.
+    acm_inner.rearm_pending_validations();
+    let acm_service = Arc::new(acm_inner);
     registry.register(acm_service.clone());
     let firehose_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -7550,7 +7606,10 @@ async fn main() {
                       axum::Json(body): axum::Json<types::AcmCertificateStatusRequest>| {
                     let svc = svc.clone();
                     async move {
-                        if svc.set_certificate_status(&arn_or_id, &body.status, body.reason) {
+                        if svc
+                            .set_certificate_status_persistent(&arn_or_id, &body.status, body.reason)
+                            .await
+                        {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND
@@ -7657,7 +7716,7 @@ async fn main() {
                 move |axum::extract::Path(arn_or_id): axum::extract::Path<String>| {
                     let svc = svc.clone();
                     async move {
-                        if svc.approve_certificate(&arn_or_id) {
+                        if svc.approve_certificate_persistent(&arn_or_id).await {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND
