@@ -609,16 +609,26 @@ impl KmsService {
             ));
         }
 
+        // A key created with `Origin=EXTERNAL` has no key material yet, so AWS
+        // returns it disabled in the `PendingImport` state until
+        // ImportKeyMaterial runs. fakecloud previously created every key
+        // Enabled, which the Terraform `aws_kms_external_key` resource caught
+        // as `enabled = true` where it expected `false`.
+        let pending_import = input.origin == "EXTERNAL";
         let key = KmsKey {
             key_id: key_id.clone(),
             arn: arn.clone(),
             creation_date: now,
             description: input.description,
-            enabled: true,
+            enabled: !pending_import,
             key_usage: input.key_usage,
             key_spec: input.key_spec,
             key_manager: "CUSTOMER".to_string(),
-            key_state: "Enabled".to_string(),
+            key_state: if pending_import {
+                "PendingImport".to_string()
+            } else {
+                "Enabled".to_string()
+            },
             deletion_date: None,
             tags: input.tags,
             policy: key_policy,
