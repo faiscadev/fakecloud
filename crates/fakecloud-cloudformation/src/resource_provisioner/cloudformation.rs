@@ -117,6 +117,7 @@ impl ResourceProvisioner {
             &parsed.resources,
             &template_body,
             &child_parameters,
+            &std::collections::BTreeMap::new(),
         )
         .map_err(|e| format!("Failed to provision nested stack: {e}"))?;
 

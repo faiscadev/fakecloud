@@ -15,6 +15,7 @@ pub fn resolve_resource_properties(
         parameters,
         resource_physical_ids,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -26,6 +27,7 @@ pub fn resolve_resource_properties_with_attrs(
     parameters: &BTreeMap<String, String>,
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+    imports: &BTreeMap<String, String>,
 ) -> Result<ResourceDefinition, String> {
     let value: Value = if template_body.trim_start().starts_with('{') {
         serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
@@ -67,7 +69,7 @@ pub fn resolve_resource_properties_with_attrs(
         resources_obj,
         resource_physical_ids,
         resource_attributes,
-        &BTreeMap::new(),
+        imports,
         &conditions,
     );
     let resolved = strip_no_value(resolved);
@@ -339,6 +341,32 @@ mod dependency_order_tests {
         assert!(pos("A") < pos("B"), "GetAtt edge");
         assert!(pos("A") < pos("C"), "Fn::Sub edge");
         assert!(pos("A") < pos("D"), "DependsOn edge");
+    }
+
+    #[test]
+    fn import_value_in_property_resolves_from_imports() {
+        // §1.5: Fn::ImportValue inside a resource property must resolve to the
+        // real exported value, not the empty string the old code baked.
+        let template = r#"{
+            "Resources": {
+                "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": {"Fn::ImportValue": "SharedQueueName"}}}
+            }
+        }"#;
+        let mut imports = BTreeMap::new();
+        imports.insert("SharedQueueName".to_string(), "shared-q".to_string());
+        let resolved = resolve_resource_properties_with_attrs(
+            &rd("Q", "AWS::SQS::Queue"),
+            template,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &imports,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.properties["QueueName"],
+            serde_json::json!("shared-q")
+        );
     }
 
     #[test]

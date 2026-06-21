@@ -142,6 +142,7 @@ pub(crate) fn provision_stack_resources(
     resource_defs: &[template::ResourceDefinition],
     template_body: &str,
     parameters: &BTreeMap<String, String>,
+    imports: &BTreeMap<String, String>,
 ) -> Result<Vec<StackResource>, AwsServiceError> {
     let mut resources = Vec::new();
     let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
@@ -169,6 +170,7 @@ pub(crate) fn provision_stack_resources(
                 parameters,
                 &physical_ids,
                 &attributes,
+                imports,
             )
             .map_err(|e| {
                 // `ValidationError` isn't declared on CreateStack/UpdateStack;
@@ -219,6 +221,7 @@ pub(crate) fn provision_stack_resources(
                 parameters,
                 &physical_ids,
                 &attributes,
+                imports,
             )
             .unwrap_or_else(|_| resource_def.clone());
             let err = provisioner.create_resource(&resolved_def).unwrap_err();
@@ -478,6 +481,43 @@ impl CloudFormationService {
         result
     }
 
+    /// Fill in declared `Parameters.<Name>.Default` for any parameter the
+    /// caller didn't supply. Without this a `Ref` to an omitted-but-defaulted
+    /// parameter baked the bare parameter name instead of its default -- common
+    /// in hand-written CFN and `aws cloudformation deploy` without
+    /// `--parameter-overrides` (bug-audit 2026-06-20, 1.6).
+    pub(crate) fn merge_parameter_defaults(
+        parameters: &mut BTreeMap<String, String>,
+        template_body: &str,
+    ) {
+        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
+            match serde_json::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        } else {
+            match serde_yaml::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        };
+        let Some(decls) = value.get("Parameters").and_then(|v| v.as_object()) else {
+            return;
+        };
+        for (name, spec) in decls {
+            if parameters.contains_key(name) {
+                continue;
+            }
+            if let Some(default) = spec.get("Default") {
+                let s = default
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| default.to_string());
+                parameters.insert(name.clone(), s);
+            }
+        }
+    }
+
     pub(crate) fn extract_notification_arns(params: &BTreeMap<String, String>) -> Vec<String> {
         let mut arns = Vec::new();
         for i in 1.. {
@@ -518,7 +558,7 @@ impl CloudFormationService {
     /// `state.exports` registry. `skip_stack` removes any export owned by
     /// the named stack — used during update so a stack doesn't import its
     /// own previous-revision export.
-    fn collect_account_imports(
+    pub(crate) fn collect_account_imports(
         state: &SharedCloudFormationState,
         account_id: &str,
         skip_stack: Option<&str>,
@@ -758,6 +798,7 @@ impl CloudFormationService {
 
         let tags = Self::extract_tags(&params);
         let mut parameters = Self::extract_parameters(&params);
+        Self::merge_parameter_defaults(&mut parameters, template_body);
         let notification_arns = Self::extract_notification_arns(&params);
 
         // Seed AWS::* pseudo-parameters with stack-context values so
@@ -947,8 +988,18 @@ impl CloudFormationService {
         let provision_result = {
             let template_body = template_body.clone();
             let parameters = parameters.clone();
+            // Cross-stack exports this account already published, so a resource
+            // property using `Fn::ImportValue` resolves to the real value
+            // instead of an empty string (bug-audit 2026-06-20, 1.5).
+            let imports = Self::collect_account_imports(&state, &account_id, Some(&stack_name));
             tokio::task::spawn_blocking(move || {
-                provision_stack_resources(&provisioner, &resource_defs, &template_body, &parameters)
+                provision_stack_resources(
+                    &provisioner,
+                    &resource_defs,
+                    &template_body,
+                    &parameters,
+                    &imports,
+                )
             })
             .await
         };
@@ -1423,6 +1474,12 @@ impl CloudFormationService {
 
         let provisioner = self.provisioner(&found_stack_id, &req.account_id, &req.region);
 
+        // Cross-stack exports for `Fn::ImportValue` in resource properties (1.5).
+        // Computed before the write lock (collect_account_imports takes a read
+        // lock and returns an owned map).
+        let imports =
+            Self::collect_account_imports(&self.state, &req.account_id, Some(&input.stack_name));
+
         // All `RwLockWriteGuard` work happens inside this block so the (non-Send)
         // guard is released before the persist `.await` below, keeping the
         // handler future `Send`. The block yields everything the post-lock tail
@@ -1476,6 +1533,7 @@ impl CloudFormationService {
                     &input.template_body,
                     &input.parameters,
                     &provisioner,
+                    &imports,
                 );
 
                 let stack_id = stack.stack_id.clone();
@@ -1842,10 +1900,12 @@ impl UpdateStackInput {
         // undeclared `ValidationError`.
         let template_body = params.get("TemplateBody").cloned().unwrap_or_default();
 
+        let mut parameters = CloudFormationService::extract_parameters(&params);
+        CloudFormationService::merge_parameter_defaults(&mut parameters, &template_body);
         Ok(Self {
             stack_name,
             template_body,
-            parameters: CloudFormationService::extract_parameters(&params),
+            parameters,
             tags: CloudFormationService::extract_tags(&params),
             notification_arns: CloudFormationService::extract_notification_arns(&params),
         })
@@ -1897,6 +1957,7 @@ pub(crate) fn apply_resource_updates(
     template_body: &str,
     parameters: &BTreeMap<String, String>,
     provisioner: &crate::resource_provisioner::ResourceProvisioner,
+    imports: &BTreeMap<String, String>,
 ) -> Result<Vec<ResourceChange>, String> {
     let mut changes: Vec<ResourceChange> = Vec::new();
     let old_logical_ids: std::collections::HashSet<String> = stack
@@ -1955,6 +2016,7 @@ pub(crate) fn apply_resource_updates(
             parameters,
             &physical_ids,
             &attributes,
+            imports,
         )
         .map_err(|e| {
             format!(
@@ -2200,6 +2262,30 @@ mod tests {
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn merge_parameter_defaults_fills_omitted_params() {
+        // §1.6: a parameter the caller omitted gets its declared Default, so a
+        // Ref to it resolves to the default instead of the bare param name.
+        let template = r#"{
+            "Parameters": {
+                "InstanceType": {"Type": "String", "Default": "t3.micro"},
+                "Count": {"Type": "Number", "Default": 3},
+                "Supplied": {"Type": "String", "Default": "dflt"}
+            },
+            "Resources": {}
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Supplied".to_string(), "override".to_string());
+        CloudFormationService::merge_parameter_defaults(&mut params, template);
+        assert_eq!(
+            params.get("InstanceType").map(String::as_str),
+            Some("t3.micro")
+        );
+        assert_eq!(params.get("Count").map(String::as_str), Some("3"));
+        // A supplied value is not overwritten by the default.
+        assert_eq!(params.get("Supplied").map(String::as_str), Some("override"));
+    }
 
     fn make_service() -> CloudFormationService {
         let cf_state = Arc::new(RwLock::new(

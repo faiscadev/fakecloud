@@ -328,7 +328,8 @@ impl CloudFormationService {
                     .map(|s| s.to_ascii_uppercase())
                     .unwrap_or_else(|| "UPDATE".to_string());
 
-                let cs_params = CloudFormationService::extract_parameters(&params);
+                let mut cs_params = CloudFormationService::extract_parameters(&params);
+                CloudFormationService::merge_parameter_defaults(&mut cs_params, &template_body);
                 let cs_tags = CloudFormationService::extract_tags(&params);
                 let cs_notif = CloudFormationService::extract_notification_arns(&params);
 
@@ -915,6 +916,11 @@ impl CloudFormationService {
 
                 let provisioner = self.provisioner(&found_stack_id, &aid, &req.region);
 
+                // Cross-stack exports for `Fn::ImportValue` in resource
+                // properties (1.5); collected before the write lock.
+                let cs_imports =
+                    CloudFormationService::collect_account_imports(&self.state, &aid, None);
+
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
 
@@ -949,6 +955,7 @@ impl CloudFormationService {
                         &template_body,
                         &cs_params,
                         &provisioner,
+                        &cs_imports,
                     );
                     let sid = stack.stack_id.clone();
                     let sname = stack.name.clone();
