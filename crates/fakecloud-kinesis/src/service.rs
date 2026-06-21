@@ -353,13 +353,25 @@ impl KinesisService {
         validate_optional_json_range("Limit", &body["Limit"], 1, 10000)?;
         let limit = body["Limit"].as_i64().unwrap_or(100).min(100);
 
+        // NextToken (an opaque base64 of the last returned stream name) takes
+        // precedence over ExclusiveStartStreamName, matching AWS where the two
+        // are alternative ways to resume the same listing.
+        let resume_after: Option<String> = match body["NextToken"].as_str() {
+            Some(tok) => base64::engine::general_purpose::STANDARD
+                .decode(tok)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok()),
+            None => exclusive_start.map(String::from),
+        };
+
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
         let mut names: Vec<String> = state.streams.keys().cloned().collect();
         names.sort();
 
-        let start = exclusive_start
+        let start = resume_after
+            .as_deref()
             .and_then(|name| {
                 names
                     .iter()
@@ -371,6 +383,13 @@ impl KinesisService {
         let page_len = remaining.min(limit as usize);
         let has_more_streams = remaining > page_len;
         let selected: Vec<String> = names.into_iter().skip(start).take(page_len).collect();
+        let next_token = if has_more_streams {
+            selected
+                .last()
+                .map(|name| base64::engine::general_purpose::STANDARD.encode(name))
+        } else {
+            None
+        };
         let summaries: Vec<Value> = selected
             .iter()
             .filter_map(|name| state.streams.get(name))
@@ -387,11 +406,15 @@ impl KinesisService {
             })
             .collect();
 
-        Ok(AwsResponse::ok_json(json!({
+        let mut response = json!({
             "HasMoreStreams": has_more_streams,
             "StreamNames": selected,
             "StreamSummaries": summaries
-        })))
+        });
+        if let Some(token) = next_token {
+            response["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(response))
     }
 
     fn delete_stream(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {

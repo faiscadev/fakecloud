@@ -407,6 +407,40 @@ fn list_streams_sorts_and_paginates() {
 }
 
 #[test]
+fn list_streams_nexttoken_round_trips() {
+    // NextToken was validated but never emitted or honored (bug-audit
+    // 2026-06-20, 1.14): a token-paging client looped on page one.
+    let (svc, _) = make_service();
+    for name in ["charlie", "alpha", "bravo"] {
+        create_stream_action(&svc, name, 1);
+    }
+
+    // First page returns a NextToken alongside HasMoreStreams.
+    let resp = svc
+        .list_streams(&request("ListStreams", json!({ "Limit": 2 })))
+        .unwrap();
+    let body = json_response(resp);
+    let names: Vec<String> = serde_json::from_value(body["StreamNames"].clone()).unwrap();
+    assert_eq!(names, vec!["alpha", "bravo"]);
+    assert_eq!(body["HasMoreStreams"], json!(true));
+    let token = body["NextToken"]
+        .as_str()
+        .expect("NextToken present")
+        .to_string();
+
+    // Resuming with the token (not ExclusiveStartStreamName) yields the rest
+    // and drops NextToken on the final page.
+    let resp = svc
+        .list_streams(&request("ListStreams", json!({ "NextToken": token })))
+        .unwrap();
+    let body = json_response(resp);
+    let names: Vec<String> = serde_json::from_value(body["StreamNames"].clone()).unwrap();
+    assert_eq!(names, vec!["charlie"]);
+    assert_eq!(body["HasMoreStreams"], json!(false));
+    assert!(body.get("NextToken").is_none());
+}
+
+#[test]
 fn delete_stream_unknown_errors() {
     let (svc, _) = make_service();
     assert_code_kinesis(
