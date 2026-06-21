@@ -223,6 +223,16 @@ impl ElastiCacheRuntime {
         }
     }
 
+    /// Remove the persisted redis/valkey data volume for a resource. Called on
+    /// delete so a later resource reusing the identifier starts clean instead
+    /// of reloading the deleted resource's RDB. No-op on the k8s backend (PVC
+    /// lifecycle is handled there) and for memcached (no volume).
+    pub async fn remove_data_volume(&self, resource_id: &str) {
+        if let CacheBackend::Docker(d) = &self.backend {
+            d.remove_data_volume(resource_id).await;
+        }
+    }
+
     /// Restart the underlying backing instance, mirroring real
     /// ElastiCache's RebootCacheCluster behaviour. Returns `Unavailable`
     /// if the resource has no live instance tracked here.
@@ -329,7 +339,7 @@ impl DockerCache {
         let image = engine.image();
         let container_port = engine.port();
 
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "create".to_string(),
             "-p".to_string(),
             format!(":{container_port}"),
@@ -337,8 +347,20 @@ impl DockerCache {
             format!("fakecloud-elasticache={resource_id}"),
             "--label".to_string(),
             format!("fakecloud-instance={}", self.instance_id),
-            image.to_string(),
         ];
+
+        // Persist redis/valkey data in a named volume at /data so a container
+        // recreated after a fakecloud restart reloads its RDB instead of
+        // coming back empty (bug-audit 2026-06-20, 4.2). A named volume (not a
+        // bind mount) is daemon-managed, so it works whether or not fakecloud
+        // is itself containerized. memcached is intentionally in-memory only,
+        // matching real ElastiCache (a reboot clears it), so it gets no
+        // volume.
+        if matches!(engine, CacheEngineKind::Redis) {
+            args.push("-v".to_string());
+            args.push(format!("{}:/data", data_volume_name(resource_id)));
+        }
+        args.push(image.to_string());
 
         let output = tokio::process::Command::new(&self.cli)
             .args(&args)
@@ -570,5 +592,49 @@ impl DockerCache {
             .args(["rm", "-f", container_id])
             .output()
             .await;
+    }
+
+    async fn remove_data_volume(&self, resource_id: &str) {
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["volume", "rm", "-f", &data_volume_name(resource_id)])
+            .output()
+            .await;
+    }
+}
+
+/// Deterministic Docker volume name for a resource's redis data dir. Keyed
+/// only on the resource id (NOT the per-process fakecloud instance id) so the
+/// same volume reattaches after a fakecloud restart. Characters outside
+/// Docker's `[a-zA-Z0-9_.-]` volume-name set are replaced with `-`.
+fn data_volume_name(resource_id: &str) -> String {
+    let sanitized: String = resource_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("fakecloud-elasticache-data-{sanitized}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_volume_name_is_stable_and_sanitized() {
+        // Stable across calls (so recovery reattaches the same volume) and
+        // keyed only on the resource id, not the per-process instance id.
+        assert_eq!(
+            data_volume_name("my-cache"),
+            "fakecloud-elasticache-data-my-cache"
+        );
+        assert_eq!(
+            data_volume_name("weird/id:1"),
+            "fakecloud-elasticache-data-weird-id-1"
+        );
     }
 }
