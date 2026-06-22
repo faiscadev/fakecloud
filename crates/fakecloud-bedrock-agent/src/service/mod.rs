@@ -7,14 +7,23 @@ use fakecloud_aws::arn::Arn;
 use http::{Method, StatusCode};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
     Agent, AgentAlias, AgentCollaborator, AgentKnowledgeBase, AgentVersion, BedrockAgentAccounts,
-    DataSource, Flow, FlowAlias, FlowVersion, IngestionJob, KnowledgeBase, Prompt, PromptVersion,
-    SharedBedrockAgentState,
+    BedrockAgentSnapshot, DataSource, Flow, FlowAlias, FlowVersion, IngestionJob, KnowledgeBase,
+    Prompt, PromptVersion, SharedBedrockAgentState, BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION,
 };
+
+/// Bedrock Agent read actions all start with `Get`, `List`, or `Validate`;
+/// every other action is a mutation. The inverse formulation guarantees no
+/// mutation is ever missed.
+fn is_mutating_action(action: &str) -> bool {
+    !(action.starts_with("Get") || action.starts_with("List") || action.starts_with("Validate"))
+}
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateAgent",
@@ -93,6 +102,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct BedrockAgentService {
     state: SharedBedrockAgentState,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 mod agents;
@@ -104,11 +115,50 @@ mod tags;
 
 impl BedrockAgentService {
     pub fn new(state: SharedBedrockAgentState) -> Self {
-        Self { state }
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared_state(&self) -> SharedBedrockAgentState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_bedrock_agent_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Bedrock Agent state when invoked,
+    /// or `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_bedrock_agent_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, Vec<(String, String)>)> {
@@ -585,7 +635,8 @@ impl AwsService for BedrockAgentService {
 
         validate_inputs(action, &req)?;
 
-        match action {
+        let mutates = is_mutating_action(action);
+        let result = match action {
             "CreateAgent" => self.create_agent(&req),
             "CreateAgentActionGroup" => self.create_agent_action_group(&req),
             "CreateAgentAlias" => self.create_agent_alias(&req),
@@ -664,7 +715,42 @@ impl AwsService for BedrockAgentService {
                 "bedrock-agent",
                 other,
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
+    }
+}
+
+/// Persist the current Bedrock Agent state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `BedrockAgentService::save_snapshot` and the
+/// CloudFormation provisioner persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_bedrock_agent_snapshot(
+    state: &SharedBedrockAgentState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = BedrockAgentSnapshot {
+        schema_version: BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write bedrock-agent snapshot"),
+        Err(err) => tracing::error!(%err, "bedrock-agent snapshot task panicked"),
     }
 }
 
