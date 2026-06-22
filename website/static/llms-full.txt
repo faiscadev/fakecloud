@@ -93,7 +93,8 @@ CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, SES,
 Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, ElastiCache,
 Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Agent,
 Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2,
-CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, and Glue. State is
+CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue,
+EC2, and Organizations. State is
 written to disk on every mutation and reloaded on startup.
 
 The data directory is guarded by `fakecloud.version.toml`. A format mismatch
