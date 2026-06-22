@@ -1680,7 +1680,60 @@ async fn main() {
     // runtime (Docker/Podman); persistence is wired in later batches. We keep a
     // clone of the shared state so the introspection router can expose
     // `GET /_fakecloud/ec2/instances`.
-    let ec2_service = Ec2Service::with_state(ec2_state.clone()).with_runtime(ec2_runtime.clone());
+    let ec2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ec2").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_ec2::Ec2Snapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "ec2 persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *ec2_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded ec2 persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse ec2 persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no ec2 persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read ec2 persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut ec2_service =
+        Ec2Service::with_state(ec2_state.clone()).with_runtime(ec2_runtime.clone());
+    if let Some(store) = ec2_snapshot_store.clone() {
+        ec2_service = ec2_service.with_snapshot_store(store);
+    }
+    if let Some(h) = ec2_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ec2", h);
+    }
     let ec2_introspection_state = ec2_state.clone();
     // Separate clones for the instance-networks introspection endpoint (#1745),
     // which also needs the runtime to report the isolation backend + SG

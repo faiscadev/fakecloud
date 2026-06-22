@@ -15,4 +15,4 @@ pub mod state;
 
 pub use runtime::Ec2Runtime;
 pub use service::Ec2Service;
-pub use state::{Ec2State, SharedEc2State};
+pub use state::{Ec2Snapshot, Ec2State, SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION};
