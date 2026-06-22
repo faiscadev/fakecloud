@@ -405,10 +405,26 @@ pub const SERVICES: &[Service] = &[
 /// from double-running the same tests.
 pub const SHARDS: &[Shard] = &[
     // ─── unsharded services (1 shard each) ─────────────────────────
+    // s3 split three ways: the full `_basic` set runs ~24 tests, each of which
+    // creates a bucket, applies a sub-resource config, and destroys it. On a
+    // 2-core CI runner that exceeds the 60-minute job budget, so partition the
+    // bucket sub-resources A-L / M-Z and run the object resources separately.
     Shard {
-        name: "s3",
+        name: "s3-buckets-a",
         service: "s3",
-        run_regex: "^TestAccS3[A-Za-z]+_basic$",
+        run_regex: "^TestAccS3Bucket[A-L][A-Za-z]*_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "s3-buckets-b",
+        service: "s3",
+        run_regex: "^TestAccS3Bucket[M-Z][A-Za-z]*_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "s3-objects",
+        service: "s3",
+        run_regex: "^TestAccS3(Object|Canonical)[A-Za-z]*_basic$",
         extra_deny: &[],
     },
     Shard {
