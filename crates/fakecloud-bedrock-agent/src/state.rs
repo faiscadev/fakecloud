@@ -7,10 +7,21 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedBedrockAgentState = Arc<RwLock<BedrockAgentAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BedrockAgentAccounts {
     pub accounts: BTreeMap<String, BedrockAgentState>,
 }
+
+/// On-disk snapshot envelope for Bedrock Agent state. Versioned so format
+/// changes fail loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BedrockAgentSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<BedrockAgentAccounts>,
+}
+
+pub const BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 impl BedrockAgentAccounts {
     pub fn new() -> Self {
@@ -32,7 +43,7 @@ impl BedrockAgentAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BedrockAgentState {
     pub account_id: String,
     pub region: String,

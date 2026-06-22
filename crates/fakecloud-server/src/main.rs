@@ -3299,9 +3299,63 @@ async fn main() {
         cfn_snapshot_hooks.insert("bedrock", h);
     }
     registry.register(Arc::new(bedrock_service));
-    registry.register(Arc::new(BedrockAgentService::new(
-        bedrock_agent_state.clone(),
-    )));
+    let bedrock_agent_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("bedrock-agent").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_bedrock_agent::BedrockAgentSnapshot>(
+                        &bytes,
+                    ) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_bedrock_agent::BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "bedrock-agent persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_bedrock_agent::BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *bedrock_agent_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded bedrock-agent persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse bedrock-agent persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no bedrock-agent persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read bedrock-agent persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut bedrock_agent_service = BedrockAgentService::new(bedrock_agent_state.clone());
+    if let Some(store) = bedrock_agent_snapshot_store.clone() {
+        bedrock_agent_service = bedrock_agent_service.with_snapshot_store(store);
+    }
+    if let Some(h) = bedrock_agent_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("bedrock-agent", h);
+    }
+    registry.register(Arc::new(bedrock_agent_service));
     registry.register(Arc::new(
         BedrockAgentRuntimeService::new(bedrock_agent_runtime_state.clone())
             .with_agent_state(bedrock_agent_state.clone()),
