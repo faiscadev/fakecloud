@@ -115,14 +115,24 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "apigatewayv2",
-        // Batch 9: core `aws_apigatewayv2_api` (HTTP) smoke. The fix
-        // here is making CreateApi return four metadata fields that
-        // real AWS always populates (api_key_selection_expression,
-        // route_selection_expression, disable_execute_api_endpoint,
-        // ip_address_type) — Terraform's provider asserts on each of
-        // them on every refresh.
-        run_regex: "^TestAccAPIGatewayV2API_basicHTTP$",
-        deny: &[],
+        // Batch 9 + widen: the HTTP-API smoke plus the `_basic` suite for the
+        // API Gateway v2 resources and data sources — model, route, route
+        // response, integration response, VPC link (+ data source), deployment,
+        // and custom domain name. The widen batch reported deployments as
+        // synchronously DEPLOYED, custom domains as AVAILABLE (with a regional
+        // endpoint + ipv4), and gave integrations their default
+        // `connection_type = INTERNET`, all of which the provider asserts.
+        run_regex: "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP)$",
+        deny: &[
+            // --- gap: a REQUEST authorizer wires up a real Lambda authorizer
+            //     function, which fakecloud cannot stand up without a working
+            //     Lambda runtime in this environment. ---
+            "TestAccAPIGatewayV2Authorizer_basic",
+            // --- gap: the export data source generates an OpenAPI document
+            //     from the API; fakecloud's export does not yet round-trip
+            //     cleanly against the provider's expectations. ---
+            "TestAccAPIGatewayV2ExportDataSource_basic",
+        ],
     },
     Service {
         name: "kinesis",
@@ -372,7 +382,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "apigatewayv2",
         service: "apigatewayv2",
-        run_regex: "^TestAccAPIGatewayV2API_basicHTTP$",
+        run_regex: "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP)$",
         extra_deny: &[],
     },
     Shard {

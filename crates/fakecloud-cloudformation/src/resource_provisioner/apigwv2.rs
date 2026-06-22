@@ -224,6 +224,11 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .map(String::from),
             timeout_in_millis: props.get("TimeoutInMillis").and_then(|v| v.as_i64()),
+            connection_type: props
+                .get("ConnectionType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INTERNET")
+                .to_string(),
         };
         state
             .integrations
@@ -511,6 +516,7 @@ impl ResourceProvisioner {
                 .map(String::from),
             created_date: Utc::now(),
             auto_deployed: false,
+            deployment_status: "DEPLOYED".to_string(),
         };
         let mut accounts = self.apigatewayv2_state.write();
         let state = accounts.get_or_create(&self.account_id);

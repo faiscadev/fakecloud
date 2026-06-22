@@ -35,6 +35,10 @@ impl ApiGatewayV2Service {
         let integration_uri = body["integrationUri"].as_str().map(|s| s.to_string());
         let payload_format_version = body["payloadFormatVersion"].as_str().map(|s| s.to_string());
         let timeout_in_millis = body["timeoutInMillis"].as_i64();
+        let connection_type = body["connectionType"]
+            .as_str()
+            .unwrap_or("INTERNET")
+            .to_string();
 
         let integration_id = generate_id("integration");
 
@@ -44,6 +48,7 @@ impl ApiGatewayV2Service {
             integration_uri,
             payload_format_version,
             timeout_in_millis,
+            connection_type,
         };
 
         let mut accounts = self.state.write();
