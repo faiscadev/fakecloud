@@ -2244,6 +2244,47 @@ async fn head_object_returns_headers() {
 }
 
 #[tokio::test]
+async fn head_object_defaults_sse_and_gates_checksum_on_mode() {
+    let svc = make_service();
+    seed_bucket(&svc, "sse");
+
+    // PUT with a CRC32 checksum requested (the Go SDK does this automatically).
+    let mut put = make_request(Method::PUT, "/sse/f.txt", &[], b"12345");
+    put.headers.insert(
+        "x-amz-checksum-algorithm",
+        http::HeaderValue::from_static("CRC32"),
+    );
+    svc.put_object("123456789012", &put, "sse", "f.txt")
+        .await
+        .unwrap();
+
+    // HEAD without checksum mode: SSE defaults to AES256, no checksum header.
+    let req = make_request(Method::HEAD, "/sse/f.txt", &[], b"");
+    let resp = svc
+        .head_object("123456789012", &req, "sse", "f.txt")
+        .unwrap();
+    assert_eq!(
+        resp.headers.get("x-amz-server-side-encryption").unwrap(),
+        "AES256"
+    );
+    assert!(
+        resp.headers.get("x-amz-checksum-crc32").is_none(),
+        "checksum must not be returned without x-amz-checksum-mode: ENABLED"
+    );
+
+    // HEAD with checksum mode enabled: the stored checksum is returned.
+    let mut req = make_request(Method::HEAD, "/sse/f.txt", &[], b"");
+    req.headers.insert(
+        "x-amz-checksum-mode",
+        http::HeaderValue::from_static("ENABLED"),
+    );
+    let resp = svc
+        .head_object("123456789012", &req, "sse", "f.txt")
+        .unwrap();
+    assert!(resp.headers.get("x-amz-checksum-crc32").is_some());
+}
+
+#[tokio::test]
 async fn delete_object_via_handler() {
     let svc = make_service();
     seed_bucket(&svc, "del");

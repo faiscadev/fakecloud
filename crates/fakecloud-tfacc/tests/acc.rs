@@ -28,6 +28,16 @@ async fn run_shard(name: &str) {
 }
 
 #[tokio::test]
+async fn s3_acceptance() {
+    run_shard("s3").await;
+}
+
+#[tokio::test]
+async fn sts_acceptance() {
+    run_shard("sts").await;
+}
+
+#[tokio::test]
 async fn cognitoidp_acceptance() {
     run_shard("cognitoidp").await;
 }

@@ -71,6 +71,37 @@ pub fn shard_deny_list(shard: &Shard) -> Vec<&'static str> {
 
 pub const SERVICES: &[Service] = &[
     Service {
+        name: "s3",
+        // Wave 3: the `_basic` suite for the S3 bucket sub-resources, bucket
+        // and object data sources, and the object resources. 24 tests. The
+        // batch made GetObject/HeadObject report the default SSE-S3 (AES256)
+        // encryption and stop echoing a stored checksum unless the caller sets
+        // `x-amz-checksum-mode: ENABLED`, which the object tests assert.
+        run_regex: "^TestAccS3[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: bucket logging / inventory leave the destination bucket
+            //     non-empty at destroy time (force-destroy / log-object
+            //     cleanup) — CheckDestroy fails with BucketNotEmpty. ---
+            "TestAccS3BucketLogging_basic",
+            "TestAccS3BucketInventory_basic",
+            // --- gap: replication configuration is cross-region. ---
+            "TestAccS3BucketReplicationConfiguration_basic",
+            // --- unsupportable: S3 Express One Zone directory buckets are a
+            //     separate API surface (ListDirectoryBuckets, etc.) not
+            //     implemented. ---
+            "TestAccS3DirectoryBucket_basic",
+            "TestAccS3DirectoryBucketsDataSource_basic",
+        ],
+    },
+    Service {
+        name: "sts",
+        // Wave 3: the `aws_caller_identity` data source smoke. STS's other
+        // surfaces (AssumeRole, GetSessionToken) are request actions, not
+        // Terraform-managed resources.
+        run_regex: "^TestAccSTS[A-Za-z]+_basic$",
+        deny: &[],
+    },
+    Service {
         name: "cognitoidp",
         // Batch 11: core `aws_cognito_user_pool` smoke. The fix here is
         // returning five shape blocks with AWS defaults on every
@@ -374,6 +405,18 @@ pub const SERVICES: &[Service] = &[
 /// from double-running the same tests.
 pub const SHARDS: &[Shard] = &[
     // ─── unsharded services (1 shard each) ─────────────────────────
+    Shard {
+        name: "s3",
+        service: "s3",
+        run_regex: "^TestAccS3[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "sts",
+        service: "sts",
+        run_regex: "^TestAccSTS[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
     Shard {
         name: "cognitoidp",
         service: "cognitoidp",

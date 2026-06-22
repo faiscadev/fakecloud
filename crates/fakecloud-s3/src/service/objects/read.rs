@@ -8,6 +8,17 @@ use super::*;
 /// bodies (and persisted state), so a crafted value must never crash the
 /// read path. AWS itself only ever stores the validated enum values, so a
 /// well-behaved object always round-trips its header.
+/// True when the request opted into checksum retrieval via
+/// `x-amz-checksum-mode: ENABLED`. AWS only returns a stored object checksum on
+/// GetObject/HeadObject when this is set.
+fn checksum_mode_enabled(req: &AwsRequest) -> bool {
+    req.headers
+        .get("x-amz-checksum-mode")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("ENABLED"))
+        .unwrap_or(false)
+}
+
 fn insert_str_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
     if let Ok(v) = value.parse::<http::header::HeaderValue>() {
         headers.insert(name, v);
@@ -136,6 +147,12 @@ impl S3Service {
         // path; skip-if-invalid mirrors the object-lock guards below.
         if let Some(algo) = &obj.sse_algorithm {
             insert_str_header(&mut headers, "x-amz-server-side-encryption", algo);
+        } else {
+            // Every S3 object is encrypted at rest with SSE-S3 (AES256) by
+            // default, and AWS reports that on GetObject/HeadObject. The
+            // Terraform `aws_s3_object` resource asserts `server_side_encryption
+            // = AES256`, so emit it when no other algorithm was set.
+            insert_str_header(&mut headers, "x-amz-server-side-encryption", "AES256");
         }
         if let Some(kid) = &obj.sse_kms_key_id {
             insert_str_header(
@@ -290,8 +307,13 @@ impl S3Service {
                 full_body_response(state, &obj.body)?
             };
         }
-        // Only include checksum headers for full (non-range) responses
-        if !is_range_request {
+        // Only include checksum headers for full (non-range) responses, and
+        // only when the caller opted in with `x-amz-checksum-mode: ENABLED`.
+        // AWS does not echo a stored object checksum on a plain GetObject (the
+        // Go SDK auto-attaches a CRC32 on PutObject, but Terraform reads the
+        // object without enabling checksum mode and expects `checksum_crc32`
+        // to be empty).
+        if !is_range_request && checksum_mode_enabled(req) {
             if let Some(algo) = &obj.checksum_algorithm {
                 if let Some(val) = &obj.checksum_value {
                     let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
@@ -485,6 +507,12 @@ impl S3Service {
         // skip-if-invalid helper rather than .parse().unwrap().
         if let Some(algo) = &obj.sse_algorithm {
             insert_str_header(&mut headers, "x-amz-server-side-encryption", algo);
+        } else {
+            // Every S3 object is encrypted at rest with SSE-S3 (AES256) by
+            // default, and AWS reports that on GetObject/HeadObject. The
+            // Terraform `aws_s3_object` resource asserts `server_side_encryption
+            // = AES256`, so emit it when no other algorithm was set.
+            insert_str_header(&mut headers, "x-amz-server-side-encryption", "AES256");
         }
         if let Some(kid) = &obj.sse_kms_key_id {
             insert_str_header(
@@ -523,13 +551,17 @@ impl S3Service {
             };
             headers.insert("x-amz-restore", restore_val.parse().unwrap());
         }
-        // Checksum headers (returned when ChecksumMode=ENABLED or always if set)
-        if let Some(algo) = &obj.checksum_algorithm {
-            if let Some(val) = &obj.checksum_value {
-                let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
-                if let Ok(name) = hn.parse::<http::header::HeaderName>() {
-                    if let Ok(hv) = val.parse() {
-                        headers.insert(name, hv);
+        // Checksum headers are only returned when the caller sets
+        // `x-amz-checksum-mode: ENABLED`; AWS does not echo them on a plain
+        // HeadObject even though one is stored.
+        if checksum_mode_enabled(req) {
+            if let Some(algo) = &obj.checksum_algorithm {
+                if let Some(val) = &obj.checksum_value {
+                    let hn = format!("x-amz-checksum-{}", algo.to_lowercase());
+                    if let Ok(name) = hn.parse::<http::header::HeaderName>() {
+                        if let Ok(hv) = val.parse() {
+                            headers.insert(name, hv);
+                        }
                     }
                 }
             }

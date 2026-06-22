@@ -116,7 +116,7 @@ Running both is how fakecloud can claim 100% behavioral parity with a straight f
 
 ### Current coverage
 
-13 services today: `apigatewayv2`, `bedrock`, `cognitoidp`, `dynamodb`, `events` (EventBridge), `iam`, `kinesis`, `kms`, `logs`, `secretsmanager`, `sns`, `sqs`, `ssm`. Coverage per service ranges from a single smoke test to the full `_basic` suite across every resource type (IAM, for example, exercises ~42 resource and data-source types).
+15 services today: `apigatewayv2`, `bedrock`, `cognitoidp`, `dynamodb`, `events` (EventBridge), `iam`, `kinesis`, `kms`, `logs`, `s3`, `secretsmanager`, `sns`, `sqs`, `ssm`, `sts`. Coverage per service ranges from a single smoke test to the full `_basic` suite across every resource type (IAM, for example, exercises ~42 resource and data-source types; S3, ~24).
 
 ### Allow-list, not deny-list
 
