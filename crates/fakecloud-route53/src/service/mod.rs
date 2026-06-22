@@ -8,10 +8,12 @@ use bytes::Bytes;
 use chrono::Utc;
 use http::{HeaderMap, StatusCode};
 use parking_lot::RwLock;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::model::{
     AssociateVpcRequest, ChangeCidrCollectionRequest, ChangeResourceRecordSetsRequest,
@@ -26,10 +28,10 @@ use crate::model::{
 };
 use crate::router::{route, Route};
 use crate::state::{
-    AccountState, HealthCheckStatus, Route53Accounts, SharedRoute53State, StoredChange,
-    StoredCidrCollection, StoredHealthCheck, StoredHostedZone, StoredKeySigningKey,
+    AccountState, HealthCheckStatus, Route53Accounts, Route53Snapshot, SharedRoute53State,
+    StoredChange, StoredCidrCollection, StoredHealthCheck, StoredHostedZone, StoredKeySigningKey,
     StoredQueryLoggingConfig, StoredReusableDelegationSet, StoredTrafficPolicy,
-    StoredTrafficPolicyInstance,
+    StoredTrafficPolicyInstance, ROUTE53_SNAPSHOT_SCHEMA_VERSION,
 };
 use crate::xml_io;
 
@@ -132,6 +134,8 @@ pub struct Route53Service {
     /// or virtual-hosted bucket endpoint resolve only when the bucket
     /// exists.
     pub(crate) s3_state: Option<fakecloud_s3::SharedS3State>,
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 mod cidr;
@@ -150,7 +154,59 @@ impl Route53Service {
             elbv2_state: None,
             cloudfront_state: None,
             s3_state: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_route53_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Route 53 state when invoked, or
+    /// `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_route53_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+
+    /// Admin-endpoint flavour of [`set_health_check_status`](Self::set_health_check_status)
+    /// that persists the override so it survives a restart.
+    pub async fn set_health_check_status_persistent(
+        &self,
+        id: &str,
+        status: HealthCheckStatus,
+        reason: Option<String>,
+    ) -> bool {
+        let changed = self.set_health_check_status(id, status, reason);
+        if changed {
+            self.save_snapshot().await;
+        }
+        changed
     }
 
     /// Wire CloudWatch Logs so `TestDNSAnswer` calls against a zone
@@ -210,6 +266,74 @@ pub struct DnssecSignature {
     pub rrset_type: String,
 }
 
+/// Actions that mutate persisted Route 53 state and therefore must trigger a
+/// snapshot write. Read-only actions (Get*/List*/Test*) are excluded.
+const MUTATING_ACTIONS: &[&str] = &[
+    "CreateHostedZone",
+    "DeleteHostedZone",
+    "UpdateHostedZoneComment",
+    "UpdateHostedZoneFeatures",
+    "ChangeResourceRecordSets",
+    "CreateHealthCheck",
+    "UpdateHealthCheck",
+    "DeleteHealthCheck",
+    "CreateTrafficPolicy",
+    "CreateTrafficPolicyVersion",
+    "DeleteTrafficPolicy",
+    "CreateTrafficPolicyInstance",
+    "UpdateTrafficPolicyInstance",
+    "DeleteTrafficPolicyInstance",
+    "EnableHostedZoneDNSSEC",
+    "DisableHostedZoneDNSSEC",
+    "CreateKeySigningKey",
+    "DeleteKeySigningKey",
+    "ActivateKeySigningKey",
+    "DeactivateKeySigningKey",
+    "CreateQueryLoggingConfig",
+    "DeleteQueryLoggingConfig",
+    "CreateCidrCollection",
+    "ChangeCidrCollection",
+    "DeleteCidrCollection",
+    "AssociateVPCWithHostedZone",
+    "DisassociateVPCFromHostedZone",
+    "CreateVPCAssociationAuthorization",
+    "DeleteVPCAssociationAuthorization",
+    "CreateReusableDelegationSet",
+    "DeleteReusableDelegationSet",
+    "ChangeTagsForResource",
+];
+
+/// Persist the current Route 53 state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `Route53Service::save_snapshot` and the
+/// CloudFormation provisioner persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_route53_snapshot(
+    state: &SharedRoute53State,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = Route53Snapshot {
+        schema_version: ROUTE53_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write route53 snapshot"),
+        Err(err) => tracing::error!(%err, "route53 snapshot task panicked"),
+    }
+}
+
 #[async_trait]
 impl AwsService for Route53Service {
     fn service_name(&self) -> &str {
@@ -232,7 +356,8 @@ impl AwsService for Route53Service {
             }
         };
 
-        match resolved.action {
+        let mutates = MUTATING_ACTIONS.contains(&resolved.action);
+        let result = match resolved.action {
             "CreateHostedZone" => self.create_hosted_zone(&req),
             "GetHostedZone" => self.get_hosted_zone(&resolved),
             "DeleteHostedZone" => self.delete_hosted_zone(&resolved),
@@ -323,7 +448,11 @@ impl AwsService for Route53Service {
                 "InvalidAction",
                 format!("Route 53 action {other} is not implemented yet"),
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 

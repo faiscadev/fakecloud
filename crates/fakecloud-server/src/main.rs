@@ -2400,13 +2400,65 @@ async fn main() {
     registry.register(elbv2_service);
     let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
     registry.register(cloudfront_service.clone());
-    let route53_service = Arc::new(
-        fakecloud_route53::Route53Service::new(route53_state.clone())
-            .with_logs(logs_state.clone())
-            .with_elbv2(elbv2_state.clone())
-            .with_cloudfront(cloudfront_state.clone())
-            .with_s3(s3_state.clone()),
-    );
+    let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("route53").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_route53::Route53Snapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_route53::ROUTE53_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "route53 persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_route53::ROUTE53_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *route53_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded route53 persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse route53 persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no route53 persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read route53 persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut route53_inner = fakecloud_route53::Route53Service::new(route53_state.clone())
+        .with_logs(logs_state.clone())
+        .with_elbv2(elbv2_state.clone())
+        .with_cloudfront(cloudfront_state.clone())
+        .with_s3(s3_state.clone());
+    if let Some(store) = route53_snapshot_store.clone() {
+        route53_inner = route53_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = route53_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("route53", h);
+    }
+    let route53_service = Arc::new(route53_inner);
     registry.register(route53_service.clone());
     let acm_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -7624,7 +7676,10 @@ async fn main() {
                                 fakecloud_route53::HealthCheckStatus::Unknown
                             }
                         };
-                        if svc.set_health_check_status(&id, status, body.reason) {
+                        if svc
+                            .set_health_check_status_persistent(&id, status, body.reason)
+                            .await
+                        {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND

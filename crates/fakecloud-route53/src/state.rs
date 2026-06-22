@@ -11,9 +11,55 @@ use crate::model::{HealthCheckConfig, HostedZoneFeatures, ResourceRecordSet, VPC
 
 pub type SharedRoute53State = Arc<RwLock<Route53Accounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Route53Accounts {
     pub accounts: BTreeMap<String, AccountState>,
+}
+
+/// On-disk snapshot envelope for Route 53 state. Versioned so format changes
+/// fail loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Route53Snapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<Route53Accounts>,
+}
+
+pub const ROUTE53_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+/// (De)serialize a `(A, B) -> V` map as a sequence of `(A, B, V)` triples. JSON
+/// object keys must be strings, so tuple-keyed maps (traffic policies keyed by
+/// `(id, version)`, KSKs / tags keyed by `(a, b)`) cannot be serialized
+/// directly — without this, whole-state snapshot writes fail.
+mod tuple2_map_serde {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S, A, B, V>(
+        map: &BTreeMap<(A, B), V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        A: Serialize,
+        B: Serialize,
+        V: Serialize,
+    {
+        let entries: Vec<(&A, &B, &V)> = map.iter().map(|((a, b), v)| (a, b, v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, A, B, V>(deserializer: D) -> Result<BTreeMap<(A, B), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        A: Deserialize<'de> + Ord,
+        B: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<(A, B, V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().map(|(a, b, v)| ((a, b), v)).collect())
+    }
 }
 
 impl Route53Accounts {
@@ -34,19 +80,21 @@ impl Route53Accounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     pub hosted_zones: BTreeMap<String, StoredHostedZone>,
     pub changes: BTreeMap<String, StoredChange>,
     pub health_checks: BTreeMap<String, StoredHealthCheck>,
     /// Keyed by `(traffic_policy_id, version)`. Each `CreateTrafficPolicyVersion`
     /// inserts a new entry alongside the existing versions.
+    #[serde(with = "tuple2_map_serde")]
     pub traffic_policies: BTreeMap<(String, i64), StoredTrafficPolicy>,
     pub traffic_policy_instances: BTreeMap<String, StoredTrafficPolicyInstance>,
     /// Per-zone DNSSEC `ServeSignature` status (SIGNING / NOT_SIGNING). Absent
     /// entries are treated as NOT_SIGNING.
     pub dnssec_status: BTreeMap<String, String>,
     /// Keyed by `(hosted_zone_id, ksk_name)`.
+    #[serde(with = "tuple2_map_serde")]
     pub key_signing_keys: BTreeMap<(String, String), StoredKeySigningKey>,
     pub query_logging_configs: BTreeMap<String, StoredQueryLoggingConfig>,
     pub cidr_collections: BTreeMap<String, StoredCidrCollection>,
@@ -56,6 +104,7 @@ pub struct AccountState {
     /// Tag bag keyed by `(resource_type, resource_id)`. Both supported
     /// resource types ("healthcheck", "hostedzone") share the bag; the
     /// resource-type discriminator is in the key tuple.
+    #[serde(with = "tuple2_map_serde")]
     pub tags: BTreeMap<(String, String), BTreeMap<String, String>>,
 }
 
