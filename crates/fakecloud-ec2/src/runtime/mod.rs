@@ -598,8 +598,8 @@ fn instance_data_dir() -> String {
 /// Whether EC2 instance data should survive a fakecloud restart via a durable
 /// named volume. OFF by default (ephemeral, keeping test/CI runs clean and
 /// avoiding a stale volume bleeding into a later instance that reuses an id);
-/// opt in with `FAKECLOUD_PERSIST_EC2_VOLUMES=1`. Persistent storage mode flips
-/// this default to on by exporting the same env var at startup (#1846).
+/// opt in with `FAKECLOUD_PERSIST_EC2_VOLUMES=1`. A follow-up flips this
+/// default to on in persistent storage mode by exporting the same env var.
 fn ec2_volumes_enabled() -> bool {
     std::env::var("FAKECLOUD_PERSIST_EC2_VOLUMES")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
@@ -686,7 +686,7 @@ impl DockerInstances {
         // stop/start (Docker reuses the same container, so the volume persists
         // regardless). OFF by default to keep test/CI runs ephemeral and avoid
         // a stale volume bleeding into a later instance that reuses an id;
-        // enabled by `FAKECLOUD_PERSIST_EC2_VOLUMES=1` (and, from #1846,
+        // enabled by `FAKECLOUD_PERSIST_EC2_VOLUMES=1` (and, in a follow-up,
         // default-on in persistent storage mode). The volume is dropped on
         // TerminateInstances. See [`data_volume_name`] / [`instance_data_dir`].
         if ec2_volumes_enabled() {
