@@ -10,7 +10,7 @@ use serde_json::Value;
 
 pub type SharedWafv2State = Arc<RwLock<Wafv2Accounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Wafv2Accounts {
     pub accounts: BTreeMap<String, AccountState>,
 }
@@ -21,15 +21,30 @@ impl Wafv2Accounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// On-disk snapshot envelope for WAFv2 state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Wafv2Snapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<Wafv2Accounts>,
+}
+
+pub const WAFV2_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by (scope, name).
+    #[serde(with = "scoped_map_serde")]
     pub web_acls: BTreeMap<ScopedKey, WebAcl>,
     /// Keyed by (scope, name).
+    #[serde(with = "scoped_map_serde")]
     pub rule_groups: BTreeMap<ScopedKey, RuleGroup>,
     /// Keyed by (scope, name).
+    #[serde(with = "scoped_map_serde")]
     pub ip_sets: BTreeMap<ScopedKey, IpSet>,
     /// Keyed by (scope, name).
+    #[serde(with = "scoped_map_serde")]
     pub regex_pattern_sets: BTreeMap<ScopedKey, RegexPatternSet>,
     /// API key tokens keyed by token string.
     pub api_keys: BTreeMap<String, ApiKey>,
@@ -44,11 +59,41 @@ pub struct AccountState {
     /// Vendor-published managed rule sets keyed by (scope, name), set via
     /// PutManagedRuleSetVersions and read by ListManagedRuleSets /
     /// ListAvailableManagedRuleGroupVersions.
-    #[serde(default)]
+    #[serde(default, with = "scoped_map_serde")]
     pub managed_rule_sets: BTreeMap<ScopedKey, ManagedRuleSet>,
 }
 
 pub type ScopedKey = (String, String);
+
+/// (De)serialize a `(scope, name) -> V` map as a sequence of `(scope, name, V)`
+/// triples. JSON object keys must be strings, so a tuple-keyed map cannot be
+/// serialized directly — without this, whole-state snapshot writes fail.
+mod scoped_map_serde {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::ScopedKey;
+
+    pub fn serialize<S, V>(map: &BTreeMap<ScopedKey, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<(&String, &String, &V)> =
+            map.iter().map(|((a, b), v)| (a, b, v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<BTreeMap<ScopedKey, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<(String, String, V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().map(|(a, b, v)| ((a, b), v)).collect())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedRuleSet {

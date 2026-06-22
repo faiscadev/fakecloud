@@ -2584,10 +2584,63 @@ async fn main() {
             app_autoscaling_state.clone(),
         );
     registry.register(Arc::new(app_autoscaling_service));
-    let wafv2_service = fakecloud_wafv2::Wafv2Service::with_rate_limiter(
+    let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("wafv2").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_wafv2::Wafv2Snapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_wafv2::WAFV2_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "wafv2 persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_wafv2::WAFV2_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *wafv2_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded wafv2 persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse wafv2 persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no wafv2 persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read wafv2 persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut wafv2_service = fakecloud_wafv2::Wafv2Service::with_rate_limiter(
         wafv2_state.clone(),
         wafv2_rate_limiter.clone(),
     );
+    if let Some(store) = wafv2_snapshot_store.clone() {
+        wafv2_service = wafv2_service.with_snapshot_store(store);
+    }
+    if let Some(h) = wafv2_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("wafv2", h);
+    }
     registry.register(Arc::new(wafv2_service));
     let athena_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
