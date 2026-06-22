@@ -7,13 +7,23 @@ use fakecloud_core::pagination::paginate_checked;
 use http::StatusCode;
 use rand::Rng;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    MemberAccount, OrgError, OrganizationState, OrganizationalUnit, Policy,
-    SharedOrganizationsState, FEATURE_SET_ALL, FEATURE_SET_CONSOLIDATED_BILLING, POLICY_TYPE_SCP,
+    MemberAccount, OrgError, OrganizationState, OrganizationalUnit, OrganizationsSnapshot, Policy,
+    SharedOrganizationsState, FEATURE_SET_ALL, FEATURE_SET_CONSOLIDATED_BILLING,
+    ORGANIZATIONS_SNAPSHOT_SCHEMA_VERSION, POLICY_TYPE_SCP,
 };
+
+/// Organizations read actions all start with `Describe` or `List`; every other
+/// action is a mutation. The inverse formulation guarantees no mutation is ever
+/// missed.
+fn is_mutating_action(action: &str) -> bool {
+    !(action.starts_with("Describe") || action.starts_with("List"))
+}
 
 /// Bounds for the synthetic delay before a `CreateAccount` request
 /// flips from `IN_PROGRESS` to `SUCCEEDED`. Real AWS takes minutes; a
@@ -92,6 +102,8 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
 
 pub struct OrganizationsService {
     state: SharedOrganizationsState,
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 mod accounts;
@@ -108,12 +120,72 @@ mod tags;
 
 impl OrganizationsService {
     pub fn new(state: SharedOrganizationsState) -> Self {
-        Self { state }
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared() -> (Arc<Self>, SharedOrganizationsState) {
         let state: SharedOrganizationsState = Arc::new(parking_lot::RwLock::new(None));
         (Arc::new(Self::new(state.clone())), state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    pub(crate) async fn save_snapshot(&self) {
+        save_organizations_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Organizations state when invoked,
+    /// or `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_organizations_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+
+    /// Re-arm the completion tick for any `CreateAccount` request restored as
+    /// `IN_PROGRESS`, so it still transitions to `SUCCEEDED` after a restart.
+    /// Called by the server after loading a snapshot.
+    pub fn rearm_in_progress_account_creations(&self) {
+        let pending: Vec<String> = {
+            let guard = self.state.read();
+            match guard.as_ref() {
+                Some(org) => org
+                    .create_account_requests
+                    .iter()
+                    .filter(|(_, s)| s.state == "IN_PROGRESS")
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        for request_id in pending {
+            self.spawn_create_account_completion(request_id);
+        }
     }
 
     /// Read-side helper: enforce that an org exists and the caller is a
@@ -195,7 +267,8 @@ impl AwsService for OrganizationsService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = is_mutating_action(&req.action);
+        let result = match req.action.as_str() {
             "CreateOrganization" => self.create_organization(&req),
             "DescribeOrganization" => self.describe_organization(&req),
             "DeleteOrganization" => self.delete_organization(&req),
@@ -275,11 +348,46 @@ impl AwsService for OrganizationsService {
                 "organizations",
                 &req.action,
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 
     fn supported_actions(&self) -> &[&str] {
         ORGANIZATIONS_ACTIONS
+    }
+}
+
+/// Persist the current Organizations state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `OrganizationsService::save_snapshot`, the
+/// CreateAccount completion tick, and the CloudFormation provisioner persist
+/// hook so all route through the same serialize-and-write path.
+pub async fn save_organizations_snapshot(
+    state: &SharedOrganizationsState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = OrganizationsSnapshot {
+        schema_version: ORGANIZATIONS_SNAPSHOT_SCHEMA_VERSION,
+        organization: state.read().clone(),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write organizations snapshot"),
+        Err(err) => tracing::error!(%err, "organizations snapshot task panicked"),
     }
 }
 
