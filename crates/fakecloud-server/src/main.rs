@@ -103,6 +103,27 @@ async fn main() {
         Err(err) => fatal_exit(format_args!("invalid persistence configuration: {err}")),
     };
     if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+        // Persistent mode means "state survives restart", so the data INSIDE
+        // container-backed services (RDS databases, EC2 instance data dirs)
+        // should be durable too -- not just the control-plane metadata. Those
+        // runtimes already know how to back a container with a named volume;
+        // they just gate it behind an env var that is off by default (to keep
+        // ephemeral/test runs clean). Default those gates ON here, before the
+        // runtimes are constructed, so persistent mode is durable end-to-end
+        // without extra flags. An explicit user setting always wins.
+        // (ElastiCache already persists Redis/Valkey unconditionally.)
+        for var in [
+            "FAKECLOUD_PERSIST_DB_VOLUMES",
+            "FAKECLOUD_PERSIST_EC2_VOLUMES",
+        ] {
+            if std::env::var_os(var).is_none() {
+                std::env::set_var(var, "1");
+                tracing::debug!(
+                    env = var,
+                    "persistent mode: defaulting container data volumes on"
+                );
+            }
+        }
         if let Some(ref data_path) = persistence_config.data_path {
             if let Err(err) = std::fs::create_dir_all(data_path) {
                 fatal_exit(format_args!(

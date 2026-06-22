@@ -203,6 +203,70 @@ async fn start_stop_db_instance_toggles_backing_container() {
     assert_eq!(value, 1);
 }
 
+/// Data WRITTEN to a DB survives a restart, not just the endpoint. With
+/// persistent mode now defaulting DB data volumes on, a row inserted before
+/// restart is still readable after the backing container is recreated. Without
+/// the durable volume the recovered postgres container would come back empty
+/// and the row would be gone -- this is the data-plane half of persistence.
+#[tokio::test]
+async fn persistence_db_row_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let extra_args = ["--storage-mode", "persistent", "--data-path", &data_path];
+    let mut server = TestServer::start_full(&[], &extra_args).await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("rowsurvive-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .unwrap();
+    let inst = helpers::wait_for_db_available(&client, "rowsurvive-db", 240).await;
+    let endpoint = inst.endpoint().expect("endpoint");
+    let host = endpoint.address().expect("address").to_string();
+    let port = endpoint.port().expect("port");
+
+    // Seed a row before the restart.
+    {
+        let db = connect_postgres_with_retry(&host, port, "admin", "secret123", "appdb")
+            .await
+            .expect("connect to seed");
+        db.batch_execute(
+            "CREATE TABLE durable (id int primary key, note text); \
+             INSERT INTO durable (id, note) VALUES (1, 'survives-restart');",
+        )
+        .await
+        .expect("seed row");
+    }
+
+    drop(client);
+    server.restart().await;
+    let client = server.rds_client().await;
+
+    let inst = helpers::wait_for_db_available(&client, "rowsurvive-db", 240).await;
+    let endpoint = inst.endpoint().expect("endpoint");
+    let host = endpoint.address().expect("address").to_string();
+    let port = endpoint.port().expect("port");
+
+    let db = connect_postgres_with_retry(&host, port, "admin", "secret123", "appdb")
+        .await
+        .expect("connect to recovered container");
+    let row = db
+        .query_one("SELECT note FROM durable WHERE id = 1", &[])
+        .await
+        .expect("row must survive the restart via the durable data volume");
+    let note: String = row.get(0);
+    assert_eq!(note, "survives-restart");
+}
+
 /// Parameter groups survive a restart.
 #[tokio::test]
 async fn persistence_round_trip_parameter_group() {

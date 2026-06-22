@@ -88,6 +88,110 @@ async fn persistence_cache_cluster_endpoint_works_after_restart() {
     );
 }
 
+/// Send one RESP command to a Redis endpoint and return the raw reply text.
+async fn redis_cmd(stream: &mut tokio::net::TcpStream, cmd: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(cmd).await.expect("write redis command");
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).await.expect("read redis reply");
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// Poll DescribeCacheClusters until the cluster is `available`, returning the
+/// node endpoint port. Panics if it never recovers.
+async fn wait_cache_port(client: &aws_sdk_elasticache::Client, id: &str) -> i32 {
+    for _ in 0..120 {
+        let resp = client
+            .describe_cache_clusters()
+            .cache_cluster_id(id)
+            .show_cache_node_info(true)
+            .send()
+            .await
+            .unwrap();
+        if let Some(cluster) = resp.cache_clusters().first() {
+            if cluster.cache_cluster_status() == Some("available") {
+                if let Some(port) = cluster
+                    .cache_nodes()
+                    .first()
+                    .and_then(|n| n.endpoint())
+                    .and_then(|e| e.port())
+                {
+                    return port;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    panic!("cache cluster {id} never reached available with an endpoint port");
+}
+
+/// Data WRITTEN to a Redis cache survives a restart, not just the endpoint.
+/// ElastiCache backs Redis/Valkey with a durable `/data` volume, so a key SET
+/// (and SAVEd to the RDB) before restart is still readable after the backing
+/// container is recreated. The explicit SAVE forces the RDB to the volume so
+/// the abrupt container teardown on restart can't lose the unflushed write.
+#[tokio::test]
+async fn persistence_cache_data_survives_restart() {
+    if !require_docker_or_skip("persistence_cache_data_survives_restart") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let data_path = tmp.path().display().to_string();
+    let extra_args = ["--storage-mode", "persistent", "--data-path", &data_path];
+    let mut server = TestServer::start_full(&[], &extra_args).await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("data-cache")
+        .engine("redis")
+        .cache_node_type("cache.t3.micro")
+        .preferred_availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    helpers::wait_for_cache_cluster_available(&client, "data-cache", 120).await;
+    let port = wait_cache_port(&client, "data-cache").await;
+
+    // SET a key, then SAVE so the RDB hits the durable /data volume.
+    {
+        let mut s = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .expect("connect redis to seed");
+        let set = redis_cmd(
+            &mut s,
+            b"*3\r\n$3\r\nSET\r\n$11\r\ndurable-key\r\n$13\r\nsurvive-value\r\n",
+        )
+        .await;
+        assert!(set.starts_with("+OK"), "SET should succeed: {set:?}");
+        let save = redis_cmd(&mut s, b"*1\r\n$4\r\nSAVE\r\n").await;
+        assert!(save.starts_with("+OK"), "SAVE should succeed: {save:?}");
+    }
+
+    drop(client);
+    server.restart().await;
+    let client = server.elasticache_client().await;
+
+    let port = wait_cache_port(&client, "data-cache").await;
+
+    // The recovered container reloads the RDB from the volume; retry GET while
+    // redis finishes loading.
+    let mut value = String::new();
+    for _ in 0..40 {
+        if let Ok(mut s) = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+            value = redis_cmd(&mut s, b"*2\r\n$3\r\nGET\r\n$11\r\ndurable-key\r\n").await;
+            if value.contains("survive-value") {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        value.contains("survive-value"),
+        "cached key must survive the restart via the durable /data volume, got {value:?}"
+    );
+}
+
 /// Users and user groups survive a restart.
 #[tokio::test]
 async fn persistence_round_trip_user_and_group() {
