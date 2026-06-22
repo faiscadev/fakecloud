@@ -57,6 +57,17 @@ Every implemented service persists its control-plane state in this mode — a sn
 - **Organizations** — the organization, OUs, member accounts, service control policies and attachments, handshakes, enabled service access, delegated administrators, responsibility transfers, tags. A `CreateAccount` request left `IN_PROGRESS` resumes and reaches `SUCCEEDED` after restart.
 - **Everything else** — API Gateway v1, ECR, ECS, EventBridge Scheduler, CloudWatch (alarms and dashboards), Application Auto Scaling, and Cognito Identity likewise persist their full control-plane state.
 
+## Container-backed service data
+
+The list above covers each service's **control-plane** state. Services that run real containers (RDS, ElastiCache, EC2, ECS) also have a **data plane** — the bytes inside the database, cache, or instance filesystem. In persistent mode fakecloud keeps that data durable too, by backing each container with a named volume keyed to the resource so a container recreated after a restart reattaches the same data instead of coming back empty:
+
+- **RDS** — postgres/mysql/mariadb data directories. A row written before a restart is still there after the backing container is recovered. (Oracle/SQL Server/Db2 manage their own state and are not volume-backed.)
+- **ElastiCache** — Redis/Valkey persist their `/data` RDB across restarts. Memcached is in-memory only, matching real ElastiCache (a reboot clears it).
+- **EC2** — each instance's data directory (`/var/lib/fakecloud/ec2` by default, see `FAKECLOUD_EC2_INSTANCE_DATA_DIR`) survives a fakecloud restart and a stop/start, the way an EBS root volume does. This persists the instance's data directory, not a full root-filesystem snapshot. The volume is removed on `TerminateInstances`, matching a deleted EBS root volume.
+- **ECS** — task storage is ephemeral, matching AWS: anonymous "Docker volumes" and `dockerVolumeConfiguration` with `scope=task` are deleted when the task stops. Host bind mounts, EFS/FSx, and `scope=shared` volumes persist independently of the task.
+
+These data volumes default **on** under `--storage-mode=persistent` and **off** in memory mode (so test/CI runs stay ephemeral and isolated). Override per service with `FAKECLOUD_PERSIST_DB_VOLUMES` / `FAKECLOUD_PERSIST_EC2_VOLUMES`. The volumes are daemon-managed, so they work whether or not fakecloud itself runs in a container; on the Kubernetes backend, volume lifecycle is handled by the cluster.
+
 ## Version compatibility
 
 On startup fakecloud reads `<data-path>/fakecloud.version.toml`. The file records the on-disk format version and the fakecloud version that created the directory. If the format version doesn't match the running binary, startup fails with an actionable error that points at the file.
