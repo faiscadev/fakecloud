@@ -85,13 +85,24 @@ async fn instance_data_survives_fakecloud_restart() {
     if !require_docker_or_skip(test) {
         return;
     }
-    // Tiny base image keeps the test fast; `tail -f /dev/null` keeps it alive.
-    std::env::set_var("FAKECLOUD_EC2_DEFAULT_IMAGE", "alpine:3");
-    // Turn on durable instance volumes for this run.
-    std::env::set_var("FAKECLOUD_PERSIST_EC2_VOLUMES", "1");
 
+    // Persistent mode with a REAL container CLI: `start_persistent` forces
+    // FAKECLOUD_CONTAINER_CLI=false (metadata-only), which would never spawn a
+    // backing container, so build the persistent server directly and let it
+    // detect docker. The env vars go through `start_full` so `restart()`
+    // re-applies them to the respawned server. A tiny base image keeps the
+    // test fast; `tail -f /dev/null` keeps it alive. `FAKECLOUD_PERSIST_EC2_VOLUMES`
+    // turns on the durable instance volume under test.
     let tmp = tempfile::tempdir().unwrap();
-    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let data_path = tmp.path().display().to_string();
+    let mut server = TestServer::start_full(
+        &[
+            ("FAKECLOUD_EC2_DEFAULT_IMAGE", "alpine:3"),
+            ("FAKECLOUD_PERSIST_EC2_VOLUMES", "1"),
+        ],
+        &["--storage-mode", "persistent", "--data-path", &data_path],
+    )
+    .await;
     let c = server.ec2_client().await;
 
     let instance_id = c
