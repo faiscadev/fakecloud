@@ -3381,3 +3381,76 @@ async fn snapshot_hook_fires_with_store() {
     // Must not panic; exercises the closure and the snapshot save path.
     hook().await;
 }
+
+#[test]
+fn put_permission_star_principal_stored_verbatim() {
+    // A `*` principal means "any account" and must be stored as "*", not an
+    // account-root ARN. The Terraform aws_cloudwatch_event_permission resource
+    // reads it back and asserts principal == "*".
+    let svc = make_service();
+    svc.put_permission(&make_request(
+        "PutPermission",
+        json!({ "Action": "events:PutEvents", "Principal": "*", "StatementId": "s1" }),
+    ))
+    .unwrap();
+    let resp = svc
+        .describe_event_bus(&make_request(
+            "DescribeEventBus",
+            json!({ "Name": "default" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let policy = body["Policy"].as_str().unwrap();
+    assert!(
+        policy.contains("\"Principal\":\"*\""),
+        "star principal should be stored verbatim, got {policy}"
+    );
+}
+
+#[test]
+fn put_permission_same_statement_id_replaces() {
+    // PutPermission with an existing StatementId replaces that statement (e.g.
+    // changing its principal) rather than stacking a duplicate.
+    let svc = make_service();
+    svc.put_permission(&make_request(
+        "PutPermission",
+        json!({ "Action": "events:PutEvents", "Principal": "111111111111", "StatementId": "s1" }),
+    ))
+    .unwrap();
+    svc.put_permission(&make_request(
+        "PutPermission",
+        json!({ "Action": "events:PutEvents", "Principal": "*", "StatementId": "s1" }),
+    ))
+    .unwrap();
+    let resp = svc
+        .describe_event_bus(&make_request(
+            "DescribeEventBus",
+            json!({ "Name": "default" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let policy: Value = serde_json::from_str(body["Policy"].as_str().unwrap()).unwrap();
+    let stmts = policy["Statement"].as_array().unwrap();
+    assert_eq!(
+        stmts.len(),
+        1,
+        "duplicate Sid should be replaced, not stacked"
+    );
+    assert_eq!(stmts[0]["Principal"], json!("*"));
+}
+
+#[test]
+fn list_event_buses_includes_creation_time() {
+    // The aws_cloudwatch_event_buses data source expects each bus to report a
+    // creation time; ListEventBuses must surface it like DescribeEventBus.
+    let svc = make_service();
+    let resp = svc
+        .list_event_buses(&make_request("ListEventBuses", json!({})))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let first = &body["EventBuses"][0];
+    assert!(
+        first["CreationTime"].is_number(),
+        "ListEventBuses entry should carry CreationTime, got {first}"
+    );
+}

@@ -366,6 +366,12 @@ fn describe_stream_summary_counts_consumers() {
     let body = json_response(resp);
     assert_eq!(body["StreamDescriptionSummary"]["ConsumerCount"], json!(0));
     assert_eq!(body["StreamDescriptionSummary"]["OpenShardCount"], json!(1));
+    // EnhancedMonitoring must be present so the aws_kinesis_stream data source
+    // (which reads DescribeStreamSummary) can populate shard_level_metrics.
+    assert_eq!(
+        body["StreamDescriptionSummary"]["EnhancedMonitoring"][0]["ShardLevelMetrics"],
+        json!([])
+    );
 }
 
 #[test]
@@ -1911,4 +1917,29 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     // Must not panic; exercises the closure and the snapshot save path.
     hook().await;
+}
+
+#[test]
+fn create_stream_persists_initial_tags() {
+    // CreateStream accepts an initial Tags map; Terraform's aws_kinesis_stream
+    // sets tags at create and treats a missing tag on the next read as drift.
+    let (svc, _) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({ "StreamName": "tagged", "ShardCount": 1, "Tags": { "Name": "tagged" } }),
+    ))
+    .unwrap();
+    let resp = svc
+        .list_tags_for_stream(&request(
+            "ListTagsForStream",
+            json!({ "StreamName": "tagged" }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    let tags = body["Tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|t| t["Key"] == "Name" && t["Value"] == "tagged"),
+        "initial CreateStream tags should persist, got {body}"
+    );
 }
