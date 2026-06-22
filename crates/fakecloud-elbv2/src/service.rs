@@ -9,19 +9,31 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
+use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::query::{
     optional_query_param, query_metadata_only_xml, query_response_xml, required_query_param,
 };
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use fakecloud_wafv2::SharedWafv2State;
 
-use crate::state::{AvailabilityZone, LoadBalancer, LoadBalancerAddress, SharedElbv2State, Tag};
+use crate::state::{
+    AvailabilityZone, Elbv2Snapshot, LoadBalancer, LoadBalancerAddress, SharedElbv2State, Tag,
+    ELBV2_SNAPSHOT_SCHEMA_VERSION,
+};
 use crate::ELBV2_NAMESPACE;
 
 const NS: &str = ELBV2_NAMESPACE;
+
+/// ELBv2 read actions all start with `Describe` or `Get`; every other action is
+/// a mutation (Create/Delete/Modify/Set/Add/Remove/Register/Deregister). The
+/// inverse formulation guarantees no mutation is ever missed.
+fn is_mutating_action(action: &str) -> bool {
+    !(action.starts_with("Describe") || action.starts_with("Get"))
+}
 
 const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
     "CreateLoadBalancer",
@@ -94,6 +106,8 @@ pub struct Elbv2Service {
     /// `/_fakecloud/elbv2/waf-counts` admin endpoint can read it.
     waf_count_metrics: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, u64>>>,
     pub region: String,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl Elbv2Service {
@@ -117,6 +131,8 @@ impl Elbv2Service {
             access_logger: parking_lot::Mutex::new(None),
             waf_count_metrics,
             region: "us-east-1".to_string(),
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -132,7 +148,47 @@ impl Elbv2Service {
             access_logger: parking_lot::Mutex::new(None),
             waf_count_metrics: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
             region: "us-east-1".to_string(),
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    /// Attach a persistence snapshot store so control-plane mutations are
+    /// written through to disk. Target health is intentionally not persisted --
+    /// the prober re-derives it after a restart.
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_elbv2_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current ELBv2 state when invoked, or
+    /// `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_elbv2_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     /// Plug in the WAFv2 shared state so the ALB dataplane can resolve
@@ -188,6 +244,37 @@ impl Elbv2Service {
     }
 }
 
+/// Persist the current ELBv2 state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `Elbv2Service::save_snapshot` and the
+/// CloudFormation provisioner persist hook so both route through the same
+/// serialize-and-write path.
+pub async fn save_elbv2_snapshot(
+    state: &SharedElbv2State,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = Elbv2Snapshot {
+        schema_version: ELBV2_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write elbv2 snapshot"),
+        Err(err) => tracing::error!(%err, "elbv2 snapshot task panicked"),
+    }
+}
+
 #[async_trait]
 impl AwsService for Elbv2Service {
     fn service_name(&self) -> &str {
@@ -195,7 +282,8 @@ impl AwsService for Elbv2Service {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = is_mutating_action(&req.action);
+        let result = match req.action.as_str() {
             "CreateLoadBalancer" => self.create_load_balancer(&req),
             "DescribeLoadBalancers" => self.describe_load_balancers(&req),
             "DeleteLoadBalancer" => self.delete_load_balancer(&req),
@@ -253,7 +341,11 @@ impl AwsService for Elbv2Service {
                 "elasticloadbalancing",
                 &req.action,
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 
     fn supported_actions(&self) -> &[&str] {
