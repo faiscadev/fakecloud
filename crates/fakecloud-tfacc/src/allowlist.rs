@@ -104,14 +104,21 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "bedrock",
-        // Batch 10: `data.aws_bedrock_foundation_models` data source
-        // smoke. fakecloud's Bedrock implementation already returns the
-        // expected ListFoundationModels shape, so this passes out of
-        // the box. Resource tests (model invocation, guardrails) need
-        // the Bedrock runtime container path to be plumbed through TF
-        // and are deferred to a later batch.
-        run_regex: "^TestAccBedrockFoundationModelsDataSource_basic$",
-        deny: &[],
+        // Batch 10 + widen: the foundation-model data sources (single + list),
+        // which return the expected ListFoundationModels / GetFoundationModel
+        // shapes out of the box.
+        run_regex: "^TestAccBedrock[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: guardrails need the content-policy / topic-policy
+            //     evaluation engine, which fakecloud's Bedrock does not model. ---
+            "TestAccBedrockGuardrail_basic",
+            "TestAccBedrockGuardrailVersion_basic",
+            // --- gap: inference profiles (cross-region model routing) are not
+            //     modelled. ---
+            "TestAccBedrockInferenceProfile_basic",
+            "TestAccBedrockInferenceProfileDataSource_basic",
+            "TestAccBedrockInferenceProfilesDataSource_basic",
+        ],
     },
     Service {
         name: "apigatewayv2",
@@ -376,7 +383,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "bedrock",
         service: "bedrock",
-        run_regex: "^TestAccBedrockFoundationModelsDataSource_basic$",
+        run_regex: "^TestAccBedrock[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
@@ -483,6 +490,28 @@ pub const SHARDS: &[Shard] = &[
         name: "dynamodb-h-z",
         service: "dynamodb",
         run_regex: "^TestAccDynamoDBTable_[^a-gA-G]",
+        extra_deny: &[],
+    },
+    // ─── dynamodb non-table resources ──────────────────────────────
+    // The two table shards cover `aws_dynamodb_table` only. This shard adds
+    // the other DynamoDB resources and data sources that pass: table item
+    // (+ data source), the table data source, contributor insights, and
+    // tagging. The regex is an explicit positive list — the remaining
+    // non-table resources are deliberately omitted, not denied:
+    //   * kinesis_streaming_destination — `approximate_creation_date_time
+    //     _precision` round-trip,
+    //   * resource_policy — import-state-verify attribute mismatch,
+    //   * global_table / table_replica — cross-region replication,
+    //   * table_export — S3 export path,
+    // each of which needs a dedicated fix and will be added later.
+    Shard {
+        name: "dynamodb-resources",
+        service: "dynamodb",
+        run_regex: concat!(
+            "^TestAccDynamoDB(",
+            "ContributorInsights|Tag|TableItem|TableItemDataSource|TableDataSource",
+            ")_basic$",
+        ),
         extra_deny: &[],
     },
 ];

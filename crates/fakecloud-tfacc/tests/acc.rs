@@ -101,3 +101,8 @@ async fn dynamodb_a_g_acceptance() {
 async fn dynamodb_h_z_acceptance() {
     run_shard("dynamodb-h-z").await;
 }
+
+#[tokio::test]
+async fn dynamodb_resources_acceptance() {
+    run_shard("dynamodb-resources").await;
+}
