@@ -22,6 +22,8 @@ FAKECLOUD_STORAGE_MODE=persistent FAKECLOUD_DATA_PATH=/var/lib/fakecloud fakeclo
 
 ## What's persisted
 
+Every implemented service persists its control-plane state in this mode — a snapshot is written to disk on every mutation and reloaded on startup. The highlights below note what each captures.
+
 - **S3** — buckets, objects, versions, delete markers, multipart uploads (resumable across restarts), and every bucket subresource: tags, lifecycle, CORS, policy, notification, logging, website, public access block, object lock, replication, ownership, inventory, encryption, ACL, accelerate. Written to disk on every mutation and reloaded on startup.
 - **SQS** — queues, attributes, tags, in-flight and delayed messages.
 - **SNS** — topics, subscriptions, attributes, tags, platform applications and endpoints, SMS settings.
@@ -42,6 +44,18 @@ FAKECLOUD_STORAGE_MODE=persistent FAKECLOUD_DATA_PATH=/var/lib/fakecloud fakeclo
 - **RDS** — DB instances (configuration, credentials, tags), DB snapshots (including dump data), subnet groups, parameter groups.
 - **ElastiCache** — cache clusters, replication groups, global replication groups, subnet groups, parameter groups, users, user groups, snapshots, serverless caches and snapshots, reserved cache nodes, tags.
 - **Bedrock** — guardrails, guardrail versions, customization jobs, provisioned throughputs, logging config, async invocations, custom models, deployments, model import/copy/invocation jobs, evaluation jobs, inference profiles, prompt routers, resource policies, marketplace endpoints, foundation model agreements, automated reasoning policies/test cases/workflows, tags. The `/_fakecloud/bedrock/invocations` introspection buffer and simulation config (custom responses, response rules, fault rules) reset on restart.
+- **Bedrock Agent** — agents (action groups, aliases, versions, collaborators, knowledge-base associations), data sources, flows (aliases, versions), knowledge bases, ingestion jobs, prompts and prompt versions, tags.
+- **EC2** — VPCs, subnets, security groups, instances, ENIs, EBS volumes, route tables, internet/NAT gateways, NACLs, Elastic IPs, VPC endpoints, transit gateways, IPAM, and the rest of the account-partitioned control plane. Backing instance containers are reconciled on restart: a persisted `running`/`pending` instance is flipped to `pending` and a fresh container is respawned (the prior process's was removed by the reaper).
+- **Route 53** — hosted zones, record sets, health checks, traffic policies and versions, traffic policy instances, DNSSEC status, key signing keys, query-logging configs, CIDR collections, reusable delegation sets, VPC authorizations, tags.
+- **CloudFront** — distributions, invalidations, origin access controls/identities, cache / origin-request / response-headers / continuous-deployment policies, functions, public keys, key groups, key value stores, field-level encryption, realtime log configs, VPC origins, anycast IP lists, trust stores, resource policies, streaming distributions, connection groups, distribution tenants, tags. A distribution left `InProgress` at shutdown resumes its deploy and reaches `Deployed` after restart.
+- **ELBv2** — load balancers, target groups, registered targets, listeners, rules, trust stores, resource policies. Target health is not persisted; the health prober re-derives it on startup.
+- **WAF v2** — web ACLs, rule groups, IP sets, regex pattern sets, logging configs, permission policies, web-ACL associations, API keys, managed rule sets, tags. Data-plane sampled-request telemetry resets on restart.
+- **ACM** — certificates (status, domains, validation, chains), tags, account config. A certificate left `PENDING_VALIDATION` (DNS) resumes auto-issue and reaches `ISSUED` after restart.
+- **Glue** — databases, tables, partitions, jobs and job runs, crawlers, classifiers, connections, triggers, workflows, blueprints, schemas, security configs, sessions, and the rest of the Data Catalog.
+- **Athena** — workgroups, data catalogs, named queries, prepared statements, query executions, notebooks, sessions, calculations, capacity reservations, tags.
+- **Firehose** — delivery streams, destinations, tags, and server-side encryption config.
+- **Organizations** — the organization, OUs, member accounts, service control policies and attachments, handshakes, enabled service access, delegated administrators, responsibility transfers, tags. A `CreateAccount` request left `IN_PROGRESS` resumes and reaches `SUCCEEDED` after restart.
+- **Everything else** — API Gateway v1, ECR, ECS, EventBridge Scheduler, CloudWatch (alarms and dashboards), Application Auto Scaling, and Cognito Identity likewise persist their full control-plane state.
 
 ## Version compatibility
 
