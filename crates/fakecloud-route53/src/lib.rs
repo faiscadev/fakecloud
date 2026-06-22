@@ -18,6 +18,6 @@ pub const NAMESPACE: &str = "https://route53.amazonaws.com/doc/2013-04-01/";
 
 pub use service::{DnssecSignature, Route53Service};
 pub use state::{
-    AccountState, HealthCheckStatus, Route53Accounts, SharedRoute53State, StoredHealthCheck,
-    StoredHostedZone, StoredKeySigningKey,
+    AccountState, HealthCheckStatus, Route53Accounts, Route53Snapshot, SharedRoute53State,
+    StoredHealthCheck, StoredHostedZone, StoredKeySigningKey, ROUTE53_SNAPSHOT_SCHEMA_VERSION,
 };
