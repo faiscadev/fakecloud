@@ -18,9 +18,21 @@ mod helpers;
 use std::time::Duration;
 
 use aws_sdk_ecs::types::{
-    ContainerDefinition, EfsVolumeConfiguration, HostVolumeProperties, MountPoint, Volume,
+    ContainerDefinition, DockerVolumeConfiguration, EfsVolumeConfiguration, HostVolumeProperties,
+    MountPoint, Scope, Volume,
 };
 use helpers::TestServer;
+
+/// True if a docker volume with this name currently exists.
+fn docker_volume_exists(name: &str) -> bool {
+    std::process::Command::new("docker")
+        .args(["volume", "inspect", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 fn docker_available() -> bool {
     std::process::Command::new("docker")
@@ -288,4 +300,115 @@ async fn ecs_efs_stub_is_shared_across_tasks() {
     // Cleanup: remove the stub directory so successive test runs on
     // the same machine don't accumulate.
     let _ = std::fs::remove_dir_all(format!("/tmp/fakecloud/efs/{fs_id}"));
+}
+
+/// AWS deletes a task-scoped docker volume when the task stops, but keeps a
+/// `scope=shared` one. After a task that mounts both stops, the task-scoped
+/// volume must be gone and the shared volume must remain.
+#[tokio::test]
+async fn ecs_task_scoped_docker_volume_removed_on_stop() {
+    if !require_docker_or_skip("ecs_task_scoped_docker_volume_removed_on_stop") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let ecs = server.ecs_client().await;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let task_vol = format!("fc-ecs-task-{unique}");
+    let shared_vol = format!("fc-ecs-shared-{unique}");
+
+    ecs.create_cluster()
+        .cluster_name("vol-scope-cluster")
+        .send()
+        .await
+        .unwrap();
+
+    ecs.register_task_definition()
+        .family("vol-scope-family")
+        .volumes(
+            Volume::builder()
+                .name(&task_vol)
+                .docker_volume_configuration(
+                    DockerVolumeConfiguration::builder()
+                        .scope(Scope::Task)
+                        .build(),
+                )
+                .build(),
+        )
+        .volumes(
+            Volume::builder()
+                .name(&shared_vol)
+                .docker_volume_configuration(
+                    DockerVolumeConfiguration::builder()
+                        .scope(Scope::Shared)
+                        .autoprovision(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("writer")
+                .image("public.ecr.aws/docker/library/alpine:3.20")
+                .essential(true)
+                .mount_points(
+                    MountPoint::builder()
+                        .source_volume(&task_vol)
+                        .container_path("/mnt/task")
+                        .build(),
+                )
+                .mount_points(
+                    MountPoint::builder()
+                        .source_volume(&shared_vol)
+                        .container_path("/mnt/shared")
+                        .build(),
+                )
+                .command("sh")
+                .command("-c")
+                .command("echo x > /mnt/task/f && echo x > /mnt/shared/f")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let run = ecs
+        .run_task()
+        .cluster("vol-scope-cluster")
+        .task_definition("vol-scope-family")
+        .send()
+        .await
+        .unwrap();
+    let arn = run.tasks()[0].task_arn().unwrap().to_string();
+    wait_stopped(&ecs, "vol-scope-cluster", &arn).await;
+
+    // The teardown removes containers then volumes; give it a moment to run
+    // the volume rm after the task flips to STOPPED.
+    let mut task_gone = false;
+    for _ in 0..40 {
+        if !docker_volume_exists(&task_vol) {
+            task_gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        task_gone,
+        "task-scoped docker volume {task_vol} should be removed when the task stops"
+    );
+    assert!(
+        docker_volume_exists(&shared_vol),
+        "scope=shared docker volume {shared_vol} should survive the task stopping"
+    );
+
+    let _ = std::process::Command::new("docker")
+        .args(["volume", "rm", "-f", &shared_vol])
+        .status();
 }

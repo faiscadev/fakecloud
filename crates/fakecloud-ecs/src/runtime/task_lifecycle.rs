@@ -487,6 +487,26 @@ impl EcsRuntime {
                 .output()
                 .await;
         }
+        // Reap task-scoped docker volumes (anonymous "Docker volumes" and
+        // `dockerVolumeConfiguration` with scope=task), matching AWS, which
+        // deletes them when the task stops. Host binds, EFS/FSx stubs and
+        // scope=shared volumes are left in place — they outlive the task.
+        // `volume rm` is best-effort and no-ops on a volume still in use.
+        let mut task_volumes: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for rp in &resolved_plans {
+            for vm in &rp.plan.volume_mounts {
+                if vm.cleanup_on_stop {
+                    task_volumes.insert(vm.source.clone());
+                }
+            }
+        }
+        for vol in &task_volumes {
+            let _ = Command::new(&self.cli)
+                .args(["volume", "rm", "-f", vol])
+                .output()
+                .await;
+        }
         // Clean up the per-task docker network for awsvpc.
         if network_created {
             let _ = Command::new(&self.cli)
