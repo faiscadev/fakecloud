@@ -102,6 +102,28 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "route53",
+        // Wave 3: the `_basic` suite for hosted zones, records (+ exclusive /
+        // data sources), health checks, DNSSEC, query-logging, delegation sets,
+        // traffic policies (+ instances), and CIDR locations — 14 tests. The
+        // batch made Route 53 render its REST-XML errors in the `<ErrorResponse>`
+        // wrapper (not S3's bare `<Error>`), so the AWS SDK can read the error
+        // code; without it the provider's post-destroy `GetHostedZone` check saw
+        // `UnknownError` and every zone-owning test failed at destroy.
+        run_regex: "^TestAccRoute53[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: CIDR collection ARN must omit the account id
+            //     (`arn:aws:route53:::cidrcollection/...`); fakecloud includes
+            //     it. ---
+            "TestAccRoute53CIDRCollection_basic",
+            // --- gap: DNSSEC key-signing keys need a computed DS digest_value
+            //     (hex), which fakecloud leaves empty. ---
+            "TestAccRoute53KeySigningKey_basic",
+            // --- gap: VPC zone association apply path. ---
+            "TestAccRoute53ZoneAssociation_basic",
+        ],
+    },
+    Service {
         name: "cognitoidp",
         // Batch 11: core `aws_cognito_user_pool` smoke. The fix here is
         // returning five shape blocks with AWS defaults on every
@@ -431,6 +453,12 @@ pub const SHARDS: &[Shard] = &[
         name: "sts",
         service: "sts",
         run_regex: "^TestAccSTS[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "route53",
+        service: "route53",
+        run_regex: "^TestAccRoute53[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
