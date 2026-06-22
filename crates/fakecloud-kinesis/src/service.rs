@@ -255,6 +255,19 @@ impl KinesisService {
             ));
         }
 
+        // CreateStream accepts an initial Tags map. Terraform's
+        // aws_kinesis_stream sets tags at create time and treats a missing tag
+        // on the next read as drift, so they must be persisted here rather than
+        // dropped (callers can still AddTagsToStream later).
+        let tags: std::collections::BTreeMap<String, String> = body["Tags"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let stream = KinesisStream {
             stream_name: stream_name.to_string(),
             stream_arn: state.stream_arn(stream_name),
@@ -266,7 +279,7 @@ impl KinesisService {
             key_id: None,
             shard_count: effective_shard_count,
             open_shard_count: effective_shard_count,
-            tags: std::collections::BTreeMap::new(),
+            tags,
             shards: build_stream_shards(effective_shard_count),
             next_shard_index: effective_shard_count,
             enhanced_metrics: Vec::new(),
@@ -325,10 +338,21 @@ impl KinesisService {
             .filter(|c| c.stream_arn == stream.stream_arn)
             .count();
 
+        // StreamDescriptionSummary carries EnhancedMonitoring just like the
+        // full DescribeStream output. The Terraform aws_kinesis_stream data
+        // source reads `shard_level_metrics` from here (it calls
+        // DescribeStreamSummary), so it must be present.
+        let enhanced_monitoring = if stream.enhanced_metrics.is_empty() {
+            json!([{ "ShardLevelMetrics": Vec::<String>::new() }])
+        } else {
+            json!([{ "ShardLevelMetrics": stream.enhanced_metrics }])
+        };
+
         Ok(AwsResponse::ok_json(json!({
             "StreamDescriptionSummary": {
                 "ConsumerCount": consumer_count,
                 "EncryptionType": stream.encryption_type,
+                "EnhancedMonitoring": enhanced_monitoring,
                 "KeyId": stream.key_id.as_deref().unwrap_or_default(),
                 "OpenShardCount": stream.open_shard_count,
                 "RetentionPeriodHours": stream.retention_period_hours,

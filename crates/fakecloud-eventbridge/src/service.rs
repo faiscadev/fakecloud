@@ -411,7 +411,17 @@ impl EventBridgeService {
         let (page, next_token) = paginate(&filtered, body["NextToken"].as_str(), limit);
         let buses: Vec<Value> = page
             .iter()
-            .map(|b| json!({ "Name": b.name, "Arn": b.arn }))
+            .map(|b| {
+                // Mirror DescribeEventBus: ListEventBuses also reports the
+                // bus creation/last-modified times, which the Terraform
+                // aws_cloudwatch_event_buses data source expects to be set.
+                json!({
+                    "Name": b.name,
+                    "Arn": b.arn,
+                    "CreationTime": b.creation_time.timestamp() as f64,
+                    "LastModifiedTime": b.last_modified_time.timestamp() as f64,
+                })
+            })
             .collect();
         let mut resp = json!({ "EventBuses": buses });
         if let Some(token) = next_token {
@@ -510,10 +520,18 @@ impl EventBridgeService {
         // PolicyLengthExceededException, ConcurrentModificationException,
         // OperationDisabledException, and InternalException. We accept any
         // action string and just record the statement.
+        // A `*` principal means "any account" and is stored verbatim, not as
+        // an account-root ARN. The Terraform aws_cloudwatch_event_permission
+        // resource reads the principal back and asserts it is exactly "*".
+        let principal_value = if principal == "*" {
+            json!("*")
+        } else {
+            json!({ "AWS": Arn::global("iam", principal, "root").to_string() })
+        };
         let statement = json!({
             "Sid": statement_id,
             "Effect": "Allow",
-            "Principal": { "AWS": Arn::global("iam", principal, "root").to_string() },
+            "Principal": principal_value,
             "Action": action,
             "Resource": bus.arn,
         });
@@ -526,6 +544,10 @@ impl EventBridgeService {
         });
 
         if let Some(stmts) = policy["Statement"].as_array_mut() {
+            // PutPermission with an existing StatementId replaces that
+            // statement (e.g. changing its principal), it does not stack a
+            // second one. Drop any prior statement with the same Sid first.
+            stmts.retain(|s| s["Sid"].as_str() != Some(statement_id));
             stmts.push(statement);
         }
 

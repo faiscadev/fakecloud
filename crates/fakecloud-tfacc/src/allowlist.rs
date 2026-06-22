@@ -109,13 +109,18 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "kinesis",
-        // Batch 8: core `aws_kinesis_stream` smoke. The fix here is
-        // making `IncreaseStreamRetentionPeriod` accept same-value as a
-        // no-op — real AWS does this despite what the API docs say,
-        // and the upstream provider unconditionally calls it with the
-        // default 24h on every create.
-        run_regex: "^TestAccKinesisStream_basic$",
-        deny: &[],
+        // Batch 8 + widen: `_basic` smoke for the Kinesis stream resources and
+        // data sources. The widen batch added EnhancedMonitoring to
+        // DescribeStreamSummary (so the data source reads `shard_level_metrics`)
+        // and made CreateStream persist its initial Tags.
+        run_regex: "^TestAccKinesis[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: the data source asserts a closed-shard count produced by
+            //     a split/merge sequence; fakecloud's shard-lineage accounting
+            //     closes fewer shards than real Kinesis (4 expected, 2 closed),
+            //     which needs fuller split/merge parent-shard tracking. ---
+            "TestAccKinesisStreamDataSource_basic",
+        ],
     },
     Service {
         name: "sns",
@@ -129,13 +134,19 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "events",
-        // Batch 7: core EventBridge `aws_cloudwatch_event_bus` and
-        // `aws_cloudwatch_event_rule` smokes. Both pass out of the box.
-        // Note: the upstream service directory is `events`, not
-        // `eventbridge` — Terraform uses the legacy CloudWatch Events
-        // naming.
-        run_regex: "^TestAccEvents(Bus|Rule)_basic$",
-        deny: &[],
+        // Batch 7 + widen: `_basic` smoke for the EventBridge resources and
+        // data sources — event bus (+ buses data source), rule, target,
+        // permission, connection, API destination, archive, and more. The
+        // widen batch fixed PutPermission's `*` principal (stored verbatim,
+        // not as an account-root ARN) and added CreationTime/LastModifiedTime
+        // to ListEventBuses. Note: the upstream service directory is `events`,
+        // not `eventbridge` — Terraform uses the legacy CloudWatch Events name.
+        run_regex: "^TestAccEvents[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: EventBridge global endpoints need multi-region event
+            //     replication / failover, which fakecloud does not model. ---
+            "TestAccEventsEndpoint_basic",
+        ],
     },
     Service {
         name: "kms",
@@ -335,7 +346,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "kinesis",
         service: "kinesis",
-        run_regex: "^TestAccKinesisStream_basic$",
+        run_regex: "^TestAccKinesis[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
@@ -347,7 +358,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "events",
         service: "events",
-        run_regex: "^TestAccEvents(Bus|Rule)_basic$",
+        run_regex: "^TestAccEvents[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
