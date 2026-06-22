@@ -288,6 +288,15 @@ pub struct Integration {
     pub payload_format_version: Option<String>, // "2.0"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i64>,
+    /// "INTERNET" (default) or "VPC_LINK". AWS always reports it, so the
+    /// Terraform provider re-plans an integration whose GetIntegration response
+    /// omits it.
+    #[serde(default = "default_connection_type")]
+    pub connection_type: String,
+}
+
+fn default_connection_type() -> String {
+    "INTERNET".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +343,15 @@ pub struct Deployment {
     pub description: Option<String>,
     pub created_date: DateTime<Utc>,
     pub auto_deployed: bool,
+    /// fakecloud applies deployments synchronously, so they are immediately
+    /// `DEPLOYED`. The Terraform provider's create-waiter polls GetDeployment
+    /// for this status, so it must be reported.
+    #[serde(default = "default_deployment_status")]
+    pub deployment_status: String,
+}
+
+fn default_deployment_status() -> String {
+    "DEPLOYED".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

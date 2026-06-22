@@ -30,6 +30,7 @@ impl ApiGatewayV2Service {
             description,
             created_date,
             auto_deployed: false,
+            deployment_status: "DEPLOYED".to_string(),
         };
 
         let mut accounts = self.state.write();

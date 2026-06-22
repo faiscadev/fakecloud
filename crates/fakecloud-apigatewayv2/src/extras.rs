@@ -42,6 +42,38 @@ fn to_camel(v: Value) -> Value {
 /// Parse the request body as JSON. Keep incoming case-as-is; handlers
 /// read fields in Pascal-case for legibility, but SDK clients send
 /// camel-case per Smithy — so we also merge a Pascal-case copy.
+/// Clone the caller's `DomainNameConfigurations` (defaulting to one empty
+/// config) and stamp each entry with the synchronous-provisioning fields AWS
+/// fills in: `DomainNameStatus = AVAILABLE`, plus a regional endpoint name and
+/// hosted-zone id. The Terraform provider's create-waiter reads
+/// `DomainNameStatus`, so it must be present.
+fn domain_configs_with_status(configs: Option<&Value>, domain: &str) -> Value {
+    let mut arr = match configs.and_then(|c| c.as_array()) {
+        Some(a) if !a.is_empty() => a.clone(),
+        _ => vec![json!({})],
+    };
+    for c in arr.iter_mut() {
+        if let Some(obj) = c.as_object_mut() {
+            if !obj.contains_key("DomainNameStatus") {
+                obj.insert("DomainNameStatus".into(), json!("AVAILABLE"));
+            }
+            if !obj.contains_key("ApiGatewayDomainName") {
+                obj.insert(
+                    "ApiGatewayDomainName".into(),
+                    json!(format!("d-{domain}.execute-api.us-east-1.amazonaws.com")),
+                );
+            }
+            if !obj.contains_key("HostedZoneId") {
+                obj.insert("HostedZoneId".into(), json!("Z1UJRXOUMOOFQ8"));
+            }
+            if !obj.contains_key("IpAddressType") {
+                obj.insert("IpAddressType".into(), json!("ipv4"));
+            }
+        }
+    }
+    Value::Array(arr)
+}
+
 fn body(req: &AwsRequest) -> Value {
     let raw: Value =
         serde_json::from_slice(&req.body).unwrap_or_else(|_| Value::Object(Default::default()));
@@ -295,10 +327,15 @@ impl ApiGatewayV2Service {
                 let name = req_str(&body, "DomainName")?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
+                // fakecloud provisions domains synchronously, so each
+                // configuration is immediately AVAILABLE. The Terraform
+                // provider's create-waiter polls GetDomainName for that status.
+                let configs =
+                    domain_configs_with_status(body.get("DomainNameConfigurations"), &name);
                 let mut entry = json!({
                     "DomainName": name,
                     "DomainNameArn": Arn::new("apigateway", "us-east-1", "", &format!("/domainnames/{name}")).to_string(),
-                    "DomainNameConfigurations": body.get("DomainNameConfigurations").cloned().unwrap_or(json!([])),
+                    "DomainNameConfigurations": configs,
                     "ApiMappingSelectionExpression": "$request.basepath",
                     "RoutingMode": "API_MAPPING_ONLY",
                     "Tags": body.get("Tags").cloned().unwrap_or(json!({})),
@@ -337,8 +374,9 @@ impl ApiGatewayV2Service {
                     .domain_names
                     .get_mut(name)
                     .ok_or_else(|| not_found("DomainName", name))?;
-                if let Some(cfgs) = body.get("DomainNameConfigurations") {
-                    entry["DomainNameConfigurations"] = cfgs.clone();
+                if body.get("DomainNameConfigurations").is_some() {
+                    entry["DomainNameConfigurations"] =
+                        domain_configs_with_status(body.get("DomainNameConfigurations"), name);
                 }
                 ok(entry.clone())
             }
@@ -2110,6 +2148,7 @@ mod tests {
                             description: None,
                             created_date: chrono::Utc::now(),
                             auto_deployed: false,
+                            deployment_status: "DEPLOYED".to_string(),
                         },
                     );
             }
@@ -2162,6 +2201,7 @@ mod tests {
                             description: None,
                             created_date: chrono::Utc::now(),
                             auto_deployed: false,
+                            deployment_status: "DEPLOYED".to_string(),
                         },
                     );
             }

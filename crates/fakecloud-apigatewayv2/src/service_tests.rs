@@ -365,6 +365,9 @@ async fn integration_crud_lifecycle() {
     let b = body_json(&resp);
     let int_id = b["integrationId"].as_str().unwrap().to_string();
     assert_eq!(b["integrationType"], "HTTP_PROXY");
+    // AWS always reports connectionType, defaulting to INTERNET, which the
+    // Terraform provider re-plans an integration without.
+    assert_eq!(b["connectionType"], "INTERNET");
 
     // Get
     let req = make_request(
@@ -475,6 +478,9 @@ async fn deployment_crud() {
     let b = body_json(&resp);
     let dep_id = b["deploymentId"].as_str().unwrap().to_string();
     assert!(dep_id.starts_with("deployment"));
+    // Deployments apply synchronously, so they report DEPLOYED immediately —
+    // the Terraform provider's create-waiter polls for this.
+    assert_eq!(b["deploymentStatus"], "DEPLOYED");
 
     // Get deployment
     let req = make_request(
@@ -2682,4 +2688,21 @@ async fn snapshot_hook_fires_with_store() {
         .snapshot_hook()
         .expect("hook present when a store is set");
     hook().await;
+}
+
+#[tokio::test]
+async fn create_domain_name_reports_available_status() {
+    // AWS provisions custom domains synchronously, so each configuration comes
+    // back AVAILABLE with a regional endpoint and ipv4 — the Terraform
+    // provider's create-waiter polls GetDomainName for DomainNameStatus.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let body = serde_json::json!({ "domainName": "tfacc.example.com" });
+    let req = make_request(Method::POST, "/v2/domainnames", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let b = body_json(&resp);
+    let cfg0 = &b["domainNameConfigurations"][0];
+    assert_eq!(cfg0["domainNameStatus"], "AVAILABLE");
+    assert_eq!(cfg0["ipAddressType"], "ipv4");
+    assert!(cfg0["apiGatewayDomainName"].as_str().is_some());
 }
