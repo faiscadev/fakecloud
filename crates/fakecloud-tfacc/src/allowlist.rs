@@ -225,20 +225,35 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "ssm",
-        // Batch 4: core `aws_ssm_parameter` smoke. The fix here is making
-        // `lookup_param` tolerate the `name:version` selector that real
-        // AWS accepts on GetParameter / ListTagsForResource — without it
-        // the upstream import-with-version step fails with
-        // InvalidResourceId.
-        run_regex: "^TestAccSSMParameter_basic$",
+        // Batch 4 + widen: the `aws_ssm_parameter` family (parameter, its data
+        // sources, the ephemeral resource, the by-path data source) plus
+        // resource data sync. These pass against fakecloud as-is. The regex is
+        // an explicit positive list rather than `^TestAccSSM..._basic$`
+        // because the broader SSM resources (document, association, the
+        // maintenance-window family, patch baselines) panic the upstream test
+        // binary mid-run today; they are left for a dedicated SSM batch rather
+        // than denied one-by-one.
+        run_regex: concat!(
+            "^TestAccSSM(",
+            "Parameter|ParameterDataSource|ParameterEphemeral",
+            "|ParametersByPathDataSource|ResourceDataSync",
+            ")_basic$",
+        ),
         deny: &[],
     },
     Service {
         name: "secretsmanager",
-        // Batch 4: core `aws_secretsmanager_secret` smoke. Passes against
-        // fakecloud out of the box — no fakecloud-side changes needed.
-        run_regex: "^TestAccSecretsManagerSecret_basic$",
-        deny: &[],
+        // Batch 4 + widen: `_basic` smoke for the Secrets Manager resources and
+        // data sources — secret (+ data source), secret policy, secret version
+        // data sources, random-password data source and ephemeral resource.
+        // Passes against fakecloud out of the box.
+        run_regex: "^TestAccSecretsManager[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: secret rotation drives a Lambda rotation function on a
+            //     schedule, which fakecloud does not orchestrate. ---
+            "TestAccSecretsManagerSecretRotation_basic",
+            "TestAccSecretsManagerSecretRotationDataSource_basic",
+        ],
     },
     Service {
         name: "sqs",
@@ -382,13 +397,18 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "ssm",
         service: "ssm",
-        run_regex: "^TestAccSSMParameter_basic$",
+        run_regex: concat!(
+            "^TestAccSSM(",
+            "Parameter|ParameterDataSource|ParameterEphemeral",
+            "|ParametersByPathDataSource|ResourceDataSync",
+            ")_basic$",
+        ),
         extra_deny: &[],
     },
     Shard {
         name: "secretsmanager",
         service: "secretsmanager",
-        run_regex: "^TestAccSecretsManagerSecret_basic$",
+        run_regex: "^TestAccSecretsManager[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     // ─── sqs split into core + encryption ──────────────────────────
