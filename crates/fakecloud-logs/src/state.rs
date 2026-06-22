@@ -214,6 +214,11 @@ pub struct MetricTransformation {
     pub metric_namespace: String,
     pub metric_value: String,
     pub default_value: Option<f64>,
+    /// CloudWatch unit for the published metric. AWS always reports it on
+    /// DescribeMetricFilters, defaulting to `None` when unset, and the
+    /// Terraform `aws_cloudwatch_log_metric_filter` resource asserts on it.
+    #[serde(default)]
+    pub unit: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

@@ -156,12 +156,29 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "logs",
-        // Batch 6: core `aws_cloudwatch_log_group` smoke. The fix here
-        // is making DescribeLogGroups always return `logGroupClass`
-        // (defaulting to STANDARD), which Terraform's provider asserts
-        // on every refresh.
-        run_regex: "^TestAccLogsGroup_basic$",
-        deny: &[],
+        // Batch 6 + widen: `_basic` smoke for the core CloudWatch Logs
+        // resources and data sources — log group (+ data sources), log stream,
+        // destination (+ policy), resource policy, query definition, metric
+        // filter, and subscription filter. The widen batch added the metric
+        // filter `unit` field (DescribeMetricFilters defaults it to None) and
+        // fixed the Lambda empty-Environment drift the subscription-filter test
+        // surfaced via its Lambda destination.
+        run_regex: "^TestAccLogs[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: log anomaly detection — needs the anomaly-detector
+            //     engine fakecloud does not model. ---
+            "TestAccLogsAnomalyDetector_basic",
+            // --- gap: data-protection policies — needs the data-protection
+            //     policy engine (audit/deidentify) fakecloud does not model. ---
+            "TestAccLogsDataProtectionPolicy_basic",
+            "TestAccLogsDataProtectionPolicyDocumentDataSource_basic",
+            // --- gap: CloudWatch Logs v2 vended-log delivery (delivery
+            //     sources/destinations) is not implemented. ---
+            "TestAccLogsDeliveryDestination_basic",
+            "TestAccLogsDeliveryDestinationPolicy_basic",
+            // --- gap: field index policies are not implemented. ---
+            "TestAccLogsIndexPolicy_basic",
+        ],
     },
     Service {
         name: "iam",
@@ -342,7 +359,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "logs",
         service: "logs",
-        run_regex: "^TestAccLogsGroup_basic$",
+        run_regex: "^TestAccLogs[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {

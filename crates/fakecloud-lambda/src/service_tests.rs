@@ -1407,6 +1407,24 @@ async fn list_functions_paginates_by_marker_and_max_items() {
 }
 
 #[tokio::test]
+async fn function_without_environment_omits_environment_block() {
+    // AWS omits the Environment block entirely for a function created without
+    // environment variables. Emitting `{"Variables":{}}` made the Terraform
+    // provider see a perpetual `variables = {} -> null` diff.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "noenv").await;
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/noenv", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(
+        v["Configuration"].get("Environment").is_none(),
+        "Environment must be omitted when there are no variables, got {}",
+        v["Configuration"]
+    );
+}
+
+#[tokio::test]
 async fn update_function_configuration_round_trips_advanced_fields() {
     // Pre-fix, UpdateFunctionConfiguration silently dropped 9 fields.
     // This asserts that a second GetFunctionConfiguration shows the
