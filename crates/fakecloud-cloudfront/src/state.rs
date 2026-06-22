@@ -27,10 +27,21 @@ use crate::tenants::{StoredDistributionTenant, StoredTenantInvalidation};
 
 pub type SharedCloudFrontState = Arc<RwLock<CloudFrontAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CloudFrontAccounts {
     pub accounts: BTreeMap<String, AccountState>,
 }
+
+/// On-disk snapshot envelope for CloudFront state. Versioned so format changes
+/// fail loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CloudFrontSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<CloudFrontAccounts>,
+}
+
+pub const CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 impl CloudFrontAccounts {
     pub fn new() -> Self {
@@ -50,7 +61,7 @@ impl CloudFrontAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     pub distributions: BTreeMap<String, StoredDistribution>,
     pub invalidations: BTreeMap<String, StoredInvalidation>,

@@ -33,4 +33,7 @@ pub const API_PREFIX: &str = "/2020-05-31";
 pub const NAMESPACE: &str = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 
 pub use service::CloudFrontService;
-pub use state::{CloudFrontAccounts, SharedCloudFrontState, StoredDistribution};
+pub use state::{
+    CloudFrontAccounts, CloudFrontSnapshot, SharedCloudFrontState, StoredDistribution,
+    CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
+};
