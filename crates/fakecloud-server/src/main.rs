@@ -2398,7 +2398,65 @@ async fn main() {
     elbv2_service.start_dataplane();
     let elbv2_service_for_admin = elbv2_service.clone();
     registry.register(elbv2_service);
-    let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
+    let cloudfront_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("cloudfront").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_cloudfront::CloudFrontSnapshot>(&bytes)
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_cloudfront::CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "cloudfront persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_cloudfront::CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *cloudfront_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded cloudfront persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse cloudfront persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no cloudfront persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read cloudfront persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut cloudfront_inner = CloudFrontService::new(cloudfront_state.clone());
+    if let Some(store) = cloudfront_snapshot_store.clone() {
+        cloudfront_inner = cloudfront_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = cloudfront_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("cloudfront", h);
+    }
+    // Re-arm propagation ticks for resources restored as InProgress so they
+    // still transition to Deployed after a restart.
+    cloudfront_inner.rearm_in_progress();
+    let cloudfront_service = Arc::new(cloudfront_inner);
     registry.register(cloudfront_service.clone());
     let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -7896,7 +7954,10 @@ async fn main() {
                 >| {
                     let svc = svc.clone();
                     async move {
-                        if svc.set_distribution_status(&id, &body.status) {
+                        if svc
+                            .set_distribution_status_persistent(&id, &body.status)
+                            .await
+                        {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND

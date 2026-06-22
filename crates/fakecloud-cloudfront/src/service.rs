@@ -8,18 +8,40 @@ use chrono::Utc;
 use http::header::{HeaderName, HeaderValue, ETAG, IF_MATCH, LOCATION};
 use http::{HeaderMap, StatusCode};
 use parking_lot::RwLock;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::model::{
     DistributionConfig, DistributionConfigWithTags, InvalidationBatch, TagKeys, Tags as ModelTags,
 };
 use crate::router::{route, Route};
 use crate::state::{
-    CloudFrontAccounts, SharedCloudFrontState, StoredDistribution, StoredInvalidation, Tag,
+    CloudFrontAccounts, CloudFrontSnapshot, SharedCloudFrontState, StoredDistribution,
+    StoredInvalidation, Tag, CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
 };
 use crate::xml_io;
+
+/// CloudFront mutating actions share these prefixes; everything else
+/// (`Get*`/`List*`/`Describe*`/`Test*`/`Verify*`) is read-only. Used to decide
+/// when a handled request must trigger a persistence snapshot.
+fn is_mutating_action(action: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "Create",
+        "Update",
+        "Delete",
+        "Copy",
+        "Associate",
+        "Disassociate",
+        "Tag",
+        "Untag",
+        "Publish",
+        "Put",
+    ];
+    PREFIXES.iter().any(|p| action.starts_with(p))
+}
 
 pub(crate) const DEFAULT_ACCOUNT: &str = "000000000000";
 
@@ -205,6 +227,8 @@ pub struct CloudFrontService {
     /// override the default via the
     /// `FAKECLOUD_CLOUDFRONT_STATUS_DELAY_SEC` env var.
     pub(crate) propagation_delay: std::time::Duration,
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 /// Resolve the default `InProgress` -> `Deployed` delay from the
@@ -234,11 +258,97 @@ impl CloudFrontService {
         Self {
             state,
             propagation_delay: default_propagation_delay(),
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared_state(&self) -> SharedCloudFrontState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_cloudfront_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current CloudFront state when invoked, or
+    /// `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_cloudfront_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+
+    /// Re-arm the propagation tick for any Distribution / DistributionTenant /
+    /// ConnectionGroup / StreamingDistribution that was still `InProgress` when
+    /// the previous process exited, so they still transition to `Deployed`
+    /// after a restart. Called by the server after loading a snapshot.
+    pub fn rearm_in_progress(&self) {
+        let (dists, tenants, groups, streaming) = {
+            let s = self.state.read();
+            let mut dists = Vec::new();
+            let mut tenants = Vec::new();
+            let mut groups = Vec::new();
+            let mut streaming = Vec::new();
+            for account in s.accounts.values() {
+                for (id, d) in &account.distributions {
+                    if d.status == "InProgress" {
+                        dists.push(id.clone());
+                    }
+                }
+                for (id, t) in &account.distribution_tenants {
+                    if t.status == "InProgress" {
+                        tenants.push(id.clone());
+                    }
+                }
+                for (id, g) in &account.connection_groups {
+                    if g.status == "InProgress" {
+                        groups.push(id.clone());
+                    }
+                }
+                for (id, d) in &account.streaming_distributions {
+                    if d.status == "InProgress" {
+                        streaming.push(id.clone());
+                    }
+                }
+            }
+            (dists, tenants, groups, streaming)
+        };
+        for id in dists {
+            self.schedule_distribution_deploy(id);
+        }
+        for id in tenants {
+            self.schedule_distribution_tenant_deploy(id);
+        }
+        for id in groups {
+            self.schedule_connection_group_deploy(id);
+        }
+        for id in streaming {
+            self.schedule_streaming_distribution_deploy(id);
+        }
     }
 
     /// Override the propagation delay used by `CreateDistribution`,
@@ -265,6 +375,47 @@ impl CloudFrontService {
             }
         }
         false
+    }
+
+    /// Admin-endpoint flavour of [`set_distribution_status`](Self::set_distribution_status)
+    /// that persists the forced status so it survives a restart.
+    pub async fn set_distribution_status_persistent(&self, id: &str, status: &str) -> bool {
+        let changed = self.set_distribution_status(id, status);
+        if changed {
+            self.save_snapshot().await;
+        }
+        changed
+    }
+}
+
+/// Persist the current CloudFront state as a snapshot. Offloads the serde +
+/// blocking file write to the Tokio blocking pool. Noop when `store` is `None`
+/// (memory mode). Shared by `CloudFrontService::save_snapshot`, the propagation
+/// ticks, and the CloudFormation provisioner persist hook so all route through
+/// the same serialize-and-write path.
+pub async fn save_cloudfront_snapshot(
+    state: &SharedCloudFrontState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = CloudFrontSnapshot {
+        schema_version: CLOUDFRONT_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write cloudfront snapshot"),
+        Err(err) => tracing::error!(%err, "cloudfront snapshot task panicked"),
     }
 }
 
@@ -296,7 +447,8 @@ impl AwsService for CloudFrontService {
             }
         };
 
-        match resolved.action {
+        let mutates = is_mutating_action(resolved.action);
+        let result = match resolved.action {
             "CreateDistribution" => self.create_distribution(&req, false),
             "CreateDistributionWithTags" => self.create_distribution(&req, true),
             "GetDistribution" => self.get_distribution(&resolved),
@@ -503,7 +655,11 @@ impl AwsService for CloudFrontService {
                 "InvalidAction",
                 format!("CloudFront action {other} is not implemented yet"),
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 
@@ -604,16 +760,26 @@ impl CloudFrontService {
     fn schedule_distribution_deploy(&self, id: String) {
         let state = Arc::clone(&self.state);
         let delay = self.propagation_delay;
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut s = state.write();
-            for account in s.accounts.values_mut() {
-                if let Some(d) = account.distributions.get_mut(&id) {
-                    if d.status == "InProgress" {
-                        d.status = "Deployed".to_string();
+            let flipped = {
+                let mut s = state.write();
+                let mut flipped = false;
+                for account in s.accounts.values_mut() {
+                    if let Some(d) = account.distributions.get_mut(&id) {
+                        if d.status == "InProgress" {
+                            d.status = "Deployed".to_string();
+                            flipped = true;
+                        }
+                        break;
                     }
-                    return;
                 }
+                flipped
+            };
+            if flipped {
+                save_cloudfront_snapshot(&state, store, &lock).await;
             }
         });
     }
@@ -622,16 +788,26 @@ impl CloudFrontService {
     pub(crate) fn schedule_distribution_tenant_deploy(&self, id: String) {
         let state = Arc::clone(&self.state);
         let delay = self.propagation_delay;
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut s = state.write();
-            for account in s.accounts.values_mut() {
-                if let Some(t) = account.distribution_tenants.get_mut(&id) {
-                    if t.status == "InProgress" {
-                        t.status = "Deployed".to_string();
+            let flipped = {
+                let mut s = state.write();
+                let mut flipped = false;
+                for account in s.accounts.values_mut() {
+                    if let Some(t) = account.distribution_tenants.get_mut(&id) {
+                        if t.status == "InProgress" {
+                            t.status = "Deployed".to_string();
+                            flipped = true;
+                        }
+                        break;
                     }
-                    return;
                 }
+                flipped
+            };
+            if flipped {
+                save_cloudfront_snapshot(&state, store, &lock).await;
             }
         });
     }
@@ -640,16 +816,26 @@ impl CloudFrontService {
     pub(crate) fn schedule_connection_group_deploy(&self, id: String) {
         let state = Arc::clone(&self.state);
         let delay = self.propagation_delay;
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut s = state.write();
-            for account in s.accounts.values_mut() {
-                if let Some(g) = account.connection_groups.get_mut(&id) {
-                    if g.status == "InProgress" {
-                        g.status = "Deployed".to_string();
+            let flipped = {
+                let mut s = state.write();
+                let mut flipped = false;
+                for account in s.accounts.values_mut() {
+                    if let Some(g) = account.connection_groups.get_mut(&id) {
+                        if g.status == "InProgress" {
+                            g.status = "Deployed".to_string();
+                            flipped = true;
+                        }
+                        break;
                     }
-                    return;
                 }
+                flipped
+            };
+            if flipped {
+                save_cloudfront_snapshot(&state, store, &lock).await;
             }
         });
     }
@@ -661,16 +847,26 @@ impl CloudFrontService {
     pub(crate) fn schedule_streaming_distribution_deploy(&self, id: String) {
         let state = Arc::clone(&self.state);
         let delay = self.propagation_delay;
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut s = state.write();
-            for account in s.accounts.values_mut() {
-                if let Some(d) = account.streaming_distributions.get_mut(&id) {
-                    if d.status == "InProgress" {
-                        d.status = "Deployed".to_string();
+            let flipped = {
+                let mut s = state.write();
+                let mut flipped = false;
+                for account in s.accounts.values_mut() {
+                    if let Some(d) = account.streaming_distributions.get_mut(&id) {
+                        if d.status == "InProgress" {
+                            d.status = "Deployed".to_string();
+                            flipped = true;
+                        }
+                        break;
                     }
-                    return;
                 }
+                flipped
+            };
+            if flipped {
+                save_cloudfront_snapshot(&state, store, &lock).await;
             }
         });
     }
