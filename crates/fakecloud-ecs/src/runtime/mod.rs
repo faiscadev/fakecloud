@@ -351,6 +351,12 @@ pub(crate) struct VolumeMount {
     /// `-v` flag so the bind/named volume is read-only inside the
     /// container. Defaults to false (read-write) when omitted.
     pub read_only: bool,
+    /// Whether `source` is a task-scoped docker named volume that should be
+    /// removed when the task stops, matching AWS: anonymous "Docker volumes"
+    /// and `dockerVolumeConfiguration` with `scope=task` are deleted on task
+    /// teardown. `false` for host bind mounts, EFS/FSx shared stubs, and
+    /// `scope=shared` docker volumes, which persist independently of the task.
+    pub cleanup_on_stop: bool,
 }
 
 /// One `ulimits` entry. Becomes `--ulimit <name>=<soft>:<hard>`.
@@ -660,11 +666,49 @@ fn resolve_mount_point(
         .unwrap_or(false);
     let volume = volumes_by_name.get(source_volume)?;
     let source = resolve_volume_source(source_volume, volume)?;
+    let cleanup_on_stop = volume_is_task_scoped(volume);
     Some(VolumeMount {
         source,
         container_path,
         read_only,
+        cleanup_on_stop,
     })
+}
+
+/// Whether a task-definition `volumes[]` entry is a task-scoped docker named
+/// volume that AWS deletes when the task stops. Mirrors the kind matching in
+/// [`resolve_volume_source`]:
+/// - host bind with a non-empty `sourcePath` -> persists on the host: `false`.
+/// - EFS / FSx -> shared filesystem, persists: `false`.
+/// - `dockerVolumeConfiguration` -> task-scoped unless `scope=shared`.
+/// - bare entry (or host with empty `sourcePath`) -> anonymous task-scoped
+///   docker volume: `true`.
+fn volume_is_task_scoped(volume: &serde_json::Value) -> bool {
+    if let Some(host) = volume.get("host") {
+        if let Some(path) = host.get("sourcePath").and_then(|v| v.as_str()) {
+            if !path.is_empty() {
+                return false;
+            }
+        }
+    }
+    if volume.get("efsVolumeConfiguration").is_some()
+        || volume
+            .get("fsxWindowsFileServerVolumeConfiguration")
+            .is_some()
+    {
+        return false;
+    }
+    if let Some(docker) = volume.get("dockerVolumeConfiguration") {
+        // Default scope for an ECS docker volume is `task`; only `shared`
+        // volumes outlive the task.
+        let scope = docker
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("task");
+        return scope != "shared";
+    }
+    // Bare volume entry (or host with empty sourcePath): anonymous task volume.
+    true
 }
 
 /// Map a single task-definition `volumes[]` entry to the source side of a
@@ -2397,6 +2441,7 @@ mod tests {
                 source: "/host/path".into(),
                 container_path: "/in/container".into(),
                 read_only: true,
+                cleanup_on_stop: false,
             }],
             ulimits: Vec::new(),
             linux_parameters: None,
@@ -2487,6 +2532,53 @@ mod tests {
         let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
         assert_eq!(resolved.source, "named-vol");
         assert_eq!(resolved.container_path, "/data");
+    }
+
+    /// Only task-scoped docker volumes are flagged for removal on task stop;
+    /// host binds, EFS/FSx shared stubs and scope=shared volumes persist.
+    #[test]
+    fn cleanup_on_stop_matches_aws_volume_scope() {
+        let cases = [
+            // (volume json, expected cleanup_on_stop)
+            (
+                serde_json::json!({ "name": "v", "host": { "sourcePath": "/data" } }),
+                false,
+            ),
+            (
+                serde_json::json!({ "name": "v", "efsVolumeConfiguration": { "fileSystemId": "fs-a" } }),
+                false,
+            ),
+            (
+                serde_json::json!({ "name": "v", "fsxWindowsFileServerVolumeConfiguration": { "fileSystemId": "fs-b" } }),
+                false,
+            ),
+            (
+                serde_json::json!({ "name": "v", "dockerVolumeConfiguration": { "scope": "shared" } }),
+                false,
+            ),
+            (
+                serde_json::json!({ "name": "v", "dockerVolumeConfiguration": { "scope": "task" } }),
+                true,
+            ),
+            // scope omitted defaults to task.
+            (
+                serde_json::json!({ "name": "v", "dockerVolumeConfiguration": {} }),
+                true,
+            ),
+            // bare entry and empty host sourcePath -> anonymous task volume.
+            (serde_json::json!({ "name": "v" }), true),
+            (
+                serde_json::json!({ "name": "v", "host": { "sourcePath": "" } }),
+                true,
+            ),
+        ];
+        for (vol, expected) in cases {
+            assert_eq!(
+                volume_is_task_scoped(&vol),
+                expected,
+                "unexpected cleanup_on_stop for {vol}"
+            );
+        }
     }
 
     /// FSx for Windows uses the same stub-directory pattern as EFS but

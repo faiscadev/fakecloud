@@ -954,6 +954,7 @@ mod tests {
             source: "scratch".to_string(),
             container_path: "/data".to_string(),
             read_only: false,
+            cleanup_on_stop: true,
         };
         a.volume_mounts = vec![vm.clone()];
         b.volume_mounts = vec![vm];
