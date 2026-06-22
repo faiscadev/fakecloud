@@ -161,6 +161,7 @@ async fn instance_lifecycle_boots_pod_runs_user_data_and_recreates_on_start() {
     // per-subnet network spec — isolation there is a NetworkPolicy concern.)
     let running = rt
         .run_instance(
+            "123456789012",
             instance_id,
             Some(USER_DATA_B64),
             &std::collections::BTreeMap::new(),

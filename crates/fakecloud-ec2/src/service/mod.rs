@@ -1080,7 +1080,13 @@ impl Ec2Service {
             let state = self.state.clone();
             handles.push(tokio::spawn(async move {
                 let running = runtime
-                    .run_instance(&p.id, p.user_data.as_deref(), &p.tags, p.network.as_ref())
+                    .run_instance(
+                        &p.account_id,
+                        &p.id,
+                        p.user_data.as_deref(),
+                        &p.tags,
+                        p.network.as_ref(),
+                    )
                     .await;
                 let reap = {
                     let mut accounts = state.write();
