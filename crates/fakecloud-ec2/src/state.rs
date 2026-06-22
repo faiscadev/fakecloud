@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 /// Shared, account-partitioned EC2 state handle.
 pub type SharedEc2State = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<Ec2State>>>;
 
+/// On-disk snapshot envelope for EC2 state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing. Backing containers are
+/// not serialized -- on restore the server reconciles them via
+/// `Ec2Service::recover_persisted_containers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ec2Snapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<Ec2State>>,
+}
+
+pub const EC2_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
 impl fakecloud_core::multi_account::AccountState for Ec2State {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         Self::new(account_id, region)

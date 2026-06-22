@@ -38,11 +38,25 @@ use http::StatusCode;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use fakecloud_core::multi_account::MultiAccountState;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::runtime::Ec2Runtime;
-use crate::state::SharedEc2State;
+use crate::state::{Ec2Snapshot, SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION};
+
+/// EC2 read actions all start with `Describe`, `Get`, `Search`, or `List`;
+/// every other action mutates state. The inverse formulation guarantees no
+/// mutation is ever missed, and the hot-path reads (Describe*) are excluded so
+/// polling never triggers a snapshot write.
+fn is_mutating_action(action: &str) -> bool {
+    !(action.starts_with("Describe")
+        || action.starts_with("Get")
+        || action.starts_with("Search")
+        || action.starts_with("List"))
+}
 
 /// Every EC2 action this build implements. The conformance audit cross-checks
 /// this list against the handwritten `#[test_action("ec2", …)]` tests, so an
@@ -868,6 +882,8 @@ pub struct Ec2Service {
     /// Optional container runtime backing instances with real containers.
     /// `None` runs the metadata-only control plane (no Docker/Podman/k8s).
     pub(crate) runtime: Option<Arc<Ec2Runtime>>,
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl Ec2Service {
@@ -880,6 +896,8 @@ impl Ec2Service {
                 "",
             ))),
             runtime: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -889,6 +907,8 @@ impl Ec2Service {
         Self {
             state,
             runtime: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -897,6 +917,44 @@ impl Ec2Service {
     pub fn with_runtime(mut self, runtime: Option<Arc<Ec2Runtime>>) -> Self {
         self.runtime = runtime;
         self
+    }
+
+    /// Attach a persistence snapshot store so control-plane mutations are
+    /// written through to disk. Backing containers are reconciled separately on
+    /// restart via [`Ec2Service::recover_persisted_containers`].
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_ec2_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current EC2 state when invoked, or `None`
+    /// in memory mode. The CloudFormation provisioner mutates `state` directly
+    /// and uses this to write a CFN-provisioned resource through to disk, the
+    /// same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_ec2_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 
     /// Clone the shared state handle so the server can expose read-only
@@ -1095,6 +1153,38 @@ impl Default for Ec2Service {
     }
 }
 
+/// Persist the current EC2 state as a snapshot. Offloads the serde + blocking
+/// file write to the Tokio blocking pool. Noop when `store` is `None` (memory
+/// mode). Shared by `Ec2Service::save_snapshot` and the CloudFormation
+/// provisioner persist hook so both route through the same serialize-and-write
+/// path. Backing containers are not serialized; they are reconciled on restart
+/// via `Ec2Service::recover_persisted_containers`.
+pub async fn save_ec2_snapshot(
+    state: &SharedEc2State,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = Ec2Snapshot {
+        schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write ec2 snapshot"),
+        Err(err) => tracing::error!(%err, "ec2 snapshot task panicked"),
+    }
+}
+
 #[async_trait]
 impl AwsService for Ec2Service {
     fn service_name(&self) -> &str {
@@ -1106,7 +1196,8 @@ impl AwsService for Ec2Service {
     }
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match request.action.as_str() {
+        let mutates = is_mutating_action(&request.action);
+        let result = match request.action.as_str() {
             "CreateTags" => tags::create_tags(self, &request),
             "DeleteTags" => tags::delete_tags(self, &request),
             "DescribeTags" => tags::describe_tags(self, &request),
@@ -2518,7 +2609,11 @@ impl AwsService for Ec2Service {
                 "InvalidAction",
                 format!("The action {other} is not valid for this web service."),
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 
