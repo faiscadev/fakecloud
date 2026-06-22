@@ -553,6 +553,11 @@ pub struct UserPoolClient {
     pub last_modified_date: DateTime<Utc>,
     pub enable_token_revocation: bool,
     pub auth_session_validity: Option<i64>,
+    /// Whether ASF (advanced security) propagates additional user-context data
+    /// to the issued tokens. AWS reports this on every DescribeUserPoolClient,
+    /// defaulting to false.
+    #[serde(default)]
+    pub enable_propagate_additional_user_context_data: bool,
     /// Additional client secrets (beyond the primary client_secret)
     pub client_secrets: Vec<ClientSecretDescriptor>,
     /// "ENABLED" rotates refresh token on every refresh-token grant

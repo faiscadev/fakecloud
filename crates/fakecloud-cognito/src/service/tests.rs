@@ -2176,6 +2176,45 @@ fn auth_events_recorded_on_sign_up() {
     assert!(st.auth_events[0].success);
 }
 
+#[test]
+fn user_pool_client_reports_aws_defaults() {
+    // A client created without token-validity / ASF options must still report
+    // the AWS defaults the Terraform provider asserts: AuthSessionValidity = 3,
+    // RefreshTokenValidity = 30, EnablePropagateAdditionalUserContextData =
+    // false (and access/id token validity left at 0).
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+
+    let resp =
+        block_on(svc.create_user_pool(&make_req("CreateUserPool", r#"{"PoolName":"p"}"#))).unwrap();
+    let pool: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pool_id = pool["UserPool"]["Id"].as_str().unwrap().to_string();
+
+    let body = serde_json::to_string(&json!({
+        "UserPoolId": pool_id,
+        "ClientName": "c",
+        "ExplicitAuthFlows": ["ADMIN_NO_SRP_AUTH"]
+    }))
+    .unwrap();
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body))
+        .unwrap();
+    let c: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let client = &c["UserPoolClient"];
+    assert_eq!(client["AuthSessionValidity"], json!(3));
+    assert_eq!(client["RefreshTokenValidity"], json!(30));
+    assert_eq!(
+        client["EnablePropagateAdditionalUserContextData"],
+        json!(false)
+    );
+}
+
 /// 1.27: SignUp + InitiateAuth must enforce SECRET_HASH for app clients
 /// that have a secret.
 #[test]
