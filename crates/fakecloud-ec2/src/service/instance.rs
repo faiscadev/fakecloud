@@ -409,6 +409,7 @@ pub(crate) async fn run_instances(
                 let running = if let Some(rt) = &runtime {
                     match rt
                         .run_instance(
+                            &account_id,
                             id,
                             user_data.as_deref(),
                             &instance_tags,

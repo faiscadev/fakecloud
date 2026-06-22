@@ -118,6 +118,10 @@ pub struct NetworkIsolationSummary {
 struct InstanceRecord {
     /// Docker container id, or Pod name.
     handle: String,
+    /// The owning account id, captured at `RunInstances`. Keys the durable
+    /// data volume (see [`data_volume_name`]) so `TerminateInstances` can
+    /// remove the right volume without re-consulting the control plane.
+    account_id: String,
     /// Resolved base image, captured at `RunInstances` so a recreate is
     /// identical even if `FAKECLOUD_EC2_DEFAULT_IMAGE` later changes.
     image: String,
@@ -401,6 +405,7 @@ impl Ec2Runtime {
     /// boot the way cloud-init would, if present.
     pub async fn run_instance(
         &self,
+        account_id: &str,
         instance_id: &str,
         user_data: Option<&str>,
         tags: &BTreeMap<String, String>,
@@ -412,7 +417,7 @@ impl Ec2Runtime {
             // L3 isolation. k8s pods share a flat network; isolation there is a
             // NetworkPolicy concern handled separately (#1745 phase 4).
             InstanceBackend::Docker(d) => {
-                d.run_instance(instance_id, &image, user_data, network)
+                d.run_instance(account_id, instance_id, &image, user_data, network)
                     .await?
             }
             InstanceBackend::K8s(k) => k.spawn_pod(instance_id, &image, user_data, tags).await?,
@@ -421,6 +426,7 @@ impl Ec2Runtime {
             instance_id.to_string(),
             InstanceRecord {
                 handle: running.container_id.clone(),
+                account_id: account_id.to_string(),
                 image,
                 user_data: user_data.map(str::to_string),
                 tags: tags.clone(),
@@ -512,7 +518,14 @@ impl Ec2Runtime {
         let record = self.instances.write().remove(instance_id);
         if let Some(record) = record {
             match &self.backend {
-                InstanceBackend::Docker(d) => d.remove(&record.handle).await,
+                InstanceBackend::Docker(d) => {
+                    d.remove(&record.handle).await;
+                    // Drop the durable root-disk volume so a later instance
+                    // reusing this id starts clean (terminate = volume gone,
+                    // matching a deleted EBS root volume). No-op when volumes
+                    // are disabled.
+                    d.remove_data_volume(&record.account_id, instance_id).await;
+                }
                 InstanceBackend::K8s(k) => k.delete_pod(&record.handle).await,
             }
         }
@@ -571,6 +584,51 @@ fn default_image() -> String {
     std::env::var(DEFAULT_IMAGE_ENV).unwrap_or_else(|_| DEFAULT_IMAGE.to_string())
 }
 
+/// The in-instance directory backed by the durable data volume. Defaults to
+/// `/var/lib/fakecloud/ec2`; override with `FAKECLOUD_EC2_INSTANCE_DATA_DIR`
+/// to capture whichever path the instance's workload writes its long-lived
+/// state to. This is fakecloud's persistent-instance-data convention rather
+/// than a full root-filesystem snapshot: data written here survives restart
+/// and stop/start; the rest of the container's ephemeral filesystem does not.
+fn instance_data_dir() -> String {
+    std::env::var("FAKECLOUD_EC2_INSTANCE_DATA_DIR")
+        .unwrap_or_else(|_| "/var/lib/fakecloud/ec2".to_string())
+}
+
+/// Whether EC2 instance data should survive a fakecloud restart via a durable
+/// named volume. OFF by default (ephemeral, keeping test/CI runs clean and
+/// avoiding a stale volume bleeding into a later instance that reuses an id);
+/// opt in with `FAKECLOUD_PERSIST_EC2_VOLUMES=1`. A follow-up flips this
+/// default to on in persistent storage mode by exporting the same env var.
+fn ec2_volumes_enabled() -> bool {
+    std::env::var("FAKECLOUD_PERSIST_EC2_VOLUMES")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Deterministic Docker volume name for an instance's data dir. Keyed only on
+/// account + instance id (NOT the per-process fakecloud instance id) so the
+/// same volume reattaches after a fakecloud restart recreates the container.
+/// Characters outside Docker's `[a-zA-Z0-9_.-]` volume-name set become `-`.
+fn data_volume_name(account_id: &str, instance_id: &str) -> String {
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    format!(
+        "fakecloud-ec2-data-{}-{}",
+        sanitize(account_id),
+        sanitize(instance_id)
+    )
+}
+
 /// Keep-alive command + user-data wrapper for a base image. Shared by both
 /// backends so they boot identical containers. When `user_data` (base64) is
 /// present it is decoded and run as a root shell script, backgrounded so a
@@ -599,6 +657,7 @@ struct DockerInstances {
 impl DockerInstances {
     async fn run_instance(
         &self,
+        account_id: &str,
         instance_id: &str,
         image: &str,
         user_data: Option<&str>,
@@ -620,6 +679,24 @@ impl DockerInstances {
             "--label".to_string(),
             format!("fakecloud-instance={}", self.instance_id),
         ];
+        // Optionally back the instance's writable data directory with a durable
+        // named volume keyed on account + instance id, so the filesystem state
+        // an instance writes there survives a fakecloud restart (the recovery
+        // path recreates the container, which reattaches the same volume) and a
+        // stop/start (Docker reuses the same container, so the volume persists
+        // regardless). OFF by default to keep test/CI runs ephemeral and avoid
+        // a stale volume bleeding into a later instance that reuses an id;
+        // enabled by `FAKECLOUD_PERSIST_EC2_VOLUMES=1` (and, in a follow-up,
+        // default-on in persistent storage mode). The volume is dropped on
+        // TerminateInstances. See [`data_volume_name`] / [`instance_data_dir`].
+        if ec2_volumes_enabled() {
+            args.push("-v".to_string());
+            args.push(format!(
+                "{}:{}",
+                data_volume_name(account_id, instance_id),
+                instance_data_dir()
+            ));
+        }
         if let Some(name) = &attached_network {
             args.push("--network".to_string());
             args.push(name.clone());
@@ -764,6 +841,25 @@ impl DockerInstances {
             .await;
     }
 
+    /// Remove the durable data volume for an instance (called on
+    /// `TerminateInstances`) so a later instance reusing the same id starts
+    /// clean rather than inheriting the terminated instance's filesystem. A
+    /// no-op when volume persistence is disabled (no such volume was created).
+    async fn remove_data_volume(&self, account_id: &str, instance_id: &str) {
+        if !ec2_volumes_enabled() {
+            return;
+        }
+        let _ = tokio::process::Command::new(&self.cli)
+            .args([
+                "volume",
+                "rm",
+                "-f",
+                &data_volume_name(account_id, instance_id),
+            ])
+            .output()
+            .await;
+    }
+
     /// The container's combined stdout+stderr (`docker logs`). `None` if the
     /// command fails; an empty log is `Some(vec![])`.
     async fn logs(&self, container_id: &str) -> Option<Vec<u8>> {
@@ -780,5 +876,35 @@ impl DockerInstances {
         let mut buf = output.stdout;
         buf.extend_from_slice(&output.stderr);
         Some(buf)
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn data_volume_name_is_stable_and_sanitized() {
+        // Stable across calls (so recovery reattaches the same volume) and
+        // keyed on account + instance id, not the per-process instance id.
+        assert_eq!(
+            data_volume_name("123456789012", "i-0abc123"),
+            "fakecloud-ec2-data-123456789012-i-0abc123"
+        );
+        // Characters outside Docker's volume-name set become '-'.
+        assert_eq!(
+            data_volume_name("1234/5678", "i-0abc:1"),
+            "fakecloud-ec2-data-1234-5678-i-0abc-1"
+        );
+    }
+
+    #[test]
+    fn distinct_instances_get_distinct_volumes() {
+        // Two instances in the same account never share a data volume, so
+        // terminating one cannot wipe another's filesystem.
+        assert_ne!(
+            data_volume_name("123456789012", "i-aaaa"),
+            data_volume_name("123456789012", "i-bbbb")
+        );
     }
 }
