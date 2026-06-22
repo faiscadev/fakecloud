@@ -2447,11 +2447,59 @@ async fn main() {
         s3_state.clone(),
     ));
     let elbv2_delivery_bus = Arc::new(DeliveryBus::new().with_s3(s3_delivery_for_elbv2));
-    let elbv2_service = Arc::new(
-        Elbv2Service::new_without_dataplane(elbv2_state.clone())
-            .with_waf_state(wafv2_state.clone())
-            .with_delivery_bus(elbv2_delivery_bus),
-    );
+    let elbv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("elbv2").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_elbv2::Elbv2Snapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_elbv2::ELBV2_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "elbv2 persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_elbv2::ELBV2_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                *elbv2_state.write() = accounts;
+                                tracing::info!("loaded elbv2 persistence snapshot");
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse elbv2 persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no elbv2 persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read elbv2 persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut elbv2_inner = Elbv2Service::new_without_dataplane(elbv2_state.clone())
+        .with_waf_state(wafv2_state.clone())
+        .with_delivery_bus(elbv2_delivery_bus);
+    if let Some(store) = elbv2_snapshot_store.clone() {
+        elbv2_inner = elbv2_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = elbv2_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("elbv2", h);
+    }
+    let elbv2_service = Arc::new(elbv2_inner);
     elbv2_service.start_dataplane();
     let elbv2_service_for_admin = elbv2_service.clone();
     registry.register(elbv2_service);

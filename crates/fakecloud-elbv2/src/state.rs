@@ -7,10 +7,22 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedElbv2State = Arc<RwLock<Elbv2Accounts>>;
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Elbv2Accounts {
     accounts: BTreeMap<String, Elbv2State>,
 }
+
+/// On-disk snapshot envelope for ELBv2 state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing. Target health is not
+/// persisted -- the prober re-derives it after a restart.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Elbv2Snapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<Elbv2Accounts>,
+}
+
+pub const ELBV2_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 impl Elbv2Accounts {
     pub fn new() -> Self {
