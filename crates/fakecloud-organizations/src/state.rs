@@ -25,6 +25,18 @@ pub const FULL_AWS_ACCESS_POLICY_DESCRIPTION: &str = "Allows access to every ope
 pub const FULL_AWS_ACCESS_POLICY_CONTENT: &str =
     r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
 
+/// On-disk snapshot envelope for Organizations state. Versioned so format
+/// changes fail loudly on upgrade rather than silently mis-parsing. The whole
+/// org is a single optional value (`None` until `CreateOrganization`).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OrganizationsSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub organization: Option<OrganizationState>,
+}
+
+pub const ORGANIZATIONS_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrganizationState {
     pub org_id: String,

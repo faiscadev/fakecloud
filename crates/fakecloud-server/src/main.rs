@@ -1616,9 +1616,66 @@ async fn main() {
     if let Some(store) = kms_snapshot_store {
         kms_hook_adapter.set_snapshot_store(store);
     }
-    registry.register(Arc::new(OrganizationsService::new(
-        organizations_state.clone(),
-    )));
+    let organizations_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("organizations").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_organizations::OrganizationsSnapshot>(
+                        &bytes,
+                    ) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_organizations::ORGANIZATIONS_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "organizations persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_organizations::ORGANIZATIONS_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            let present = snapshot.organization.is_some();
+                            *organizations_state.write() = snapshot.organization;
+                            tracing::info!(
+                                organization = present,
+                                "loaded organizations persistence snapshot"
+                            );
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse organizations persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no organizations persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read organizations persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut organizations_inner = OrganizationsService::new(organizations_state.clone());
+    if let Some(store) = organizations_snapshot_store.clone() {
+        organizations_inner = organizations_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = organizations_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("organizations", h);
+    }
+    // Re-arm CreateAccount completion ticks for requests restored as IN_PROGRESS.
+    organizations_inner.rearm_in_progress_account_creations();
+    // Hook shared with the create-admin admin endpoint, which auto-enrolls an
+    // account into the org directly and must persist that through to disk.
+    let organizations_persist_hook = organizations_inner.snapshot_hook();
+    registry.register(Arc::new(organizations_inner));
     // EC2 (ec2Query protocol). Instances are backed by the optional container
     // runtime (Docker/Podman); persistence is wired in later batches. We keep a
     // clone of the shared state so the introspection router can expose
@@ -7671,16 +7728,24 @@ async fn main() {
             axum::routing::post({
                 let iam = iam_state.clone();
                 let orgs = organizations_state.clone();
+                let persist = organizations_persist_hook.clone();
                 move |axum::Json(body): axum::Json<types::CreateAdminRequest>| {
                     let iam = iam.clone();
                     let orgs = orgs.clone();
+                    let persist = persist.clone();
                     async move {
-                        axum::Json(reset::create_admin_in_account(
+                        let resp = reset::create_admin_in_account(
                             &iam,
                             &orgs,
                             &body.account_id,
                             &body.user_name,
-                        ))
+                        );
+                        // The helper may auto-enroll the account into the org;
+                        // persist that mutation through to disk.
+                        if let Some(hook) = &persist {
+                            hook().await;
+                        }
+                        axum::Json(resp)
                     }
                 }
             }),

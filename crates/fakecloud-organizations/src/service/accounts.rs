@@ -114,6 +114,8 @@ impl OrganizationsService {
     /// AWS `CreateAccount` so SDK callers can observe both phases.
     pub(super) fn spawn_create_account_completion(&self, request_id: String) {
         let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
         let delay = {
             let mut rng = rand::thread_rng();
             let span = CREATE_ACCOUNT_MAX_DELAY.saturating_sub(CREATE_ACCOUNT_MIN_DELAY);
@@ -126,9 +128,18 @@ impl OrganizationsService {
         };
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let mut guard = state.write();
-            if let Some(org) = guard.as_mut() {
-                org.complete_create_account(&request_id);
+            let completed = {
+                let mut guard = state.write();
+                match guard.as_mut() {
+                    Some(org) => {
+                        org.complete_create_account(&request_id);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if completed {
+                super::save_organizations_snapshot(&state, store, &lock).await;
             }
         });
     }
