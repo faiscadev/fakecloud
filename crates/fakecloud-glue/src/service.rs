@@ -6,12 +6,28 @@ use chrono::Utc;
 use http::StatusCode;
 use parking_lot::RwLock;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    Column, Database, GlueAccounts, Partition, SerdeInfo, SharedGlueState, StorageDescriptor, Table,
+    Column, Database, GlueAccounts, GlueSnapshot, Partition, SerdeInfo, SharedGlueState,
+    StorageDescriptor, Table, GLUE_SNAPSHOT_SCHEMA_VERSION,
 };
+
+/// Glue read actions all start with one of these verbs; every other action is
+/// a mutation (Create/Update/Delete/BatchCreate/BatchDelete/BatchPut/BatchStop/
+/// BatchUpdate/Cancel/Import/Modify/Put/Register/Remove/Reset/Resume/Run/Start/
+/// Stop/Tag/Untag). Used to decide when a handled request must trigger a
+/// persistence snapshot. The inverse formulation guarantees no mutation is
+/// ever missed.
+fn is_mutating_action(action: &str) -> bool {
+    const READ_PREFIXES: &[&str] = &[
+        "BatchGet", "Get", "List", "Search", "Query", "Check", "Describe", "Test",
+    ];
+    !READ_PREFIXES.iter().any(|p| action.starts_with(p))
+}
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "BatchCreatePartition",
@@ -285,15 +301,87 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct GlueService {
     pub(crate) state: SharedGlueState,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl GlueService {
     pub fn new(state: SharedGlueState) -> Self {
-        Self { state }
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared_state(&self) -> SharedGlueState {
         Arc::clone(&self.state)
+    }
+
+    /// Persist current state as a snapshot. Held across the
+    /// clone-serialize-write sequence to prevent stale-last writes, with serde
+    /// + file I/O offloaded to the blocking pool.
+    async fn save_snapshot(&self) {
+        save_glue_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// Build a hook that persists the current Glue state when invoked, or
+    /// `None` in memory mode. The CloudFormation provisioner mutates `state`
+    /// directly and uses this to write a CFN-provisioned resource through to
+    /// disk, the same way a direct mutating API call would.
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_glue_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current Glue state as a snapshot. Offloads the serde + blocking
+/// file write to the Tokio blocking pool. Noop when `store` is `None` (memory
+/// mode). Shared by `GlueService::save_snapshot` and the CloudFormation
+/// provisioner persist hook so both route through the same serialize-and-write
+/// path.
+pub async fn save_glue_snapshot(
+    state: &SharedGlueState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = GlueSnapshot {
+        schema_version: GLUE_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write glue snapshot"),
+        Err(err) => tracing::error!(%err, "glue snapshot task panicked"),
     }
 }
 
@@ -317,7 +405,8 @@ impl AwsService for GlueService {
         // Server-side input validation (lengths/ranges/enums) runs before any
         // handler, mirroring AWS's request-validation phase.
         crate::common::validate_constraints(&req.action, &req.json_body())?;
-        match req.action.as_str() {
+        let mutates = is_mutating_action(&req.action);
+        let result = match req.action.as_str() {
             "BatchCreatePartition" => self.batch_create_partition(&req),
             "BatchDeleteConnection" => self.batch_delete_connection(&req),
             "BatchDeletePartition" => self.batch_delete_partition(&req),
@@ -638,7 +727,11 @@ impl AwsService for GlueService {
             "UpdateUserDefinedFunction" => self.update_user_defined_function(&req),
             "UpdateWorkflow" => self.update_workflow(&req),
             other => Err(AwsServiceError::action_not_implemented("glue", other)),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 

@@ -14,10 +14,21 @@ pub type JsonStore = BTreeMap<String, Value>;
 
 pub type SharedGlueState = Arc<RwLock<GlueAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GlueAccounts {
     pub accounts: BTreeMap<String, GlueState>,
 }
+
+/// On-disk snapshot envelope for Glue state. Versioned so format changes fail
+/// loudly on upgrade rather than silently mis-parsing.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GlueSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<GlueAccounts>,
+}
+
+pub const GLUE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 impl GlueAccounts {
     pub fn new() -> Self {
@@ -35,7 +46,7 @@ impl GlueAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GlueState {
     #[serde(default)]
     pub account_id: String,

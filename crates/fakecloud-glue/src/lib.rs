@@ -21,5 +21,6 @@ pub(crate) mod triggers;
 
 pub use service::GlueService;
 pub use state::{
-    Column, Database, GlueAccounts, GlueState, Partition, SharedGlueState, StorageDescriptor, Table,
+    Column, Database, GlueAccounts, GlueSnapshot, GlueState, Partition, SharedGlueState,
+    StorageDescriptor, Table, GLUE_SNAPSHOT_SCHEMA_VERSION,
 };

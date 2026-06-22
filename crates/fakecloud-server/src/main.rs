@@ -2632,7 +2632,60 @@ async fn main() {
         cfn_snapshot_hooks.insert("firehose", h);
     }
     registry.register(Arc::new(firehose_service));
-    let glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
+    let glue_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("glue").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_glue::GlueSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_glue::GLUE_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "glue persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_glue::GLUE_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *glue_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded glue persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse glue persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no glue persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read glue persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
+    if let Some(store) = glue_snapshot_store.clone() {
+        glue_service = glue_service.with_snapshot_store(store);
+    }
+    if let Some(h) = glue_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("glue", h);
+    }
     registry.register(Arc::new(glue_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
