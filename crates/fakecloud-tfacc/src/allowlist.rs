@@ -82,8 +82,25 @@ pub const SERVICES: &[Service] = &[
         // `user_pool_tier = ESSENTIALS`, and a non-empty
         // `account_recovery_setting`. None of these were emitted
         // unless the caller set them at create time.
-        run_regex: "^TestAccCognitoIDPUserPool_basic$",
-        deny: &[],
+        // Widen: `_basic` smoke for the Cognito user-pool resources and data
+        // sources — user pool (+ data sources), user pool client (+ data
+        // sources), resource server, users and groups (+ data sources), and the
+        // signing-certificate data source. The widen batch added the user-pool
+        // client defaults the provider asserts (AuthSessionValidity = 3,
+        // RefreshTokenValidity = 30, EnablePropagateAdditionalUserContextData).
+        run_regex: "^TestAccCognitoIDP[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: federated identity providers need real SAML/OIDC
+            //     metadata handling and attribute-mapping round-trip. ---
+            "TestAccCognitoIDPIdentityProvider_basic",
+            // --- gap: a user-pool domain provisions a CloudFront distribution
+            //     (cloudfront_distribution / _arn), which fakecloud's Cognito
+            //     does not stand up. ---
+            "TestAccCognitoIDPUserPoolDomain_basic",
+            // --- gap: managed (AWS-provisioned) user-pool clients are created
+            //     by other AWS services, not directly; not modelled. ---
+            "TestAccCognitoIDPManagedUserPoolClient_basic",
+        ],
     },
     Service {
         name: "bedrock",
@@ -343,7 +360,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "cognitoidp",
         service: "cognitoidp",
-        run_regex: "^TestAccCognitoIDPUserPool_basic$",
+        run_regex: "^TestAccCognitoIDP[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {

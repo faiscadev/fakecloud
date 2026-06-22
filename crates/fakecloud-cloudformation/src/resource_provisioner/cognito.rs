@@ -220,7 +220,12 @@ impl ResourceProvisioner {
             token_validity_units: None,
             access_token_validity: props.get("AccessTokenValidity").and_then(|v| v.as_i64()),
             id_token_validity: props.get("IdTokenValidity").and_then(|v| v.as_i64()),
-            refresh_token_validity: props.get("RefreshTokenValidity").and_then(|v| v.as_i64()),
+            refresh_token_validity: Some(
+                props
+                    .get("RefreshTokenValidity")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(30),
+            ),
             callback_urls: parse_cognito_string_array(props.get("CallbackURLs")),
             logout_urls: parse_cognito_string_array(props.get("LogoutURLs")),
             supported_identity_providers: parse_cognito_string_array(
@@ -244,7 +249,16 @@ impl ResourceProvisioner {
                 .get("EnableTokenRevocation")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            auth_session_validity: props.get("AuthSessionValidity").and_then(|v| v.as_i64()),
+            auth_session_validity: Some(
+                props
+                    .get("AuthSessionValidity")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(3),
+            ),
+            enable_propagate_additional_user_context_data: props
+                .get("EnablePropagateAdditionalUserContextData")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             client_secrets: Vec::new(),
             refresh_token_rotation: None,
         };

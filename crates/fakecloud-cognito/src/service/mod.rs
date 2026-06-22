@@ -872,9 +872,7 @@ fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
     if let Some(v) = client.id_token_validity {
         obj["IdTokenValidity"] = json!(v);
     }
-    if let Some(v) = client.refresh_token_validity {
-        obj["RefreshTokenValidity"] = json!(v);
-    }
+    obj["RefreshTokenValidity"] = json!(client.refresh_token_validity.unwrap_or(30));
     if !client.callback_urls.is_empty() {
         obj["CallbackURLs"] = json!(client.callback_urls);
     }
@@ -899,9 +897,10 @@ fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
     if !client.write_attributes.is_empty() {
         obj["WriteAttributes"] = json!(client.write_attributes);
     }
-    if let Some(v) = client.auth_session_validity {
-        obj["AuthSessionValidity"] = json!(v);
-    }
+    // AWS always reports these two; AuthSessionValidity defaults to 3.
+    obj["AuthSessionValidity"] = json!(client.auth_session_validity.unwrap_or(3));
+    obj["EnablePropagateAdditionalUserContextData"] =
+        json!(client.enable_propagate_additional_user_context_data);
     if let Some(ref rot) = client.refresh_token_rotation {
         let mut r = json!({"Feature": rot.feature});
         if let Some(g) = rot.retry_grace_period_seconds {

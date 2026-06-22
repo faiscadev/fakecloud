@@ -566,7 +566,9 @@ impl CognitoService {
             token_validity_units: parse_token_validity_units(&body["TokenValidityUnits"]),
             access_token_validity: body["AccessTokenValidity"].as_i64(),
             id_token_validity: body["IdTokenValidity"].as_i64(),
-            refresh_token_validity: body["RefreshTokenValidity"].as_i64(),
+            // AWS defaults RefreshTokenValidity to 30 (days) when unset and
+            // always reports it; access/id token validity stay unset (0).
+            refresh_token_validity: Some(body["RefreshTokenValidity"].as_i64().unwrap_or(30)),
             callback_urls: parse_string_array(&body["CallbackURLs"]),
             logout_urls: parse_string_array(&body["LogoutURLs"]),
             supported_identity_providers: parse_string_array(&body["SupportedIdentityProviders"]),
@@ -583,7 +585,13 @@ impl CognitoService {
             creation_date: now,
             last_modified_date: now,
             enable_token_revocation: body["EnableTokenRevocation"].as_bool().unwrap_or(true),
-            auth_session_validity: body["AuthSessionValidity"].as_i64(),
+            // AWS defaults AuthSessionValidity to 3 (minutes) when unset and
+            // always reports it.
+            auth_session_validity: Some(body["AuthSessionValidity"].as_i64().unwrap_or(3)),
+            enable_propagate_additional_user_context_data: body
+                ["EnablePropagateAdditionalUserContextData"]
+                .as_bool()
+                .unwrap_or(false),
             client_secrets: Vec::new(),
             refresh_token_rotation: parse_refresh_token_rotation(&body["RefreshTokenRotation"]),
         };
@@ -759,6 +767,9 @@ impl CognitoService {
         }
         if let Some(v) = body["AuthSessionValidity"].as_i64() {
             client.auth_session_validity = Some(v);
+        }
+        if let Some(v) = body["EnablePropagateAdditionalUserContextData"].as_bool() {
+            client.enable_propagate_additional_user_context_data = v;
         }
 
         client.last_modified_date = Utc::now();
