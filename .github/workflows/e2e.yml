@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build E2E partition tool
@@ -57,8 +58,46 @@ jobs:
         name: Generate E2E matrix
         run: echo "matrix=$(./target/debug/e2e_nextest_partitions matrix)" >> "$GITHUB_OUTPUT"
 
-      # Build fakecloud once here so every partition job can download the
-      # binary as an artifact instead of rebuilding from scratch.
+      # Build the E2E test binaries ONCE and archive them. Every partition job
+      # then runs the prebuilt binaries via `--archive-file` instead of
+      # recompiling the (large) test crate from scratch — previously ~11.5 min of
+      # redundant compilation paid in each of the ~19 partition jobs.
+      #
+      # CARGO_PROFILE_TEST_DEBUG=0 strips debuginfo from the archived binaries:
+      # it shrinks both this build and the archive, so the compile, the upload
+      # here, and the download in every partition are all faster (all on the
+      # workflow's critical path). Assertion-failure locations are preserved via
+      # std's #[track_caller], so CI failure output still points at the test line.
+      - name: Archive E2E test binaries
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo nextest archive -P ci -p fakecloud-e2e --archive-file e2e-archive.tar.zst
+
+      - name: Upload E2E test archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fakecloud-e2e-archive
+          path: e2e-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  # Build the fakecloud server binary in parallel with the test-archive build so
+  # the partition jobs wait on max(archive, server) rather than their sum. The
+  # harness boots this binary via its workspace-relative path
+  # (crates/fakecloud-testkit/src/lib.rs), which resolves identically on every
+  # GitHub-hosted runner, so a downloaded binary works regardless of where the
+  # archived test binaries extract.
+  e2e-fakecloud:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
       - name: Build fakecloud
         run: cargo build --bin fakecloud
 
@@ -90,7 +129,7 @@ jobs:
 
   e2e:
     name: E2E ${{ matrix.name }}
-    needs: [changes, e2e-build]
+    needs: [changes, e2e-build, e2e-fakecloud]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -106,41 +145,20 @@ jobs:
       - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # No rust-cache here: this job runs prebuilt test binaries from the archive
+      # produced by e2e-build and never compiles, so there is nothing to cache.
 
       - name: Install podman
         if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      # The lambda-runtimes partitions pull several large language-runtime
-      # images and stack container layers during the run, which can exhaust the
-      # root filesystem even after free-disk-space (the recurring "No space left
-      # on device" flake). Move container storage onto the runner's much larger
-      # ephemeral /mnt disk so image/layer growth no longer fills `/`.
-      - name: Relocate container storage to /mnt
-        run: |
-          echo "=== disk before relocation ==="; df -h / /mnt || df -h /
-          # Docker: move data-root to /mnt and symlink so the daemon config and
-          # any preinstalled images are preserved.
-          sudo systemctl stop docker docker.socket || true
-          sudo mkdir -p /mnt/docker
-          if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
-            sudo rsync -a /var/lib/docker/ /mnt/docker/ || true
-            sudo rm -rf /var/lib/docker
-          fi
-          sudo ln -sfn /mnt/docker /var/lib/docker
-          sudo systemctl start docker
-          # Podman (rootless): point graphroot/runroot at /mnt as well.
-          if [ "$INSTALL_PODMAN" = "true" ]; then
-            sudo mkdir -p /mnt/podman-storage /mnt/podman-run
-            sudo chown -R "$USER" /mnt/podman-storage /mnt/podman-run
-            mkdir -p ~/.config/containers
-            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/podman-storage"\nrunroot = "/mnt/podman-run"\n' > ~/.config/containers/storage.conf
-          fi
-          echo "=== docker info root + disk after ==="
-          docker info --format '{{.DockerRootDir}}' || true
-          df -h / /mnt || df -h /
-
+      # NOTE: an earlier "Relocate container storage to /mnt" step was removed
+      # here. It existed to escape a small root filesystem when /mnt was a large
+      # separate ephemeral disk, but current GitHub-hosted runners have a single
+      # ~145G root and no separate /mnt, so the relocation rsynced docker's
+      # data-root from root back onto root — pure overhead (~1.7 min/partition)
+      # with no headroom gained. The free-disk action above still reclaims ~30G,
+      # which is the actual disk-full safety net.
       - name: Prune container state before tests
         run: |
           docker system prune -af --volumes || true
@@ -157,6 +175,11 @@ jobs:
       - name: Mark fakecloud binary executable
         run: chmod +x target/debug/fakecloud
 
+      - name: Download E2E test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fakecloud-e2e-archive
+
       - name: Disk diagnostics before nextest
         run: |
           echo "=== df -h ==="
@@ -166,9 +189,17 @@ jobs:
           echo "=== ~/.cargo ==="
           du -sh ~/.cargo 2>/dev/null || true
 
+      # Run the prebuilt test binaries straight from the archive — no compilation.
+      # --workspace-remap . points runtime workspace lookups at this checkout (the
+      # path matches the build runner on GitHub-hosted runners). nextest extracts
+      # to its own temp dir under /tmp (ample free space on the root fs);
+      # container images still land on the /mnt-relocated docker root.
       - name: Run nextest partition
         run: |
-          cmd=(cargo nextest run -P ci -p fakecloud-e2e -E "$NEXTEST_FILTER")
+          cmd=(cargo nextest run -P ci
+            --archive-file e2e-archive.tar.zst
+            --workspace-remap .
+            -E "$NEXTEST_FILTER")
           if [ -n "$NEXTEST_PARTITION" ]; then
             cmd+=(--partition "$NEXTEST_PARTITION")
           fi
