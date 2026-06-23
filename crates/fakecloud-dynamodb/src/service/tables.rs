@@ -723,8 +723,7 @@ impl DynamoDbService {
         let table = find_table_by_arn_mut(&mut state.tables, resource_arn)?;
         table.resource_policy = Some(policy.to_string());
 
-        let revision_id = uuid::Uuid::new_v4().to_string();
-        Self::ok_json(json!({ "RevisionId": revision_id }))
+        Self::ok_json(json!({ "RevisionId": policy_revision_id(policy) }))
     }
 
     pub(super) fn get_resource_policy(
@@ -740,13 +739,10 @@ impl DynamoDbService {
         let table = find_table_by_arn(&state.tables, resource_arn)?;
 
         match &table.resource_policy {
-            Some(policy) => {
-                let revision_id = uuid::Uuid::new_v4().to_string();
-                Self::ok_json(json!({
-                    "Policy": policy,
-                    "RevisionId": revision_id
-                }))
-            }
+            Some(policy) => Self::ok_json(json!({
+                "Policy": policy,
+                "RevisionId": policy_revision_id(policy)
+            })),
             None => Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "PolicyNotFoundException",
@@ -1848,6 +1844,19 @@ impl DynamoDbService {
             "ImportSummaryList": summaries
         }))
     }
+}
+
+/// Derive a stable `RevisionId` for a resource policy from its content. Real
+/// AWS mints an opaque revision per write; deriving it deterministically means
+/// `PutResourcePolicy` and a later `GetResourcePolicy` (Terraform's
+/// import-state-verify) agree on the same id for the same policy document.
+fn policy_revision_id(policy: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    // `DefaultHasher::new()` is seeded with fixed keys, so this is stable
+    // across calls and processes.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    policy.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 /// Rewrite a `ValidationException` from the shared schema/throughput parsers

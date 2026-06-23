@@ -8,7 +8,10 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_query_param(request, "CacheSubnetGroupName")?;
+        // ElastiCache forces cache-subnet-group names to lowercase; the
+        // response (and the resource's ID) come back lowercased, so the
+        // Terraform Read queries the lowercase name. Store it canonically.
+        let name = required_query_param(request, "CacheSubnetGroupName")?.to_lowercase();
         let description = required_query_param(request, "CacheSubnetGroupDescription")?;
         // AWS SDKs serialize this list as `SubnetIds.SubnetIdentifier.N`
         // (the @xmlName on the list member). The conformance probe uses the
@@ -16,6 +19,7 @@ impl ElastiCacheService {
         // `parse_query_list_param`, which falls back to `member` if the
         // canonical name yields nothing.
         let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetIdentifier");
+        let tags = parse_tags(request)?;
 
         // SubnetIds is @required in the Smithy model but
         // `InvalidParameterValueException` is NOT among
@@ -62,6 +66,10 @@ impl ElastiCacheService {
 
         let xml = cache_subnet_group_xml(&group, &state.region);
         state.register_arn(&group.arn);
+        state.tags.entry(group.arn.clone()).or_default();
+        if !tags.is_empty() {
+            merge_tags(state.tags.entry(group.arn.clone()).or_default(), &tags);
+        }
         state.subnet_groups.insert(name, group);
 
         Ok(AwsResponse::xml(
@@ -79,7 +87,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let group_name = optional_query_param(request, "CacheSubnetGroupName");
+        let group_name =
+            optional_query_param(request, "CacheSubnetGroupName").map(|n| n.to_lowercase());
         let max_records = optional_usize_param(request, "MaxRecords")?;
         let marker = optional_query_param(request, "Marker");
 
@@ -134,7 +143,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_query_param(request, "CacheSubnetGroupName")?;
+        let name = required_query_param(request, "CacheSubnetGroupName")?.to_lowercase();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -172,7 +181,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_query_param(request, "CacheSubnetGroupName")?;
+        let name = required_query_param(request, "CacheSubnetGroupName")?.to_lowercase();
         let description = optional_query_param(request, "CacheSubnetGroupDescription");
         let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetIdentifier");
         if subnet_ids.iter().any(|s| s.trim().is_empty()) {

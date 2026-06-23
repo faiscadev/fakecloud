@@ -1603,7 +1603,7 @@ async fn dynamodb_resource_policy_lifecycle() {
         .send()
         .await
         .unwrap();
-    assert!(resp.revision_id().is_some());
+    let put_revision = resp.revision_id().expect("revision id").to_string();
 
     // Get resource policy
     let resp = client
@@ -1613,6 +1613,10 @@ async fn dynamodb_resource_policy_lifecycle() {
         .await
         .unwrap();
     assert_eq!(resp.policy().unwrap(), policy_doc);
+    // The revision id must be stable for the same policy so Terraform's
+    // import-state-verify round-trips (PutResourcePolicy and GetResourcePolicy
+    // agree on the same id).
+    assert_eq!(resp.revision_id(), Some(put_revision.as_str()));
 
     // Delete resource policy
     client
@@ -1914,7 +1918,8 @@ async fn dynamodb_kinesis_streaming_destination() {
 
     let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream";
 
-    // Enable
+    // Enable without a precision: AWS does not synthesise a default, so the
+    // field must come back unset (the Terraform resource asserts "").
     let resp = client
         .enable_kinesis_streaming_destination()
         .table_name("KinesisTable")
@@ -1932,6 +1937,9 @@ async fn dynamodb_kinesis_streaming_destination() {
         .await
         .unwrap();
     assert!(!resp.kinesis_data_stream_destinations().is_empty());
+    assert!(resp.kinesis_data_stream_destinations()[0]
+        .approximate_creation_date_time_precision()
+        .is_none());
 
     // Disable
     let resp = client
@@ -1942,6 +1950,65 @@ async fn dynamodb_kinesis_streaming_destination() {
         .await
         .unwrap();
     assert_eq!(resp.destination_status().unwrap().as_str(), "DISABLED");
+}
+
+#[tokio::test]
+async fn dynamodb_kinesis_streaming_destination_echoes_precision() {
+    use aws_sdk_dynamodb::types::{
+        ApproximateCreationDateTimePrecision, EnableKinesisStreamingConfiguration,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("KTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/s";
+    client
+        .enable_kinesis_streaming_destination()
+        .table_name("KTable")
+        .stream_arn(stream_arn)
+        .enable_kinesis_streaming_configuration(
+            EnableKinesisStreamingConfiguration::builder()
+                .approximate_creation_date_time_precision(
+                    ApproximateCreationDateTimePrecision::Microsecond,
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_kinesis_streaming_destination()
+        .table_name("KTable")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.kinesis_data_stream_destinations()[0].approximate_creation_date_time_precision(),
+        Some(&ApproximateCreationDateTimePrecision::Microsecond)
+    );
 }
 
 #[tokio::test]

@@ -522,7 +522,19 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "elasticache",
-        run_regex: "^TestAccElastiCacheUser_basic$",
+        // Control-plane resources that don't need a cache container: users,
+        // user groups (+ association), and subnet groups (+ data sources).
+        // CreateUser/CreateUserGroup accept the case-insensitive "REDIS"
+        // engine; subnet-group names are lowercased like AWS and round-trip
+        // their tags; ModifyUserGroup settles back to `active` so the
+        // provider's update waiter completes.
+        run_regex: concat!(
+            "^TestAccElastiCache(",
+            "User|UserDataSource",
+            "|UserGroup|UserGroupAssociation",
+            "|SubnetGroup|SubnetGroupDataSource",
+            ")_basic$",
+        ),
         deny: &[],
     },
     Service {
@@ -730,12 +742,11 @@ pub const SHARDS: &[Shard] = &[
     // ─── dynamodb non-table resources ──────────────────────────────
     // The two table shards cover `aws_dynamodb_table` only. This shard adds
     // the other DynamoDB resources and data sources that pass: table item
-    // (+ data source), the table data source, contributor insights, and
-    // tagging. The regex is an explicit positive list — the remaining
-    // non-table resources are deliberately omitted, not denied:
-    //   * kinesis_streaming_destination — `approximate_creation_date_time
-    //     _precision` round-trip,
-    //   * resource_policy — import-state-verify attribute mismatch,
+    // (+ data source), the table data source, contributor insights, tagging,
+    // kinesis streaming destination (optional precision now echoes empty), and
+    // resource policy (revision id is derived from the policy content, so
+    // import-state-verify round-trips). The remaining non-table resources are
+    // deliberately omitted, not denied:
     //   * global_table / table_replica — cross-region replication,
     //   * table_export — S3 export path,
     // each of which needs a dedicated fix and will be added later.
@@ -745,6 +756,7 @@ pub const SHARDS: &[Shard] = &[
         run_regex: concat!(
             "^TestAccDynamoDB(",
             "ContributorInsights|Tag|TableItem|TableItemDataSource|TableDataSource",
+            "|KinesisStreamingDestination|ResourcePolicy",
             ")_basic$",
         ),
         extra_deny: &[],
@@ -798,7 +810,13 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "elasticache",
         service: "elasticache",
-        run_regex: "^TestAccElastiCacheUser_basic$",
+        run_regex: concat!(
+            "^TestAccElastiCache(",
+            "User|UserDataSource",
+            "|UserGroup|UserGroupAssociation",
+            "|SubnetGroup|SubnetGroupDataSource",
+            ")_basic$",
+        ),
         extra_deny: &[],
     },
     Shard {
