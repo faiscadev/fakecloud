@@ -176,7 +176,16 @@ impl CognitoService {
         let pool_groups = state.groups.get(pool_id).unwrap_or(&empty);
 
         let mut groups: Vec<&Group> = pool_groups.values().collect();
-        groups.sort_by_key(|g| g.creation_date);
+        // Stable, deterministic order: groups created in the same instant (a
+        // fast test creating several at once) would otherwise sort
+        // arbitrarily, and token-based pagination keyed on group_name could
+        // then skip or duplicate a group — surfacing as an inconsistent group
+        // count under parallel load.
+        groups.sort_by(|a, b| {
+            a.creation_date
+                .cmp(&b.creation_date)
+                .then_with(|| a.group_name.cmp(&b.group_name))
+        });
 
         let start_idx = if let Some(token) = next_token {
             // A stale token (its group was deleted) must end the listing, not
@@ -361,7 +370,16 @@ impl CognitoService {
             .iter()
             .filter_map(|name| pool_groups.get(name))
             .collect();
-        groups.sort_by_key(|g| g.creation_date);
+        // Stable, deterministic order: groups created in the same instant (a
+        // fast test creating several at once) would otherwise sort
+        // arbitrarily, and token-based pagination keyed on group_name could
+        // then skip or duplicate a group — surfacing as an inconsistent group
+        // count under parallel load.
+        groups.sort_by(|a, b| {
+            a.creation_date
+                .cmp(&b.creation_date)
+                .then_with(|| a.group_name.cmp(&b.group_name))
+        });
 
         let start_idx = if let Some(token) = next_token {
             // A stale token (its group was deleted) must end the listing, not
