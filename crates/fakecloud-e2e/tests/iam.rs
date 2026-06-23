@@ -3550,3 +3550,101 @@ async fn iam_resync_mfa_device_freshens_enable_date() {
         "ResyncMFADevice should freshen EnableDate: before={before_date:?} after={after_date:?}"
     );
 }
+
+#[tokio::test]
+async fn iam_get_aws_managed_policy_from_catalog() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+
+    // GetPolicy resolves the AWS-managed policy without it ever being created.
+    let resp = client.get_policy().policy_arn(arn).send().await.unwrap();
+    let policy = resp.policy().unwrap();
+    assert_eq!(policy.policy_name(), Some("AdministratorAccess"));
+    assert_eq!(policy.arn(), Some(arn));
+    assert_eq!(policy.default_version_id(), Some("v1"));
+    assert!(policy.is_attachable());
+
+    // GetPolicyVersion returns the real default document.
+    let v = client
+        .get_policy_version()
+        .policy_arn(arn)
+        .version_id("v1")
+        .send()
+        .await
+        .unwrap();
+    let pv = v.policy_version().unwrap();
+    assert!(pv.is_default_version());
+    let doc = pv.document().unwrap();
+    // The document is non-empty and carries the policy's statement (assert on
+    // encoding-invariant substrings, since the wire form is URL-encoded).
+    assert!(doc.contains("Statement"), "document missing Statement: {doc}");
+    assert!(doc.contains("Allow"), "document missing Allow effect: {doc}");
+
+    // ListPolicies Scope=AWS surfaces the catalog.
+    let listed = client
+        .list_policies()
+        .scope(aws_sdk_iam::types::PolicyScopeType::Aws)
+        .max_items(1000)
+        .send()
+        .await
+        .unwrap();
+    assert!(listed
+        .policies()
+        .iter()
+        .any(|p| p.arn() == Some(arn)));
+}
+
+#[tokio::test]
+async fn iam_attach_aws_managed_policy_round_trips() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
+
+    client
+        .create_role()
+        .role_name("lambda-role")
+        .assume_role_policy_document("{}")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .attach_role_policy()
+        .role_name("lambda-role")
+        .policy_arn(arn)
+        .send()
+        .await
+        .unwrap();
+
+    // ListAttachedRolePolicies returns the managed policy with its real name.
+    let attached = client
+        .list_attached_role_policies()
+        .role_name("lambda-role")
+        .send()
+        .await
+        .unwrap();
+    let p = attached
+        .attached_policies()
+        .iter()
+        .find(|p| p.policy_arn() == Some(arn))
+        .expect("managed policy should be attached");
+    assert_eq!(p.policy_name(), Some("AWSLambdaBasicExecutionRole"));
+
+    // ListEntitiesForPolicy reports the role and GetPolicy reflects the count.
+    let entities = client
+        .list_entities_for_policy()
+        .policy_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(entities
+        .policy_roles()
+        .iter()
+        .any(|r| r.role_name() == Some("lambda-role")));
+
+    let gp = client.get_policy().policy_arn(arn).send().await.unwrap();
+    assert_eq!(gp.policy().unwrap().attachment_count(), Some(1));
+}

@@ -1927,11 +1927,16 @@ fn list_policies_paginates_via_marker() {
         ))
         .unwrap();
     }
+    // Scope=Local isolates the customer-managed policies created above from the
+    // seeded AWS-managed catalog (which Scope=All now also returns).
     let body1 = String::from_utf8_lossy(
-        svc.list_policies(&make_request("ListPolicies", vec![("MaxItems", "2")]))
-            .unwrap()
-            .body
-            .expect_bytes(),
+        svc.list_policies(&make_request(
+            "ListPolicies",
+            vec![("MaxItems", "2"), ("Scope", "Local")],
+        ))
+        .unwrap()
+        .body
+        .expect_bytes(),
     )
     .to_string();
     assert_eq!(count_occurrences(&body1, "<member>"), 2);
@@ -1941,7 +1946,7 @@ fn list_policies_paginates_via_marker() {
     let body2 = String::from_utf8_lossy(
         svc.list_policies(&make_request(
             "ListPolicies",
-            vec![("MaxItems", "2"), ("Marker", &marker)],
+            vec![("MaxItems", "2"), ("Marker", &marker), ("Scope", "Local")],
         ))
         .unwrap()
         .body
@@ -4636,5 +4641,139 @@ fn list_service_specific_credentials_uses_member_framing() {
     assert!(
         body.contains("<member>") && body.contains("codecommit.amazonaws.com"),
         "list should wrap credentials in <member>, got {body}"
+    );
+}
+
+#[test]
+fn get_policy_resolves_aws_managed_from_catalog() {
+    let svc = make_service();
+    let arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+    let resp = svc
+        .get_policy(&make_request("GetPolicy", vec![("PolicyArn", arn)]))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains(arn), "ARN missing: {body}");
+    assert!(
+        body.contains("<PolicyName>AdministratorAccess</PolicyName>"),
+        "name missing: {body}"
+    );
+    assert!(
+        body.contains("<DefaultVersionId>v1</DefaultVersionId>"),
+        "default version missing: {body}"
+    );
+    assert!(
+        body.contains("<IsAttachable>true</IsAttachable>"),
+        "IsAttachable missing: {body}"
+    );
+}
+
+#[test]
+fn get_policy_unknown_managed_arn_still_not_found() {
+    let svc = make_service();
+    let result = svc.get_policy(&make_request(
+        "GetPolicy",
+        vec![("PolicyArn", "arn:aws:iam::aws:policy/TotallyMadeUpPolicy")],
+    ));
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.code(), "NoSuchEntity");
+    }
+}
+
+#[test]
+fn get_policy_version_resolves_aws_managed_document() {
+    let svc = make_service();
+    let arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess";
+    let resp = svc
+        .get_policy_version(&make_request(
+            "GetPolicyVersion",
+            vec![("PolicyArn", arn), ("VersionId", "v2")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    // Document is URL-encoded in the response; check an encoded fragment.
+    assert!(body.contains("s3%3A"), "encoded s3 action missing: {body}");
+    assert!(body.contains("<IsDefaultVersion>true</IsDefaultVersion>"));
+}
+
+#[test]
+fn list_policy_versions_resolves_aws_managed() {
+    let svc = make_service();
+    let arn = "arn:aws:iam::aws:policy/AWSLambda_FullAccess";
+    let resp = svc
+        .list_policy_versions(&make_request(
+            "ListPolicyVersions",
+            vec![("PolicyArn", arn)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        body.contains("<VersionId>v7</VersionId>"),
+        "version missing: {body}"
+    );
+}
+
+#[test]
+fn list_policies_scope_aws_returns_catalog() {
+    let svc = make_service();
+    let resp = svc
+        .list_policies(&make_request("ListPolicies", vec![("Scope", "AWS")]))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        body.contains("arn:aws:iam::aws:policy/AdministratorAccess"),
+        "AdministratorAccess missing from Scope=AWS: {body}"
+    );
+    assert!(
+        body.contains("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"),
+        "service-role policy missing from Scope=AWS: {body}"
+    );
+}
+
+#[test]
+fn list_policies_scope_local_excludes_catalog() {
+    let svc = make_service();
+    let resp = svc
+        .list_policies(&make_request("ListPolicies", vec![("Scope", "Local")]))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        !body.contains("arn:aws:iam::aws:policy/AdministratorAccess"),
+        "Scope=Local must not include AWS-managed policies: {body}"
+    );
+}
+
+#[test]
+fn list_entities_for_managed_policy_counts_attachments() {
+    let svc = make_service();
+    let arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess";
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![("RoleName", "reader"), ("AssumeRolePolicyDocument", "{}")],
+    ))
+    .unwrap();
+    svc.attach_role_policy(&make_request(
+        "AttachRolePolicy",
+        vec![("RoleName", "reader"), ("PolicyArn", arn)],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .list_entities_for_policy(&make_request(
+            "ListEntitiesForPolicy",
+            vec![("PolicyArn", arn)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("reader"), "attached role missing: {body}");
+
+    // GetPolicy should now report AttachmentCount=1.
+    let gp = svc
+        .get_policy(&make_request("GetPolicy", vec![("PolicyArn", arn)]))
+        .unwrap();
+    let gp_body = String::from_utf8_lossy(gp.body.expect_bytes()).to_string();
+    assert!(
+        gp_body.contains("<AttachmentCount>1</AttachmentCount>"),
+        "attachment count not reflected: {gp_body}"
     );
 }

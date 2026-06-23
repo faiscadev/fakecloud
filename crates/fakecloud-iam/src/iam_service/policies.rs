@@ -99,7 +99,7 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let policy = state.policies.get(&policy_arn).ok_or_else(|| {
+        let policy = resolve_policy(state, &policy_arn).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
@@ -107,7 +107,7 @@ impl IamService {
             )
         })?;
 
-        let xml = xml_responses::get_policy_response(policy, &req.request_id);
+        let xml = xml_responses::get_policy_response(&policy, &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
@@ -186,14 +186,21 @@ impl IamService {
             .unwrap_or(100);
         let marker = req.query_params.get("Marker").cloned();
 
-        let mut policies: Vec<IamPolicy> = state.policies.values().cloned().collect();
+        // Customer-managed (``Local``) policies live in state; AWS-managed
+        // policies come from the seeded catalog. ``Scope`` selects which sets
+        // to include.
+        let mut policies: Vec<IamPolicy> = if matches!(scope, PolicyScope::Aws) {
+            Vec::new()
+        } else {
+            state.policies.values().cloned().collect()
+        };
+        if matches!(scope, PolicyScope::All | PolicyScope::Aws) {
+            for mp in crate::managed_policies::all() {
+                policies.push(mp.to_iam_policy(count_managed_attachments(state, &mp.arn)));
+            }
+        }
         if let Some(prefix) = path_prefix {
             policies.retain(|p| p.path.starts_with(&prefix));
-        }
-        if matches!(scope, PolicyScope::Aws) {
-            // We don't carry any AWS-managed policies in fakecloud, so an
-            // explicit ``Scope=AWS`` filter returns an empty list.
-            policies.clear();
         }
         policies.sort_by(|a, b| a.policy_name.cmp(&b.policy_name));
 
@@ -391,7 +398,7 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let policy = state.policies.get(&policy_arn).ok_or_else(|| {
+        let policy = resolve_policy(state, &policy_arn).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
@@ -446,7 +453,7 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let policy = state.policies.get(&policy_arn).ok_or_else(|| {
+        let policy = resolve_policy(state, &policy_arn).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
@@ -614,7 +621,9 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        if !state.policies.contains_key(&policy_arn) {
+        if !state.policies.contains_key(&policy_arn)
+            && crate::managed_policies::lookup(&policy_arn).is_none()
+        {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
@@ -756,4 +765,38 @@ impl CreatePolicyInput {
             tags,
         })
     }
+}
+
+/// Resolve a policy ARN to an owned [`IamPolicy`], looking first in the
+/// account's customer-managed policies and then in the seeded AWS-managed
+/// catalog. Returns `None` if neither holds it.
+fn resolve_policy(state: &crate::state::IamState, arn: &str) -> Option<IamPolicy> {
+    if let Some(p) = state.policies.get(arn) {
+        return Some(p.clone());
+    }
+    crate::managed_policies::lookup(arn)
+        .map(|mp| mp.to_iam_policy(count_managed_attachments(state, arn)))
+}
+
+/// Count how many roles, users, and groups in this account reference the given
+/// policy ARN. AWS-managed policies are not stored in state, so their
+/// `AttachmentCount` is derived on demand from the attachment maps.
+fn count_managed_attachments(state: &crate::state::IamState, arn: &str) -> u32 {
+    let mut count = 0u32;
+    for arns in state.role_policies.values() {
+        if arns.iter().any(|a| a == arn) {
+            count += 1;
+        }
+    }
+    for arns in state.user_policies.values() {
+        if arns.iter().any(|a| a == arn) {
+            count += 1;
+        }
+    }
+    for group in state.groups.values() {
+        if group.attached_policies.iter().any(|a| a == arn) {
+            count += 1;
+        }
+    }
+    count
 }

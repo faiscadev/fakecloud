@@ -1,0 +1,251 @@
+//! Catalog of well-known AWS-managed IAM policies (`arn:aws:iam::aws:policy/*`).
+//!
+//! AWS-managed policies are not created by users: they exist in every account
+//! under a fixed ARN with a document AWS maintains. Real clients (Terraform,
+//! CDK, the console) routinely attach them to roles/users/groups and then call
+//! `GetPolicy`/`GetPolicyVersion`/`ListPolicyVersions`/`ListPolicies` against
+//! them. fakecloud seeds a curated set so those calls resolve like real AWS
+//! instead of returning `NoSuchEntity`, and so the policy engine can evaluate
+//! the grants they confer.
+//!
+//! The documents embedded in `managed_policies/catalog.json` are the exact
+//! current AWS documents (fetched verbatim from the AWS managed-policy
+//! reference). The set is curated toward the policies most commonly attached in
+//! infrastructure-as-code; it is not the full AWS catalog. An ARN that is not
+//! seeded behaves exactly as before (it can still be attached, but resolves to
+//! `NoSuchEntity` on read), so adding more entries is purely additive.
+
+use std::sync::OnceLock;
+
+use chrono::{DateTime, TimeZone, Utc};
+use serde::Deserialize;
+
+use crate::state::{IamPolicy, PolicyVersion};
+
+/// One entry in the embedded AWS-managed policy catalog.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedPolicy {
+    pub name: String,
+    pub arn: String,
+    pub path: String,
+    #[serde(rename = "defaultVersionId")]
+    pub default_version_id: String,
+    #[serde(rename = "createDate")]
+    pub create_date: String,
+    pub description: String,
+    pub document: String,
+}
+
+#[derive(Deserialize)]
+struct CatalogFile {
+    policies: Vec<ManagedPolicy>,
+}
+
+const CATALOG_JSON: &str = include_str!("managed_policies/catalog.json");
+
+fn catalog() -> &'static [ManagedPolicy] {
+    static CATALOG: OnceLock<Vec<ManagedPolicy>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let parsed: CatalogFile = serde_json::from_str(CATALOG_JSON)
+                .expect("embedded AWS-managed policy catalog must be valid JSON");
+            parsed.policies
+        })
+        .as_slice()
+}
+
+/// True if the ARN refers to an AWS-managed policy (`arn:aws:iam::aws:policy/...`),
+/// including service-role and aws-service-role policies. Customer-managed ARNs
+/// (`arn:aws:iam::<account-id>:policy/...`) do not match.
+pub fn is_aws_managed_arn(arn: &str) -> bool {
+    arn.contains(":aws:policy/")
+}
+
+/// All seeded AWS-managed policies.
+pub fn all() -> &'static [ManagedPolicy] {
+    catalog()
+}
+
+/// Look up a seeded AWS-managed policy by its full ARN.
+pub fn lookup(arn: &str) -> Option<&'static ManagedPolicy> {
+    catalog().iter().find(|p| p.arn == arn)
+}
+
+/// The default-version policy document for a seeded AWS-managed ARN, if any.
+pub fn default_document(arn: &str) -> Option<&'static str> {
+    lookup(arn).map(|p| p.document.as_str())
+}
+
+impl ManagedPolicy {
+    /// Parse the catalog's ISO-8601 creation timestamp (falls back to the epoch
+    /// if a future catalog entry has a malformed date, which the unit tests
+    /// guard against).
+    pub fn created_at(&self) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(&self.create_date)
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).single().unwrap_or_default())
+    }
+
+    /// A stable `PolicyId` for this managed policy. AWS does not publish the
+    /// real `ANPA...` id per policy, so we derive a deterministic one from the
+    /// name (clients key off the ARN, not the id). Format matches AWS: the
+    /// `ANPA` prefix followed by 17 uppercase base-32 characters.
+    pub fn policy_id(&self) -> String {
+        deterministic_policy_id(&self.name)
+    }
+
+    /// The number of versions after the default; AWS-managed policies in the
+    /// catalog carry only their current default version.
+    fn next_version_num(&self) -> u32 {
+        self.default_version_id
+            .trim_start_matches('v')
+            .parse::<u32>()
+            .unwrap_or(1)
+            .saturating_add(1)
+    }
+
+    /// Build a state-shaped [`IamPolicy`] view of this catalog entry so the
+    /// existing response builders can render it. `attachment_count` is supplied
+    /// by the caller (computed from how many principals reference the ARN).
+    pub fn to_iam_policy(&self, attachment_count: u32) -> IamPolicy {
+        let created_at = self.created_at();
+        IamPolicy {
+            policy_name: self.name.clone(),
+            policy_id: self.policy_id(),
+            arn: self.arn.clone(),
+            path: self.path.clone(),
+            description: self.description.clone(),
+            created_at,
+            tags: Vec::new(),
+            default_version_id: self.default_version_id.clone(),
+            versions: vec![PolicyVersion {
+                version_id: self.default_version_id.clone(),
+                document: self.document.clone(),
+                is_default: true,
+                created_at,
+            }],
+            next_version_num: self.next_version_num(),
+            attachment_count,
+        }
+    }
+}
+
+fn deterministic_policy_id(name: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    // Two FNV-1a passes (forward and reverse) give 128 bits of stable entropy.
+    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.bytes() {
+        h1 ^= b as u64;
+        h1 = h1.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut h2: u64 = 0x8422_2325_cbf2_9ce4;
+    for b in name.bytes().rev() {
+        h2 ^= b as u64;
+        h2 = h2.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut bits = ((h1 as u128) << 64) | h2 as u128;
+    let mut out = String::with_capacity(21);
+    out.push_str("ANPA");
+    for _ in 0..17 {
+        out.push(ALPHABET[(bits & 0x1f) as usize] as char);
+        bits >>= 5;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_parses_and_is_nonempty() {
+        assert!(!all().is_empty(), "catalog should seed at least one policy");
+    }
+
+    #[test]
+    fn every_entry_is_managed_with_valid_document() {
+        for p in all() {
+            assert!(
+                is_aws_managed_arn(&p.arn),
+                "catalog ARN must be AWS-managed: {}",
+                p.arn
+            );
+            assert!(
+                p.arn.ends_with(&p.name),
+                "ARN should end with the policy name: {} / {}",
+                p.arn,
+                p.name
+            );
+            // The document must be valid JSON with a Statement element.
+            let v: serde_json::Value =
+                serde_json::from_str(&p.document).expect("policy document must be valid JSON");
+            assert!(
+                v.get("Statement").is_some(),
+                "document for {} must have a Statement",
+                p.name
+            );
+            // Creation date must parse.
+            DateTime::parse_from_rfc3339(&p.create_date)
+                .unwrap_or_else(|_| panic!("createDate must be RFC3339 for {}", p.name));
+            // Service-role policies must declare a matching path.
+            if p.arn.contains(":aws:policy/service-role/") {
+                assert_eq!(p.path, "/service-role/", "path mismatch for {}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn arns_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for p in all() {
+            assert!(seen.insert(&p.arn), "duplicate ARN in catalog: {}", p.arn);
+        }
+    }
+
+    #[test]
+    fn lookup_and_default_document_resolve_known_policy() {
+        let arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+        let p = lookup(arn).expect("AdministratorAccess must be seeded");
+        assert_eq!(p.name, "AdministratorAccess");
+        let doc = default_document(arn).expect("must have a default document");
+        assert!(doc.contains("\"Action\":\"*\""));
+        assert!(lookup("arn:aws:iam::aws:policy/DoesNotExist").is_none());
+    }
+
+    #[test]
+    fn customer_arn_is_not_managed() {
+        assert!(!is_aws_managed_arn(
+            "arn:aws:iam::123456789012:policy/MyPolicy"
+        ));
+        assert!(is_aws_managed_arn(
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ));
+    }
+
+    #[test]
+    fn policy_id_is_stable_and_well_formed() {
+        let a = deterministic_policy_id("AdministratorAccess");
+        let b = deterministic_policy_id("AdministratorAccess");
+        assert_eq!(a, b, "policy id must be deterministic");
+        assert!(a.starts_with("ANPA"));
+        assert_eq!(a.len(), 21);
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert_ne!(
+            deterministic_policy_id("AdministratorAccess"),
+            deterministic_policy_id("PowerUserAccess"),
+        );
+    }
+
+    #[test]
+    fn to_iam_policy_carries_default_version() {
+        let p = lookup("arn:aws:iam::aws:policy/AmazonS3FullAccess").unwrap();
+        let ip = p.to_iam_policy(3);
+        assert_eq!(ip.attachment_count, 3);
+        assert_eq!(ip.default_version_id, "v2");
+        assert_eq!(ip.versions.len(), 1);
+        assert!(ip.versions[0].is_default);
+        assert_eq!(ip.next_version_num, 3);
+    }
+}
