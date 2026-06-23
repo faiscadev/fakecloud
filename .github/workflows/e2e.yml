@@ -308,6 +308,21 @@ jobs:
             got=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing)
             echo "bridge-nf-call-iptables=${got}"
           }
+          # Remove leftover instance containers + per-subnet networks from any
+          # prior attempt. A failed attempt panics *before* the test's own
+          # cleanup runs, so its container and `fakecloud-subnet-<id>` network
+          # leak. Across the 3 retries these accumulate and exhaust Docker's
+          # default address pool; the next `docker network create` then fails and
+          # the runtime falls back to the default bridge (docker0, 172.17.x) —
+          # where same-subnet traffic never reaches fakecloud's per-subnet nft
+          # rules, so the deny "bypasses" and every subsequent attempt fails
+          # identically. Pruning before each attempt makes the retries genuinely
+          # independent (the real fix for this job's intermittent failures).
+          clean_docker() {
+            sudo docker ps -aq --filter "label=fakecloud-ec2" | xargs -r sudo docker rm -f >/dev/null 2>&1 || true
+            sudo docker network ls -q --filter "name=fakecloud-subnet-" | xargs -r sudo docker network rm >/dev/null 2>&1 || true
+            sudo docker network prune -f >/dev/null 2>&1 || true
+          }
           run_once() {
             sudo -E env "PATH=$PATH:/usr/sbin:/sbin" "HOME=$HOME" \
               FAKECLOUD_TEST_SG_ENFORCE=1 CI=1 \
@@ -315,6 +330,7 @@ jobs:
           }
           for attempt in 1 2 3; do
             echo "=== SG enforcement attempt ${attempt}/3 ==="
+            clean_docker
             ensure_bridge_nf
             if run_once; then
               echo "SG enforcement passed on attempt ${attempt}"
@@ -323,12 +339,13 @@ jobs:
             echo "attempt ${attempt} failed; host state at failure:"
             echo "--- bridge-nf-call-iptables ---"; cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing
             echo "--- nft fakecloud_ec2 table ---"; sudo nft list table inet fakecloud_ec2 2>/dev/null || echo "(no table)"
-            echo "flushing nft + conntrack before retry"
+            echo "--- docker networks (watch for pool exhaustion / docker0 fallback) ---"; sudo docker network ls || true
+            echo "flushing nft + conntrack + leaked docker state before retry"
             sudo nft flush ruleset || true
             sudo conntrack -F || true
             sleep 3
           done
-          echo "SG enforcement failed all 3 attempts (bridge-nf verified active each attempt -> real enforcement regression, not flake)"
+          echo "SG enforcement failed all 3 independent attempts (clean docker + bridge-nf each attempt -> real enforcement regression, not flake)"
           exit 1
 
       - name: nft ruleset diagnostics
