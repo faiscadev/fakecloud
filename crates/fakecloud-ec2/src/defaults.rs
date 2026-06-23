@@ -157,6 +157,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
                 map_customer_owned_ip_on_launch: false,
                 enable_dns64: false,
                 private_dns_hostname_type: "ip-name".to_string(),
+                ipv6_cidr_block: None,
             },
         );
         subnet_ids.push(subnet_id);

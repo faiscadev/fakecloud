@@ -65,15 +65,17 @@ pub(crate) fn vpc_xml(vpc: &Vpc, tags: &[Tag], owner_id: &str) -> String {
 
 /// Deterministic Amazon-style IPv6 /56 for a VPC. Real Amazon CIDRs come from
 /// `2600:1f00::/24`; we derive a stable suffix from the VPC id so reads are
-/// consistent.
+/// consistent. A /56 puts the network boundary at the high byte of the 4th
+/// hextet, so the low byte (and everything after) MUST be zero — otherwise the
+/// CIDR has host bits set and Terraform's `cidrsubnet()` rejects it.
 fn generated_ipv6_cidr(vpc_id: &str) -> String {
     let h = vpc_id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     format!(
-        "2600:1f16:{:04x}:{:04x}::/56",
+        "2600:1f16:{:04x}:{:02x}00::/56",
         (h >> 16) & 0xffff,
-        h & 0xffff
+        h & 0xff
     )
 }
 

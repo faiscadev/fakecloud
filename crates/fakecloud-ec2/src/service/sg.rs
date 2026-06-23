@@ -51,12 +51,20 @@ fn rule_xml(r: &SecurityGroupRule, owner: &str, region: &str) -> String {
 
 /// Render one `<item>` IpPermission from a rule.
 fn ip_permission_xml(r: &SecurityGroupRule) -> String {
-    let mut inner = format!(
-        "{}<fromPort>{}</fromPort><toPort>{}</toPort>",
-        ec2_elem("ipProtocol", &r.ip_protocol),
-        r.from_port,
-        r.to_port,
-    );
+    // For the "all traffic" protocol (`-1`), AWS omits FromPort/ToPort entirely;
+    // the provider then normalises them to 0. Emitting `-1` here makes the
+    // `aws_security_group` resource see a perpetual port diff. tcp/udp/icmp
+    // always carry their port range.
+    let mut inner = if r.ip_protocol == "-1" {
+        ec2_elem("ipProtocol", &r.ip_protocol)
+    } else {
+        format!(
+            "{}<fromPort>{}</fromPort><toPort>{}</toPort>",
+            ec2_elem("ipProtocol", &r.ip_protocol),
+            r.from_port,
+            r.to_port,
+        )
+    };
     let mut ranges = String::new();
     if let Some(c) = &r.cidr_ipv4 {
         ranges.push_str(&format!(

@@ -69,6 +69,10 @@ impl LambdaService {
             .get("SourceAccount")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let event_source_token = body
+            .get("EventSourceToken")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         // `Qualifier` scopes the policy to a specific numbered version
         // snapshot. AWS keeps a separate resource policy per qualifier
@@ -133,11 +137,18 @@ impl LambdaService {
         if let Some(arn) = source_arn.as_ref() {
             condition.insert("ArnLike".to_string(), json!({ "aws:SourceArn": arn }));
         }
+        // SourceAccount and EventSourceToken both surface as `StringEquals`
+        // condition keys; AWS merges them into one operator block, and the
+        // Terraform resource reads `event_source_token` back from here.
+        let mut string_equals = serde_json::Map::new();
         if let Some(acct) = source_account.as_ref() {
-            condition.insert(
-                "StringEquals".to_string(),
-                json!({ "aws:SourceAccount": acct }),
-            );
+            string_equals.insert("aws:SourceAccount".to_string(), json!(acct));
+        }
+        if let Some(token) = event_source_token.as_ref() {
+            string_equals.insert("lambda:EventSourceToken".to_string(), json!(token));
+        }
+        if !string_equals.is_empty() {
+            condition.insert("StringEquals".to_string(), Value::Object(string_equals));
         }
 
         // Store the Action verbatim — AWS round-trips whatever string
