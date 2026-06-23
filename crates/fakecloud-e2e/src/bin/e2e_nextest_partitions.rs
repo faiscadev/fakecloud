@@ -78,17 +78,33 @@ struct Partition {
     install_podman: bool,
 }
 
-const PARTITIONS: [Partition; 10] = [
+// The "general" set is the long pole of the E2E run (~31 min of test execution
+// across two hash partitions). Now that test binaries are compiled once and
+// shipped as a nextest archive, each partition only pays its share of test
+// runtime, so splitting general four ways brings each well under the CI budget.
+const PARTITIONS: [Partition; 12] = [
     Partition {
         name: "general-1",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:1/2"),
+        partition: Some("hash:1/4"),
         install_podman: false,
     },
     Partition {
         name: "general-2",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:2/2"),
+        partition: Some("hash:2/4"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-3",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:3/4"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-4",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:4/4"),
         install_podman: false,
     },
     Partition {
@@ -440,10 +456,12 @@ mod tests {
     #[test]
     fn check_partitions_accepts_exact_coverage() {
         let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
             &[
                 (partition_key("general-1"), &["a"]),
                 (partition_key("general-2"), &["b"]),
+                (partition_key("general-3"), &["k"]),
+                (partition_key("general-4"), &["l"]),
                 (partition_key("lambda-api"), &["c"]),
                 (partition_key("lambda-runtimes-python"), &["d"]),
                 (partition_key("lambda-runtimes-nodejs"), &["e"]),
@@ -461,10 +479,14 @@ mod tests {
     #[test]
     fn check_partitions_rejects_missing_tests() {
         let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "missing"],
+            &[
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "missing",
+            ],
             &[
                 (partition_key("general-1"), &["a"]),
                 (partition_key("general-2"), &["b"]),
+                (partition_key("general-3"), &["k"]),
+                (partition_key("general-4"), &["l"]),
                 (partition_key("lambda-api"), &["c"]),
                 (partition_key("lambda-runtimes-python"), &["d"]),
                 (partition_key("lambda-runtimes-nodejs"), &["e"]),
@@ -482,10 +504,12 @@ mod tests {
     #[test]
     fn check_partitions_rejects_overlaps() {
         let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "l"],
             &[
                 (partition_key("general-1"), &["a"]),
                 (partition_key("general-2"), &["a"]),
+                (partition_key("general-3"), &["k"]),
+                (partition_key("general-4"), &["l"]),
                 (partition_key("lambda-api"), &["b"]),
                 (partition_key("lambda-runtimes-python"), &["c"]),
                 (partition_key("lambda-runtimes-nodejs"), &["d"]),
@@ -503,10 +527,12 @@ mod tests {
     #[test]
     fn check_partitions_rejects_empty_partition() {
         let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "l"],
             &[
                 (partition_key("general-1"), &["a"]),
                 (partition_key("general-2"), &["b"]),
+                (partition_key("general-3"), &["k"]),
+                (partition_key("general-4"), &["l"]),
                 (partition_key("lambda-api"), &[]),
                 (partition_key("lambda-runtimes-python"), &["c"]),
                 (partition_key("lambda-runtimes-nodejs"), &["d"]),

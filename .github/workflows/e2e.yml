@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build E2E partition tool
@@ -58,7 +59,11 @@ jobs:
         run: echo "matrix=$(./target/debug/e2e_nextest_partitions matrix)" >> "$GITHUB_OUTPUT"
 
       # Build fakecloud once here so every partition job can download the
-      # binary as an artifact instead of rebuilding from scratch.
+      # binary as an artifact instead of rebuilding from scratch. The e2e test
+      # harness boots it via its workspace-relative path
+      # (crates/fakecloud-testkit/src/lib.rs), which resolves identically on every
+      # GitHub-hosted runner, so a downloaded binary works regardless of where the
+      # archived test binaries are extracted.
       - name: Build fakecloud
         run: cargo build --bin fakecloud
 
@@ -67,6 +72,21 @@ jobs:
         with:
           name: fakecloud-binary-e2e
           path: target/debug/fakecloud
+          if-no-files-found: error
+          retention-days: 1
+
+      # Build the E2E test binaries ONCE and archive them. Every partition job
+      # then runs the prebuilt binaries via `--archive-file` instead of
+      # recompiling the (large) test crate from scratch — previously ~11.5 min of
+      # redundant compilation paid in each of the ~13 partition jobs.
+      - name: Archive E2E test binaries
+        run: cargo nextest archive -P ci -p fakecloud-e2e --archive-file e2e-archive.tar.zst
+
+      - name: Upload E2E test archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fakecloud-e2e-archive
+          path: e2e-archive.tar.zst
           if-no-files-found: error
           retention-days: 1
 
@@ -106,7 +126,8 @@ jobs:
       - uses: ./.github/actions/free-disk
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # No rust-cache here: this job runs prebuilt test binaries from the archive
+      # produced by e2e-build and never compiles, so there is nothing to cache.
 
       - name: Install podman
         if: matrix.install_podman
@@ -157,6 +178,11 @@ jobs:
       - name: Mark fakecloud binary executable
         run: chmod +x target/debug/fakecloud
 
+      - name: Download E2E test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fakecloud-e2e-archive
+
       - name: Disk diagnostics before nextest
         run: |
           echo "=== df -h ==="
@@ -166,9 +192,17 @@ jobs:
           echo "=== ~/.cargo ==="
           du -sh ~/.cargo 2>/dev/null || true
 
+      # Run the prebuilt test binaries straight from the archive — no compilation.
+      # --workspace-remap . points runtime workspace lookups at this checkout (the
+      # path matches the build runner on GitHub-hosted runners). Extract under /mnt
+      # so the unpacked binaries don't fill the small root filesystem.
       - name: Run nextest partition
         run: |
-          cmd=(cargo nextest run -P ci -p fakecloud-e2e -E "$NEXTEST_FILTER")
+          cmd=(cargo nextest run -P ci
+            --archive-file e2e-archive.tar.zst
+            --workspace-remap .
+            --extract-to /mnt/nextest-e2e --extract-overwrite
+            -E "$NEXTEST_FILTER")
           if [ -n "$NEXTEST_PARTITION" ]; then
             cmd+=(--partition "$NEXTEST_PARTITION")
           fi
