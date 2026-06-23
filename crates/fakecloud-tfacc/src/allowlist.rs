@@ -124,6 +124,61 @@ pub const SERVICES: &[Service] = &[
         ],
     },
     Service {
+        name: "organizations",
+        // Wave 3: the policies-for-target data source smoke. Most other
+        // Organizations resources mutate the singleton org and are exercised
+        // elsewhere.
+        run_regex: "^TestAccOrganizations[A-Za-z]+_basic$",
+        deny: &[],
+    },
+    Service {
+        name: "ecr",
+        // Wave 3: the `_basic` suite for repository/lifecycle/pull-through-cache
+        // policies and their data sources, plus the authorization-token data
+        // source — 8 tests.
+        run_regex: "^TestAccECR[A-Za-z]+_basic$",
+        deny: &[
+            // --- unsupportable: fakecloud reports the repository_url as its
+            //     local registry endpoint (127.0.0.1:port/...) so real
+            //     `docker push`/`pull` work against it; that can't also equal
+            //     the AWS-format `<account>.dkr.ecr.<region>.amazonaws.com` URL
+            //     the resource asserts. ---
+            "TestAccECRRepository_basic",
+            // --- gap: the image data source needs an image actually pushed to
+            //     the registry, which requires a running container engine. ---
+            "TestAccECRImageDataSource_basic",
+            // --- gap: repository creation templates are not implemented. ---
+            "TestAccECRRepositoryCreationTemplate_basic",
+            "TestAccECRRepositoryCreationTemplateDataSource_basic",
+        ],
+    },
+    Service {
+        name: "glue",
+        // Wave 3: the `_basic` suite for the Data Catalog (table + data source),
+        // connections (+ data source), registries (+ data source), data-quality
+        // rulesets, security configurations, user-defined functions, and
+        // workflows — 10 tests.
+        run_regex: "^TestAccGlue[A-Za-z]+_basic$",
+        deny: &[
+            // --- gap: jobs and triggers reference the AWS-managed IAM policy
+            //     `AWSGlueServiceRole`, which fakecloud's IAM does not resolve
+            //     (no AWS-managed policy catalogue). ---
+            "TestAccGlueJob_basic",
+            "TestAccGlueTrigger_basic",
+            // --- gap: partitions omit the `catalog_id` (defaults to the account
+            //     id) on read. ---
+            "TestAccGluePartition_basic",
+            "TestAccGluePartitionIndex_basic",
+            // --- gap: schema registry schemas and ML transforms are not
+            //     implemented. ---
+            "TestAccGlueSchema_basic",
+            "TestAccGlueMlTransform_basic",
+            // --- gap: dev endpoints provision a notebook environment; the test
+            //     polls a creation waiter for ~15m before failing. ---
+            "TestAccGlueDevEndpoint_basic",
+        ],
+    },
+    Service {
         name: "cognitoidp",
         // Batch 11: core `aws_cognito_user_pool` smoke. The fix here is
         // returning five shape blocks with AWS defaults on every
@@ -459,6 +514,24 @@ pub const SHARDS: &[Shard] = &[
         name: "route53",
         service: "route53",
         run_regex: "^TestAccRoute53[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "organizations",
+        service: "organizations",
+        run_regex: "^TestAccOrganizations[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ecr",
+        service: "ecr",
+        run_regex: "^TestAccECR[A-Za-z]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "glue",
+        service: "glue",
+        run_regex: "^TestAccGlue[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     Shard {
