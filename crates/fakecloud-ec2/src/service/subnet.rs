@@ -13,7 +13,7 @@ use crate::state::{Ec2State, Subnet, SubnetCidrReservation, Tag};
 /// Render the inner XML of a `<subnet>` element (lowerCamel wire names).
 pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("subnetId", &s.subnet_id),
         ec2_elem("state", &s.state),
         ec2_elem("vpcId", &s.vpc_id),
@@ -39,6 +39,13 @@ pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) ->
             &format!("arn:aws:ec2:{region}:{owner}:subnet/{}", s.subnet_id),
         ),
         format_args!("<enableDns64>{}</enableDns64>", s.enable_dns64),
+        // The `aws_subnet` resource reads `private_dns_hostname_type_on_launch`
+        // (and the DNS-record toggles) from this block; AWS defaults the
+        // hostname type to `ip-name`.
+        format_args!(
+            "<privateDnsNameOptionsOnLaunch><hostnameType>{}</hostnameType><enableResourceNameDnsARecord>false</enableResourceNameDnsARecord><enableResourceNameDnsAAAARecord>false</enableResourceNameDnsAAAARecord></privateDnsNameOptionsOnLaunch>",
+            s.private_dns_hostname_type
+        ),
         super::tags::tag_set_xml(tags),
     )
 }

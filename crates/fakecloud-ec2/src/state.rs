@@ -64,6 +64,12 @@ pub struct Vpc {
     pub enable_dns_hostnames: bool,
     #[serde(default)]
     pub cidr_associations: Vec<VpcCidrAssoc>,
+    /// Amazon-provided IPv6 /56 CIDR, set when the VPC was created (or updated)
+    /// with `AmazonProvidedIpv6CidrBlock=true`. Reported in the
+    /// `Ipv6CidrBlockAssociationSet`; the `aws_vpc` resource reads
+    /// `ipv6_cidr_block` / `assign_generated_ipv6_cidr_block` from it.
+    #[serde(default)]
+    pub ipv6_cidr_block: Option<String>,
 }
 
 /// One `key -> values` entry in a DHCP options set.
