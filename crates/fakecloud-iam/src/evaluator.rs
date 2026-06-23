@@ -1104,13 +1104,18 @@ pub fn collect_boundary_policies(
 }
 
 fn managed_policy_default_document(state: &IamState, arn: &str) -> Option<String> {
-    let policy = state.policies.get(arn)?;
-    policy
-        .versions
-        .iter()
-        .find(|v| v.is_default)
-        .or_else(|| policy.versions.first())
-        .map(|v| v.document.clone())
+    if let Some(policy) = state.policies.get(arn) {
+        return policy
+            .versions
+            .iter()
+            .find(|v| v.is_default)
+            .or_else(|| policy.versions.first())
+            .map(|v| v.document.clone());
+    }
+    // AWS-managed policies (arn:aws:iam::aws:policy/*) are not stored in account
+    // state; resolve their default document from the seeded catalog so attached
+    // managed policies actually grant permissions under --iam soft|strict.
+    crate::managed_policies::default_document(arn).map(str::to_owned)
 }
 
 /// Extract the bare `user_name` component from an IAM user ARN.
