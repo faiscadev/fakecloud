@@ -3579,8 +3579,14 @@ async fn iam_get_aws_managed_policy_from_catalog() {
     let doc = pv.document().unwrap();
     // The document is non-empty and carries the policy's statement (assert on
     // encoding-invariant substrings, since the wire form is URL-encoded).
-    assert!(doc.contains("Statement"), "document missing Statement: {doc}");
-    assert!(doc.contains("Allow"), "document missing Allow effect: {doc}");
+    assert!(
+        doc.contains("Statement"),
+        "document missing Statement: {doc}"
+    );
+    assert!(
+        doc.contains("Allow"),
+        "document missing Allow effect: {doc}"
+    );
 
     // ListPolicies Scope=AWS surfaces the catalog.
     let listed = client
@@ -3590,10 +3596,7 @@ async fn iam_get_aws_managed_policy_from_catalog() {
         .send()
         .await
         .unwrap();
-    assert!(listed
-        .policies()
-        .iter()
-        .any(|p| p.arn() == Some(arn)));
+    assert!(listed.policies().iter().any(|p| p.arn() == Some(arn)));
 }
 
 #[tokio::test]
