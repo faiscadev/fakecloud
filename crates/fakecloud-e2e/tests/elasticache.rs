@@ -3382,3 +3382,104 @@ async fn delete_during_create_does_not_orphan() {
         .await
         .expect("re-create with same id must succeed after delete-during-create");
 }
+
+// ── Control-plane resources that don't need a cache container ──────────────
+
+#[tokio::test]
+async fn elasticache_subnet_group_name_lowercased_and_tags_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    // AWS lowercases subnet-group names; create with mixed case and the
+    // response (and later reads) must use the lowercase form.
+    let create = client
+        .create_cache_subnet_group()
+        .cache_subnet_group_name("Mixed-Case-SG")
+        .cache_subnet_group_description("d")
+        .subnet_ids("subnet-aaa111")
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("Name")
+                .value("Mixed-Case-SG")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let group = create.cache_subnet_group().unwrap();
+    assert_eq!(group.cache_subnet_group_name(), Some("mixed-case-sg"));
+
+    // Describe by the lowercase name resolves it.
+    let described = client
+        .describe_cache_subnet_groups()
+        .cache_subnet_group_name("mixed-case-sg")
+        .send()
+        .await
+        .expect("describe by lowercase name");
+    assert_eq!(described.cache_subnet_groups().len(), 1);
+
+    // Create-time tags round-trip via ListTagsForResource.
+    let arn = group.arn().unwrap();
+    let tags = client
+        .list_tags_for_resource()
+        .resource_name(arn)
+        .send()
+        .await
+        .expect("list tags");
+    assert!(tags
+        .tag_list()
+        .iter()
+        .any(|t| t.key() == Some("Name") && t.value() == Some("Mixed-Case-SG")));
+}
+
+#[tokio::test]
+async fn elasticache_user_group_engine_case_insensitive_and_modify_settles_active() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    // The provider sends the engine uppercase ("REDIS"); AWS accepts it and
+    // stores it lowercase.
+    client
+        .create_user()
+        .user_id("u1")
+        .user_name("u1")
+        .engine("REDIS")
+        .access_string("on ~* +@all")
+        .passwords("abcdefghijabcdefghij")
+        .send()
+        .await
+        .expect("create user with REDIS engine");
+    client
+        .create_user()
+        .user_id("u2")
+        .user_name("u2")
+        .engine("REDIS")
+        .access_string("on ~* +@all")
+        .passwords("abcdefghijabcdefghij")
+        .send()
+        .await
+        .expect("create second user");
+
+    let ug = client
+        .create_user_group()
+        .user_group_id("ug1")
+        .engine("REDIS")
+        .user_ids("u1")
+        .send()
+        .await
+        .expect("create user group with REDIS engine");
+    assert_eq!(ug.engine(), Some("redis"));
+    assert_eq!(ug.status(), Some("active"));
+
+    // Modifying the membership must settle back to `active`, not stay
+    // `modifying` (which would hang the provider's update waiter).
+    let modified = client
+        .modify_user_group()
+        .user_group_id("ug1")
+        .user_ids_to_add("u2")
+        .send()
+        .await
+        .expect("modify user group");
+    assert_eq!(modified.status(), Some("active"));
+    assert_eq!(modified.user_ids().len(), 2);
+}

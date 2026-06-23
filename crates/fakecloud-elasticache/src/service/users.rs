@@ -7,7 +7,9 @@ impl ElastiCacheService {
     pub(super) fn create_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_id = required_query_param(request, "UserId")?;
         let user_name = required_query_param(request, "UserName")?;
-        let engine = required_query_param(request, "Engine")?;
+        // Engine is case-insensitive on the wire (the provider sends "REDIS");
+        // AWS normalises and stores it lowercase, so do the same.
+        let engine = required_query_param(request, "Engine")?.to_lowercase();
         let access_string = required_query_param(request, "AccessString")?;
 
         validate_engine(&engine)?;
@@ -225,7 +227,9 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let user_group_id = required_query_param(request, "UserGroupId")?;
-        let engine = required_query_param(request, "Engine")?;
+        // Engine is case-insensitive on the wire (the provider sends "REDIS");
+        // AWS normalises and stores it lowercase, matching the user records.
+        let engine = required_query_param(request, "Engine")?.to_lowercase();
 
         validate_engine(&engine)?;
 
@@ -458,7 +462,11 @@ impl ElastiCacheService {
                 }
             }
             group.user_ids.retain(|u| !to_remove.contains(u));
-            group.status = "modifying".to_string();
+            // The membership change is applied synchronously, so the group is
+            // immediately back to `active`. Leaving it `modifying` would hang
+            // the provider's update waiter (Pending: modifying, Target: active)
+            // forever, since fakecloud has no async tick to flip it.
+            group.status = "active".to_string();
             // Keep the reverse mapping on each User in sync so that
             // ModifyUser can resolve the correct replication groups.
             for u in &to_add {

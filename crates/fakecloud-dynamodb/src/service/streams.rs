@@ -142,10 +142,13 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let stream_arn = require_str(&body, "StreamArn")?;
+        // Precision is optional: real AWS only reports it once the caller set
+        // it, so an unset precision must come back empty (not a synthesised
+        // MILLISECOND default), which the Terraform resource asserts.
         let precision = body["EnableKinesisStreamingConfiguration"]
             ["ApproximateCreationDateTimePrecision"]
             .as_str()
-            .unwrap_or("MILLISECOND");
+            .unwrap_or("");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -157,13 +160,15 @@ impl DynamoDbService {
             approximate_creation_date_time_precision: precision.to_string(),
         });
 
+        let mut config = json!({});
+        if !precision.is_empty() {
+            config["ApproximateCreationDateTimePrecision"] = json!(precision);
+        }
         Self::ok_json(json!({
             "TableName": table_name,
             "StreamArn": stream_arn,
             "DestinationStatus": "ACTIVE",
-            "EnableKinesisStreamingConfiguration": {
-                "ApproximateCreationDateTimePrecision": precision
-            }
+            "EnableKinesisStreamingConfiguration": config
         }))
     }
 
@@ -210,11 +215,17 @@ impl DynamoDbService {
             .kinesis_destinations
             .iter()
             .map(|d| {
-                json!({
+                let mut o = json!({
                     "StreamArn": d.stream_arn,
                     "DestinationStatus": d.destination_status,
-                    "ApproximateCreationDateTimePrecision": d.approximate_creation_date_time_precision
-                })
+                });
+                // Only report precision once it was actually set, so the
+                // Terraform resource reads "" for an unset destination.
+                if !d.approximate_creation_date_time_precision.is_empty() {
+                    o["ApproximateCreationDateTimePrecision"] =
+                        json!(d.approximate_creation_date_time_precision);
+                }
+                o
             })
             .collect();
 
@@ -234,7 +245,7 @@ impl DynamoDbService {
         let precision = body["UpdateKinesisStreamingConfiguration"]
             ["ApproximateCreationDateTimePrecision"]
             .as_str()
-            .unwrap_or("MILLISECOND");
+            .unwrap_or("");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -248,13 +259,15 @@ impl DynamoDbService {
             dest.approximate_creation_date_time_precision = precision.to_string();
         }
 
+        let mut config = json!({});
+        if !precision.is_empty() {
+            config["ApproximateCreationDateTimePrecision"] = json!(precision);
+        }
         Self::ok_json(json!({
             "TableName": table_name,
             "StreamArn": stream_arn,
             "DestinationStatus": "ACTIVE",
-            "UpdateKinesisStreamingConfiguration": {
-                "ApproximateCreationDateTimePrecision": precision
-            }
+            "UpdateKinesisStreamingConfiguration": config
         }))
     }
 
