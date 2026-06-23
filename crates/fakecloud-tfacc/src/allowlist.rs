@@ -160,11 +160,9 @@ pub const SERVICES: &[Service] = &[
         // workflows — 10 tests.
         run_regex: "^TestAccGlue[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: jobs and triggers reference the AWS-managed IAM policy
-            //     `AWSGlueServiceRole`, which fakecloud's IAM does not resolve
-            //     (no AWS-managed policy catalogue). ---
-            "TestAccGlueJob_basic",
-            "TestAccGlueTrigger_basic",
+            // (Jobs and triggers reference the AWS-managed IAM policy
+            //  `AWSGlueServiceRole`; fakecloud now resolves it from the
+            //  AWS-managed policy catalogue (#1880), so those tests run.)
             // --- gap: partitions omit the `catalog_id` (defaults to the account
             //     id) on read. ---
             "TestAccGluePartition_basic",
