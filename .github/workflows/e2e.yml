@@ -62,7 +62,15 @@ jobs:
       # then runs the prebuilt binaries via `--archive-file` instead of
       # recompiling the (large) test crate from scratch — previously ~11.5 min of
       # redundant compilation paid in each of the ~19 partition jobs.
+      #
+      # CARGO_PROFILE_TEST_DEBUG=0 strips debuginfo from the archived binaries:
+      # it shrinks both this build and the archive, so the compile, the upload
+      # here, and the download in every partition are all faster (all on the
+      # workflow's critical path). Assertion-failure locations are preserved via
+      # std's #[track_caller], so CI failure output still points at the test line.
       - name: Archive E2E test binaries
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo nextest archive -P ci -p fakecloud-e2e --archive-file e2e-archive.tar.zst
 
       - name: Upload E2E test archive
@@ -144,35 +152,13 @@ jobs:
         if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      # The lambda-runtimes partitions pull several large language-runtime
-      # images and stack container layers during the run, which can exhaust the
-      # root filesystem even after free-disk-space (the recurring "No space left
-      # on device" flake). Move container storage onto the runner's much larger
-      # ephemeral /mnt disk so image/layer growth no longer fills `/`.
-      - name: Relocate container storage to /mnt
-        run: |
-          echo "=== disk before relocation ==="; df -h / /mnt || df -h /
-          # Docker: move data-root to /mnt and symlink so the daemon config and
-          # any preinstalled images are preserved.
-          sudo systemctl stop docker docker.socket || true
-          sudo mkdir -p /mnt/docker
-          if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
-            sudo rsync -a /var/lib/docker/ /mnt/docker/ || true
-            sudo rm -rf /var/lib/docker
-          fi
-          sudo ln -sfn /mnt/docker /var/lib/docker
-          sudo systemctl start docker
-          # Podman (rootless): point graphroot/runroot at /mnt as well.
-          if [ "$INSTALL_PODMAN" = "true" ]; then
-            sudo mkdir -p /mnt/podman-storage /mnt/podman-run
-            sudo chown -R "$USER" /mnt/podman-storage /mnt/podman-run
-            mkdir -p ~/.config/containers
-            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/podman-storage"\nrunroot = "/mnt/podman-run"\n' > ~/.config/containers/storage.conf
-          fi
-          echo "=== docker info root + disk after ==="
-          docker info --format '{{.DockerRootDir}}' || true
-          df -h / /mnt || df -h /
-
+      # NOTE: an earlier "Relocate container storage to /mnt" step was removed
+      # here. It existed to escape a small root filesystem when /mnt was a large
+      # separate ephemeral disk, but current GitHub-hosted runners have a single
+      # ~145G root and no separate /mnt, so the relocation rsynced docker's
+      # data-root from root back onto root — pure overhead (~1.7 min/partition)
+      # with no headroom gained. The free-disk action above still reclaims ~30G,
+      # which is the actual disk-full safety net.
       - name: Prune container state before tests
         run: |
           docker system prune -af --volumes || true
