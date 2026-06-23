@@ -4715,18 +4715,36 @@ fn list_policy_versions_resolves_aws_managed() {
 
 #[test]
 fn list_policies_scope_aws_returns_catalog() {
+    // The catalog is the full AWS set (~1,500), so Scope=AWS paginates. Walk
+    // the Marker and confirm well-known policies across path classes appear.
     let svc = make_service();
-    let resp = svc
-        .list_policies(&make_request("ListPolicies", vec![("Scope", "AWS")]))
-        .unwrap();
-    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    let mut marker: Option<String> = None;
+    let mut all = String::new();
+    for _ in 0..40 {
+        let mut params = vec![("Scope", "AWS"), ("MaxItems", "100")];
+        if let Some(m) = marker.as_deref() {
+            params.push(("Marker", m));
+        }
+        let resp = svc
+            .list_policies(&make_request("ListPolicies", params))
+            .unwrap();
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        all.push_str(&body);
+        marker = body
+            .split_once("<Marker>")
+            .and_then(|(_, r)| r.split_once("</Marker>"))
+            .map(|(m, _)| m.to_string());
+        if marker.is_none() {
+            break;
+        }
+    }
     assert!(
-        body.contains("arn:aws:iam::aws:policy/AdministratorAccess"),
-        "AdministratorAccess missing from Scope=AWS: {body}"
+        all.contains("arn:aws:iam::aws:policy/AdministratorAccess"),
+        "AdministratorAccess missing from Scope=AWS"
     );
     assert!(
-        body.contains("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"),
-        "service-role policy missing from Scope=AWS: {body}"
+        all.contains("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"),
+        "service-role policy missing from Scope=AWS"
     );
 }
 
