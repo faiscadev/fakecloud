@@ -78,33 +78,61 @@ struct Partition {
     install_podman: bool,
 }
 
-// The "general" set is the long pole of the E2E run (~31 min of test execution
-// across two hash partitions). Now that test binaries are compiled once and
-// shipped as a nextest archive, each partition only pays its share of test
-// runtime, so splitting general four ways brings each well under the CI budget.
-const PARTITIONS: [Partition; 12] = [
+// Each E2E partition runs prebuilt binaries from a shared nextest archive (no
+// per-partition compile), and every partition job waits on the single build
+// anchor, so the workflow's wall-clock is `build + slowest partition`. The set
+// below is sized so no single partition's test runtime dominates: the heavy
+// "general" group fans out 8 ways (~55 min of total test execution), the two
+// slowest lambda runtime families (python ~12 min, nodejs ~10 min) are hash-split
+// in two, and the container-CLI tests split by runtime (docker vs podman) so the
+// podman-only job is the only one paying the podman install.
+const PARTITIONS: [Partition; 19] = [
     Partition {
         name: "general-1",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:1/4"),
+        partition: Some("hash:1/8"),
         install_podman: false,
     },
     Partition {
         name: "general-2",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:2/4"),
+        partition: Some("hash:2/8"),
         install_podman: false,
     },
     Partition {
         name: "general-3",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:3/4"),
+        partition: Some("hash:3/8"),
         install_podman: false,
     },
     Partition {
         name: "general-4",
         filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
-        partition: Some("hash:4/4"),
+        partition: Some("hash:4/8"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-5",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:5/8"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-6",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:6/8"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-7",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:7/8"),
+        install_podman: false,
+    },
+    Partition {
+        name: "general-8",
+        filter: "package(fakecloud-e2e) and not binary(lambda) and not binary(lambda_invoke)",
+        partition: Some("hash:8/8"),
         install_podman: false,
     },
     Partition {
@@ -115,15 +143,27 @@ const PARTITIONS: [Partition; 12] = [
         install_podman: false,
     },
     Partition {
-        name: "lambda-runtimes-python",
+        name: "lambda-runtimes-python-1",
         filter: LAMBDA_RUNTIME_PYTHON_FILTER,
-        partition: None,
+        partition: Some("hash:1/2"),
         install_podman: false,
     },
     Partition {
-        name: "lambda-runtimes-nodejs",
+        name: "lambda-runtimes-python-2",
+        filter: LAMBDA_RUNTIME_PYTHON_FILTER,
+        partition: Some("hash:2/2"),
+        install_podman: false,
+    },
+    Partition {
+        name: "lambda-runtimes-nodejs-1",
         filter: LAMBDA_RUNTIME_NODEJS_FILTER,
-        partition: None,
+        partition: Some("hash:1/2"),
+        install_podman: false,
+    },
+    Partition {
+        name: "lambda-runtimes-nodejs-2",
+        filter: LAMBDA_RUNTIME_NODEJS_FILTER,
+        partition: Some("hash:2/2"),
         install_podman: false,
     },
     Partition {
@@ -151,8 +191,14 @@ const PARTITIONS: [Partition; 12] = [
         install_podman: false,
     },
     Partition {
-        name: "lambda-container-clis",
-        filter: "binary(lambda) and (test(lambda_invoke_docker) | test(lambda_invoke_podman))",
+        name: "lambda-container-docker",
+        filter: "binary(lambda) and test(lambda_invoke_docker)",
+        partition: None,
+        install_podman: false,
+    },
+    Partition {
+        name: "lambda-container-podman",
+        filter: "binary(lambda) and test(lambda_invoke_podman)",
         partition: None,
         install_podman: true,
     },
@@ -307,11 +353,17 @@ fn check_partitions(lister: &dyn NextestLister) -> Result<(), DynError> {
 }
 
 fn validate_partition_layout() -> Result<(), DynError> {
-    for name in LAMBDA_RUNTIME_FAMILY_PARTITIONS {
-        if !PARTITIONS.iter().any(|partition| partition.name == name) {
-            return Err(
-                SimpleError(format!("missing explicit lambda runtime partition {name}")).into(),
-            );
+    // Each runtime family must keep at least one dedicated partition. Families
+    // whose runtime is slow enough may be hash-split into `<family>-1`,
+    // `<family>-2`, ...; matching by prefix accepts both the single-partition
+    // and the split form while still catching an accidentally-dropped family.
+    for prefix in LAMBDA_RUNTIME_FAMILY_PARTITIONS {
+        let matches = |name: &str| name == prefix || name.starts_with(&format!("{prefix}-"));
+        if !PARTITIONS.iter().any(|partition| matches(partition.name)) {
+            return Err(SimpleError(format!(
+                "missing explicit lambda runtime partition {prefix}"
+            ))
+            .into());
         }
     }
 
@@ -453,110 +505,86 @@ mod tests {
         );
     }
 
+    // One synthetic test per real partition, in PARTITIONS order:
+    // a..h = general-1..8, i = lambda-api, j/k = python-1/2, l/m = nodejs-1/2,
+    // n = ruby, o = provided, p = java, q = dotnet, r = docker, s = podman.
+    fn exact_coverage_cases() -> Vec<(PartitionKey, &'static [&'static str])> {
+        vec![
+            (partition_key("general-1"), &["a"]),
+            (partition_key("general-2"), &["b"]),
+            (partition_key("general-3"), &["c"]),
+            (partition_key("general-4"), &["d"]),
+            (partition_key("general-5"), &["e"]),
+            (partition_key("general-6"), &["f"]),
+            (partition_key("general-7"), &["g"]),
+            (partition_key("general-8"), &["h"]),
+            (partition_key("lambda-api"), &["i"]),
+            (partition_key("lambda-runtimes-python-1"), &["j"]),
+            (partition_key("lambda-runtimes-python-2"), &["k"]),
+            (partition_key("lambda-runtimes-nodejs-1"), &["l"]),
+            (partition_key("lambda-runtimes-nodejs-2"), &["m"]),
+            (partition_key("lambda-runtimes-ruby"), &["n"]),
+            (partition_key("lambda-runtimes-provided"), &["o"]),
+            (partition_key("lambda-runtimes-java"), &["p"]),
+            (partition_key("lambda-runtimes-dotnet"), &["q"]),
+            (partition_key("lambda-container-docker"), &["r"]),
+            (partition_key("lambda-container-podman"), &["s"]),
+        ]
+    }
+
+    const ALL_TESTS: &[&str] = &[
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
+        "s",
+    ];
+
     #[test]
     fn check_partitions_accepts_exact_coverage() {
-        let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
-            &[
-                (partition_key("general-1"), &["a"]),
-                (partition_key("general-2"), &["b"]),
-                (partition_key("general-3"), &["k"]),
-                (partition_key("general-4"), &["l"]),
-                (partition_key("lambda-api"), &["c"]),
-                (partition_key("lambda-runtimes-python"), &["d"]),
-                (partition_key("lambda-runtimes-nodejs"), &["e"]),
-                (partition_key("lambda-runtimes-ruby"), &["f"]),
-                (partition_key("lambda-runtimes-provided"), &["g"]),
-                (partition_key("lambda-runtimes-java"), &["h"]),
-                (partition_key("lambda-runtimes-dotnet"), &["i"]),
-                (partition_key("lambda-container-clis"), &["j"]),
-            ],
-        );
-
+        let lister = FakeLister::with_partitions(ALL_TESTS, &exact_coverage_cases());
         assert!(check_partitions(&lister).is_ok());
     }
 
     #[test]
     fn check_partitions_rejects_missing_tests() {
-        let lister = FakeLister::with_partitions(
-            &[
-                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "missing",
-            ],
-            &[
-                (partition_key("general-1"), &["a"]),
-                (partition_key("general-2"), &["b"]),
-                (partition_key("general-3"), &["k"]),
-                (partition_key("general-4"), &["l"]),
-                (partition_key("lambda-api"), &["c"]),
-                (partition_key("lambda-runtimes-python"), &["d"]),
-                (partition_key("lambda-runtimes-nodejs"), &["e"]),
-                (partition_key("lambda-runtimes-ruby"), &["f"]),
-                (partition_key("lambda-runtimes-provided"), &["g"]),
-                (partition_key("lambda-runtimes-java"), &["h"]),
-                (partition_key("lambda-runtimes-dotnet"), &["i"]),
-                (partition_key("lambda-container-clis"), &["j"]),
-            ],
-        );
-
+        let mut expected = ALL_TESTS.to_vec();
+        expected.push("missing");
+        let lister = FakeLister::with_partitions(&expected, &exact_coverage_cases());
         assert!(check_partitions(&lister).is_err());
     }
 
     #[test]
     fn check_partitions_rejects_overlaps() {
-        let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "l"],
-            &[
-                (partition_key("general-1"), &["a"]),
-                (partition_key("general-2"), &["a"]),
-                (partition_key("general-3"), &["k"]),
-                (partition_key("general-4"), &["l"]),
-                (partition_key("lambda-api"), &["b"]),
-                (partition_key("lambda-runtimes-python"), &["c"]),
-                (partition_key("lambda-runtimes-nodejs"), &["d"]),
-                (partition_key("lambda-runtimes-ruby"), &["e"]),
-                (partition_key("lambda-runtimes-provided"), &["f"]),
-                (partition_key("lambda-runtimes-java"), &["g"]),
-                (partition_key("lambda-runtimes-dotnet"), &["h"]),
-                (partition_key("lambda-container-clis"), &["i"]),
-            ],
-        );
-
+        // general-2 duplicates general-1's "a"; drop "b" from expected so the
+        // only discrepancy is the overlap.
+        let mut cases = exact_coverage_cases();
+        cases[1].1 = &["a"];
+        let expected: Vec<&str> = ALL_TESTS.iter().copied().filter(|t| *t != "b").collect();
+        let lister = FakeLister::with_partitions(&expected, &cases);
         assert!(check_partitions(&lister).is_err());
     }
 
     #[test]
     fn check_partitions_rejects_empty_partition() {
-        let lister = FakeLister::with_partitions(
-            &["a", "b", "c", "d", "e", "f", "g", "h", "i", "k", "l"],
-            &[
-                (partition_key("general-1"), &["a"]),
-                (partition_key("general-2"), &["b"]),
-                (partition_key("general-3"), &["k"]),
-                (partition_key("general-4"), &["l"]),
-                (partition_key("lambda-api"), &[]),
-                (partition_key("lambda-runtimes-python"), &["c"]),
-                (partition_key("lambda-runtimes-nodejs"), &["d"]),
-                (partition_key("lambda-runtimes-ruby"), &["e"]),
-                (partition_key("lambda-runtimes-provided"), &["f"]),
-                (partition_key("lambda-runtimes-java"), &["g"]),
-                (partition_key("lambda-runtimes-dotnet"), &["h"]),
-                (partition_key("lambda-container-clis"), &["i"]),
-            ],
-        );
-
+        // lambda-api selects nothing; drop its "i" from expected.
+        let mut cases = exact_coverage_cases();
+        cases[8].1 = &[];
+        let expected: Vec<&str> = ALL_TESTS.iter().copied().filter(|t| *t != "i").collect();
+        let lister = FakeLister::with_partitions(&expected, &cases);
         assert!(check_partitions(&lister).is_err());
     }
 
     #[test]
     fn lambda_runtime_family_partitions_are_explicit() {
         validate_partition_layout().unwrap();
-        assert_eq!(
-            PARTITIONS
-                .iter()
-                .filter(|partition| partition.name.starts_with("lambda-runtimes-"))
-                .count(),
-            LAMBDA_RUNTIME_FAMILY_PARTITIONS.len()
-        );
+        // Every runtime family is represented by at least one partition (some
+        // families are hash-split into `<family>-1`/`-2`, so the partition count
+        // is >= the number of families).
+        for prefix in LAMBDA_RUNTIME_FAMILY_PARTITIONS {
+            assert!(
+                PARTITIONS.iter().any(|partition| partition.name == prefix
+                    || partition.name.starts_with(&format!("{prefix}-"))),
+                "no partition for runtime family {prefix}"
+            );
+        }
     }
 
     #[test]

@@ -58,27 +58,10 @@ jobs:
         name: Generate E2E matrix
         run: echo "matrix=$(./target/debug/e2e_nextest_partitions matrix)" >> "$GITHUB_OUTPUT"
 
-      # Build fakecloud once here so every partition job can download the
-      # binary as an artifact instead of rebuilding from scratch. The e2e test
-      # harness boots it via its workspace-relative path
-      # (crates/fakecloud-testkit/src/lib.rs), which resolves identically on every
-      # GitHub-hosted runner, so a downloaded binary works regardless of where the
-      # archived test binaries are extracted.
-      - name: Build fakecloud
-        run: cargo build --bin fakecloud
-
-      - name: Upload fakecloud binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fakecloud-binary-e2e
-          path: target/debug/fakecloud
-          if-no-files-found: error
-          retention-days: 1
-
       # Build the E2E test binaries ONCE and archive them. Every partition job
       # then runs the prebuilt binaries via `--archive-file` instead of
       # recompiling the (large) test crate from scratch — previously ~11.5 min of
-      # redundant compilation paid in each of the ~13 partition jobs.
+      # redundant compilation paid in each of the ~19 partition jobs.
       - name: Archive E2E test binaries
         run: cargo nextest archive -P ci -p fakecloud-e2e --archive-file e2e-archive.tar.zst
 
@@ -87,6 +70,34 @@ jobs:
         with:
           name: fakecloud-e2e-archive
           path: e2e-archive.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  # Build the fakecloud server binary in parallel with the test-archive build so
+  # the partition jobs wait on max(archive, server) rather than their sum. The
+  # harness boots this binary via its workspace-relative path
+  # (crates/fakecloud-testkit/src/lib.rs), which resolves identically on every
+  # GitHub-hosted runner, so a downloaded binary works regardless of where the
+  # archived test binaries extract.
+  e2e-fakecloud:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build fakecloud
+        run: cargo build --bin fakecloud
+
+      - name: Upload fakecloud binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fakecloud-binary-e2e
+          path: target/debug/fakecloud
           if-no-files-found: error
           retention-days: 1
 
@@ -110,7 +121,7 @@ jobs:
 
   e2e:
     name: E2E ${{ matrix.name }}
-    needs: [changes, e2e-build]
+    needs: [changes, e2e-build, e2e-fakecloud]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
