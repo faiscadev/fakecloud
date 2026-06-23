@@ -112,10 +112,8 @@ pub const SERVICES: &[Service] = &[
         // `UnknownError` and every zone-owning test failed at destroy.
         run_regex: "^TestAccRoute53[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: CIDR collection ARN must omit the account id
-            //     (`arn:aws:route53:::cidrcollection/...`); fakecloud includes
-            //     it. ---
-            "TestAccRoute53CIDRCollection_basic",
+            // (CIDR collection ARN now omits the account id —
+            //  `arn:aws:route53:::cidrcollection/...` — so that test runs.)
             // --- gap: DNSSEC key-signing keys need a computed DS digest_value
             //     (hex), which fakecloud leaves empty. ---
             "TestAccRoute53KeySigningKey_basic",
@@ -163,10 +161,10 @@ pub const SERVICES: &[Service] = &[
             // (Jobs and triggers reference the AWS-managed IAM policy
             //  `AWSGlueServiceRole`; fakecloud now resolves it from the
             //  AWS-managed policy catalogue (#1880), so those tests run.)
-            // --- gap: partitions omit the `catalog_id` (defaults to the account
-            //     id) on read. ---
-            "TestAccGluePartition_basic",
-            "TestAccGluePartitionIndex_basic",
+            // (Partitions now return `catalog_id`, the full StorageDescriptor
+            //  round-trips (bucket/sort/skewed columns), and
+            //  GetPartitionIndexes raises EntityNotFound on a deleted table,
+            //  so the partition + partition-index tests run.)
             // --- gap: schema registry schemas and ML transforms are not
             //     implemented. ---
             "TestAccGlueSchema_basic",
@@ -453,10 +451,15 @@ pub const SERVICES: &[Service] = &[
             "TestAccDynamoDBTable_Replica_tags_updateIsPropagated_oneOfTwo",
             "TestAccDynamoDBTable_Replica_tags_updateIsPropagated_twoOfTwo",
             "TestAccDynamoDBTable_restoreCrossRegion",
-            // --- unsupportable: INFREQUENT_ACCESS table class ---
-            "TestAccDynamoDBTable_tableClassInfrequentAccess",
+            // (INFREQUENT_ACCESS / STANDARD table class round-trips on
+            //  create + UpdateTable now, so tableClassInfrequentAccess,
+            //  tableClassExplicitDefault, and tableClass_ConcurrentModification
+            //  run.)
+            // --- unsupportable: the migrate test pins the external
+            //     `hashicorp/aws@4.57.0` provider for step 1, which predates
+            //     the `AWS_ENDPOINT_URL_*` SDK env vars, so it cannot be
+            //     redirected to fakecloud and talks to real AWS. ---
             "TestAccDynamoDBTable_tableClass_migrate",
-            "TestAccDynamoDBTable_tableClass_ConcurrentModification",
             // --- unsupportable: backup encryption (S3 import/export path) ---
             "TestAccDynamoDBTable_backupEncryption",
             "TestAccDynamoDBTable_backup_overrideEncryption",
@@ -536,7 +539,10 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "sfn",
-        run_regex: "^TestAccSFNStateMachineDataSource_basic$",
+        // State-machine data source plus the Activity resource + data source.
+        // Activities now resolve in the tag path (`ListTagsForResource`
+        // accepts activity ARNs, not just state-machine ARNs).
+        run_regex: "^TestAccSFN(StateMachineDataSource|Activity|ActivityDataSource)_basic$",
         deny: &[],
     },
 ];
@@ -809,7 +815,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "sfn",
         service: "sfn",
-        run_regex: "^TestAccSFNStateMachineDataSource_basic$",
+        run_regex: "^TestAccSFN(StateMachineDataSource|Activity|ActivityDataSource)_basic$",
         extra_deny: &[],
     },
 ];

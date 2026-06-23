@@ -5,7 +5,8 @@ use aws_sdk_dynamodb::types::{
     DeleteRequest, Get, GlobalSecondaryIndex, KeySchemaElement, KeyType, OnDemandThroughput,
     PointInTimeRecoverySpecification, Projection, ProjectionType, ProvisionedThroughput, Put,
     PutRequest, Replica, ScalarAttributeType, SseSpecification, SseType, StreamSpecification,
-    StreamViewType, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
+    StreamViewType, TableClass, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem,
+    WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -5342,5 +5343,109 @@ async fn dynamodb_query_rejects_mixed_key_condition_forms() {
         stderr.contains("ValidationException")
             && stderr.contains("both expression and non-expression"),
         "unexpected error: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_table_class_create_and_update() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Default table class is STANDARD, reported in TableClassSummary.
+    client
+        .create_table()
+        .table_name("tc-default")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    let desc = client
+        .describe_table()
+        .table_name("tc-default")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.table()
+            .unwrap()
+            .table_class_summary()
+            .unwrap()
+            .table_class(),
+        Some(&TableClass::Standard)
+    );
+
+    // Create with explicit INFREQUENT_ACCESS.
+    client
+        .create_table()
+        .table_name("tc-ia")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .table_class(TableClass::StandardInfrequentAccess)
+        .send()
+        .await
+        .unwrap();
+    let desc = client
+        .describe_table()
+        .table_name("tc-ia")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.table()
+            .unwrap()
+            .table_class_summary()
+            .unwrap()
+            .table_class(),
+        Some(&TableClass::StandardInfrequentAccess)
+    );
+
+    // UpdateTable migrates the class back to STANDARD.
+    client
+        .update_table()
+        .table_name("tc-ia")
+        .table_class(TableClass::Standard)
+        .send()
+        .await
+        .unwrap();
+    let desc = client
+        .describe_table()
+        .table_name("tc-ia")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.table()
+            .unwrap()
+            .table_class_summary()
+            .unwrap()
+            .table_class(),
+        Some(&TableClass::Standard)
     );
 }

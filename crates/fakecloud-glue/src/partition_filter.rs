@@ -244,11 +244,13 @@ mod tests {
                 name: "year".to_string(),
                 column_type: "string".to_string(),
                 comment: None,
+                parameters: Default::default(),
             },
             Column {
                 name: "month".to_string(),
                 column_type: "string".to_string(),
                 comment: None,
+                parameters: Default::default(),
             },
         ]
     }

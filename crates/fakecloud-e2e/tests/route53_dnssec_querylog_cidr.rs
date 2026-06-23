@@ -230,6 +230,11 @@ async fn cidr_collection_lifecycle() {
         .expect("create");
     let id = create.collection().unwrap().id().unwrap().to_string();
     assert_eq!(create.collection().unwrap().version(), Some(1));
+    // Route 53 CIDR-collection ARNs are global and omit the account id:
+    // `arn:aws:route53::<empty-account>:cidrcollection/<id>`. The Terraform
+    // `aws_route53_cidr_collection` resource asserts this exact shape.
+    let arn = create.collection().unwrap().arn().unwrap();
+    assert_eq!(arn, format!("arn:aws:route53:::cidrcollection/{id}"));
 
     let put = CidrCollectionChange::builder()
         .location_name("us-east-1")

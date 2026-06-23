@@ -151,6 +151,15 @@ pub struct DynamoTable {
     /// PAY_PER_REQUEST tables, but real AWS echoes the field on every
     /// DescribeTable once set.
     pub on_demand_throughput: Option<OnDemandThroughput>,
+    /// Storage class: STANDARD (default) or STANDARD_INFREQUENT_ACCESS.
+    /// Returned inside `TableClassSummary` on DescribeTable; set at
+    /// CreateTable and changed via UpdateTable.
+    #[serde(default = "default_table_class")]
+    pub table_class: String,
+}
+
+pub(crate) fn default_table_class() -> String {
+    "STANDARD".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,6 +581,7 @@ mod tests {
             sse_kms_key_arn: None,
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: default_table_class(),
         }
     }
 

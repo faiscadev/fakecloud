@@ -417,6 +417,7 @@ mod tests {
             sse_kms_key_arn: None,
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: "STANDARD".to_string(),
         };
         let rec = StreamRecord {
             event_id: "e1".into(),

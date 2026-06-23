@@ -22,11 +22,15 @@ impl StepFunctionsService {
                 format!("Activity already exists: {arn}"),
             ));
         }
+        let mut tags = BTreeMap::new();
+        // CreateActivity accepts create-time `tags`; the Terraform
+        // `aws_sfn_activity` resource reads them back immediately.
+        let _ = fakecloud_core::tags::apply_tags(&mut tags, &body, "tags", "key", "value");
         let activity = crate::state::Activity {
             name: name.to_string(),
             arn: arn.clone(),
             creation_date: chrono::Utc::now(),
-            tags: BTreeMap::new(),
+            tags,
         };
         state.activities.insert(arn.clone(), activity.clone());
         Ok(AwsResponse::ok_json(json!({
