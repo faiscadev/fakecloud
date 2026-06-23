@@ -299,4 +299,5 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_SFN", "sfn"),
     ("AWS_ENDPOINT_URL_APIGATEWAYV2", "apigatewayv2"),
     ("AWS_ENDPOINT_URL_BEDROCK", "bedrock"),
+    ("AWS_ENDPOINT_URL_ROUTE53", "route53"),
 ];

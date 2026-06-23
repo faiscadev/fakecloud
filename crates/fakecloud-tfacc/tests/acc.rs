@@ -48,6 +48,11 @@ async fn sts_acceptance() {
 }
 
 #[tokio::test]
+async fn route53_acceptance() {
+    run_shard("route53").await;
+}
+
+#[tokio::test]
 async fn cognitoidp_acceptance() {
     run_shard("cognitoidp").await;
 }
