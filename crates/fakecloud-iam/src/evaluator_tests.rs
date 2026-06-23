@@ -2041,3 +2041,85 @@ fn kms_delegation_rule_is_case_insensitive_on_action_prefix() {
         Decision::ImplicitDeny
     );
 }
+
+#[test]
+fn collect_identity_policies_resolves_attached_aws_managed_policy() {
+    // An AWS-managed policy attached to a user must grant its permissions under
+    // enforcement, resolved from the seeded catalog (not account state).
+    use crate::state::IamUser;
+    use chrono::Utc;
+    let mut state = IamState::new("123456789012");
+    state.users.insert(
+        "alice".to_string(),
+        IamUser {
+            user_name: "alice".into(),
+            user_id: "AIDAALICE".into(),
+            arn: "arn:aws:iam::123456789012:user/alice".into(),
+            path: "/".into(),
+            created_at: Utc::now(),
+            tags: Vec::new(),
+            permissions_boundary: None,
+        },
+    );
+    state.user_policies.insert(
+        "alice".to_string(),
+        vec!["arn:aws:iam::aws:policy/AmazonS3FullAccess".to_string()],
+    );
+
+    let principal = principal_user("arn:aws:iam::123456789012:user/alice");
+    let docs = collect_identity_policies(&state, &principal);
+    assert_eq!(
+        docs.len(),
+        1,
+        "attached AWS-managed policy must resolve to one document"
+    );
+    // AmazonS3FullAccess grants s3:* -> a write action is allowed.
+    assert_eq!(
+        evaluate(
+            &docs,
+            &req(&principal, "s3:PutObject", "arn:aws:s3:::bucket/key")
+        ),
+        Decision::Allow
+    );
+    // It does not grant unrelated services.
+    assert_eq!(
+        evaluate(
+            &docs,
+            &req(
+                &principal,
+                "dynamodb:PutItem",
+                "arn:aws:dynamodb:us-east-1:123456789012:table/t"
+            )
+        ),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn unseeded_aws_managed_policy_grants_nothing() {
+    use crate::state::IamUser;
+    use chrono::Utc;
+    let mut state = IamState::new("123456789012");
+    state.users.insert(
+        "bob".to_string(),
+        IamUser {
+            user_name: "bob".into(),
+            user_id: "AIDABOB".into(),
+            arn: "arn:aws:iam::123456789012:user/bob".into(),
+            path: "/".into(),
+            created_at: Utc::now(),
+            tags: Vec::new(),
+            permissions_boundary: None,
+        },
+    );
+    state.user_policies.insert(
+        "bob".to_string(),
+        vec!["arn:aws:iam::aws:policy/NotInCatalogPolicy".to_string()],
+    );
+    let principal = principal_user("arn:aws:iam::123456789012:user/bob");
+    let docs = collect_identity_policies(&state, &principal);
+    assert!(
+        docs.is_empty(),
+        "an unseeded managed ARN resolves to no document"
+    );
+}

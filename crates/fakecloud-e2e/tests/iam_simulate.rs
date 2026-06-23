@@ -217,3 +217,52 @@ async fn simulate_principal_policy_unions_group_attached_policies() {
         "user must inherit group's attached policy"
     );
 }
+
+#[tokio::test]
+async fn simulate_principal_policy_via_attached_aws_managed_policy() {
+    // SimulatePrincipalPolicy must resolve an attached AWS-managed policy from
+    // the built-in catalog (it is never created in this account) and honor its
+    // grants.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+
+    iam.create_user()
+        .user_name("awsmanaged-simuser")
+        .send()
+        .await
+        .unwrap();
+    iam.attach_user_policy()
+        .user_name("awsmanaged-simuser")
+        .policy_arn("arn:aws:iam::aws:policy/AmazonS3FullAccess")
+        .send()
+        .await
+        .unwrap();
+
+    // s3:PutObject is granted by AmazonS3FullAccess (s3:*).
+    let allowed = iam
+        .simulate_principal_policy()
+        .policy_source_arn("arn:aws:iam::123456789012:user/awsmanaged-simuser")
+        .action_names("s3:PutObject")
+        .resource_arns("arn:aws:s3:::bucket/key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed.evaluation_results()[0].eval_decision().as_str(),
+        "allowed"
+    );
+
+    // An unrelated service is not granted.
+    let denied = iam
+        .simulate_principal_policy()
+        .policy_source_arn("arn:aws:iam::123456789012:user/awsmanaged-simuser")
+        .action_names("dynamodb:PutItem")
+        .resource_arns("arn:aws:dynamodb:us-east-1:123456789012:table/t")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.evaluation_results()[0].eval_decision().as_str(),
+        "implicitDeny"
+    );
+}
