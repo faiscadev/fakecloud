@@ -83,6 +83,7 @@ The policy evaluator implements the essentials of AWS's identity-based policy ev
 - Identity policies attached to:
   - IAM users (inline + managed + via group membership, inline and managed)
   - IAM roles (inline + managed, for assumed-role sessions)
+- Managed policies resolve from both customer-managed policies you create and a built-in catalog of common AWS-managed policies (`arn:aws:iam::aws:policy/*`, e.g. `AdministratorAccess`, `AmazonS3FullAccess`, `AWSLambdaBasicExecutionRole`). Attaching an AWS-managed policy grants its permissions just like a customer-managed one.
 - Empty effective policy set -> implicit deny.
 
 ### Condition block evaluation
