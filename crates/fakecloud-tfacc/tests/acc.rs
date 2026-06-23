@@ -53,6 +53,21 @@ async fn route53_acceptance() {
 }
 
 #[tokio::test]
+async fn organizations_acceptance() {
+    run_shard("organizations").await;
+}
+
+#[tokio::test]
+async fn ecr_acceptance() {
+    run_shard("ecr").await;
+}
+
+#[tokio::test]
+async fn glue_acceptance() {
+    run_shard("glue").await;
+}
+
+#[tokio::test]
 async fn cognitoidp_acceptance() {
     run_shard("cognitoidp").await;
 }
