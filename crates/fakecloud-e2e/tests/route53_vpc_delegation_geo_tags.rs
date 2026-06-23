@@ -442,15 +442,12 @@ async fn create_zone_with_vpc_is_implicitly_private_with_name_servers() {
         .send()
         .await
         .expect("zone");
-    assert_eq!(
-        created
-            .hosted_zone()
-            .unwrap()
-            .config()
-            .unwrap()
-            .private_zone(),
-        true
-    );
+    assert!(created
+        .hosted_zone()
+        .unwrap()
+        .config()
+        .unwrap()
+        .private_zone());
     let zone_id = created.hosted_zone().unwrap().id().to_string();
 
     let got = r53
