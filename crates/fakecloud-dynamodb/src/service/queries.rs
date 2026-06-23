@@ -809,6 +809,7 @@ mod tests {
             sse_kms_key_arn: None,
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: "STANDARD".to_string(),
         };
         s.tables.insert(name.to_string(), table);
     }

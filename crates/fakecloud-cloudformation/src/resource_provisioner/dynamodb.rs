@@ -188,6 +188,11 @@ impl ResourceProvisioner {
             sse_kms_key_arn: None,
             deletion_protection_enabled,
             on_demand_throughput,
+            table_class: props
+                .get("TableClass")
+                .and_then(|v| v.as_str())
+                .unwrap_or("STANDARD")
+                .to_string(),
         };
 
         state.tables.insert(table_name.to_string(), table);

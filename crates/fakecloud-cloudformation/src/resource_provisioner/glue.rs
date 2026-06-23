@@ -203,6 +203,7 @@ impl ResourceProvisioner {
             key.clone(),
             fakecloud_glue::Partition {
                 values: values.clone(),
+                catalog_id: self.account_id.clone(),
                 database_name: db_name.clone(),
                 table_name: table_name.clone(),
                 create_time: Utc::now(),

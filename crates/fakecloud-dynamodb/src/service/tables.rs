@@ -149,6 +149,12 @@ impl DynamoDbService {
             (None, None)
         };
 
+        let table_class = body
+            .get("TableClass")
+            .and_then(|v| v.as_str())
+            .unwrap_or("STANDARD")
+            .to_string();
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -208,6 +214,7 @@ impl DynamoDbService {
             sse_kms_key_arn,
             deletion_protection_enabled,
             on_demand_throughput: on_demand_throughput.clone(),
+            table_class,
         };
 
         // Build the response from the inserted table so CreateTable returns
@@ -477,6 +484,10 @@ impl DynamoDbService {
             .and_then(|v| v.as_bool())
         {
             table.deletion_protection_enabled = dpe;
+        }
+
+        if let Some(tc) = body.get("TableClass").and_then(|v| v.as_str()) {
+            table.table_class = tc.to_string();
         }
 
         // Handle StreamSpecification update. Mirrors real AWS:
@@ -1076,6 +1087,7 @@ impl DynamoDbService {
 
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: "STANDARD".to_string(),
         };
         table.recalculate_stats();
 
@@ -1178,6 +1190,7 @@ impl DynamoDbService {
 
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: "STANDARD".to_string(),
         };
         table.recalculate_stats();
 
@@ -1685,6 +1698,7 @@ impl DynamoDbService {
 
             deletion_protection_enabled: false,
             on_demand_throughput: None,
+            table_class: "STANDARD".to_string(),
         };
         table.recalculate_stats();
         state.tables.insert(table_name.to_string(), table);

@@ -312,6 +312,66 @@ async fn sfn_tag_resource() {
 }
 
 #[tokio::test]
+async fn sfn_tag_resource_resolves_activity_arn() {
+    // Activities are taggable too — `ListTagsForResource` must resolve an
+    // activity ARN, not only a state-machine ARN. The Terraform
+    // `aws_sfn_activity` resource reads its tags right after create.
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let arn = client
+        .create_activity()
+        .name("tagged-activity")
+        .tags(Tag::builder().key("env").value("prod").build())
+        .send()
+        .await
+        .unwrap()
+        .activity_arn()
+        .to_string();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .expect("list tags on activity");
+    assert_eq!(tags.tags().len(), 1);
+    assert_eq!(tags.tags()[0].key(), Some("env"));
+
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags(Tag::builder().key("team").value("data").build())
+        .send()
+        .await
+        .expect("tag activity");
+
+    let after = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.tags().len(), 2);
+
+    client
+        .untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .expect("untag activity");
+    let final_tags = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(final_tags.tags().len(), 1);
+    assert_eq!(final_tags.tags()[0].key(), Some("team"));
+}
+
+#[tokio::test]
 async fn sfn_untag_resource() {
     let server = TestServer::start().await;
     let client = server.sfn_client().await;

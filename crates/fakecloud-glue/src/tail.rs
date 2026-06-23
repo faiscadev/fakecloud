@@ -929,6 +929,18 @@ impl GlueService {
         let table = req_str(&body, "TableName")?;
         let prefix = format!("{db}\u{1f}{table}\u{1f}");
         let accounts = self.state.read();
+        // Real AWS raises EntityNotFoundException when the database or table
+        // does not exist. Terraform's partition-index destroy check relies on
+        // this: after the table is torn down it expects the not-found error,
+        // not an empty list.
+        let table_exists = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.dbs_in(&req.region))
+            .and_then(|dbs| dbs.get(db))
+            .is_some_and(|d| d.tables.contains_key(table));
+        if !table_exists {
+            return Err(entity_not_found(format!("Table {table} not found")));
+        }
         let list: Vec<Value> = accounts
             .get(&req.account_id)
             .map(|s| {

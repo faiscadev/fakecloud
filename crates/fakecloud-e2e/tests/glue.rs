@@ -234,6 +234,9 @@ async fn partition_lifecycle() {
         .await
         .expect("get partition");
     assert_eq!(got.partition().unwrap().values(), &["2026-04-30"]);
+    // Partitions report their owning catalog id (the account) so the
+    // Terraform `aws_glue_partition` resource sees a stable `catalog_id`.
+    assert_eq!(got.partition().unwrap().catalog_id(), Some("123456789012"));
 
     let listed = glue
         .get_partitions()
@@ -738,4 +741,117 @@ async fn test_connection_named_must_exist() {
         .send()
         .await
         .expect("test existing connection");
+}
+
+#[tokio::test]
+async fn table_storage_descriptor_round_trips_full_shape() {
+    use aws_sdk_glue::types::{Order, SkewedInfo};
+
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("sd").build().unwrap())
+        .send()
+        .await
+        .expect("create db");
+
+    let sd = StorageDescriptor::builder()
+        .columns(
+            Column::builder()
+                .name("c1")
+                .r#type("int")
+                .parameters("p", "v")
+                .build()
+                .unwrap(),
+        )
+        .location("s3://sd/t/")
+        .bucket_columns("c1")
+        .number_of_buckets(4)
+        .stored_as_sub_directories(false)
+        .sort_columns(Order::builder().column("c1").sort_order(1).build().unwrap())
+        .skewed_info(
+            SkewedInfo::builder()
+                .skewed_column_names("c1")
+                .skewed_column_values("v1")
+                .skewed_column_value_location_maps("v1", "loc")
+                .build(),
+        )
+        .build();
+
+    glue.create_table()
+        .database_name("sd")
+        .table_input(
+            TableInput::builder()
+                .name("t")
+                .storage_descriptor(sd)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create table");
+
+    let got = glue
+        .get_table()
+        .database_name("sd")
+        .name("t")
+        .send()
+        .await
+        .expect("get table");
+    let rsd = got.table().unwrap().storage_descriptor().unwrap();
+    assert_eq!(rsd.bucket_columns(), &["c1"]);
+    assert_eq!(rsd.number_of_buckets(), 4);
+    assert_eq!(rsd.sort_columns().len(), 1);
+    assert_eq!(rsd.sort_columns()[0].column(), "c1");
+    assert_eq!(
+        rsd.columns()[0].parameters().unwrap().get("p"),
+        Some(&"v".to_string())
+    );
+    let skew = rsd.skewed_info().unwrap();
+    assert_eq!(skew.skewed_column_names(), &["c1"]);
+}
+
+#[tokio::test]
+async fn get_partition_indexes_not_found_after_table_delete() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("pi").build().unwrap())
+        .send()
+        .await
+        .expect("create db");
+    glue.create_table()
+        .database_name("pi")
+        .table_input(table_input("t"))
+        .send()
+        .await
+        .expect("create table");
+
+    // Index present while the table exists.
+    glue.get_partition_indexes()
+        .database_name("pi")
+        .table_name("t")
+        .send()
+        .await
+        .expect("get indexes on live table");
+
+    glue.delete_table()
+        .database_name("pi")
+        .name("t")
+        .send()
+        .await
+        .expect("delete table");
+
+    // Real AWS raises EntityNotFoundException once the table is gone — the
+    // Terraform partition-index destroy check depends on this.
+    let err = glue
+        .get_partition_indexes()
+        .database_name("pi")
+        .table_name("t")
+        .send()
+        .await
+        .expect_err("table gone");
+    assert!(err.into_service_error().is_entity_not_found_exception());
 }

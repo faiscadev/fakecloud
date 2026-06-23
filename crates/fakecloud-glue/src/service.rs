@@ -780,6 +780,7 @@ fn parse_columns(val: &Value) -> Vec<Column> {
             name: c["Name"].as_str().unwrap_or_default().to_string(),
             column_type: c["Type"].as_str().unwrap_or_default().to_string(),
             comment: c["Comment"].as_str().map(|s| s.to_string()),
+            parameters: parse_string_map(&c["Parameters"]),
         })
         .collect()
 }
@@ -799,6 +800,20 @@ fn parse_storage_descriptor(val: &Value) -> Option<StorageDescriptor> {
     } else {
         None
     };
+    let bucket_columns = val["BucketColumns"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let sort_columns = val["SortColumns"].as_array().cloned().unwrap_or_default();
+    let skewed_info = if val["SkewedInfo"].is_object() {
+        Some(val["SkewedInfo"].clone())
+    } else {
+        None
+    };
     Some(StorageDescriptor {
         columns: parse_columns(&val["Columns"]),
         location: val["Location"].as_str().map(|s| s.to_string()),
@@ -807,6 +822,11 @@ fn parse_storage_descriptor(val: &Value) -> Option<StorageDescriptor> {
         compressed: val["Compressed"].as_bool(),
         serde_info,
         parameters: parse_string_map(&val["Parameters"]),
+        bucket_columns,
+        number_of_buckets: val["NumberOfBuckets"].as_i64(),
+        stored_as_sub_directories: val["StoredAsSubDirectories"].as_bool(),
+        sort_columns,
+        skewed_info,
     })
 }
 
@@ -817,6 +837,9 @@ fn columns_json(cols: &[Column]) -> Value {
                 let mut o = json!({"Name": c.name, "Type": c.column_type});
                 if let Some(ref cm) = c.comment {
                     o["Comment"] = json!(cm);
+                }
+                if !c.parameters.is_empty() {
+                    o["Parameters"] = json!(c.parameters);
                 }
                 o
             })
@@ -850,6 +873,21 @@ fn storage_descriptor_json(sd: &StorageDescriptor) -> Value {
             sj["SerializationLibrary"] = json!(l);
         }
         o["SerdeInfo"] = sj;
+    }
+    if !sd.bucket_columns.is_empty() {
+        o["BucketColumns"] = json!(sd.bucket_columns);
+    }
+    if let Some(n) = sd.number_of_buckets {
+        o["NumberOfBuckets"] = json!(n);
+    }
+    if let Some(b) = sd.stored_as_sub_directories {
+        o["StoredAsSubDirectories"] = json!(b);
+    }
+    if !sd.sort_columns.is_empty() {
+        o["SortColumns"] = json!(sd.sort_columns);
+    }
+    if let Some(ref si) = sd.skewed_info {
+        o["SkewedInfo"] = si.clone();
     }
     o
 }
@@ -907,6 +945,7 @@ pub(crate) fn table_json(t: &Table) -> Value {
 pub(crate) fn partition_json(p: &Partition) -> Value {
     let mut o = json!({
         "Values": p.values,
+        "CatalogId": p.catalog_id,
         "DatabaseName": p.database_name,
         "TableName": p.table_name,
         "Parameters": p.parameters,
@@ -1213,6 +1252,10 @@ impl GlueService {
             key,
             Partition {
                 values,
+                catalog_id: body["CatalogId"]
+                    .as_str()
+                    .unwrap_or(&req.account_id)
+                    .to_string(),
                 database_name: db_name,
                 table_name,
                 create_time: Utc::now(),
@@ -1451,6 +1494,10 @@ impl GlueService {
                 key,
                 Partition {
                     values,
+                    catalog_id: body["CatalogId"]
+                        .as_str()
+                        .unwrap_or(&req.account_id)
+                        .to_string(),
                     database_name: db_name.clone(),
                     table_name: table_name.clone(),
                     create_time: now,

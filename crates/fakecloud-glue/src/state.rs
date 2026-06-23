@@ -256,6 +256,10 @@ pub struct Table {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Partition {
     pub values: Vec<String>,
+    /// Owning Data Catalog id (the account id). Reported on read; the Terraform
+    /// `aws_glue_partition` resource asserts `catalog_id`.
+    #[serde(default)]
+    pub catalog_id: String,
     pub database_name: String,
     pub table_name: String,
     pub create_time: DateTime<Utc>,
@@ -273,6 +277,21 @@ pub struct StorageDescriptor {
     pub compressed: Option<bool>,
     pub serde_info: Option<SerdeInfo>,
     pub parameters: BTreeMap<String, String>,
+    /// Bucketing columns. Round-tripped on GetTable/GetPartition so the
+    /// Terraform `storage_descriptor` block sees a stable plan.
+    #[serde(default)]
+    pub bucket_columns: Vec<String>,
+    #[serde(default)]
+    pub number_of_buckets: Option<i64>,
+    #[serde(default)]
+    pub stored_as_sub_directories: Option<bool>,
+    /// Sort columns: list of `{Column, SortOrder}`. Stored verbatim.
+    #[serde(default)]
+    pub sort_columns: Vec<Value>,
+    /// Skew handling: `{SkewedColumnNames, SkewedColumnValues,
+    /// SkewedColumnValueLocationMaps}`. Stored verbatim.
+    #[serde(default)]
+    pub skewed_info: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +299,8 @@ pub struct Column {
     pub name: String,
     pub column_type: String,
     pub comment: Option<String>,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

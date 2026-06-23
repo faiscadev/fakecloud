@@ -205,5 +205,10 @@ pub(crate) fn build_table_description(table: &DynamoTable) -> Value {
         desc["SSEDescription"] = sse_desc;
     }
 
+    // TableClassSummary echoes the storage class. Real AWS returns it on every
+    // DescribeTable; the Terraform provider reads `table_class` from here and
+    // falls back to STANDARD when absent.
+    desc["TableClassSummary"] = json!({ "TableClass": table.table_class });
+
     desc
 }
