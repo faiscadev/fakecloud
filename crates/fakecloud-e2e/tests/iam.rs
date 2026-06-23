@@ -666,8 +666,16 @@ async fn iam_policy_lifecycle() {
         .unwrap();
     assert_eq!(get.policy().unwrap().policy_name().unwrap(), "s3-read");
 
-    // List policies
-    let list = client.list_policies().send().await.unwrap();
+    // List policies. Scope to Local: the default scope also returns the full
+    // AWS-managed catalog (~1,500 policies), which paginates and would push a
+    // customer policy off the first page — exactly as it would against real
+    // AWS. Scope=Local lists only customer-managed policies.
+    let list = client
+        .list_policies()
+        .scope(aws_sdk_iam::types::PolicyScopeType::Local)
+        .send()
+        .await
+        .unwrap();
     assert!(list
         .policies()
         .iter()
