@@ -300,3 +300,118 @@ async fn security_group_all_traffic_rule_omits_ports() {
     assert!(all.from_port().is_none());
     assert!(all.to_port().is_none());
 }
+
+#[tokio::test]
+async fn subnet_auto_associates_with_default_nacl() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+
+    let vpc = c
+        .create_vpc()
+        .cidr_block("10.60.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap().to_string();
+    let subnet = c
+        .create_subnet()
+        .vpc_id(&vpc_id)
+        .cidr_block("10.60.1.0/24")
+        .send()
+        .await
+        .unwrap();
+    let subnet_id = subnet.subnet().unwrap().subnet_id().unwrap().to_string();
+
+    // DescribeNetworkAcls filtered by the subnet resolves the one default NACL.
+    let acls = c
+        .describe_network_acls()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("association.subnet-id")
+                .values(&subnet_id)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(acls.network_acls().len(), 1);
+    assert_eq!(acls.network_acls()[0].is_default(), Some(true));
+}
+
+#[tokio::test]
+async fn replace_route_table_association_moves_main_to_new_table() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+
+    let vpc = c
+        .create_vpc()
+        .cidr_block("10.61.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap().to_string();
+
+    // The VPC's default main route table.
+    let main = c
+        .describe_route_tables()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("vpc-id")
+                .values(&vpc_id)
+                .build(),
+        )
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("association.main")
+                .values("true")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(main.route_tables().len(), 1);
+    let main_assoc = main.route_tables()[0].associations()[0]
+        .route_table_association_id()
+        .unwrap()
+        .to_string();
+
+    // A fresh route table to become the new main.
+    let new_rt = c.create_route_table().vpc_id(&vpc_id).send().await.unwrap();
+    let new_rt_id = new_rt
+        .route_table()
+        .unwrap()
+        .route_table_id()
+        .unwrap()
+        .to_string();
+
+    c.replace_route_table_association()
+        .association_id(&main_assoc)
+        .route_table_id(&new_rt_id)
+        .send()
+        .await
+        .unwrap();
+
+    // The main association now resolves to the new route table only.
+    let after = c
+        .describe_route_tables()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("vpc-id")
+                .values(&vpc_id)
+                .build(),
+        )
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("association.main")
+                .values("true")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.route_tables().len(), 1);
+    assert_eq!(
+        after.route_tables()[0].route_table_id(),
+        Some(new_rt_id.as_str())
+    );
+}
