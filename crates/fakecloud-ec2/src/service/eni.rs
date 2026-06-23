@@ -37,7 +37,7 @@ fn eni_xml(n: &NetworkInterface, tags: &[Tag], owner: &str) -> String {
         .map(|a| format!("<attachment>{}</attachment>", attachment_inner(a)))
         .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("networkInterfaceId", &n.network_interface_id),
         ec2_elem("subnetId", &n.subnet_id),
         ec2_elem("vpcId", &n.vpc_id),
@@ -46,6 +46,12 @@ fn eni_xml(n: &NetworkInterface, tags: &[Tag], owner: &str) -> String {
         ec2_elem("ownerId", owner),
         ec2_elem("macAddress", &n.mac_address),
         ec2_elem("privateIpAddress", &n.private_ip_address),
+        // AWS derives the private DNS name from the primary private IP; the
+        // `aws_network_interface` resource reads it back.
+        ec2_elem(
+            "privateDnsName",
+            &format!("ip-{}.ec2.internal", n.private_ip_address.replace('.', "-"))
+        ),
         format_args!("<sourceDestCheck>{}</sourceDestCheck>", n.source_dest_check),
         ec2_elem("status", &n.status),
         ec2_elem("interfaceType", &n.interface_type),
@@ -77,10 +83,33 @@ pub(crate) fn create_network_interface(
         &["efa", "efa-only", "branch", "trunk"],
     )?;
     let id = gen_id("eni");
+    // Resolve the subnet's VPC, and default the security group to that VPC's
+    // `default` group when the caller specified none (AWS does this, and the
+    // `aws_network_interface` resource asserts `security_groups.# == 1`).
+    let (resolved_vpc_id, default_groups) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let vpc_id = state
+            .subnets
+            .get(&subnet_id)
+            .map(|s| s.vpc_id.clone())
+            .unwrap_or_default();
+        let mut groups = indexed_list(&req.query_params, "SecurityGroupId");
+        if groups.is_empty() {
+            if let Some(default_sg) = state
+                .security_groups
+                .values()
+                .find(|g| g.vpc_id == vpc_id && g.group_name == "default")
+            {
+                groups.push(default_sg.group_id.clone());
+            }
+        }
+        (vpc_id, groups)
+    };
     let eni = NetworkInterface {
         network_interface_id: id.clone(),
         subnet_id,
-        vpc_id: String::new(),
+        vpc_id: resolved_vpc_id,
         availability_zone: format!(
             "{}a",
             if req.region.is_empty() {
@@ -107,7 +136,7 @@ pub(crate) fn create_network_interface(
             .cloned()
             .unwrap_or_else(|| "interface".to_string()),
         source_dest_check: true,
-        group_ids: indexed_list(&req.query_params, "SecurityGroupId"),
+        group_ids: default_groups,
         private_ips: Vec::new(),
         ipv6_addresses: Vec::new(),
         attachment: None,

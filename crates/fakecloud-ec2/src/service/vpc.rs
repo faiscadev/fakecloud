@@ -29,8 +29,27 @@ pub(crate) fn vpc_xml(vpc: &Vpc, tags: &[Tag], owner_id: &str) -> String {
     })
     .collect();
 
+    // When an Amazon-provided IPv6 CIDR was assigned, report it in the
+    // `ipv6CidrBlockAssociationSet`. The `aws_vpc` resource reads
+    // `ipv6_cidr_block` (and infers `assign_generated_ipv6_cidr_block`) here.
+    let ipv6_set = match &vpc.ipv6_cidr_block {
+        Some(cidr) => {
+            let item = format!(
+                "{}{}<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState>{}",
+                ec2_elem(
+                    "associationId",
+                    &format!("vpc-cidr-assoc-ipv6-{}", &vpc.vpc_id[4..])
+                ),
+                ec2_elem("ipv6CidrBlock", cidr),
+                ec2_elem("ipv6Pool", "Amazon"),
+            );
+            ec2_list("ipv6CidrBlockAssociationSet", &[item])
+        }
+        None => String::new(),
+    };
+
     format!(
-        "{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("vpcId", &vpc.vpc_id),
         ec2_elem("state", &vpc.state),
         ec2_elem("cidrBlock", &vpc.cidr_block),
@@ -39,7 +58,22 @@ pub(crate) fn vpc_xml(vpc: &Vpc, tags: &[Tag], owner_id: &str) -> String {
         format_args!("<isDefault>{}</isDefault>", vpc.is_default),
         ec2_elem("ownerId", owner_id),
         ec2_list("cidrBlockAssociationSet", &cidr_assocs),
+        ipv6_set,
         super::tags::tag_set_xml(tags),
+    )
+}
+
+/// Deterministic Amazon-style IPv6 /56 for a VPC. Real Amazon CIDRs come from
+/// `2600:1f00::/24`; we derive a stable suffix from the VPC id so reads are
+/// consistent.
+fn generated_ipv6_cidr(vpc_id: &str) -> String {
+    let h = vpc_id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    format!(
+        "2600:1f16:{:04x}:{:04x}::/56",
+        (h >> 16) & 0xffff,
+        h & 0xffff
     )
 }
 
@@ -53,6 +87,14 @@ fn vpc_matches(vpc: &Vpc, tags: &[Tag], filters: &[Filter]) -> bool {
             "dhcp-options-id" => vec![vpc.dhcp_options_id.clone()],
             "state" => vec![vpc.state.clone()],
             "isDefault" | "is-default" => vec![vpc.is_default.to_string()],
+            "ipv6-cidr-block-association.association-id" => vpc
+                .ipv6_cidr_block
+                .as_ref()
+                .map(|_| vec![format!("vpc-cidr-assoc-ipv6-{}", &vpc.vpc_id[4..])])
+                .unwrap_or_default(),
+            "ipv6-cidr-block-association.ipv6-cidr-block" => {
+                vpc.ipv6_cidr_block.clone().into_iter().collect()
+            }
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -88,8 +130,18 @@ pub(crate) fn create_vpc(
         .get("InstanceTenancy")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
-    let vpc = build_vpc(cidr, tenancy, false);
+    let mut vpc = build_vpc(cidr, tenancy, false);
     let vpc_id = vpc.vpc_id.clone();
+    // `AmazonProvidedIpv6CidrBlock=true` requests an Amazon-assigned /56; the
+    // `aws_vpc` resource then expects `ipv6_cidr_block` to be set.
+    if req
+        .query_params
+        .get("AmazonProvidedIpv6CidrBlock")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        vpc.ipv6_cidr_block = Some(generated_ipv6_cidr(&vpc_id));
+    }
 
     let owner = req.account_id.clone();
     let body = {
@@ -98,6 +150,9 @@ pub(crate) fn create_vpc(
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &vpc_id, "vpc");
         let tags = state.tags_for(&vpc_id).to_vec();
         state.vpcs.insert(vpc_id.clone(), vpc.clone());
+        // AWS provisions a default SG, default NACL, and main route table for
+        // every new VPC; the `aws_vpc` resource reads their ids back.
+        crate::defaults::create_vpc_default_resources(state, &vpc_id, &vpc.cidr_block);
         format!("<vpc>{}</vpc>", vpc_xml(&vpc, &tags, &owner))
     };
     Ok(Ec2Service::respond("CreateVpc", &req.request_id, &body))
@@ -149,6 +204,7 @@ fn build_vpc(cidr: String, tenancy: String, is_default: bool) -> Vpc {
         enable_dns_support: true,
         enable_dns_hostnames: is_default,
         cidr_associations: Vec::new(),
+        ipv6_cidr_block: None,
     }
 }
 
@@ -290,6 +346,38 @@ pub(crate) fn associate_vpc_cidr_block(
 ) -> Result<AwsResponse, AwsServiceError> {
     let vpc_id = require(&req.query_params, "VpcId")?;
     let cidr = req.query_params.get("CidrBlock").cloned();
+
+    // IPv6: `AmazonProvidedIpv6CidrBlock=true` assigns a /56. The resource
+    // waits (DescribeVpcs) for the returned association id to show up, so the
+    // id here must match the one vpc_xml renders.
+    if req
+        .query_params
+        .get("AmazonProvidedIpv6CidrBlock")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        let ipv6 = generated_ipv6_cidr(&vpc_id);
+        let assoc_id = format!("vpc-cidr-assoc-ipv6-{}", &vpc_id[4..]);
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
+                vpc.ipv6_cidr_block = Some(ipv6.clone());
+            }
+        }
+        let body = format!(
+            "{}<ipv6CidrBlockAssociation>{}{}{}<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState></ipv6CidrBlockAssociation>",
+            ec2_elem("vpcId", &vpc_id),
+            ec2_elem("associationId", &assoc_id),
+            ec2_elem("ipv6CidrBlock", &ipv6),
+            ec2_elem("ipv6Pool", "Amazon"),
+        );
+        return Ok(Ec2Service::respond(
+            "AssociateVpcCidrBlock",
+            &req.request_id,
+            &body,
+        ));
+    }
 
     let assoc = VpcCidrAssoc {
         association_id: gen_id("vpc-cidr-assoc"),

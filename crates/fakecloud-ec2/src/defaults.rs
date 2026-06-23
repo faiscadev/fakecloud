@@ -120,6 +120,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
             enable_dns_support: true,
             enable_dns_hostnames: true,
             cidr_associations: Vec::new(),
+            ipv6_cidr_block: None,
         },
     );
 
@@ -261,6 +262,93 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
             associations: nacl_associations,
         },
     );
+}
+
+/// Create the implicit resources AWS provisions for every newly-created VPC: a
+/// `default` security group, a default network ACL, and a main route table
+/// (with the `local` route). The `aws_vpc` resource reads back
+/// `default_security_group_id`, `default_network_acl_id`,
+/// `default_route_table_id`, and `main_route_table_id`, all derived from these.
+/// Ids are deterministic functions of the VPC id so read-path fallbacks agree.
+pub(crate) fn create_vpc_default_resources(state: &mut Ec2State, vpc_id: &str, cidr: &str) {
+    let account = state.account_id.clone();
+    let rtb_id = deterministic_id("rtb", &account, &format!("{vpc_id}-main-rtb"));
+    let acl_id = deterministic_id("acl", &account, &format!("{vpc_id}-default-acl"));
+    let sg_id = deterministic_id("sg", &account, &format!("{vpc_id}-default-sg"));
+
+    state
+        .route_tables
+        .entry(rtb_id.clone())
+        .or_insert_with(|| RouteTable {
+            route_table_id: rtb_id.clone(),
+            vpc_id: vpc_id.to_string(),
+            routes: vec![Route {
+                destination_cidr_block: Some(cidr.to_string()),
+                gateway_id: Some("local".to_string()),
+                ..Default::default()
+            }],
+            associations: vec![RouteTableAssociation {
+                association_id: deterministic_id("rtbassoc", &account, &format!("{vpc_id}-main")),
+                route_table_id: rtb_id.clone(),
+                subnet_id: None,
+                gateway_id: None,
+                main: true,
+            }],
+        });
+
+    state
+        .security_groups
+        .entry(sg_id.clone())
+        .or_insert_with(|| SecurityGroup {
+            group_id: sg_id.clone(),
+            group_name: "default".to_string(),
+            description: "default VPC security group".to_string(),
+            vpc_id: vpc_id.to_string(),
+            rules: vec![
+                SecurityGroupRule {
+                    rule_id: deterministic_id("sgr", &account, &format!("{vpc_id}-sg-ingress")),
+                    group_id: sg_id.clone(),
+                    is_egress: false,
+                    ip_protocol: "-1".to_string(),
+                    from_port: -1,
+                    to_port: -1,
+                    cidr_ipv4: None,
+                    cidr_ipv6: None,
+                    prefix_list_id: None,
+                    referenced_group_id: Some(sg_id.clone()),
+                    description: String::new(),
+                },
+                SecurityGroupRule {
+                    rule_id: deterministic_id("sgr", &account, &format!("{vpc_id}-sg-egress")),
+                    group_id: sg_id.clone(),
+                    is_egress: true,
+                    ip_protocol: "-1".to_string(),
+                    from_port: -1,
+                    to_port: -1,
+                    cidr_ipv4: Some("0.0.0.0/0".to_string()),
+                    cidr_ipv6: None,
+                    prefix_list_id: None,
+                    referenced_group_id: None,
+                    description: String::new(),
+                },
+            ],
+        });
+
+    state
+        .network_acls
+        .entry(acl_id.clone())
+        .or_insert_with(|| NetworkAcl {
+            network_acl_id: acl_id.clone(),
+            vpc_id: vpc_id.to_string(),
+            is_default: true,
+            entries: vec![
+                allow_all_entry(false),
+                deny_all_entry(false),
+                allow_all_entry(true),
+                deny_all_entry(true),
+            ],
+            associations: Vec::new(),
+        });
 }
 
 fn allow_all_entry(egress: bool) -> NetworkAclEntry {

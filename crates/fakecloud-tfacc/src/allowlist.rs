@@ -512,9 +512,21 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "ec2",
-        // Elastic IPs and key pairs. The wider EC2 surface (VPC/subnet/SG/...)
-        // is large and is being brought in incrementally elsewhere.
-        run_regex: "^TestAccEC2(EIP|EIPsDataSource|KeyPair)_basic$",
+        // Elastic IPs, key pairs, and the core VPC control plane. CreateVpc now
+        // provisions the default SG / default NACL / main route table (so
+        // `aws_vpc` reads back the four default-resource ids) and honors
+        // `AmazonProvidedIpv6CidrBlock` (a generated /56, also via
+        // AssociateVpcCidrBlock); subnets report `private_dns_name_options`;
+        // ENIs derive `private_dns_name` and default to the VPC's `default`
+        // security group. The remaining EC2 surface is brought in incrementally.
+        run_regex: concat!(
+            "^TestAcc(",
+            "EC2(EIP|EIPsDataSource|KeyPair)",
+            "|VPC(|Subnet|SecurityGroup|RouteTable|InternetGateway|NetworkACL",
+            "|NetworkInterface|DHCPOptions|EgressOnlyInternetGateway",
+            "|DefaultSecurityGroup|DefaultNetworkACL|Route)",
+            ")_basic$",
+        ),
         deny: &[],
     },
     Service {
@@ -801,7 +813,14 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "ec2",
         service: "ec2",
-        run_regex: "^TestAccEC2(EIP|EIPsDataSource|KeyPair)_basic$",
+        run_regex: concat!(
+            "^TestAcc(",
+            "EC2(EIP|EIPsDataSource|KeyPair)",
+            "|VPC(|Subnet|SecurityGroup|RouteTable|InternetGateway|NetworkACL",
+            "|NetworkInterface|DHCPOptions|EgressOnlyInternetGateway",
+            "|DefaultSecurityGroup|DefaultNetworkACL|Route)",
+            ")_basic$",
+        ),
         extra_deny: &[],
     },
     Shard {
