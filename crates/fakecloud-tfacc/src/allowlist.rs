@@ -492,13 +492,22 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "lambda",
-        // Function-URL + provisioned-concurrency + layer-version data source.
-        // The function/alias/permission resources need archive handling and a
-        // container runtime and are deferred.
+        // Control-plane metadata resources/data sources that don't need a
+        // container runtime: function URL, provisioned concurrency, layer
+        // versions (+ data source, now returning LayerArn on read), aliases
+        // (response is rendered in the AWS wire shape and routing config clears
+        // on removal), the function data source ($LATEST-qualified arn lineage
+        // via ListVersionsByFunction), and event-invoke config (optional
+        // MaximumEventAgeInSeconds). The `aws_lambda_function` /
+        // `aws_lambda_permission` resources and the functions/runtime-config
+        // data sources share a VPC scaffold that needs Amazon-provided IPv6
+        // CIDR generation (an EC2 feature) and are deferred; code-signing needs
+        // the AWS Signer service.
         run_regex: concat!(
             "^TestAccLambda(",
             "FunctionURL|FunctionURLDataSource",
-            "|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            "|LayerVersion|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            "|Alias|FunctionDataSource|FunctionEventInvokeConfig",
             ")_basic$",
         ),
         deny: &[],
@@ -785,7 +794,8 @@ pub const SHARDS: &[Shard] = &[
         run_regex: concat!(
             "^TestAccLambda(",
             "FunctionURL|FunctionURLDataSource",
-            "|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            "|LayerVersion|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            "|Alias|FunctionDataSource|FunctionEventInvokeConfig",
             ")_basic$",
         ),
         extra_deny: &[],

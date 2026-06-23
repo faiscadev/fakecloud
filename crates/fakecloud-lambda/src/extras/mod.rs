@@ -732,6 +732,11 @@ impl LambdaService {
             let mut all: Vec<serde_json::Value> = Vec::new();
             let mut latest = self.function_config_json(func);
             latest["Version"] = json!("$LATEST");
+            // In ListVersionsByFunction, AWS qualifies the $LATEST entry's
+            // FunctionArn with `:$LATEST` (unlike a bare GetFunction). The
+            // Terraform `aws_lambda_function` resource derives `qualified_arn`
+            // from this entry, so it must carry the qualifier.
+            latest["FunctionArn"] = json!(format!("{}:$LATEST", func.function_arn));
             all.push(latest);
             let snapshots = state.function_version_snapshots.get(function_name);
             if let Some(numbered) = state.function_versions.get(function_name) {
@@ -1087,9 +1092,8 @@ fn event_invoke_json(c: &EventInvokeConfig) -> Value {
             Value::Object(map)
         }
     };
-    json!({
+    let mut out = json!({
         "FunctionArn": c.function_arn,
-        "MaximumEventAgeInSeconds": c.maximum_event_age,
         "MaximumRetryAttempts": c.maximum_retry_attempts,
         "DestinationConfig": destination,
         // `LastModified` is bound to Smithy's `Date` shape
@@ -1101,7 +1105,12 @@ fn event_invoke_json(c: &EventInvokeConfig) -> Value {
             .last_modified
             .timestamp_millis() as f64
             / 1000.0,
-    })
+    });
+    // AWS only reports MaximumEventAgeInSeconds once the caller set it.
+    if c.maximum_event_age != 0 {
+        out["MaximumEventAgeInSeconds"] = json!(c.maximum_event_age);
+    }
+    out
 }
 
 #[cfg(test)]
