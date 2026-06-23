@@ -153,6 +153,23 @@ pub(crate) fn create_subnet(
         let state = accounts.get_or_create(&req.account_id);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "subnet");
         let tags = state.tags_for(&id).to_vec();
+        // AWS auto-associates every new subnet with its VPC's default network
+        // ACL. The aws_network_acl_association resource resolves the subnet's
+        // current association via DescribeNetworkAcls before replacing it, so
+        // the default association must exist.
+        let vpc_of_subnet = subnet.vpc_id.clone();
+        if let Some(default_acl) = state
+            .network_acls
+            .values_mut()
+            .find(|a| a.vpc_id == vpc_of_subnet && a.is_default)
+        {
+            default_acl
+                .associations
+                .push(crate::state::NetworkAclAssoc {
+                    association_id: gen_id("aclassoc"),
+                    subnet_id: id.clone(),
+                });
+        }
         state.subnets.insert(id.clone(), subnet.clone());
         format!(
             "<subnet>{}</subnet>",

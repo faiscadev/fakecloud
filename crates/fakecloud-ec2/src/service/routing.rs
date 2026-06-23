@@ -241,10 +241,33 @@ pub(crate) fn describe_route_tables(
         .values()
         .filter(|rt| wanted.is_empty() || wanted.contains(&rt.route_table_id))
         .filter(|rt| {
-            simple_match(
+            // Synthesize `association.main` so the provider's main-route-table
+            // lookup (a singular find) resolves to exactly the main RT instead
+            // of every RT in the VPC.
+            let main = if rt.associations.iter().any(|a| a.main) {
+                "true"
+            } else {
+                "false"
+            };
+            let subnet_assoc: Vec<&str> = rt
+                .associations
+                .iter()
+                .filter_map(|a| a.subnet_id.as_deref())
+                .collect();
+            let assoc_ids: Vec<&str> = rt
+                .associations
+                .iter()
+                .map(|a| a.association_id.as_str())
+                .collect();
+            simple_match_multi(
                 &[
                     ("route-table-id", &rt.route_table_id),
                     ("vpc-id", &rt.vpc_id),
+                    ("association.main", main),
+                ],
+                &[
+                    ("association.subnet-id", &subnet_assoc),
+                    ("association.route-table-association-id", &assoc_ids),
                 ],
                 state.tags_for(&rt.route_table_id),
                 &filters,
@@ -388,12 +411,28 @@ pub(crate) fn replace_route_table_association(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // Detach the association from whichever route table currently owns it,
+        // preserving whether it's the main association or a subnet association.
+        let mut moved: Option<crate::state::RouteTableAssociation> = None;
         for rt in state.route_tables.values_mut() {
-            for a in rt.associations.iter_mut() {
-                if a.association_id == assoc_id {
-                    a.association_id = new_id.clone();
-                    a.route_table_id = rt_id.clone();
-                }
+            if let Some(pos) = rt
+                .associations
+                .iter()
+                .position(|a| a.association_id == assoc_id)
+            {
+                moved = Some(rt.associations.remove(pos));
+                break;
+            }
+        }
+        // Re-attach it to the target route table with a fresh id. Moving the
+        // association (rather than rewriting its fields in place) is what lets a
+        // `main` association actually migrate to the new table, so the
+        // DescribeRouteTables `association.main` lookup resolves the new table.
+        if let Some(mut assoc) = moved {
+            assoc.association_id = new_id.clone();
+            assoc.route_table_id = rt_id.clone();
+            if let Some(target) = state.route_tables.get_mut(&rt_id) {
+                target.associations.push(assoc);
             }
         }
     }
@@ -743,10 +782,24 @@ pub(crate) fn unassign_private_nat_gateway_address(
 // ---- shared filter ----
 
 fn simple_match(fields: &[(&str, &str)], tags: &[Tag], filters: &[Filter]) -> bool {
+    simple_match_multi(fields, &[], tags, filters)
+}
+
+/// Like [`simple_match`] but also accepts multi-valued fields (a single filter
+/// name backed by a list of candidate values, e.g. `association.subnet-id`
+/// over a route table's several subnet associations).
+fn simple_match_multi(
+    fields: &[(&str, &str)],
+    multi_fields: &[(&str, &[&str])],
+    tags: &[Tag],
+    filters: &[Filter],
+) -> bool {
     filters.iter().all(|f| {
         let candidates: Vec<String> =
             if let Some((_, v)) = fields.iter().find(|(n, _)| *n == f.name) {
                 vec![v.to_string()]
+            } else if let Some((_, vs)) = multi_fields.iter().find(|(n, _)| *n == f.name) {
+                vs.iter().map(|s| s.to_string()).collect()
             } else if f.name == "tag-key" {
                 tags.iter().map(|t| t.key.clone()).collect()
             } else if let Some(key) = f.name.strip_prefix("tag:") {

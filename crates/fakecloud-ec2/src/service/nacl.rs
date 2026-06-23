@@ -177,6 +177,18 @@ fn nacl_match(a: &NetworkAcl, tags: &[Tag], filters: &[Filter]) -> bool {
             "network-acl-id" => vec![a.network_acl_id.clone()],
             "vpc-id" => vec![a.vpc_id.clone()],
             "default" => vec![a.is_default.to_string()],
+            // The aws_network_acl_association resource's read is a singular
+            // find filtered by the associated subnet, so this filter must
+            // narrow to the one NACL covering that subnet.
+            "association.subnet-id" => a.associations.iter().map(|x| x.subnet_id.clone()).collect(),
+            "association.association-id" => a
+                .associations
+                .iter()
+                .map(|x| x.association_id.clone())
+                .collect(),
+            "association.network-acl-id" if !a.associations.is_empty() => {
+                vec![a.network_acl_id.clone()]
+            }
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
