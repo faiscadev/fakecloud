@@ -194,14 +194,14 @@ jobs:
 
       # Run the prebuilt test binaries straight from the archive — no compilation.
       # --workspace-remap . points runtime workspace lookups at this checkout (the
-      # path matches the build runner on GitHub-hosted runners). Extract under /mnt
-      # so the unpacked binaries don't fill the small root filesystem.
+      # path matches the build runner on GitHub-hosted runners). nextest extracts
+      # to its own temp dir under /tmp (ample free space on the root fs);
+      # container images still land on the /mnt-relocated docker root.
       - name: Run nextest partition
         run: |
           cmd=(cargo nextest run -P ci
             --archive-file e2e-archive.tar.zst
             --workspace-remap .
-            --extract-to /mnt/nextest-e2e --extract-overwrite
             -E "$NEXTEST_FILTER")
           if [ -n "$NEXTEST_PARTITION" ]; then
             cmd+=(--partition "$NEXTEST_PARTITION")
