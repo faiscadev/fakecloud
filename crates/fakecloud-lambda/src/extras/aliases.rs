@@ -9,6 +9,24 @@ impl LambdaService {
         format!("{function}:{alias}")
     }
 
+    /// Render an alias in the AWS wire shape (PascalCase keys). The stored
+    /// `FunctionAlias` uses snake_case Rust field names for persistence, so it
+    /// must not be serialized directly into a response — the AWS SDK would not
+    /// find `AliasArn`/`Name`/etc and would parse an empty object.
+    fn alias_json(a: &FunctionAlias) -> Value {
+        let mut o = json!({
+            "AliasArn": a.alias_arn,
+            "Name": a.name,
+            "FunctionVersion": a.function_version,
+            "Description": a.description,
+            "RevisionId": a.revision_id,
+        });
+        if let Some(ref rc) = a.routing_config {
+            o["RoutingConfig"] = rc.clone();
+        }
+        o
+    }
+
     pub(super) fn create_alias(
         &self,
         function_name: &str,
@@ -48,12 +66,19 @@ impl LambdaService {
             function_version: version,
             description: body["Description"].as_str().unwrap_or("").to_string(),
             revision_id: id_from_time("rev-"),
-            routing_config: body.get("RoutingConfig").cloned(),
+            routing_config: body
+                .get("RoutingConfig")
+                .filter(|rc| {
+                    rc.get("AdditionalVersionWeights")
+                        .and_then(|w| w.as_object())
+                        .is_some_and(|w| !w.is_empty())
+                })
+                .cloned(),
         };
         state
             .aliases
             .insert(Self::alias_key(function_name, &name), alias.clone());
-        ok(serde_json::to_value(alias).unwrap_or_default())
+        ok(Self::alias_json(&alias))
     }
 
     pub(super) fn get_alias(
@@ -77,7 +102,7 @@ impl LambdaService {
             state
                 .aliases
                 .get(&Self::alias_key(function_name, &alias_name))
-                .map(|a| ok(serde_json::to_value(a).unwrap_or_default()))
+                .map(|a| ok(Self::alias_json(a)))
                 .unwrap_or_else(|| Err(not_found("Alias", &alias_name)))
         })
     }
@@ -101,10 +126,7 @@ impl LambdaService {
                 .collect();
             let (page, next_marker) =
                 crate::service::paginate_marker(aliases, marker, max_items, |a| a.name.clone());
-            let page_json: Vec<Value> = page
-                .iter()
-                .map(|a| serde_json::to_value(a).unwrap_or_default())
-                .collect();
+            let page_json: Vec<Value> = page.iter().map(Self::alias_json).collect();
             ok(json!({"Aliases": page_json, "NextMarker": next_marker}))
         })
     }
@@ -129,11 +151,20 @@ impl LambdaService {
         if let Some(d) = body["Description"].as_str() {
             alias.description = d.to_string();
         }
-        if let Some(rc) = body.get("RoutingConfig") {
-            alias.routing_config = Some(rc.clone());
-        }
+        // UpdateAlias replaces the routing config wholesale: an absent or empty
+        // `RoutingConfig.AdditionalVersionWeights` clears it (Terraform removes
+        // the block by sending an empty config). Keeping the old weights would
+        // leave the alias's routing config "still present" after removal.
+        alias.routing_config = body
+            .get("RoutingConfig")
+            .filter(|rc| {
+                rc.get("AdditionalVersionWeights")
+                    .and_then(|w| w.as_object())
+                    .is_some_and(|w| !w.is_empty())
+            })
+            .cloned();
         alias.revision_id = id_from_time("rev-");
-        ok(serde_json::to_value(alias).unwrap_or_default())
+        ok(Self::alias_json(alias))
     }
 
     pub(super) fn delete_alias(

@@ -204,8 +204,14 @@ impl LambdaService {
 
         let mut config = self.function_config_json(func);
         config["Version"] = json!(version_label);
-        if version_label != "$LATEST" {
+        // When the caller passed an explicit `Qualifier` (including `$LATEST`),
+        // AWS qualifies the returned FunctionArn with it; an unqualified
+        // GetFunction returns the bare ARN. The Terraform function data source
+        // relies on this to derive `qualified_arn`.
+        if qualifier.is_some() {
             config["FunctionArn"] = json!(format!("{}:{version_label}", live.function_arn));
+        }
+        if version_label != "$LATEST" {
             config["MasterArn"] = json!(live.function_arn);
         }
         let code = if let Some(ref uri) = func.image_uri {

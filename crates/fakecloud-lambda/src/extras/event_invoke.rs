@@ -25,8 +25,12 @@ impl LambdaService {
         // Validate Smithy ranges before persisting:
         //   MaximumEventAgeInSeconds: 60..=21600
         //   MaximumRetryAttempts:     0..=2
-        let event_age = body["MaximumEventAgeInSeconds"].as_i64().unwrap_or(21600);
-        if !(60..=21600).contains(&event_age) {
+        // MaximumEventAgeInSeconds is optional: AWS only reports it once set.
+        // Store 0 as the "unset" sentinel (0 is outside the valid 60..21600
+        // range) so GetFunctionEventInvokeConfig can omit it, which the
+        // Terraform resource reads back as 0.
+        let event_age = body["MaximumEventAgeInSeconds"].as_i64().unwrap_or(0);
+        if event_age != 0 && !(60..=21600).contains(&event_age) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",

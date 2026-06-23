@@ -1027,3 +1027,175 @@ async fn lambda_alias_targets_published_version_snapshot() {
     assert_eq!(cfg.code_sha256().unwrap(), v1_sha);
     assert!(cfg.function_arn().unwrap().ends_with(":1"));
 }
+
+#[tokio::test]
+async fn lambda_get_alias_wire_shape_and_routing_removal() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("rc-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .publish_version()
+        .function_name("rc-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_code()
+        .function_name("rc-fn")
+        .zip_file(Blob::new(make_zip_with(b"v2\n")))
+        .send()
+        .await
+        .unwrap();
+    client
+        .publish_version()
+        .function_name("rc-fn")
+        .send()
+        .await
+        .unwrap();
+
+    // Create alias with a routing config (90/10 between v1 and v2).
+    client
+        .create_alias()
+        .function_name("rc-fn")
+        .name("live")
+        .function_version("1")
+        .routing_config(
+            aws_sdk_lambda::types::AliasRoutingConfiguration::builder()
+                .additional_version_weights("2", 0.1)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // GetAlias must return the AWS wire shape (PascalCase fields parse into the
+    // typed SDK struct) including the routing config.
+    let got = client
+        .get_alias()
+        .function_name("rc-fn")
+        .name("live")
+        .send()
+        .await
+        .expect("get alias");
+    assert_eq!(got.name(), Some("live"));
+    assert_eq!(got.function_version(), Some("1"));
+    assert!(got.alias_arn().unwrap().ends_with(":live"));
+    assert!(got.revision_id().is_some());
+    assert_eq!(
+        got.routing_config()
+            .and_then(|r| r.additional_version_weights())
+            .and_then(|w| w.get("2"))
+            .copied(),
+        Some(0.1)
+    );
+
+    // Removing the routing config (empty) must clear it, not leave it present.
+    client
+        .update_alias()
+        .function_name("rc-fn")
+        .name("live")
+        .routing_config(aws_sdk_lambda::types::AliasRoutingConfiguration::builder().build())
+        .send()
+        .await
+        .unwrap();
+    let after = client
+        .get_alias()
+        .function_name("rc-fn")
+        .name("live")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        after
+            .routing_config()
+            .map(|r| r.additional_version_weights().is_none_or(|w| w.is_empty()))
+            .unwrap_or(true),
+        "routing config must be cleared after removal"
+    );
+}
+
+#[tokio::test]
+async fn lambda_get_layer_version_returns_layer_arn() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let published = client
+        .publish_layer_version()
+        .layer_name("mylayer")
+        .content(
+            aws_sdk_lambda::types::LayerVersionContentInput::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("publish layer");
+    let version = published.version();
+
+    // GetLayerVersion must echo LayerArn (the Terraform resource reads it).
+    let got = client
+        .get_layer_version()
+        .layer_name("mylayer")
+        .version_number(version)
+        .send()
+        .await
+        .expect("get layer version");
+    assert_eq!(
+        got.layer_arn(),
+        Some("arn:aws:lambda:us-east-1:123456789012:layer:mylayer")
+    );
+}
+
+#[tokio::test]
+async fn lambda_event_invoke_config_omits_unset_max_age() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("eic-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Set only the retry attempts; leave MaximumEventAgeInSeconds unset.
+    client
+        .put_function_event_invoke_config()
+        .function_name("eic-fn")
+        .maximum_retry_attempts(1)
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_function_event_invoke_config()
+        .function_name("eic-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.maximum_retry_attempts(), Some(1));
+    // AWS does not synthesise a default age, so it comes back unset.
+    assert!(got.maximum_event_age_in_seconds().is_none());
+}

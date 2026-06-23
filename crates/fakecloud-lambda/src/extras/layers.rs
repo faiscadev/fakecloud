@@ -236,9 +236,15 @@ impl LambdaService {
             state
                 .layers
                 .get(&layer_name)
-                .and_then(|l| l.versions.iter().find(|v| v.version == version))
-                .map(|v| {
+                .and_then(|l| {
+                    l.versions
+                        .iter()
+                        .find(|v| v.version == version)
+                        .map(|v| (l.layer_arn.clone(), v))
+                })
+                .map(|(layer_arn, v)| {
                     ok(json!({
+                        "LayerArn": layer_arn,
                         "LayerVersionArn": v.layer_version_arn,
                         "Version": v.version,
                         "Description": v.description,
@@ -275,9 +281,15 @@ impl LambdaService {
             state
                 .layers
                 .get(&layer_name)
-                .and_then(|l| l.versions.iter().find(|v| v.version == version))
-                .map(|v| {
+                .and_then(|l| {
+                    l.versions
+                        .iter()
+                        .find(|v| v.version == version)
+                        .map(|v| (l.layer_arn.clone(), v))
+                })
+                .map(|(layer_arn, v)| {
                     ok(json!({
+                        "LayerArn": layer_arn,
                         "LayerVersionArn": v.layer_version_arn,
                         "Version": v.version,
                         "Description": v.description,
