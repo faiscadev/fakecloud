@@ -68,6 +68,46 @@ async fn glue_acceptance() {
 }
 
 #[tokio::test]
+async fn cloudformation_acceptance() {
+    run_shard("cloudformation").await;
+}
+
+#[tokio::test]
+async fn cognito_identity_acceptance() {
+    run_shard("cognito-identity").await;
+}
+
+#[tokio::test]
+async fn lambda_acceptance() {
+    run_shard("lambda").await;
+}
+
+#[tokio::test]
+async fn ecs_acceptance() {
+    run_shard("ecs").await;
+}
+
+#[tokio::test]
+async fn ec2_acceptance() {
+    run_shard("ec2").await;
+}
+
+#[tokio::test]
+async fn elasticache_acceptance() {
+    run_shard("elasticache").await;
+}
+
+#[tokio::test]
+async fn cloudfront_acceptance() {
+    run_shard("cloudfront").await;
+}
+
+#[tokio::test]
+async fn sfn_acceptance() {
+    run_shard("sfn").await;
+}
+
+#[tokio::test]
 async fn cognitoidp_acceptance() {
     run_shard("cognitoidp").await;
 }

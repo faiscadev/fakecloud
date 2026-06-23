@@ -470,6 +470,77 @@ pub const SERVICES: &[Service] = &[
             "TestAccDynamoDBTable_TTL_updateDisable",
         ],
     },
+    // ─── Wave 3 tail: services added with a narrow positive regex over their
+    //     currently-passing resources/data sources. The broader suites for
+    //     these need fixes (or a container engine) and are deferred rather than
+    //     enumerated as denies. ──────────────────────────────────────────────
+    Service {
+        name: "cloudformation",
+        run_regex: "^TestAccCloudFormation(ExportDataSource|Stack)_basic$",
+        deny: &[],
+    },
+    Service {
+        name: "cognito-identity",
+        run_regex: concat!(
+            "^TestAccCognitoIdentity(",
+            "Pool|PoolDataSource|PoolRolesAttachment",
+            "|OpenIDTokenForDeveloperIdentityEphemeral",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
+        name: "lambda",
+        // Function-URL + provisioned-concurrency + layer-version data source.
+        // The function/alias/permission resources need archive handling and a
+        // container runtime and are deferred.
+        run_regex: concat!(
+            "^TestAccLambda(",
+            "FunctionURL|FunctionURLDataSource",
+            "|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
+        name: "ecs",
+        run_regex: concat!(
+            "^TestAccECS(",
+            "ClusterCapacityProviders|ClustersDataSource",
+            "|TaskDefinition|TaskExecutionDataSource",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
+        name: "ec2",
+        // Elastic IPs and key pairs. The wider EC2 surface (VPC/subnet/SG/...)
+        // is large and is being brought in incrementally elsewhere.
+        run_regex: "^TestAccEC2(EIP|EIPsDataSource|KeyPair)_basic$",
+        deny: &[],
+    },
+    Service {
+        name: "elasticache",
+        run_regex: "^TestAccElastiCache(ClusterDataSource|User)_basic$",
+        deny: &[],
+    },
+    Service {
+        name: "cloudfront",
+        // Cache/origin-request/realtime-log/log-delivery data sources. The
+        // CloudFront resources (distribution, function, OAC, ...) are deferred.
+        run_regex: concat!(
+            "^TestAccCloudFront(",
+            "CachePolicyDataSource|OriginRequestPolicyDataSource",
+            "|RealtimeLogConfigDataSource|LogDeliveryCanonicalUserIDDataSource",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
+        name: "sfn",
+        run_regex: "^TestAccSFNStateMachineDataSource_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -672,6 +743,75 @@ pub const SHARDS: &[Shard] = &[
             "ContributorInsights|Tag|TableItem|TableItemDataSource|TableDataSource",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    // ─── Wave 3 tail (one shard each, narrow positive regex) ───────────
+    Shard {
+        name: "cloudformation",
+        service: "cloudformation",
+        run_regex: "^TestAccCloudFormation(ExportDataSource|Stack)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "cognito-identity",
+        service: "cognito-identity",
+        run_regex: concat!(
+            "^TestAccCognitoIdentity(",
+            "Pool|PoolDataSource|PoolRolesAttachment",
+            "|OpenIDTokenForDeveloperIdentityEphemeral",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "lambda",
+        service: "lambda",
+        run_regex: concat!(
+            "^TestAccLambda(",
+            "FunctionURL|FunctionURLDataSource",
+            "|LayerVersionDataSource|ProvisionedConcurrencyConfig",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ecs",
+        service: "ecs",
+        run_regex: concat!(
+            "^TestAccECS(",
+            "ClusterCapacityProviders|ClustersDataSource",
+            "|TaskDefinition|TaskExecutionDataSource",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ec2",
+        service: "ec2",
+        run_regex: "^TestAccEC2(EIP|EIPsDataSource|KeyPair)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "elasticache",
+        service: "elasticache",
+        run_regex: "^TestAccElastiCache(ClusterDataSource|User)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "cloudfront",
+        service: "cloudfront",
+        run_regex: concat!(
+            "^TestAccCloudFront(",
+            "CachePolicyDataSource|OriginRequestPolicyDataSource",
+            "|RealtimeLogConfigDataSource|LogDeliveryCanonicalUserIDDataSource",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "sfn",
+        service: "sfn",
+        run_regex: "^TestAccSFNStateMachineDataSource_basic$",
         extra_deny: &[],
     },
 ];
