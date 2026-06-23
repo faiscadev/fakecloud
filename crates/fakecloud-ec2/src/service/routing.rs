@@ -781,13 +781,10 @@ pub(crate) fn unassign_private_nat_gateway_address(
 
 // ---- shared filter ----
 
-fn simple_match(fields: &[(&str, &str)], tags: &[Tag], filters: &[Filter]) -> bool {
-    simple_match_multi(fields, &[], tags, filters)
-}
-
-/// Like [`simple_match`] but also accepts multi-valued fields (a single filter
-/// name backed by a list of candidate values, e.g. `association.subnet-id`
-/// over a route table's several subnet associations).
+/// Filter matcher for route-table describe. Accepts both single-valued fields
+/// and multi-valued fields (a single filter name backed by a list of candidate
+/// values, e.g. `association.subnet-id` over a route table's several subnet
+/// associations).
 fn simple_match_multi(
     fields: &[(&str, &str)],
     multi_fields: &[(&str, &[&str])],
