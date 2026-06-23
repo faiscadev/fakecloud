@@ -162,9 +162,11 @@ async fn iam_roles() {
         .unwrap();
     assert_eq!(resp.role().unwrap().role_name(), "test-role");
 
-    // List
+    // List — the account also ships the default service-linked roles AWS
+    // auto-creates, so assert the created role is present rather than an
+    // exact count.
     let resp = client.list_roles().send().await.unwrap();
-    assert_eq!(resp.roles().len(), 1);
+    assert!(resp.roles().iter().any(|r| r.role_name() == "test-role"));
 
     // Delete
     client
@@ -174,8 +176,9 @@ async fn iam_roles() {
         .await
         .unwrap();
 
+    // The created role is gone; only the default service-linked roles remain.
     let resp = client.list_roles().send().await.unwrap();
-    assert_eq!(resp.roles().len(), 0);
+    assert!(resp.roles().iter().all(|r| r.role_name() != "test-role"));
 }
 
 #[tokio::test]
@@ -3658,4 +3661,34 @@ async fn iam_attach_aws_managed_policy_round_trips() {
 
     let gp = client.get_policy().policy_arn(arn).send().await.unwrap();
     assert_eq!(gp.policy().unwrap().attachment_count(), Some(1));
+}
+
+#[tokio::test]
+async fn iam_service_linked_role_canonical_name() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    // The Inspector SLR name is not a naive capitalisation of the principal.
+    let resp = client
+        .create_service_linked_role()
+        .aws_service_name("inspector.amazonaws.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.role().unwrap().role_name(),
+        "AWSServiceRoleForAmazonInspector"
+    );
+}
+
+#[tokio::test]
+async fn iam_account_seeds_default_service_linked_roles() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    // A fresh account lists the default SLRs AWS auto-creates.
+    let resp = client.list_roles().send().await.unwrap();
+    let names: Vec<&str> = resp.roles().iter().map(|r| r.role_name()).collect();
+    assert!(names.contains(&"AWSServiceRoleForSupport"));
+    assert!(names.contains(&"AWSServiceRoleForTrustedAdvisor"));
 }

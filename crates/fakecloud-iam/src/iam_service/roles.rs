@@ -80,6 +80,32 @@ fn derive_service_linked_role_name(aws_service_name: &str, custom_suffix: Option
         "elasticbeanstalk" => "ElasticBeanstalk".to_string(),
         "elasticloadbalancing" => "ElasticLoadBalancing".to_string(),
         "elasticmapreduce" => "ElasticMapReduce".to_string(),
+        // Documented service-linked-role suffixes that don't follow the
+        // title-case-the-principal rule. AWS mints `AWSServiceRoleFor<Suffix>`
+        // with these exact spellings; deriving them mechanically would produce
+        // wrong names (e.g. `inspector` -> `AmazonInspector`).
+        "inspector" => "AmazonInspector".to_string(),
+        "inspector2" => "AmazonInspector2".to_string(),
+        "ec2" | "ec2-instance-connect" => "EC2InstanceConnect".to_string(),
+        "ssm" => "AmazonSSM".to_string(),
+        "rds" => "RDS".to_string(),
+        "elasticache" => "ElastiCache".to_string(),
+        "ecs" => "ECS".to_string(),
+        "eks" => "AmazonEKS".to_string(),
+        " eks-nodegroup" | "eks-nodegroup" => "AmazonEKSNodegroup".to_string(),
+        "opensearchservice" => "AmazonOpenSearchService".to_string(),
+        "es" => "AmazonElasticsearchService".to_string(),
+        "guardduty" => "AmazonGuardDuty".to_string(),
+        "macie" => "AmazonMacie".to_string(),
+        "config" => "Config".to_string(),
+        "cloudtrail" => "CloudTrail".to_string(),
+        "organizations" => "Organizations".to_string(),
+        "sso" => "SSO".to_string(),
+        "kafka" => "Kafka".to_string(),
+        "globalaccelerator" => "GlobalAccelerator".to_string(),
+        "dynamodb" => "DynamoDBReplication".to_string(),
+        "lakeformation" => "LakeFormationDataAccess".to_string(),
+        "s3" => "S3StorageLens".to_string(),
         s if s.contains('.') => {
             let parts: Vec<&str> = s.splitn(2, '.').collect();
             let prefix = parts[0];
