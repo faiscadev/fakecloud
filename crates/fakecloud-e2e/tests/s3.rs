@@ -4585,3 +4585,122 @@ async fn s3_eventbridge_notification() {
     assert_eq!(body["detail"]["bucket"]["name"], "eb-notif-bucket");
     assert_eq!(body["detail"]["object"]["key"], "test-file.txt");
 }
+
+#[tokio::test]
+async fn s3_logging_does_not_deliver_objects_by_default() {
+    // Real S3 delivers server access logs asynchronously/best-effort, so a
+    // target bucket created and exercised within a test stays empty (and is
+    // deletable). fakecloud only delivers eagerly when opted in, so by default
+    // the log bucket must remain empty no matter how many requests we make.
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client.create_bucket().bucket("src-b").send().await.unwrap();
+    client.create_bucket().bucket("log-b").send().await.unwrap();
+
+    let logging = r#"<BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LoggingEnabled><TargetBucket>log-b</TargetBucket><TargetPrefix>logs/</TargetPrefix></LoggingEnabled></BucketLoggingStatus>"#;
+    client
+        .put_bucket_logging()
+        .bucket("src-b")
+        .bucket_logging_status(
+            aws_sdk_s3::types::BucketLoggingStatus::builder()
+                .logging_enabled(
+                    aws_sdk_s3::types::LoggingEnabled::builder()
+                        .target_bucket("log-b")
+                        .target_prefix("logs/")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put logging");
+    let _ = logging;
+
+    // Generate traffic against the source bucket.
+    for i in 0..5 {
+        client
+            .put_object()
+            .bucket("src-b")
+            .key(format!("k{i}"))
+            .body(ByteStream::from_static(b"data"))
+            .send()
+            .await
+            .unwrap();
+        let _ = client
+            .get_object()
+            .bucket("src-b")
+            .key(format!("k{i}"))
+            .send()
+            .await;
+    }
+
+    // The log bucket must still be empty, so it deletes cleanly.
+    let listed = client
+        .list_objects_v2()
+        .bucket("log-b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.key_count(),
+        Some(0),
+        "log bucket must be empty by default"
+    );
+}
+
+#[tokio::test]
+async fn s3_inventory_does_not_deliver_report_by_default() {
+    // Inventory reports are delivered on a daily/weekly schedule in real S3, so
+    // configuring inventory does not place an object in the destination bucket.
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client.create_bucket().bucket("inv-b").send().await.unwrap();
+
+    let inv = aws_sdk_s3::types::InventoryConfiguration::builder()
+        .id("inv1")
+        .is_enabled(true)
+        .included_object_versions(aws_sdk_s3::types::InventoryIncludedObjectVersions::Current)
+        .schedule(
+            aws_sdk_s3::types::InventorySchedule::builder()
+                .frequency(aws_sdk_s3::types::InventoryFrequency::Daily)
+                .build()
+                .unwrap(),
+        )
+        .destination(
+            aws_sdk_s3::types::InventoryDestination::builder()
+                .s3_bucket_destination(
+                    aws_sdk_s3::types::InventoryS3BucketDestination::builder()
+                        .bucket("arn:aws:s3:::inv-b")
+                        .format(aws_sdk_s3::types::InventoryFormat::Csv)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    client
+        .put_bucket_inventory_configuration()
+        .bucket("inv-b")
+        .id("inv1")
+        .inventory_configuration(inv)
+        .send()
+        .await
+        .expect("put inventory config");
+
+    let listed = client
+        .list_objects_v2()
+        .bucket("inv-b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.key_count(),
+        Some(0),
+        "no inventory report object by default"
+    );
+}

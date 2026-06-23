@@ -442,3 +442,48 @@ async fn kinesis_increase_retention_to_current_value_is_noop() {
         .await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn kinesis_update_shard_count_reshard_lineage_matches_aws() {
+    use aws_sdk_kinesis::types::ScalingType;
+
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("reshard")
+        .shard_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    // Scale 2 -> 3. AWS uniform scaling reshards through the shards' common
+    // refinement (split every shard, then merge pieces), which leaves exactly
+    // 4 closed shards — not 2. The data source asserts this count.
+    client
+        .update_shard_count()
+        .stream_name("reshard")
+        .target_shard_count(3)
+        .scaling_type(ScalingType::UniformScaling)
+        .send()
+        .await
+        .expect("update shard count");
+
+    // The data source partitions shards by the presence of an ending sequence
+    // number: closed shards have one, open shards do not. Scaling 2 -> 3 must
+    // leave exactly 4 closed and 3 open.
+    let all = client
+        .list_shards()
+        .stream_name("reshard")
+        .send()
+        .await
+        .expect("list all shards");
+    let (closed, open): (Vec<_>, Vec<_>) = all.shards().iter().partition(|s| {
+        s.sequence_number_range()
+            .and_then(|r| r.ending_sequence_number())
+            .is_some()
+    });
+    assert_eq!(closed.len(), 4, "scaling 2 -> 3 must close 4 shards");
+    assert_eq!(open.len(), 3, "scaling 2 -> 3 must leave 3 open shards");
+}

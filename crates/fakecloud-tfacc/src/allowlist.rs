@@ -79,11 +79,11 @@ pub const SERVICES: &[Service] = &[
         // `x-amz-checksum-mode: ENABLED`, which the object tests assert.
         run_regex: "^TestAccS3[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: bucket logging / inventory leave the destination bucket
-            //     non-empty at destroy time (force-destroy / log-object
-            //     cleanup) — CheckDestroy fails with BucketNotEmpty. ---
-            "TestAccS3BucketLogging_basic",
-            "TestAccS3BucketInventory_basic",
+            // (Bucket logging / inventory no longer eagerly deliver access-log
+            //  or report objects into the destination bucket — like real S3,
+            //  which delivers them async/scheduled — so a create+destroy test
+            //  leaves the bucket empty and CheckDestroy passes. Eager delivery
+            //  is opt-in via `FAKECLOUD_S3_EAGER_DELIVERY`.)
             // --- gap: replication configuration is cross-region. ---
             "TestAccS3BucketReplicationConfiguration_basic",
             // --- unsupportable: S3 Express One Zone directory buckets are a
@@ -252,13 +252,10 @@ pub const SERVICES: &[Service] = &[
         // DescribeStreamSummary (so the data source reads `shard_level_metrics`)
         // and made CreateStream persist its initial Tags.
         run_regex: "^TestAccKinesis[A-Za-z]+_basic$",
-        deny: &[
-            // --- gap: the data source asserts a closed-shard count produced by
-            //     a split/merge sequence; fakecloud's shard-lineage accounting
-            //     closes fewer shards than real Kinesis (4 expected, 2 closed),
-            //     which needs fuller split/merge parent-shard tracking. ---
-            "TestAccKinesisStreamDataSource_basic",
-        ],
+        // (UpdateShardCount now reshards through the shards' common refinement
+        //  — split-all-then-merge — matching AWS's uniform-scaling lineage, so
+        //  scaling 2 -> 3 leaves the 4 closed shards the data source asserts.)
+        deny: &[],
     },
     Service {
         name: "sns",
