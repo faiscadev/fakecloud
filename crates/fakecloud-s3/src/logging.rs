@@ -10,6 +10,26 @@ use crate::persistence::object_meta_snapshot;
 use crate::state::{S3Object, SharedS3State};
 use crate::xml_util::extract_tag;
 
+/// Whether eager, synchronous delivery of best-effort S3 reports (server
+/// access logs and inventory reports) is enabled.
+///
+/// Real S3 delivers both asynchronously: access logs are best-effort with
+/// minutes-to-hours latency, and inventory reports run on a daily/weekly
+/// schedule. A bucket created and destroyed within a single test therefore
+/// never accumulates these objects, so it deletes cleanly. fakecloud can
+/// deliver them synchronously for users who want to exercise the features,
+/// but that breaks the realistic create/destroy lifecycle (the destination
+/// bucket is never empty), so it is opt-in via
+/// `FAKECLOUD_S3_EAGER_DELIVERY=1`.
+pub fn eager_delivery_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FAKECLOUD_S3_EAGER_DELIVERY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 /// Parsed logging configuration extracted from the XML stored on the bucket.
 pub struct LoggingConfig {
     pub target_bucket: String,
@@ -78,6 +98,13 @@ pub fn maybe_write_access_log(
     source_bucket: &str,
     request: &AccessLogRequest<'_>,
 ) {
+    // Real S3 delivers access logs asynchronously and best-effort, so a bucket
+    // is empty during a quick create/destroy test. Only deliver synchronously
+    // when explicitly opted in.
+    if !eager_delivery_enabled() {
+        return;
+    }
+
     // Read logging config from the source bucket
     let (logging_config_xml, bucket_owner) = {
         let mas = state.read();

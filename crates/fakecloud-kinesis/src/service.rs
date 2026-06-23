@@ -1640,32 +1640,121 @@ impl KinesisService {
 
         let current = stream.open_shard_count;
 
+        // Real Kinesis UpdateShardCount (uniform scaling) does not simply close
+        // the old shards and open `target` new ones. It reshapes the current
+        // partition into the target partition through the shards' *common
+        // refinement*: every current open shard is split at the target
+        // boundaries (closing the originals), then adjacent refinement pieces
+        // that fall inside the same target shard are merged (closing those
+        // pieces). This is why scaling 2 -> 3 leaves 4 closed shards, not 2 —
+        // a fact the `aws_kinesis_stream` data source asserts. We reproduce the
+        // same lineage so `closed_shards` / `open_shards` match AWS.
+
+        // Current open shards as inclusive [start, end] hash-key ranges.
+        let mut open_ranges: Vec<(u128, u128)> = stream
+            .shards
+            .iter()
+            .filter(|s| s.is_open)
+            .map(|s| {
+                (
+                    s.starting_hash_key.parse::<u128>().unwrap_or(0),
+                    s.ending_hash_key.parse::<u128>().unwrap_or(MAX_HASH_KEY),
+                )
+            })
+            .collect();
+        open_ranges.sort_unstable();
+
+        // Target uniform partition as inclusive [start, end] ranges.
+        let count = target as u128;
+        let target_ranges: Vec<(u128, u128)> = (0..count)
+            .map(|idx| {
+                let start = if idx == 0 {
+                    0
+                } else {
+                    (MAX_HASH_KEY / count) * idx + 1
+                };
+                let end = if idx == count - 1 {
+                    MAX_HASH_KEY
+                } else {
+                    (MAX_HASH_KEY / count) * (idx + 1)
+                };
+                (start, end)
+            })
+            .collect();
+
+        // Cut points = the union of every range's *start* key. Each pair of
+        // consecutive starts defines a refinement interval `[start, next-1]`,
+        // with the final interval running to `MAX_HASH_KEY`. (Hash keys span
+        // the full u128 range, so an exclusive `end+1` upper bound would
+        // overflow — starts alone unambiguously define the partition.)
+        let mut cuts: Vec<u128> = Vec::with_capacity(open_ranges.len() + target_ranges.len() + 1);
+        cuts.push(0);
+        for (s, _) in open_ranges.iter().chain(target_ranges.iter()) {
+            cuts.push(*s);
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+
+        let refinement: Vec<(u128, u128)> = cuts
+            .iter()
+            .enumerate()
+            .map(|(i, &start)| {
+                let end = cuts.get(i + 1).map(|next| next - 1).unwrap_or(MAX_HASH_KEY);
+                (start, end)
+            })
+            .collect();
+
+        // Close every current open shard — they are all split away.
         for shard in &mut stream.shards {
-            if shard.is_open {
-                shard.is_open = false;
-            }
+            shard.is_open = false;
         }
 
-        let count = target as u128;
-        for i in 0..target {
-            let idx = i as u128;
-            let starting = if idx == 0 {
-                0u128
-            } else {
-                (MAX_HASH_KEY / count) * idx + 1
-            };
-            let ending = if idx == count - 1 {
-                MAX_HASH_KEY
-            } else {
-                (MAX_HASH_KEY / count) * (idx + 1)
-            };
+        // Materialise each refinement interval as a shard, recording its id so
+        // multi-piece target shards can reference their merge parents.
+        let mut piece_ids: Vec<(u128, u128, String)> = Vec::new();
+        for (start, end) in &refinement {
             let new_id = next_shard_id(stream);
             stream.shards.push(KinesisShard {
-                shard_id: new_id,
-                starting_hash_key: starting.to_string(),
-                ending_hash_key: ending.to_string(),
+                shard_id: new_id.clone(),
+                starting_hash_key: start.to_string(),
+                ending_hash_key: end.to_string(),
                 parent_shard_id: None,
                 adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 1,
+                records: Vec::new(),
+            });
+            piece_ids.push((*start, *end, new_id));
+        }
+
+        // For each target shard, gather the refinement pieces inside it. A
+        // single-piece target keeps that piece open; a multi-piece target
+        // closes its pieces and opens one merged shard spanning the range.
+        for (tstart, tend) in &target_ranges {
+            let pieces: Vec<usize> = piece_ids
+                .iter()
+                .enumerate()
+                .filter(|(_, (ps, pe, _))| ps >= tstart && pe <= tend)
+                .map(|(i, _)| i)
+                .collect();
+            if pieces.len() <= 1 {
+                continue;
+            }
+            let parent = piece_ids[pieces[0]].2.clone();
+            let adjacent = piece_ids[pieces[1]].2.clone();
+            for &i in &pieces {
+                let id = &piece_ids[i].2;
+                if let Some(sh) = stream.shards.iter_mut().find(|s| &s.shard_id == id) {
+                    sh.is_open = false;
+                }
+            }
+            let merged_id = next_shard_id(stream);
+            stream.shards.push(KinesisShard {
+                shard_id: merged_id,
+                starting_hash_key: tstart.to_string(),
+                ending_hash_key: tend.to_string(),
+                parent_shard_id: Some(parent),
+                adjacent_parent_shard_id: Some(adjacent),
                 is_open: true,
                 next_sequence_number: 1,
                 records: Vec::new(),

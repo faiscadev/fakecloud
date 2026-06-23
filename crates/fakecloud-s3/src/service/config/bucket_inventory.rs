@@ -30,8 +30,12 @@ impl S3Service {
         self.store
             .put_bucket_subresource(bucket, BucketSubresource::Inventory, &payload)
             .map_err(crate::service::persistence_error)?;
-        // Generate the inventory report immediately so tests can verify it
-        inventory::generate_inventory_report(&self.state, bucket, &inv_id);
+        // Real S3 delivers inventory reports on a daily/weekly schedule, not at
+        // config time, so a bucket created and destroyed within a test never
+        // accumulates a report object. Only generate it eagerly when opted in.
+        if crate::logging::eager_delivery_enabled() {
+            inventory::generate_inventory_report(&self.state, bucket, &inv_id);
+        }
         Ok(empty_response(StatusCode::OK))
     }
 
