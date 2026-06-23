@@ -125,14 +125,13 @@ jobs:
 
       # Run prebuilt binaries straight from the archive -- no compilation.
       # --workspace-remap . points runtime workspace lookups at this checkout
-      # (path matches the build runner on GitHub-hosted runners). Extract under
-      # /mnt so the unpacked binaries don't fill the small root filesystem.
+      # (path matches the build runner on GitHub-hosted runners). nextest extracts
+      # to its own temp dir under /tmp (ample free space on the root fs here).
       - name: Run conformance partition
         run: |
           cargo nextest run -P ci \
             --archive-file conformance-archive.tar.zst \
             --workspace-remap . \
-            --extract-to /mnt/nextest-conformance --extract-overwrite \
             --partition "hash:${{ matrix.partition }}"
 
       - name: Disk diagnostics after nextest
