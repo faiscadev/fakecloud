@@ -19,14 +19,16 @@ impl Route53Service {
         if !name.ends_with('.') {
             name.push('.');
         }
-        let private_zone = cfg
-            .hosted_zone_config
-            .as_ref()
-            .and_then(|c| c.private_zone)
-            .unwrap_or(false);
-        if private_zone && cfg.vpc.is_none() {
-            return Err(invalid_argument("Private hosted zone must include a VPC"));
-        }
+        // A hosted zone is private iff it is created with a VPC association.
+        // AWS treats `HostedZoneConfig.PrivateZone` as a read-only output, not
+        // an input — supplying a VPC is what makes the zone private — so don't
+        // require the caller to set it.
+        let private_zone = cfg.vpc.is_some()
+            || cfg
+                .hosted_zone_config
+                .as_ref()
+                .and_then(|c| c.private_zone)
+                .unwrap_or(false);
         let comment = cfg
             .hosted_zone_config
             .as_ref()
@@ -55,11 +57,11 @@ impl Route53Service {
         let now = Utc::now();
         let name_servers = synth_name_servers(&id);
         let vpcs = cfg.vpc.into_iter().collect();
-        let default_records = if private_zone {
-            Vec::new()
-        } else {
-            default_zone_records(&name, &name_servers)
-        };
+        // Both public and private hosted zones carry default NS + SOA records.
+        // The Terraform provider reads a private zone's name servers from its
+        // NS record set (findNameServersByZone), so omitting them made the
+        // resource read crash on an empty name-server list.
+        let default_records = default_zone_records(&name, &name_servers);
         let zone = StoredHostedZone {
             id: id.clone(),
             name: name.clone(),

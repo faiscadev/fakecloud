@@ -66,10 +66,13 @@ async fn vpc_association_lifecycle() {
         .send()
         .await
         .expect("list by vpc");
+    // ListHostedZonesByVPC reports the bare zone id (no `/hostedzone/` prefix),
+    // matching AWS; the create response carries the prefixed form.
+    let bare_zone = zone.trim_start_matches("/hostedzone/");
     assert!(by_vpc
         .hosted_zone_summaries()
         .iter()
-        .any(|s| s.hosted_zone_id() == zone));
+        .any(|s| s.hosted_zone_id() == bare_zone));
 
     // Disassociate the second VPC (still leaves vpc-aaaa).
     r53.disassociate_vpc_from_hosted_zone()
@@ -422,4 +425,39 @@ async fn tags_for_unknown_resource_errors() {
         .send()
         .await;
     assert!(bad.is_err(), "unknown hosted zone tag list must fail");
+}
+
+#[tokio::test]
+async fn create_zone_with_vpc_is_implicitly_private_with_name_servers() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    // Providing a VPC (without setting private_zone) makes the zone private,
+    // and a private zone still carries NS records the provider reads.
+    let created = r53
+        .create_hosted_zone()
+        .name("implicit-private.example.com")
+        .caller_reference("impl-1")
+        .vpc(vpc("vpc-cccc"))
+        .send()
+        .await
+        .expect("zone");
+    assert_eq!(
+        created
+            .hosted_zone()
+            .unwrap()
+            .config()
+            .unwrap()
+            .private_zone(),
+        true
+    );
+    let zone_id = created.hosted_zone().unwrap().id().to_string();
+
+    let got = r53
+        .get_hosted_zone()
+        .id(&zone_id)
+        .send()
+        .await
+        .expect("get zone");
+    assert!(!got.delegation_set().unwrap().name_servers().is_empty());
 }

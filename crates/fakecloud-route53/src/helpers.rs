@@ -963,10 +963,9 @@ impl Route53Service {
         body.push_str("<HostedZoneSummaries>");
         for (id, name) in &summaries {
             body.push_str("<HostedZoneSummary>");
-            body.push_str(&format!(
-                "<HostedZoneId>/hostedzone/{}</HostedZoneId>",
-                esc(id)
-            ));
+            // HostedZoneId in a summary is the bare id (no `/hostedzone/`
+            // prefix); the SDK validates the id pattern and rejects the prefix.
+            body.push_str(&format!("<HostedZoneId>{}</HostedZoneId>", esc(id)));
             body.push_str(&format!("<Name>{}</Name>", esc(name)));
             body.push_str("<Owner>");
             body.push_str(&format!("<OwningAccount>{DEFAULT_ACCOUNT}</OwningAccount>",));
