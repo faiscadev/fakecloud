@@ -73,8 +73,8 @@ async fn cloudformation_acceptance() {
 }
 
 #[tokio::test]
-async fn cognito_identity_acceptance() {
-    run_shard("cognito-identity").await;
+async fn cognitoidentity_acceptance() {
+    run_shard("cognitoidentity").await;
 }
 
 #[tokio::test]

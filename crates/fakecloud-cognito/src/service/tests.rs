@@ -1769,6 +1769,45 @@ fn list_groups_stale_token_does_not_restart_at_page_one() {
 }
 
 #[test]
+fn list_groups_paginates_completely_with_tied_creation_dates() {
+    // Groups created in the same instant share a creation_date; paging through
+    // them one at a time must still return every group exactly once (a
+    // non-deterministic sort would skip or duplicate one — the count drift the
+    // aws_cognito_user_groups data source caught under load).
+    let (svc, pool_id) = setup_svc_with_pool();
+    let names = ["g1", "g2", "g3", "g4", "g5"];
+    for n in names {
+        let body = format!(r#"{{"UserPoolId":"{pool_id}","GroupName":"{n}"}}"#);
+        svc.create_group(&make_req("CreateGroup", &body)).unwrap();
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..10 {
+        let body = match &token {
+            Some(t) => format!(r#"{{"UserPoolId":"{pool_id}","Limit":1,"NextToken":"{t}"}}"#),
+            None => format!(r#"{{"UserPoolId":"{pool_id}","Limit":1}}"#),
+        };
+        let resp = svc.list_groups(&make_req("ListGroups", &body)).unwrap();
+        let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        for g in b["Groups"].as_array().unwrap() {
+            seen.push(g["GroupName"].as_str().unwrap().to_string());
+        }
+        match b.get("NextToken").and_then(|v| v.as_str()) {
+            Some(t) => token = Some(t.to_string()),
+            None => break,
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        names.len(),
+        "every group must be paged exactly once"
+    );
+}
+
+#[test]
 fn list_users_requires_user_pool_id() {
     let (svc, _) = setup_svc_with_pool();
 

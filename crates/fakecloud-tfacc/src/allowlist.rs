@@ -480,7 +480,7 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
-        name: "cognito-identity",
+        name: "cognitoidentity",
         run_regex: concat!(
             "^TestAccCognitoIdentity(",
             "Pool|PoolDataSource|PoolRolesAttachment",
@@ -521,7 +521,7 @@ pub const SERVICES: &[Service] = &[
     },
     Service {
         name: "elasticache",
-        run_regex: "^TestAccElastiCache(ClusterDataSource|User)_basic$",
+        run_regex: "^TestAccElastiCacheUser_basic$",
         deny: &[],
     },
     Service {
@@ -753,8 +753,8 @@ pub const SHARDS: &[Shard] = &[
         extra_deny: &[],
     },
     Shard {
-        name: "cognito-identity",
-        service: "cognito-identity",
+        name: "cognitoidentity",
+        service: "cognitoidentity",
         run_regex: concat!(
             "^TestAccCognitoIdentity(",
             "Pool|PoolDataSource|PoolRolesAttachment",
@@ -794,7 +794,7 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "elasticache",
         service: "elasticache",
-        run_regex: "^TestAccElastiCache(ClusterDataSource|User)_basic$",
+        run_regex: "^TestAccElastiCacheUser_basic$",
         extra_deny: &[],
     },
     Shard {
