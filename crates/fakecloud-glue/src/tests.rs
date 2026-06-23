@@ -106,13 +106,77 @@ fn trigger_round_trip_and_missing_required() {
     assert_eq!(got["Trigger"]["Type"], "ON_DEMAND");
     assert_eq!(got["Trigger"]["Actions"][0]["JobName"], "j");
 
+    // StartTrigger on an ON_DEMAND trigger fires a run but leaves it in the
+    // CREATED state (matching AWS); only scheduled/conditional triggers go
+    // ACTIVATED.
     svc.start_trigger(&req("StartTrigger", json!({"Name": "t"})))
         .unwrap();
     let got = body_of(
         svc.get_trigger(&req("GetTrigger", json!({"Name": "t"})))
             .unwrap(),
     );
+    assert_eq!(got["Trigger"]["State"], "CREATED");
+}
+
+#[test]
+fn start_trigger_activates_scheduled_trigger() {
+    let svc = GlueService::default();
+    svc.create_trigger(&req(
+        "CreateTrigger",
+        json!({
+            "Name": "sched",
+            "Type": "SCHEDULED",
+            "Schedule": "cron(0 12 * * ? *)",
+            "Actions": [{"JobName": "j"}]
+        }),
+    ))
+    .unwrap();
+    svc.start_trigger(&req("StartTrigger", json!({"Name": "sched"})))
+        .unwrap();
+    let got = body_of(
+        svc.get_trigger(&req("GetTrigger", json!({"Name": "sched"})))
+            .unwrap(),
+    );
     assert_eq!(got["Trigger"]["State"], "ACTIVATED");
+}
+
+#[test]
+fn create_job_defaults_timeout_to_2880() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "j", "Role": "r", "Command": {"Name": "glueetl"}}),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "j"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Job"]["Timeout"], 2880);
+
+    // Streaming jobs have no default timeout.
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "s", "Role": "r", "Command": {"Name": "gluestreaming"}}),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "s"})))
+            .unwrap(),
+    );
+    assert!(got["Job"]["Timeout"].is_null());
+
+    // An explicit timeout is preserved.
+    svc.create_job(&req(
+        "CreateJob",
+        json!({"Name": "x", "Role": "r", "Command": {"Name": "glueetl"}, "Timeout": 60}),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "x"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Job"]["Timeout"], 60);
 }
 
 #[test]

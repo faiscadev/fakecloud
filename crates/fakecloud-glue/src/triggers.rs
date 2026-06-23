@@ -135,7 +135,25 @@ impl GlueService {
     }
 
     pub(crate) fn start_trigger(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        self.set_trigger_state(req, "ACTIVATED")
+        // ON_DEMAND triggers fire a single run on StartTrigger but stay in the
+        // CREATED state; only scheduled/conditional triggers transition to
+        // ACTIVATED. Matching AWS here keeps the provider's computed `enabled`
+        // attribute correct (ON_DEMAND + CREATED => enabled = true).
+        let body = req.json_body();
+        let name = req_str(&body, "Name")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let t = st
+            .triggers
+            .get_mut(&name)
+            .ok_or_else(|| entity_not_found(format!("Trigger {name} not found")))?;
+        if let Some(obj) = t.as_object_mut() {
+            let is_on_demand = obj.get("Type").and_then(|v| v.as_str()) == Some("ON_DEMAND");
+            if !is_on_demand {
+                obj.insert("State".into(), json!("ACTIVATED"));
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({ "Name": name })))
     }
 
     pub(crate) fn stop_trigger(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {

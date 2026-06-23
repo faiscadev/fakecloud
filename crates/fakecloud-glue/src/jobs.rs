@@ -103,6 +103,15 @@ impl GlueService {
         if command.is_null() {
             return Err(missing("Command"));
         }
+        // AWS defaults the job timeout to 2880 minutes (48h) for batch jobs when
+        // unset; streaming jobs (gluestreaming) have no default timeout.
+        let timeout = body["Timeout"].as_i64().or_else(|| {
+            if command["Name"].as_str() == Some("gluestreaming") {
+                None
+            } else {
+                Some(2880)
+            }
+        });
         let now = Utc::now();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
@@ -118,7 +127,7 @@ impl GlueService {
             command,
             default_arguments: parse_string_map(&body["DefaultArguments"]),
             max_retries: body["MaxRetries"].as_i64().unwrap_or(0),
-            timeout: body["Timeout"].as_i64(),
+            timeout,
             glue_version: body["GlueVersion"].as_str().map(String::from),
             max_capacity: body["MaxCapacity"].as_f64(),
             worker_type: body["WorkerType"].as_str().map(String::from),
