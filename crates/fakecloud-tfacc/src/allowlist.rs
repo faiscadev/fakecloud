@@ -541,6 +541,18 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "rds",
+        // RDS control-plane resources that need no DB engine container. The DB
+        // subnet group now reports `supported_network_types = [IPV4]` and a
+        // `Complete` status. Parameter/option/cluster-parameter groups are
+        // deferred: their go-acceptance Modify-then-Describe round-trip returns
+        // empty parameters/groups even though the same calls succeed via the
+        // AWS CLI (a request-handling discrepancy still under investigation).
+        // DB instances/clusters need Docker and stay out.
+        run_regex: "^TestAccRDSSubnetGroup_basic$",
+        deny: &[],
+    },
+    Service {
         name: "elasticache",
         // Control-plane resources that don't need a cache container: users,
         // user groups (+ association), and subnet groups (+ data sources).
@@ -834,6 +846,12 @@ pub const SHARDS: &[Shard] = &[
             "|DefaultSecurityGroup|DefaultNetworkACL|Route)",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "rds",
+        service: "rds",
+        run_regex: "^TestAccRDSSubnetGroup_basic$",
         extra_deny: &[],
     },
     Shard {

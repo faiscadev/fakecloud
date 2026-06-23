@@ -98,6 +98,11 @@ async fn elasticache_acceptance() {
 }
 
 #[tokio::test]
+async fn rds_acceptance() {
+    run_shard("rds").await;
+}
+
+#[tokio::test]
 async fn cloudfront_acceptance() {
     run_shard("cloudfront").await;
 }

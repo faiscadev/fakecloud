@@ -1546,7 +1546,8 @@ pub(crate) fn db_subnet_group_xml(subnet_group: &DbSubnetGroup) -> String {
          <VpcId>{}</VpcId>\
          <SubnetGroupStatus>Complete</SubnetGroupStatus>\
          <Subnets>{}</Subnets>\
-         <DBSubnetGroupArn>{}</DBSubnetGroupArn>",
+         <DBSubnetGroupArn>{}</DBSubnetGroupArn>\
+         <SupportedNetworkTypes><member>IPV4</member></SupportedNetworkTypes>",
         xml_escape(&subnet_group.db_subnet_group_name),
         xml_escape(&subnet_group.db_subnet_group_description),
         xml_escape(&subnet_group.vpc_id),

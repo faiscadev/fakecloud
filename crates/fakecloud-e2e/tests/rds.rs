@@ -1807,3 +1807,30 @@ async fn rds_restore_db_instance_to_point_in_time_clones_data() {
     let value: String = row.get(0);
     assert_eq!(value, "instance-pit-payload");
 }
+
+#[tokio::test]
+async fn rds_subnet_group_reports_supported_network_types() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_subnet_group()
+        .db_subnet_group_name("sg-net")
+        .db_subnet_group_description("d")
+        .subnet_ids("subnet-aaaa1111")
+        .subnet_ids("subnet-bbbb2222")
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_subnet_groups()
+        .db_subnet_group_name("sg-net")
+        .send()
+        .await
+        .unwrap();
+    let g = &described.db_subnet_groups()[0];
+    assert_eq!(g.subnet_group_status(), Some("Complete"));
+    // The aws_db_subnet_group resource asserts supported_network_types = [IPV4].
+    assert_eq!(g.supported_network_types(), &["IPV4".to_string()]);
+}
