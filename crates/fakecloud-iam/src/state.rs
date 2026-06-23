@@ -430,7 +430,7 @@ pub struct OrganizationsAccessReport {
 
 impl IamState {
     pub fn new(account_id: &str) -> Self {
-        Self {
+        let mut state = Self {
             account_id: account_id.to_string(),
             users: BTreeMap::new(),
             access_keys: BTreeMap::new(),
@@ -465,6 +465,42 @@ impl IamState {
             global_endpoint_token_version: None,
             delegation_requests: BTreeMap::new(),
             outbound_web_identity_federation_enabled: false,
+        };
+        state.seed_default_service_linked_roles();
+        state
+    }
+
+    /// AWS accounts ship with a handful of service-linked roles created
+    /// automatically (Support, Trusted Advisor, ...). `aws_iam_roles` and other
+    /// callers expect a non-empty `ListRoles` on a fresh account, so seed them.
+    fn seed_default_service_linked_roles(&mut self) {
+        let now = Utc::now();
+        for (service, name) in [
+            ("support.amazonaws.com", "AWSServiceRoleForSupport"),
+            (
+                "trustedadvisor.amazonaws.com",
+                "AWSServiceRoleForTrustedAdvisor",
+            ),
+        ] {
+            let path = format!("/aws-service-role/{service}/");
+            let arn = format!("arn:aws:iam::{}:role{}{}", self.account_id, path, name);
+            self.roles.insert(
+                name.to_string(),
+                IamRole {
+                    role_name: name.to_string(),
+                    role_id: format!("AROA{:0>17}", name.len()),
+                    arn,
+                    path,
+                    assume_role_policy_document: format!(
+                        "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\"Principal\":{{\"Service\":\"{service}\"}},\"Action\":\"sts:AssumeRole\"}}]}}"
+                    ),
+                    created_at: now,
+                    description: None,
+                    max_session_duration: 3600,
+                    tags: Vec::new(),
+                    permissions_boundary: None,
+                },
+            );
         }
     }
 

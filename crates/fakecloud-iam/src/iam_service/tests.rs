@@ -1634,11 +1634,13 @@ fn get_account_authorization_details_paginates_by_marker() {
             .unwrap();
     }
 
-    // First page of 2 users is truncated and carries a Marker.
+    // First page of 2 users is truncated and carries a Marker. Scope to
+    // `Filter=User` so the default service-linked roles every account ships
+    // don't interleave with the users this test paginates.
     let resp = svc
         .get_account_authorization_details(&make_request(
             "GetAccountAuthorizationDetails",
-            vec![("MaxItems", "2")],
+            vec![("MaxItems", "2"), ("Filter.member.1", "User")],
         ))
         .unwrap();
     let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
@@ -1653,7 +1655,11 @@ fn get_account_authorization_details_paginates_by_marker() {
     let resp = svc
         .get_account_authorization_details(&make_request(
             "GetAccountAuthorizationDetails",
-            vec![("MaxItems", "2"), ("Marker", &marker)],
+            vec![
+                ("MaxItems", "2"),
+                ("Marker", &marker),
+                ("Filter.member.1", "User"),
+            ],
         ))
         .unwrap();
     let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();

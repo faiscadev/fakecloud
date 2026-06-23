@@ -344,18 +344,12 @@ pub const SERVICES: &[Service] = &[
             //          Needs the policy simulator to track which statement
             //          produced each decision. ---
             "TestAccIAMPrincipalPolicySimulationDataSource_basic",
-            // --- gap: the data source lists existing roles and asserts the
-            //          account is non-empty. Real accounts always carry
-            //          AWS-managed service-linked roles; fakecloud seeds none,
-            //          so a fresh account lists zero. Seeding default SLRs would
-            //          perturb other tests' exact role counts, so deferred. ---
-            "TestAccIAMRolesDataSource_basic",
-            // --- gap: CreateServiceLinkedRole derives the role name by naive
-            //          capitalisation (AWSServiceRoleForinspector) instead of
-            //          AWS's per-service canonical name
-            //          (AWSServiceRoleForAmazonInspector). Needs a
-            //          service-principal -> SLR-name mapping table. ---
-            "TestAccIAMServiceLinkedRole_basic",
+            // (RolesDataSource now passes: accounts seed the default
+            //  AWSServiceRoleForSupport / TrustedAdvisor service-linked roles
+            //  like real AWS, so a fresh ListRoles is non-empty.)
+            // (ServiceLinkedRole now passes: CreateServiceLinkedRole maps the
+            //  service principal to AWS's canonical SLR name via a documented
+            //  table — e.g. inspector -> AWSServiceRoleForAmazonInspector.)
         ],
     },
     Service {
