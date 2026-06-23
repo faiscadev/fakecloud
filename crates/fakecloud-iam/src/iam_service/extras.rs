@@ -120,10 +120,8 @@ fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<Str
         ),
     };
     for arn in &managed {
-        if let Some(policy) = state.policies.get(arn) {
-            if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
-                out.push(v.document.clone());
-            }
+        if let Some(doc) = managed_default_doc(state, arn) {
+            out.push(doc);
         }
     }
     for doc in inline.values() {
@@ -138,10 +136,8 @@ fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<Str
                 continue;
             }
             for arn in &group.attached_policies {
-                if let Some(policy) = state.policies.get(arn) {
-                    if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
-                        out.push(v.document.clone());
-                    }
+                if let Some(doc) = managed_default_doc(state, arn) {
+                    out.push(doc);
                 }
             }
             for doc in group.inline_policies.values() {
@@ -150,6 +146,20 @@ fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<Str
         }
     }
     out
+}
+
+/// Resolve a managed policy ARN to its default-version document, looking first
+/// in the account's customer-managed policies and then in the seeded
+/// AWS-managed catalog (which is not stored in account state).
+fn managed_default_doc(state: &IamState, arn: &str) -> Option<String> {
+    if let Some(policy) = state.policies.get(arn) {
+        return policy
+            .versions
+            .iter()
+            .find(|v| v.is_default)
+            .map(|v| v.document.clone());
+    }
+    crate::managed_policies::default_document(arn).map(str::to_owned)
 }
 
 fn principal_boundary(state: &IamState, source_arn: &str) -> Option<String> {
