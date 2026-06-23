@@ -1199,3 +1199,82 @@ async fn lambda_event_invoke_config_omits_unset_max_age() {
     // AWS does not synthesise a default age, so it comes back unset.
     assert!(got.maximum_event_age_in_seconds().is_none());
 }
+
+#[tokio::test]
+async fn lambda_get_function_returns_default_logging_config() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("lg-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_function()
+        .function_name("lg-fn")
+        .send()
+        .await
+        .unwrap();
+    let lc = got
+        .configuration()
+        .and_then(|c| c.logging_config())
+        .expect("default logging config");
+    assert_eq!(
+        lc.log_format(),
+        Some(&aws_sdk_lambda::types::LogFormat::Text)
+    );
+    assert_eq!(lc.log_group(), Some("/aws/lambda/lg-fn"));
+}
+
+#[tokio::test]
+async fn lambda_add_permission_round_trips_event_source_token() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("est-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .add_permission()
+        .function_name("est-fn")
+        .statement_id("s1")
+        .action("lambda:InvokeFunction")
+        .principal("events.amazonaws.com")
+        .event_source_token("my-token")
+        .send()
+        .await
+        .unwrap();
+
+    let policy = client
+        .get_policy()
+        .function_name("est-fn")
+        .send()
+        .await
+        .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(policy.policy().unwrap()).unwrap();
+    let cond = &doc["Statement"][0]["Condition"]["StringEquals"]["lambda:EventSourceToken"];
+    assert_eq!(cond.as_str(), Some("my-token"));
+}

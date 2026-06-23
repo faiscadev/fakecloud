@@ -185,3 +185,118 @@ async fn network_interface_derives_private_dns_and_default_sg() {
     // No SecurityGroupId was given, so the VPC's default SG is attached.
     assert_eq!(n.groups().len(), 1);
 }
+
+#[tokio::test]
+async fn subnet_ipv6_association_and_assign_on_creation() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+
+    let vpc = c
+        .create_vpc()
+        .cidr_block("10.50.0.0/16")
+        .amazon_provided_ipv6_cidr_block(true)
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap().to_string();
+
+    let subnet = c
+        .create_subnet()
+        .vpc_id(&vpc_id)
+        .cidr_block("10.50.1.0/24")
+        .ipv6_cidr_block("2600:1f16:abc:1::/64")
+        .send()
+        .await
+        .unwrap();
+    let subnet_id = subnet.subnet().unwrap().subnet_id().unwrap().to_string();
+    let set = subnet.subnet().unwrap().ipv6_cidr_block_association_set();
+    assert_eq!(set.len(), 1);
+    let assoc_id = set[0].association_id().unwrap().to_string();
+
+    // ModifySubnetAttribute flips AssignIpv6AddressOnCreation, which must then
+    // round-trip on DescribeSubnets (the resource waits for `true`).
+    c.modify_subnet_attribute()
+        .subnet_id(&subnet_id)
+        .assign_ipv6_address_on_creation(
+            aws_sdk_ec2::types::AttributeBooleanValue::builder()
+                .value(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // The association is filterable, and the assign flag persists on read.
+    let described = c
+        .describe_subnets()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("ipv6-cidr-block-association.association-id")
+                .values(&assoc_id)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.subnets().len(), 1);
+    assert_eq!(described.subnets()[0].subnet_id(), Some(subnet_id.as_str()));
+    assert_eq!(
+        described.subnets()[0].assign_ipv6_address_on_creation(),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn security_group_all_traffic_rule_omits_ports() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+
+    let vpc = c
+        .create_vpc()
+        .cidr_block("10.51.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = vpc.vpc().unwrap().vpc_id().unwrap().to_string();
+
+    let sg = c
+        .create_security_group()
+        .group_name("all-traffic-sg")
+        .description("d")
+        .vpc_id(&vpc_id)
+        .send()
+        .await
+        .unwrap();
+    let sg_id = sg.group_id().unwrap().to_string();
+
+    c.authorize_security_group_egress()
+        .group_id(&sg_id)
+        .ip_permissions(
+            aws_sdk_ec2::types::IpPermission::builder()
+                .ip_protocol("-1")
+                .ip_ranges(
+                    aws_sdk_ec2::types::IpRange::builder()
+                        .cidr_ip("0.0.0.0/0")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let described = c
+        .describe_security_groups()
+        .group_ids(&sg_id)
+        .send()
+        .await
+        .unwrap();
+    let egress = described.security_groups()[0].ip_permissions_egress();
+    // The all-traffic (`-1`) rule must report no port range (AWS omits them).
+    let all = egress
+        .iter()
+        .find(|p| p.ip_protocol() == Some("-1"))
+        .expect("all-traffic egress rule");
+    assert!(all.from_port().is_none());
+    assert!(all.to_port().is_none());
+}

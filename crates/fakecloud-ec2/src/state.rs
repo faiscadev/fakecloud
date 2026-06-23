@@ -104,6 +104,11 @@ pub struct Subnet {
     pub enable_dns64: bool,
     /// `ip-name` | `resource-name`.
     pub private_dns_hostname_type: String,
+    /// IPv6 /64 associated with the subnet (via CreateSubnet `Ipv6CidrBlock` or
+    /// AssociateSubnetCidrBlock). Reported in the `ipv6CidrBlockAssociationSet`;
+    /// the `aws_subnet` resource waits for this association.
+    #[serde(default)]
+    pub ipv6_cidr_block: Option<String>,
 }
 
 /// A CIDR reservation within a subnet.

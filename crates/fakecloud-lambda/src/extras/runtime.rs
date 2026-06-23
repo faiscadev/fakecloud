@@ -74,11 +74,17 @@ impl LambdaService {
         state
             .runtime_management
             .insert(format!("{function_name}:{qualifier}"), cfg.clone());
-        ok(json!({
+        let mut resp = json!({
             "FunctionArn": Arn::new("lambda", &state.region, &state.account_id, &format!("function:{function_name}:{qualifier}")).to_string(),
             "UpdateRuntimeOn": cfg.update_runtime_on,
-            "RuntimeVersionArn": cfg.runtime_version_arn,
-        }))
+        });
+        // RuntimeVersionArn is an ARN-typed field; an empty value fails the
+        // SDK's client-side ARN validation, so omit it when unset (Auto /
+        // FunctionUpdate modes carry no pinned runtime version).
+        if !cfg.runtime_version_arn.is_empty() {
+            resp["RuntimeVersionArn"] = json!(cfg.runtime_version_arn);
+        }
+        ok(resp)
     }
 
     pub(super) fn get_runtime_management(
@@ -97,14 +103,17 @@ impl LambdaService {
                     update_runtime_on: "Auto".to_string(),
                     runtime_version_arn: String::new(),
                 });
-            ok(json!({
+            let mut resp = json!({
                 "FunctionArn": format!(
                     "arn:aws:lambda:{}:{}:function:{}:{}",
                     state.region, state.account_id, function_name, qualifier
                 ),
                 "UpdateRuntimeOn": cfg.update_runtime_on,
-                "RuntimeVersionArn": cfg.runtime_version_arn,
-            }))
+            });
+            if !cfg.runtime_version_arn.is_empty() {
+                resp["RuntimeVersionArn"] = json!(cfg.runtime_version_arn);
+            }
+            ok(resp)
         })
     }
 }

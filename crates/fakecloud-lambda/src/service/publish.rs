@@ -185,9 +185,15 @@ impl LambdaService {
         if !func.file_system_configs.is_empty() {
             config["FileSystemConfigs"] = json!(func.file_system_configs);
         }
-        if let Some(ref lg) = func.logging_config {
-            config["LoggingConfig"] = lg.clone();
-        }
+        // Every function has a LoggingConfig: AWS defaults it to Text format
+        // delivering to `/aws/lambda/<name>`. The Terraform resource asserts a
+        // populated `logging_config` block even when the caller set none.
+        config["LoggingConfig"] = func.logging_config.clone().unwrap_or_else(|| {
+            json!({
+                "LogFormat": "Text",
+                "LogGroup": format!("/aws/lambda/{}", func.function_name),
+            })
+        });
         if let Some(ref ic) = func.image_config {
             config["ImageConfigResponse"] = json!({ "ImageConfig": ic });
         }

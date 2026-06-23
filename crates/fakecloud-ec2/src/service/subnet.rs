@@ -12,8 +12,19 @@ use crate::state::{Ec2State, Subnet, SubnetCidrReservation, Tag};
 
 /// Render the inner XML of a `<subnet>` element (lowerCamel wire names).
 pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) -> String {
+    let ipv6_set = match &s.ipv6_cidr_block {
+        Some(cidr) => {
+            let item = format!(
+                "{}{}<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState>",
+                ec2_elem("associationId", &subnet_ipv6_assoc_id(&s.subnet_id)),
+                ec2_elem("ipv6CidrBlock", cidr),
+            );
+            ec2_list("ipv6CidrBlockAssociationSet", &[item])
+        }
+        None => String::new(),
+    };
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("subnetId", &s.subnet_id),
         ec2_elem("state", &s.state),
         ec2_elem("vpcId", &s.vpc_id),
@@ -33,6 +44,10 @@ pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) ->
             "<mapCustomerOwnedIpOnLaunch>{}</mapCustomerOwnedIpOnLaunch>",
             s.map_customer_owned_ip_on_launch
         ),
+        format_args!(
+            "<assignIpv6AddressOnCreation>{}</assignIpv6AddressOnCreation>",
+            s.assign_ipv6_address_on_creation
+        ),
         ec2_elem("ownerId", owner),
         ec2_elem(
             "subnetArn",
@@ -46,6 +61,7 @@ pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) ->
             "<privateDnsNameOptionsOnLaunch><hostnameType>{}</hostnameType><enableResourceNameDnsARecord>false</enableResourceNameDnsARecord><enableResourceNameDnsAAAARecord>false</enableResourceNameDnsAAAARecord></privateDnsNameOptionsOnLaunch>",
             s.private_dns_hostname_type
         ),
+        ipv6_set,
         super::tags::tag_set_xml(tags),
     )
 }
@@ -77,7 +93,13 @@ fn build_subnet(vpc_id: String, cidr: String, az: &str, default_for_az: bool) ->
         map_customer_owned_ip_on_launch: false,
         enable_dns64: false,
         private_dns_hostname_type: "ip-name".to_string(),
+        ipv6_cidr_block: None,
     }
+}
+
+/// Deterministic association id for a subnet's IPv6 CIDR.
+fn subnet_ipv6_assoc_id(subnet_id: &str) -> String {
+    format!("subnet-cidr-assoc-ipv6-{}", &subnet_id[7..])
 }
 
 fn default_az(req: &AwsRequest) -> String {
@@ -107,7 +129,22 @@ pub(crate) fn create_subnet(
         .cloned()
         .unwrap_or_else(|| "10.0.0.0/24".to_string());
     let az = default_az(req);
-    let subnet = build_subnet(vpc_id, cidr, &az, false);
+    let mut subnet = build_subnet(vpc_id, cidr, &az, false);
+    // CreateSubnet may carry an IPv6 CIDR; the resource then waits for the
+    // association to appear in DescribeSubnets.
+    if let Some(ipv6) = req.query_params.get("Ipv6CidrBlock") {
+        if !ipv6.is_empty() {
+            subnet.ipv6_cidr_block = Some(ipv6.clone());
+        }
+    }
+    if req
+        .query_params
+        .get("AssignIpv6AddressOnCreation")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        subnet.assign_ipv6_address_on_creation = true;
+    }
     let id = subnet.subnet_id.clone();
     let owner = req.account_id.clone();
     let region = req.region.clone();
@@ -282,6 +319,14 @@ fn subnet_matches(s: &Subnet, tags: &[Tag], filters: &[Filter]) -> bool {
             "availability-zone" => vec![s.availability_zone.clone()],
             "state" => vec![s.state.clone()],
             "default-for-az" => vec![s.default_for_az.to_string()],
+            "ipv6-cidr-block-association.association-id" => s
+                .ipv6_cidr_block
+                .as_ref()
+                .map(|_| vec![subnet_ipv6_assoc_id(&s.subnet_id)])
+                .unwrap_or_default(),
+            "ipv6-cidr-block-association.ipv6-cidr-block" => {
+                s.ipv6_cidr_block.clone().into_iter().collect()
+            }
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -343,8 +388,16 @@ pub(crate) fn associate_subnet_cidr_block(
         .get("Ipv6CidrBlock")
         .cloned()
         .unwrap_or_else(|| "2600:1f00::/64".to_string());
-    let assoc_id = gen_id("subnet-cidr-assoc");
-    let _ = svc;
+    let assoc_id = subnet_ipv6_assoc_id(&subnet_id);
+    // Persist on the subnet so DescribeSubnets reports the association; the
+    // resource waits for it via the returned association id.
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(s) = state.subnets.get_mut(&subnet_id) {
+            s.ipv6_cidr_block = Some(ipv6.clone());
+        }
+    }
     let body = format!(
         "{}<ipv6CidrBlockAssociation>{}{}<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState></ipv6CidrBlockAssociation>",
         ec2_elem("subnetId", &subnet_id),

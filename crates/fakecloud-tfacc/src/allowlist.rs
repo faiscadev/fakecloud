@@ -494,17 +494,19 @@ pub const SERVICES: &[Service] = &[
         // versions (+ data source, now returning LayerArn on read), aliases
         // (response is rendered in the AWS wire shape and routing config clears
         // on removal), the function data source ($LATEST-qualified arn lineage
-        // via ListVersionsByFunction), and event-invoke config (optional
-        // MaximumEventAgeInSeconds). The `aws_lambda_function` /
-        // `aws_lambda_permission` resources and the functions/runtime-config
-        // data sources share a VPC scaffold that needs Amazon-provided IPv6
-        // CIDR generation (an EC2 feature) and are deferred; code-signing needs
-        // the AWS Signer service.
+        // via ListVersionsByFunction), event-invoke config (optional
+        // MaximumEventAgeInSeconds), and now the core function resource +
+        // permission + functions data source. The function VPC scaffold rides
+        // on the EC2 VPC/subnet IPv6 generation, the security-group all-traffic
+        // port representation, and a default LoggingConfig. RuntimeManagement
+        // config is deferred (its CheckDestroy reads an unset id attribute);
+        // code-signing needs the AWS Signer service.
         run_regex: concat!(
             "^TestAccLambda(",
             "FunctionURL|FunctionURLDataSource",
             "|LayerVersion|LayerVersionDataSource|ProvisionedConcurrencyConfig",
             "|Alias|FunctionDataSource|FunctionEventInvokeConfig",
+            "|Function|Permission|FunctionsDataSource",
             ")_basic$",
         ),
         deny: &[],
@@ -805,6 +807,7 @@ pub const SHARDS: &[Shard] = &[
             "FunctionURL|FunctionURLDataSource",
             "|LayerVersion|LayerVersionDataSource|ProvisionedConcurrencyConfig",
             "|Alias|FunctionDataSource|FunctionEventInvokeConfig",
+            "|Function|Permission|FunctionsDataSource",
             ")_basic$",
         ),
         extra_deny: &[],
