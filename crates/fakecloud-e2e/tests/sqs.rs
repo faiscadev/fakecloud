@@ -1806,8 +1806,7 @@ async fn fifo_dedup_replays_original_id_and_sequence() {
 #[tokio::test]
 async fn sqs_send_message_batch_stores_system_attributes() {
     use aws_sdk_sqs::types::{
-        MessageSystemAttributeName, MessageSystemAttributeNameForSends,
-        MessageSystemAttributeValue,
+        MessageSystemAttributeName, MessageSystemAttributeNameForSends, MessageSystemAttributeValue,
     };
 
     let server = TestServer::start().await;
@@ -1920,5 +1919,8 @@ async fn sqs_send_message_batch_fifo_content_dedup() {
                 .ok();
         }
     }
-    assert_eq!(received, 1, "content-based dedup must collapse batch duplicates");
+    assert_eq!(
+        received, 1,
+        "content-based dedup must collapse batch duplicates"
+    );
 }
