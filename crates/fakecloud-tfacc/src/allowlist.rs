@@ -233,16 +233,19 @@ pub const SERVICES: &[Service] = &[
         // synchronously DEPLOYED, custom domains as AVAILABLE (with a regional
         // endpoint + ipv4), and gave integrations their default
         // `connection_type = INTERNET`, all of which the provider asserts.
-        run_regex: "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP)$",
+        // Batch 13 also restored the integration's `integration_method`,
+        // `integration_response_selection_expression`, and `passthrough_behavior`
+        // fields (the last two with their WEBSOCKET defaults), and gave
+        // integrations their protocol-specific default timeout (29000ms for
+        // WEBSOCKET, 30000ms for HTTP) so the export data source — which renders
+        // the full integration into its OpenAPI document — round-trips cleanly.
+        run_regex:
+            "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP|Integration_basic(HTTP|WebSocket))$",
         deny: &[
             // --- gap: a REQUEST authorizer wires up a real Lambda authorizer
             //     function, which fakecloud cannot stand up without a working
             //     Lambda runtime in this environment. ---
             "TestAccAPIGatewayV2Authorizer_basic",
-            // --- gap: the export data source generates an OpenAPI document
-            //     from the API; fakecloud's export does not yet round-trip
-            //     cleanly against the provider's expectations. ---
-            "TestAccAPIGatewayV2ExportDataSource_basic",
         ],
     },
     Service {
@@ -322,8 +325,6 @@ pub const SERVICES: &[Service] = &[
             //     sources/destinations) is not implemented. ---
             "TestAccLogsDeliveryDestination_basic",
             "TestAccLogsDeliveryDestinationPolicy_basic",
-            // --- gap: field index policies are not implemented. ---
-            "TestAccLogsIndexPolicy_basic",
         ],
     },
     Service {
@@ -663,7 +664,8 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "apigatewayv2",
         service: "apigatewayv2",
-        run_regex: "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP)$",
+        run_regex:
+            "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP|Integration_basic(HTTP|WebSocket))$",
         extra_deny: &[],
     },
     Shard {
