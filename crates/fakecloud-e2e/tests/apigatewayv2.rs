@@ -1526,3 +1526,87 @@ async fn apigatewayv2_create_api_returns_default_metadata_fields() {
         Some(&aws_sdk_apigatewayv2::types::IpAddressType::Ipv4)
     );
 }
+
+#[tokio::test]
+async fn update_model_partial_preserves_other_fields() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api_id = client
+        .create_api()
+        .name("model-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap()
+        .api_id()
+        .unwrap()
+        .to_string();
+
+    let model_id = client
+        .create_model()
+        .api_id(&api_id)
+        .name("Pet")
+        .content_type("application/json")
+        .schema(r#"{"type":"object"}"#)
+        .send()
+        .await
+        .unwrap()
+        .model_id()
+        .unwrap()
+        .to_string();
+
+    // Update only the Schema — Name and ContentType must be preserved, not
+    // clobbered to defaults.
+    client
+        .update_model()
+        .api_id(&api_id)
+        .model_id(&model_id)
+        .schema(r#"{"type":"object","properties":{}}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_model()
+        .api_id(&api_id)
+        .model_id(&model_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.name(),
+        Some("Pet"),
+        "Name must survive a partial update"
+    );
+    assert_eq!(got.content_type(), Some("application/json"));
+}
+
+#[tokio::test]
+async fn update_api_changes_route_selection_expression() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api_id = client
+        .create_api()
+        .name("ws-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Websocket)
+        .route_selection_expression("$request.body.action")
+        .send()
+        .await
+        .unwrap()
+        .api_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .update_api()
+        .api_id(&api_id)
+        .route_selection_expression("$request.body.kind")
+        .send()
+        .await
+        .unwrap();
+
+    let got = client.get_api().api_id(&api_id).send().await.unwrap();
+    assert_eq!(got.route_selection_expression(), Some("$request.body.kind"));
+}

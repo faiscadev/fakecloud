@@ -124,6 +124,25 @@ impl ApiGatewayService {
                         m.insert(key, value.clone());
                     }
                 }
+                // apiStages were dropped, so the standard "create plan, then
+                // attach an API stage" flow (Terraform/CDK) silently no-op'd
+                // (bug-hunt 2026-06-24, 1.11). AWS adds a stage via
+                // {op:add, path:/apiStages, value:"<apiId>:<stage>"} and removes
+                // it via {op:remove, path:/apiStages/<apiId>:<stage>}.
+                "/apiStages" if op == "add" => {
+                    if let Some((api_id, stage)) = value.as_str().and_then(|s| s.split_once(':')) {
+                        plan.api_stages
+                            .push(serde_json::json!({"apiId": api_id, "stage": stage}));
+                    }
+                }
+                _ if path.starts_with("/apiStages/") && op == "remove" => {
+                    let target = path.trim_start_matches("/apiStages/");
+                    plan.api_stages.retain(|s| {
+                        let id = s.get("apiId").and_then(|v| v.as_str()).unwrap_or("");
+                        let st = s.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("{id}:{st}") != target
+                    });
+                }
                 _ => {}
             }
         });

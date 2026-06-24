@@ -249,6 +249,15 @@ impl ApiGatewayV2Service {
             integration.timeout_in_millis = Some(timeout_in_millis);
         }
 
+        // Previously dropped (bug-hunt 2026-06-24, 1.11): VPC-link connection
+        // type and the integration-response selection expression.
+        if let Some(connection_type) = body["connectionType"].as_str() {
+            integration.connection_type = connection_type.to_string();
+        }
+        if let Some(expr) = body["integrationResponseSelectionExpression"].as_str() {
+            integration.integration_response_selection_expression = Some(expr.to_string());
+        }
+
         Ok(AwsResponse::ok_json(json!(integration)))
     }
 

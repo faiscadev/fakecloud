@@ -142,7 +142,7 @@ impl ApiGatewayService {
             .get_mut(&id)
             .ok_or_else(|| not_found("Authorizer not found"))?;
         apply_patch_operations(req, |op, path, value| {
-            if op != "replace" && op != "add" {
+            if op != "replace" && op != "add" && op != "remove" {
                 return;
             }
             match path {
@@ -155,6 +155,26 @@ impl ApiGatewayService {
                 "/identitySource" => a.identity_source = value.as_str().map(String::from),
                 "/authorizerResultTtlInSeconds" => {
                     a.authorizer_result_ttl_in_seconds = value.as_i64().map(|v| v as i32);
+                }
+                // Previously dropped: rotating Cognito provider ARNs or updating
+                // the authorizer's IAM credentials / identity validation
+                // silently no-op'd (bug-hunt 2026-06-24, 1.11).
+                "/authorizerCredentials" => {
+                    a.authorizer_credentials = value.as_str().map(String::from)
+                }
+                "/identityValidationExpression" => {
+                    a.identity_validation_expression = value.as_str().map(String::from)
+                }
+                "/providerARNs" if op == "add" => {
+                    if let Some(s) = value.as_str() {
+                        if !a.provider_arns.iter().any(|x| x == s) {
+                            a.provider_arns.push(s.to_string());
+                        }
+                    }
+                }
+                _ if path.starts_with("/providerARNs/") && op == "remove" => {
+                    let target = path.trim_start_matches("/providerARNs/");
+                    a.provider_arns.retain(|x| x != target);
                 }
                 _ => {}
             }

@@ -124,7 +124,7 @@ impl ApiGatewayService {
             .get_mut(&id)
             .ok_or_else(|| not_found("ApiKey not found"))?;
         apply_patch_operations(req, |op, path, value| {
-            if op != "replace" && op != "add" {
+            if op != "replace" && op != "add" && op != "remove" {
                 return;
             }
             match path {
@@ -138,6 +138,19 @@ impl ApiGatewayService {
                     if let Some(b) = value.as_bool() {
                         k.enabled = b;
                     }
+                }
+                // Previously dropped (bug-hunt 2026-06-24, 1.11).
+                "/customerId" => k.customer_id = value.as_str().map(String::from),
+                "/stageKeys" if op == "add" => {
+                    if let Some(s) = value.as_str() {
+                        if !k.stage_keys.iter().any(|x| x == s) {
+                            k.stage_keys.push(s.to_string());
+                        }
+                    }
+                }
+                _ if path.starts_with("/stageKeys/") && op == "remove" => {
+                    let target = path.trim_start_matches("/stageKeys/");
+                    k.stage_keys.retain(|x| x != target);
                 }
                 _ => {}
             }
