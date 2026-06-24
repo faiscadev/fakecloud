@@ -1079,7 +1079,7 @@ impl AwsService for S3Service {
         // service prefixes, not `s3:`. Select the right prefix so a policy
         // targeting the real action string actually matches.
         let service = match action {
-            "CreateSession" => "s3express",
+            "CreateSession" | "ListAllMyDirectoryBuckets" => "s3express",
             "WriteGetObjectResponse" => "s3-object-lambda",
             _ => "s3",
         };
@@ -1241,6 +1241,15 @@ fn s3_detect_action(
     // Service root
     if bucket.is_none() {
         return match method {
+            // A directory-bucket listing (`GET /?x-id=ListDirectoryBuckets`) is
+            // authorized under `s3express:ListAllMyDirectoryBuckets`, NOT
+            // `s3:ListBuckets`. Detecting it as ListBuckets let an
+            // `s3:ListBuckets` grant wrongly enumerate directory buckets and
+            // denied a policy that only granted the s3express action (bug-hunt
+            // 2026-06-24, 5.5).
+            "GET" if query.get("x-id").map(|s| s.as_str()) == Some("ListDirectoryBuckets") => {
+                Some("ListAllMyDirectoryBuckets")
+            }
             "GET" => Some("ListBuckets"),
             _ => None,
         };
@@ -2865,6 +2874,16 @@ mod s3_detect_action_tests {
         // POST /WriteGetObjectResponse (no key) — Object Lambda data plane.
         let action = s3_detect_action("POST", Some("WriteGetObjectResponse"), None, &q(&[]));
         assert_eq!(action, Some("WriteGetObjectResponse"));
+    }
+
+    #[test]
+    fn list_directory_buckets_is_distinct_from_list_buckets() {
+        // GET /?x-id=ListDirectoryBuckets -> s3express action, not ListBuckets.
+        let dir = s3_detect_action("GET", None, None, &q(&[("x-id", "ListDirectoryBuckets")]));
+        assert_eq!(dir, Some("ListAllMyDirectoryBuckets"));
+        // Plain GET / is still ListBuckets.
+        let plain = s3_detect_action("GET", None, None, &q(&[]));
+        assert_eq!(plain, Some("ListBuckets"));
     }
 
     #[test]
