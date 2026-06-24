@@ -610,6 +610,62 @@ async fn test_send_bulk_email() {
 }
 
 #[tokio::test]
+async fn test_send_bulk_email_applies_replacement_and_default_tags() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    let svc = SesV2Service::new(state.clone());
+
+    // DefaultEmailTags apply to every entry; per-entry ReplacementTags add to
+    // or override them by name (previously both were dropped).
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-bulk-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "DefaultEmailTags": [
+                {"Name": "campaign", "Value": "default"},
+                {"Name": "env", "Value": "prod"}
+            ],
+            "DefaultContent": {
+                "Template": {"TemplateName": null, "TemplateData": "{}"}
+            },
+            "BulkEmailEntries": [
+                {
+                    "Destination": {"ToAddresses": ["a@example.com"]},
+                    "ReplacementTags": [
+                        {"Name": "campaign", "Value": "winback"},
+                        {"Name": "segment", "Value": "vip"}
+                    ]
+                },
+                {"Destination": {"ToAddresses": ["b@example.com"]}}
+            ]
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let guard = state.read();
+    let s = guard.default_ref();
+    assert_eq!(s.sent_emails.len(), 2);
+
+    // Entry 0: ReplacementTags override `campaign` and add `segment`; `env`
+    // inherited from the defaults.
+    let t0: std::collections::BTreeMap<_, _> =
+        s.sent_emails[0].email_tags.iter().cloned().collect();
+    assert_eq!(t0.get("campaign").map(String::as_str), Some("winback"));
+    assert_eq!(t0.get("segment").map(String::as_str), Some("vip"));
+    assert_eq!(t0.get("env").map(String::as_str), Some("prod"));
+
+    // Entry 1: no ReplacementTags -> exactly the defaults.
+    let t1: std::collections::BTreeMap<_, _> =
+        s.sent_emails[1].email_tags.iter().cloned().collect();
+    assert_eq!(t1.get("campaign").map(String::as_str), Some("default"));
+    assert_eq!(t1.get("env").map(String::as_str), Some("prod"));
+    assert!(!t1.contains_key("segment"));
+}
+
+#[tokio::test]
 async fn test_send_email_rejects_when_account_paused() {
     let state = make_state();
     {

@@ -3,11 +3,27 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::state::LinkedProvider;
-
 use crate::state::CognitoState;
+use crate::state::LinkedProvider;
+use crate::state::MfaOption;
 
 use super::{require_str, CognitoService};
+
+/// Parse the legacy `MFAOptions` list shape
+/// (`[{DeliveryMedium, AttributeName}]`) into stored options.
+fn parse_mfa_options(value: &Value) -> Vec<MfaOption> {
+    value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|o| MfaOption {
+                    delivery_medium: o["DeliveryMedium"].as_str().unwrap_or_default().to_string(),
+                    attribute_name: o["AttributeName"].as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 impl CognitoService {
     // ── Legacy MFA Settings ────────────────────────────────────────────
@@ -18,16 +34,15 @@ impl CognitoService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let pool_id = require_str(&body, "UserPoolId")?;
-        let username = require_str(&body, "Username")?;
-        let _mfa_options = body["MFAOptions"].as_array();
+        let pool_id = require_str(&body, "UserPoolId")?.to_string();
+        let username = require_str(&body, "Username")?.to_string();
+        let mfa_options = parse_mfa_options(&body["MFAOptions"]);
 
-        let accounts = self.state.read();
-        let empty = CognitoState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
 
         // Validate pool and user exist
-        let users = state.users.get(pool_id).ok_or_else(|| {
+        let users = state.users.get_mut(&pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ResourceNotFoundException",
@@ -35,15 +50,17 @@ impl CognitoService {
             )
         })?;
 
-        if !users.contains_key(username) {
-            return Err(AwsServiceError::aws_error(
+        let user = users.get_mut(&username).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "UserNotFoundException",
                 format!("User {username} does not exist."),
-            ));
-        }
+            )
+        })?;
 
-        // Legacy operation — accept but don't change behavior (maps to AdminSetUserMFAPreference)
+        // Legacy operation — persist the MFA options so GetUser echoes them
+        // (maps loosely to AdminSetUserMFAPreference).
+        user.mfa_options = mfa_options;
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -53,34 +70,36 @@ impl CognitoService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let access_token = require_str(&body, "AccessToken")?;
-        let _mfa_options = body["MFAOptions"].as_array();
+        let access_token = require_str(&body, "AccessToken")?.to_string();
+        let mfa_options = parse_mfa_options(&body["MFAOptions"]);
 
-        let accounts = self.state.read();
-        let empty = CognitoState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
 
-        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid access token.",
-            )
-        })?;
+        let (pool_id, username) = {
+            let token_data = state.access_tokens.get(&access_token).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid access token.",
+                )
+            })?;
+            (token_data.user_pool_id.clone(), token_data.username.clone())
+        };
 
-        // Validate user exists
-        if !state
+        let user = state
             .users
-            .get(&token_data.user_pool_id)
-            .is_some_and(|u| u.contains_key(&token_data.username))
-        {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                "User not found.",
-            ));
-        }
+            .get_mut(&pool_id)
+            .and_then(|u| u.get_mut(&username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "User not found.",
+                )
+            })?;
 
+        user.mfa_options = mfa_options;
         Ok(AwsResponse::ok_json(json!({})))
     }
 

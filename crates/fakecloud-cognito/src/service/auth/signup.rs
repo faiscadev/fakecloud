@@ -92,6 +92,7 @@ impl CognitoService {
                 totp_verified: false,
                 devices: BTreeMap::new(),
                 linked_providers: Vec::new(),
+                mfa_options: Vec::new(),
             };
 
             pool_users.insert(username.to_string(), user.clone());

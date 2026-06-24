@@ -455,6 +455,7 @@ fn filter_matches_username() {
         totp_verified: false,
         devices: BTreeMap::new(),
         linked_providers: Vec::new(),
+        mfa_options: Vec::new(),
     };
 
     let filter = parse_filter_expression(r#"username = "testuser""#).unwrap();
@@ -489,6 +490,7 @@ fn filter_matches_attribute() {
         totp_verified: false,
         devices: BTreeMap::new(),
         linked_providers: Vec::new(),
+        mfa_options: Vec::new(),
     };
 
     let filter = parse_filter_expression(r#"email = "test@example.com""#).unwrap();
@@ -520,6 +522,7 @@ fn filter_matches_user_status() {
         totp_verified: false,
         devices: BTreeMap::new(),
         linked_providers: Vec::new(),
+        mfa_options: Vec::new(),
     };
 
     let filter =
@@ -5895,6 +5898,16 @@ fn set_user_settings_valid_token() {
     });
     let req = make_req("SetUserSettings", &body.to_string());
     svc.set_user_settings(&req).unwrap();
+
+    // GetUser must echo the MFA options that were just set, not a hardcoded
+    // empty list (bug-hunt 2026-06-24, 1.13).
+    let get_req = make_req("GetUser", &json!({ "AccessToken": token }).to_string());
+    let resp = svc.get_user(&get_req).unwrap();
+    let json: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let opts = json["MFAOptions"].as_array().unwrap();
+    assert_eq!(opts.len(), 1);
+    assert_eq!(opts[0]["DeliveryMedium"], "SMS");
+    assert_eq!(opts[0]["AttributeName"], "phone_number");
 }
 
 #[test]

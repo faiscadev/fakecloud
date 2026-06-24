@@ -608,6 +608,17 @@ pub struct User {
     pub totp_verified: bool,
     pub devices: BTreeMap<String, Device>,
     pub linked_providers: Vec<LinkedProvider>,
+    /// Legacy MFA options set via SetUserSettings/AdminSetUserSettings and
+    /// echoed back by GetUser/AdminGetUser (deprecated in favor of
+    /// mfa_preferences, but still round-tripped for legacy clients).
+    #[serde(default)]
+    pub mfa_options: Vec<MfaOption>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MfaOption {
+    pub delivery_medium: String,
+    pub attribute_name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
