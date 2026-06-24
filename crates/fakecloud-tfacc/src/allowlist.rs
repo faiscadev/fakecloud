@@ -114,11 +114,13 @@ pub const SERVICES: &[Service] = &[
         deny: &[
             // (CIDR collection ARN now omits the account id —
             //  `arn:aws:route53:::cidrcollection/...` — so that test runs.)
-            // --- gap: DNSSEC key-signing keys need real DNSSEC crypto derived
-            //     from the referenced KMS key — public_key, dnskey_record,
-            //     ds_record, and the SHA-256 digest_value (keytag + DS digest).
-            //     A focused follow-up. ---
-            "TestAccRoute53KeySigningKey_basic",
+            // (Batch 20: DNSSEC key-signing keys now report the full DNSSEC
+            //  material — the CreateKeySigningKey/GetDNSSEC response carries the
+            //  base64 PublicKey, the DNSKEY/DS presentation records, and the
+            //  upper-case SHA-256 DigestValue, all derived deterministically from
+            //  the (zone, ksk-name) keypair fakecloud already generates — so the
+            //  resource's public_key/dnskey_record/ds_record/digest_value
+            //  assertions pass.)
             // (Private-zone VPC association now works: a zone created with a VPC
             //  is private and carries default NS/SOA records, and
             //  ListHostedZonesByVPC returns a bare HostedZoneId.)

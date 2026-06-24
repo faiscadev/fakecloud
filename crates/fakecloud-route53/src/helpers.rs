@@ -619,6 +619,25 @@ pub(crate) fn push_key_signing_key_inner(out: &mut String, k: &StoredKeySigningK
          <DigestAlgorithmType>2</DigestAlgorithmType>",
     );
     out.push_str(&format!("<KeyTag>{}</KeyTag>", k.key_tag));
+    // Re-derive the (deterministic) DNSSEC key material so the response carries
+    // the DNSKEY public key, the DNSKEY/DS presentation records, and the DS
+    // digest the Terraform resource asserts. AWS reports the DS digest in upper
+    // case hex; the DNSKEY/DS records use the standard zone-file presentation.
+    let material = crate::dnssec::derive_keypair(&k.hosted_zone_id, &k.name);
+    let public_key_b64 = crate::dnssec::b64(&material.dnskey_public_key);
+    let digest_upper = k.ds_digest_hex.to_uppercase();
+    let dnskey_record = format!("257 3 13 {public_key_b64}");
+    let ds_record = format!("{} 13 2 {}", k.key_tag, digest_upper);
+    out.push_str(&format!("<PublicKey>{}</PublicKey>", esc(&public_key_b64)));
+    out.push_str(&format!(
+        "<DigestValue>{}</DigestValue>",
+        esc(&digest_upper)
+    ));
+    out.push_str(&format!(
+        "<DNSKEYRecord>{}</DNSKEYRecord>",
+        esc(&dnskey_record)
+    ));
+    out.push_str(&format!("<DSRecord>{}</DSRecord>", esc(&ds_record)));
     out.push_str(&format!("<Status>{}</Status>", esc(&k.status)));
     out.push_str(&format!(
         "<CreatedDate>{}</CreatedDate>",
