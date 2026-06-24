@@ -399,23 +399,6 @@ impl SnsService {
         let mut successful = Vec::new();
         let failed: Vec<String> = Vec::new();
 
-        // Pre-mint one FIFO SequenceNumber per entry in a single mutable
-        // burst before the per-entry fanout re-borrows state (1.6).
-        let sequence_numbers: Vec<String> = if is_fifo {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
-            let mut out = Vec::with_capacity(entries.len());
-            if let Some(t) = state.topics.get_mut(&topic_arn) {
-                for _ in &entries {
-                    t.fifo_sequence += 1;
-                    out.push(format!("{:020}", t.fifo_sequence));
-                }
-            }
-            out
-        } else {
-            Vec::new()
-        };
-
         for (idx, (id, message, subject, group_id, dedup_id, structure)) in
             entries.iter().enumerate()
         {
@@ -427,21 +410,66 @@ impl SnsService {
                 validate_message_structure_json(message)?;
             }
 
-            let msg_id = uuid::Uuid::new_v4().to_string();
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
-            state.published.push(PublishedMessage {
-                message_id: msg_id.clone(),
-                topic_arn: topic_arn.clone(),
-                message: message.clone(),
-                subject: subject.clone(),
-                message_attributes: batch_attrs.clone(),
-                message_group_id: group_id.clone(),
-                message_dedup_id: dedup_id.clone(),
-                timestamp: Utc::now(),
-            });
+            // FIFO dedup + sequence minting, mirroring single Publish. A
+            // duplicate within the 5-minute window replays the original
+            // MessageId/SequenceNumber and is NOT fanned out again — the batch
+            // path previously skipped dedup entirely.
+            let effective_dedup_id: Option<String> = if is_fifo {
+                dedup_id
+                    .clone()
+                    .or_else(|| content_dedup.then(|| sns_sha256_hex(message)))
+            } else {
+                None
+            };
+            let (msg_id, sequence_number, deduped) = {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                let now = Utc::now();
+                let replayed = effective_dedup_id.as_ref().and_then(|dedup_id| {
+                    let topic = state.topics.get_mut(&topic_arn)?;
+                    topic.dedup_cache.retain(|_, e| e.expiry > now);
+                    let entry = topic.dedup_cache.get(dedup_id)?;
+                    Some((entry.message_id.clone(), entry.sequence_number.clone()))
+                });
+                if let Some((orig_id, orig_seq)) = replayed {
+                    (orig_id, orig_seq, true)
+                } else {
+                    let sequence_number = if is_fifo {
+                        state.topics.get_mut(&topic_arn).map(|t| {
+                            t.fifo_sequence += 1;
+                            format!("{:020}", t.fifo_sequence)
+                        })
+                    } else {
+                        None
+                    };
+                    let msg_id = uuid::Uuid::new_v4().to_string();
+                    state.published.push(PublishedMessage {
+                        message_id: msg_id.clone(),
+                        topic_arn: topic_arn.clone(),
+                        message: message.clone(),
+                        subject: subject.clone(),
+                        message_attributes: batch_attrs.clone(),
+                        message_group_id: group_id.clone(),
+                        message_dedup_id: dedup_id.clone(),
+                        timestamp: now,
+                    });
+                    if let Some(ref dedup_id) = effective_dedup_id {
+                        if let Some(topic) = state.topics.get_mut(&topic_arn) {
+                            topic.dedup_cache.insert(
+                                dedup_id.clone(),
+                                crate::state::SnsDedupEntry {
+                                    message_id: msg_id.clone(),
+                                    sequence_number: sequence_number.clone(),
+                                    expiry: now + chrono::Duration::minutes(5),
+                                },
+                            );
+                        }
+                    }
+                    (msg_id, sequence_number, false)
+                }
+            };
 
-            // Resolve message for SQS via MessageStructure=json
+            // Resolve MessageStructure=json once for this entry.
             let parsed_structure: Option<Value> = if structure.as_deref() == Some("json") {
                 Some(serde_json::from_str(message).map_err(|_| {
                     AwsServiceError::aws_error(
@@ -453,9 +481,8 @@ impl SnsService {
             } else {
                 None
             };
-            let sqs_message = if let Some(ref s) = parsed_structure {
-                s.get("sqs")
-                    .or_else(|| s.get("default"))
+            let default_message = if let Some(ref s) = parsed_structure {
+                s.get("default")
                     .and_then(|v| v.as_str())
                     .unwrap_or(message)
                     .to_string()
@@ -463,77 +490,45 @@ impl SnsService {
                 message.clone()
             };
 
-            // Deliver to SQS subscribers
-            let sqs_subscribers: Vec<(String, bool)> = state
-                .subscriptions
-                .values()
-                .filter(|s| s.topic_arn == topic_arn && s.protocol == "sqs" && s.confirmed)
-                .map(|s| {
-                    let raw = s
-                        .attributes
-                        .get("RawMessageDelivery")
-                        .map(|v| v == "true")
-                        .unwrap_or(false);
-                    (s.endpoint.clone(), raw)
-                })
-                .collect();
-            drop(accounts);
-
-            // Build envelope attributes
-            let mut envelope_attrs = serde_json::Map::new();
-            for (key, attr) in &batch_attrs {
-                let mut attr_obj = serde_json::Map::new();
-                attr_obj.insert("Type".to_string(), Value::String(attr.data_type.clone()));
-                if let Some(ref sv) = attr.string_value {
-                    attr_obj.insert("Value".to_string(), Value::String(sv.clone()));
-                }
-                if let Some(ref bv) = attr.binary_value {
-                    attr_obj.insert(
-                        "Value".to_string(),
-                        Value::String(base64::engine::general_purpose::STANDARD.encode(bv)),
-                    );
-                }
-                envelope_attrs.insert(key.clone(), Value::Object(attr_obj));
+            // Fan out to ALL subscriber protocols, applying each
+            // subscription's FilterPolicy — mirroring single Publish. The
+            // batch path previously hand-filtered to SQS only, so HTTP /
+            // Lambda / email / SMS subscribers got nothing and FilterPolicy
+            // was never evaluated. A deduplicated entry is not re-delivered.
+            if !deduped {
+                let subscribers = {
+                    let accts = self.state.read();
+                    let empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
+                    let state = accts.get(&req.account_id).unwrap_or(&empty);
+                    collect_topic_subscribers(state, &topic_arn, &batch_attrs, message)
+                };
+                let envelope_attrs = build_envelope_attrs(&batch_attrs);
+                let ctx = TopicFanoutContext {
+                    msg_id: &msg_id,
+                    topic_arn: &topic_arn,
+                    subject: subject.as_deref(),
+                    endpoint: &endpoint,
+                    default_message: &default_message,
+                    structure: parsed_structure.as_ref(),
+                    envelope_attrs: &envelope_attrs,
+                    message_attributes: &batch_attrs,
+                    message_group_id: if is_fifo { group_id.as_deref() } else { None },
+                    message_dedup_id: if is_fifo { dedup_id.as_deref() } else { None },
+                };
+                deliver_to_sqs_subscribers(&self.delivery, &subscribers.sqs, &ctx);
+                deliver_to_http_subscribers(&self.delivery, &subscribers.http, &ctx);
+                deliver_to_lambda_subscribers(
+                    &self.state,
+                    &self.delivery,
+                    &subscribers.lambda,
+                    &ctx,
+                );
+                deliver_to_email_subscribers(&self.state, &subscribers.email, &ctx);
+                deliver_to_sms_subscribers(&self.state, &subscribers.sms, &ctx);
             }
 
-            for (queue_arn, raw) in &sqs_subscribers {
-                if *raw {
-                    let mut sqs_msg_attrs = HashMap::new();
-                    for (k, v) in &batch_attrs {
-                        let mut attr = fakecloud_core::delivery::SqsMessageAttribute {
-                            data_type: v.data_type.clone(),
-                            string_value: v.string_value.clone(),
-                            binary_value: None,
-                        };
-                        if let Some(ref bv) = v.binary_value {
-                            attr.binary_value =
-                                Some(base64::engine::general_purpose::STANDARD.encode(bv));
-                        }
-                        sqs_msg_attrs.insert(k.clone(), attr);
-                    }
-                    self.delivery.send_to_sqs_with_attrs(
-                        queue_arn,
-                        &sqs_message,
-                        &sqs_msg_attrs,
-                        if is_fifo { group_id.as_deref() } else { None },
-                        if is_fifo { dedup_id.as_deref() } else { None },
-                    );
-                } else {
-                    let envelope_str = build_sns_envelope(
-                        &msg_id,
-                        &topic_arn,
-                        subject,
-                        &sqs_message,
-                        &envelope_attrs,
-                        &endpoint,
-                    );
-                    self.delivery
-                        .send_to_sqs(queue_arn, &envelope_str, &HashMap::new());
-                }
-            }
-
-            let sequence_xml = sequence_numbers
-                .get(idx)
+            let sequence_xml = sequence_number
+                .as_deref()
                 .map(|seq| format!("\n      <SequenceNumber>{seq}</SequenceNumber>"))
                 .unwrap_or_default();
             successful.push(format!(
