@@ -554,3 +554,43 @@ async fn secretsmanager_rotation_scheduler_tick() {
         Some(1)
     );
 }
+
+#[tokio::test]
+async fn secretsmanager_rotation_rules_schedule_round_trips() {
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    client
+        .create_secret()
+        .name("rotate-sched")
+        .secret_string("v")
+        .send()
+        .await
+        .unwrap();
+
+    // The modern scheduling form (Duration + ScheduleExpression) must survive
+    // the RotateSecret -> DescribeSecret round-trip; previously both were
+    // dropped, surfacing as perpetual Terraform drift.
+    client
+        .rotate_secret()
+        .secret_id("rotate-sched")
+        .rotation_rules(
+            aws_sdk_secretsmanager::types::RotationRulesType::builder()
+                .duration("2h")
+                .schedule_expression("cron(0 8 1 * ? *)")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let desc = client
+        .describe_secret()
+        .secret_id("rotate-sched")
+        .send()
+        .await
+        .unwrap();
+    let rules = desc.rotation_rules().expect("rotation rules present");
+    assert_eq!(rules.duration(), Some("2h"));
+    assert_eq!(rules.schedule_expression(), Some("cron(0 8 1 * ? *)"));
+}

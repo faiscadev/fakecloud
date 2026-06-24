@@ -148,6 +148,16 @@ impl ResourceProvisioner {
             .get("RotationRules")
             .and_then(|v| v.get("AutomaticallyAfterDays"))
             .and_then(|v| v.as_i64());
+        let rotation_duration = props
+            .get("RotationRules")
+            .and_then(|v| v.get("Duration"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let rotation_schedule_expression = props
+            .get("RotationRules")
+            .and_then(|v| v.get("ScheduleExpression"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let mut accounts = self.secretsmanager_state.write();
         let state = accounts.get_or_create(&self.account_id);
         let secret_arn = if state.secrets.contains_key(&secret_id) {
@@ -171,6 +181,8 @@ impl ResourceProvisioner {
         secret.rotation_lambda_arn = rotation_lambda_arn;
         secret.rotation_rules = Some(RotationRules {
             automatically_after_days,
+            duration: rotation_duration,
+            schedule_expression: rotation_schedule_expression,
         });
         secret.last_changed_at = Utc::now();
         Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))

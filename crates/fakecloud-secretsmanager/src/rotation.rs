@@ -256,6 +256,8 @@ mod tests {
             rotation_lambda_arn: None, // no Lambda for unit tests
             rotation_rules: days.map(|d| RotationRules {
                 automatically_after_days: Some(d),
+                duration: None,
+                schedule_expression: None,
             }),
             last_rotated_at: last_rotated,
             resource_policy: None,
