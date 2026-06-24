@@ -970,6 +970,13 @@ impl RdsService {
                 .get_mut(&db_instance_identifier)
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
             instance.db_instance_status = "rebooting".to_string();
+            // Apply pending modifications SYNCHRONOUSLY: AWS applies these to the
+            // instance metadata as part of the reboot, and the response must
+            // reflect the new values with pending cleared. Only the container
+            // restart (the slow part) is backgrounded below.
+            if let Some(pending) = instance.pending_modified_values.take() {
+                apply_pending_to_instance(instance, pending);
+            }
             instance.clone()
         };
 
@@ -1008,9 +1015,9 @@ impl RdsService {
                     instance.host_port = running.host_port;
                     instance.port = i32::from(running.endpoint_port);
                     instance.endpoint_address = running.endpoint_address.clone();
-                    if let Some(pending) = instance.pending_modified_values.take() {
-                        apply_pending_to_instance(instance, pending);
-                    }
+                    // Pending modifications were already applied synchronously
+                    // in the handler; the background task only reconciles the
+                    // restarted container's endpoint + flips to available.
                     instance.db_instance_status = "available".to_string();
                     instance.db_instance_arn.clone()
                 };
