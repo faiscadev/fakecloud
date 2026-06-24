@@ -344,14 +344,14 @@ pub const SERVICES: &[Service] = &[
         // fakecloud-side fixes that unblocked server certificates (trailing-PEM
         // newline), the STS global-endpoint token version in GetAccountSummary,
         // and ListServiceSpecificCredentials `<member>` framing.
+        // Batch 21: Simulate{Custom,Principal}Policy now attribute their
+        // MatchedStatements to the source policy. Each resolved identity policy
+        // is tracked with its simulation source id (a managed policy by its
+        // name, an inline policy as `<kind>_<principal>_<policy>`), and the
+        // evaluator exposes which statements matched the action/resource for the
+        // decision, so the data source reads source_policy_id/source_policy_type.
         run_regex: "^TestAccIAM[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: SimulatePrincipalPolicy returns no per-statement
-            //          MatchedStatements detail (source_policy_id /
-            //          source_policy_type), which the data source asserts.
-            //          Needs the policy simulator to track which statement
-            //          produced each decision. ---
-            "TestAccIAMPrincipalPolicySimulationDataSource_basic",
             // (RolesDataSource now passes: accounts seed the default
             //  AWSServiceRoleForSupport / TrustedAdvisor service-linked roles
             //  like real AWS, so a fresh ListRoles is non-empty.)

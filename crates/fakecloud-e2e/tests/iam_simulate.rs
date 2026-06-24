@@ -44,6 +44,51 @@ async fn simulate_custom_policy_allows_matching_action() {
         "expected allowed, got {:?}",
         r.eval_decision()
     );
+    // An allow is attributed to the matching statement's source policy.
+    let matched = r.matched_statements();
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].source_policy_id(), Some("PolicyInputList.1"));
+    assert_eq!(
+        matched[0].source_policy_type().map(|t| t.as_str()),
+        Some("IAM Policy")
+    );
+}
+
+#[tokio::test]
+async fn simulate_principal_policy_matched_statement_names_inline_policy() {
+    // SimulatePrincipalPolicy attributes the decision to the user's inline
+    // policy, identified as `user_<user>_<policy>` with type "IAM Policy".
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+
+    iam.create_user().user_name("alice").send().await.unwrap();
+    iam.put_user_policy()
+        .user_name("alice")
+        .policy_name("AllowS3Get")
+        .policy_document(ALLOW_S3_GET)
+        .send()
+        .await
+        .unwrap();
+    let user = iam.get_user().user_name("alice").send().await.unwrap();
+    let arn = user.user().unwrap().arn().to_string();
+
+    let resp = iam
+        .simulate_principal_policy()
+        .policy_source_arn(arn)
+        .action_names("s3:GetObject")
+        .resource_arns("arn:aws:s3:::bucket/key")
+        .send()
+        .await
+        .unwrap();
+    let r = &resp.evaluation_results()[0];
+    assert_eq!(r.eval_decision().as_str(), "allowed");
+    let matched = r.matched_statements();
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].source_policy_id(), Some("user_alice_AllowS3Get"));
+    assert_eq!(
+        matched[0].source_policy_type().map(|t| t.as_str()),
+        Some("IAM Policy")
+    );
 }
 
 #[tokio::test]
