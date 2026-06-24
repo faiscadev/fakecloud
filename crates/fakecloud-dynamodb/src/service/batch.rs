@@ -410,6 +410,29 @@ impl DynamoDbService {
             )
         })?;
 
+        // AWS rejects an empty transaction and one over the 100-action ceiling
+        // up-front with a ValidationException; previously both were silently
+        // accepted (an empty transaction returned success, an oversized one
+        // applied every action).
+        if transact_items.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value '[]' at 'transactItems' \
+                 failed to satisfy constraint: Member must have length greater \
+                 than or equal to 1",
+            ));
+        }
+        if transact_items.len() > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value at 'transactItems' failed \
+                 to satisfy constraint: Member must have length less than or \
+                 equal to 100",
+            ));
+        }
+
         // Per-operation `ReturnValuesOnConditionCheckFailure` is its own
         // enum; validate it up-front so a malformed value short-circuits
         // before we touch the state lock. Real DDB rejects unknown values
@@ -439,6 +462,35 @@ impl DynamoDbService {
                     let table_name = op["TableName"].as_str().unwrap_or_default();
                     get_table(&state.tables, table_name)?;
                 }
+            }
+        }
+
+        // AWS rejects a transaction that targets the same item more than once
+        // (by table + primary key) with a ValidationException; previously such
+        // a transaction applied last-writer-wins and reported success. The key
+        // is the table's primary key, extracted from a Put's Item or the
+        // Key field of Update/Delete/ConditionCheck.
+        let mut seen_keys: Vec<(String, HashMap<String, AttributeValue>)> = Vec::new();
+        for ti in transact_items {
+            for op_key in ["Put", "Delete", "Update", "ConditionCheck"] {
+                let Some(op) = ti.get(op_key) else { continue };
+                let table_name = op["TableName"].as_str().unwrap_or_default();
+                let table = get_table(&state.tables, table_name)?;
+                let key = if op_key == "Put" {
+                    let item: HashMap<String, AttributeValue> =
+                        serde_json::from_value(op["Item"].clone()).unwrap_or_default();
+                    extract_key(table, &item)
+                } else {
+                    serde_json::from_value(op["Key"].clone()).unwrap_or_default()
+                };
+                if seen_keys.iter().any(|(t, k)| t == table_name && *k == key) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "Transaction request cannot include multiple operations on one item",
+                    ));
+                }
+                seen_keys.push((table_name.to_string(), key));
             }
         }
 
@@ -1697,6 +1749,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transact_write_rejects_empty_oversized_and_duplicate_keys() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let err_code =
+            |body: Value| match svc.transact_write_items(&req_for("TransactWriteItems", body)) {
+                Ok(_) => panic!("transaction must be rejected"),
+                Err(e) => e.code().to_string(),
+            };
+
+        // Empty transaction.
+        assert_eq!(
+            err_code(json!({"TransactItems": []})),
+            "ValidationException"
+        );
+
+        // Over the 100-action ceiling.
+        let many: Vec<Value> = (0..101)
+            .map(|i| json!({"Put": {"TableName": "Widgets", "Item": {"pk": {"S": i.to_string()}}}}))
+            .collect();
+        assert_eq!(
+            err_code(json!({"TransactItems": many})),
+            "ValidationException"
+        );
+
+        // Two operations on the same item key.
+        assert_eq!(
+            err_code(json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "x"}}}},
+                    {"Delete": {"TableName": "Widgets", "Key": {"pk": {"S": "x"}}}},
+                ]
+            })),
+            "ValidationException"
+        );
+
+        // Sanity: nothing committed.
+        assert_eq!(
+            state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .tables
+                .get("Widgets")
+                .unwrap()
+                .items
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn transact_write_apply_failure_reverts_and_emits_validation_error() {
         let state = make_state();
         seed_table_with_stream(&state, "Widgets");
@@ -1713,7 +1818,7 @@ mod tests {
                         {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
                         {"Update": {
                             "TableName": "Widgets",
-                            "Key": {"pk": {"S": "a"}},
+                            "Key": {"pk": {"S": "b"}},
                             "UpdateExpression": "BOGUS expression that won't parse"
                         }},
                     ]
