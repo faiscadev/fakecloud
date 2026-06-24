@@ -1,8 +1,12 @@
 use super::*;
 
-/// Response with only metadata (no result body).
+/// Response with an empty result body. The SES v1 Query protocol always wraps
+/// the response in a `<{Action}Result>` element (empty for actions with no
+/// output members); omitting it makes the AWS SDK fail to deserialize with
+/// "{Action}Result node not found". Use this for write actions that return no
+/// data of their own.
 pub(crate) fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = query_metadata_only_xml(action, SES_NS, request_id);
+    let xml = query_response_xml(action, SES_NS, "", request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
