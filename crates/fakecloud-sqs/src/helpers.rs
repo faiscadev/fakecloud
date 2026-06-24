@@ -248,16 +248,13 @@ pub(crate) fn process_batch_send_entry(
     };
 
     let message_attributes = entry_attributes;
+    // System attributes (e.g. AWSTraceHeader for X-Ray) must be stored, not
+    // dropped — the single-send path stores them, and the batch response
+    // already advertises their MD5, so dropping them silently lost the
+    // X-Ray trace context for batched sends.
     let system_attributes = parse_message_system_attributes(entry);
 
-    let sequence_number = if cfg.is_fifo {
-        let seq = queue.next_sequence_number;
-        queue.next_sequence_number += 1;
-        Some(seq.to_string())
-    } else {
-        None
-    };
-
+    let md5_of_body = md5_hex(&message_body);
     let md5_of_attrs = if message_attributes.is_empty() {
         None
     } else {
@@ -269,26 +266,72 @@ pub(crate) fn process_batch_send_entry(
         Some(md5_of_message_system_attributes(&system_attributes))
     };
 
+    // FIFO content-based deduplication. The single-send path computes an
+    // effective dedup id (explicit id, else the body SHA-256 when
+    // ContentBasedDeduplication is on) and replays the original
+    // MessageId/SequenceNumber for a duplicate within the 5-minute window
+    // without enqueuing again or advancing the sequence counter. The batch
+    // path skipped all of this, so duplicate-body batched messages all
+    // enqueued.
+    let effective_dedup_id = if cfg.is_fifo {
+        message_dedup_id
+            .clone()
+            .or_else(|| cfg.content_based_dedup.then(|| sha256_hex(&message_body)))
+    } else {
+        None
+    };
+    if cfg.is_fifo {
+        if let Some(ref dedup_id) = effective_dedup_id {
+            queue.dedup_cache.retain(|_, e| e.expiry > cfg.now);
+            if let Some(existing) = queue.dedup_cache.get(dedup_id) {
+                let mut entry_resp = json!({
+                    "Id": id,
+                    "MessageId": existing.message_id,
+                    "MD5OfMessageBody": md5_of_body,
+                });
+                if let Some(ref seq) = existing.sequence_number {
+                    entry_resp["SequenceNumber"] = json!(seq);
+                }
+                if let Some(md5) = &md5_of_attrs {
+                    entry_resp["MD5OfMessageAttributes"] = json!(md5);
+                }
+                if let Some(md5) = &md5_of_system_attrs {
+                    entry_resp["MD5OfMessageSystemAttributes"] = json!(md5);
+                }
+                return Ok(BatchEntryOutcome::Success(entry_resp));
+            }
+        }
+    }
+
+    let sequence_number = if cfg.is_fifo {
+        let seq = queue.next_sequence_number;
+        queue.next_sequence_number += 1;
+        Some(seq.to_string())
+    } else {
+        None
+    };
+
     let msg = SqsMessage {
         message_id: uuid::Uuid::new_v4().to_string(),
         receipt_handle: None,
-        md5_of_body: md5_hex(&message_body),
+        md5_of_body: md5_of_body.clone(),
         body: stored_body_override.unwrap_or(message_body),
         sent_timestamp: cfg.now.timestamp_millis(),
-        attributes: BTreeMap::new(),
+        attributes: system_attributes,
         message_attributes,
         visible_at,
         receive_count: 0,
         message_group_id,
-        message_dedup_id,
+        message_dedup_id: effective_dedup_id.clone(),
         created_at: cfg.now,
         sequence_number: sequence_number.clone(),
     };
+    let message_id = msg.message_id.clone();
 
     let mut entry_resp = json!({
         "Id": id,
-        "MessageId": msg.message_id,
-        "MD5OfMessageBody": msg.md5_of_body,
+        "MessageId": message_id,
+        "MD5OfMessageBody": md5_of_body,
     });
     if let Some(seq) = &sequence_number {
         entry_resp["SequenceNumber"] = json!(seq);
@@ -300,6 +343,19 @@ pub(crate) fn process_batch_send_entry(
         entry_resp["MD5OfMessageSystemAttributes"] = json!(md5);
     }
     queue.messages.push_back(msg);
+
+    if cfg.is_fifo {
+        if let Some(dedup_id) = effective_dedup_id {
+            queue.dedup_cache.insert(
+                dedup_id,
+                crate::state::DedupEntry {
+                    message_id,
+                    sequence_number,
+                    expiry: cfg.now + chrono::Duration::minutes(5),
+                },
+            );
+        }
+    }
     Ok(BatchEntryOutcome::Success(entry_resp))
 }
 

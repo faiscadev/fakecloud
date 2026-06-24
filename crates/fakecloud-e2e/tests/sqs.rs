@@ -1802,3 +1802,125 @@ async fn fifo_dedup_replays_original_id_and_sequence() {
         .expect("receive");
     assert_eq!(recv.messages().len(), 1, "duplicate must not enqueue twice");
 }
+
+#[tokio::test]
+async fn sqs_send_message_batch_stores_system_attributes() {
+    use aws_sdk_sqs::types::{
+        MessageSystemAttributeName, MessageSystemAttributeNameForSends, MessageSystemAttributeValue,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let queue_url = client
+        .create_queue()
+        .queue_name("batch-sys-attrs")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+
+    let trace = "Root=1-5759e988-bd862e3fe1be46a994272793";
+    let entry = SendMessageBatchRequestEntry::builder()
+        .id("m1")
+        .message_body("payload")
+        .message_system_attributes(
+            MessageSystemAttributeNameForSends::AwsTraceHeader,
+            MessageSystemAttributeValue::builder()
+                .data_type("String")
+                .string_value(trace)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    client
+        .send_message_batch()
+        .queue_url(&queue_url)
+        .entries(entry)
+        .send()
+        .await
+        .expect("send_message_batch");
+
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .message_system_attribute_names(MessageSystemAttributeName::All)
+        .send()
+        .await
+        .expect("receive");
+    let msg = &recv.messages()[0];
+    // The batch path previously dropped system attributes; the AWSTraceHeader
+    // must survive so X-Ray trace context propagates.
+    assert_eq!(
+        msg.attributes()
+            .and_then(|a| a.get(&MessageSystemAttributeName::AwsTraceHeader))
+            .map(String::as_str),
+        Some(trace),
+        "AWSTraceHeader lost on batch send: {:?}",
+        msg.attributes()
+    );
+}
+
+#[tokio::test]
+async fn sqs_send_message_batch_fifo_content_dedup() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let queue_url = client
+        .create_queue()
+        .queue_name("batch-dedup.fifo")
+        .attributes(QueueAttributeName::FifoQueue, "true")
+        .attributes(QueueAttributeName::ContentBasedDeduplication, "true")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+
+    // Two batch entries with identical bodies in the same group: content-based
+    // dedup must collapse them to a single enqueued message.
+    let mk = |id: &str| {
+        SendMessageBatchRequestEntry::builder()
+            .id(id)
+            .message_body("same-body")
+            .message_group_id("g1")
+            .build()
+            .unwrap()
+    };
+    client
+        .send_message_batch()
+        .queue_url(&queue_url)
+        .entries(mk("a"))
+        .entries(mk("b"))
+        .send()
+        .await
+        .expect("send_message_batch");
+
+    let mut received = 0;
+    for _ in 0..3 {
+        let recv = client
+            .receive_message()
+            .queue_url(&queue_url)
+            .max_number_of_messages(10)
+            .send()
+            .await
+            .expect("receive");
+        for m in recv.messages() {
+            received += 1;
+            client
+                .delete_message()
+                .queue_url(&queue_url)
+                .receipt_handle(m.receipt_handle().unwrap())
+                .send()
+                .await
+                .ok();
+        }
+    }
+    assert_eq!(
+        received, 1,
+        "content-based dedup must collapse batch duplicates"
+    );
+}
