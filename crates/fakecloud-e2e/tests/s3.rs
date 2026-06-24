@@ -4704,3 +4704,114 @@ async fn s3_inventory_does_not_deliver_report_by_default() {
         "no inventory report object by default"
     );
 }
+
+#[tokio::test]
+async fn s3_list_multipart_uploads_paginates() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("mp-page")
+        .send()
+        .await
+        .unwrap();
+
+    for k in ["a.bin", "b.bin", "c.bin"] {
+        client
+            .create_multipart_upload()
+            .bucket("mp-page")
+            .key(k)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // max-uploads is honored and IsTruncated + NextKeyMarker are real.
+    let page1 = client
+        .list_multipart_uploads()
+        .bucket("mp-page")
+        .max_uploads(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1.uploads().len(), 2, "max-uploads ignored");
+    assert_eq!(page1.is_truncated(), Some(true));
+    assert!(page1.next_key_marker().is_some());
+
+    // Second page resumes from the marker and returns the remainder.
+    let page2 = client
+        .list_multipart_uploads()
+        .bucket("mp-page")
+        .max_uploads(2)
+        .key_marker(page1.next_key_marker().unwrap())
+        .upload_id_marker(page1.next_upload_id_marker().unwrap_or_default())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.uploads().len(), 1, "pagination did not resume");
+    assert_eq!(page2.is_truncated(), Some(false));
+}
+
+#[tokio::test]
+async fn s3_get_zero_byte_multipart_part_does_not_panic() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("mp-empty")
+        .send()
+        .await
+        .unwrap();
+
+    let init = client
+        .create_multipart_upload()
+        .bucket("mp-empty")
+        .key("empty.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = init.upload_id().unwrap().to_string();
+
+    // A single, empty (0-byte) part — AWS allows the last/only part to be empty.
+    let part = client
+        .upload_part()
+        .bucket("mp-empty")
+        .key("empty.bin")
+        .upload_id(&upload_id)
+        .part_number(1)
+        .body(ByteStream::from(Vec::new()))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .complete_multipart_upload()
+        .bucket("mp-empty")
+        .key("empty.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(
+            aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .parts(
+                    aws_sdk_s3::types::CompletedPart::builder()
+                        .part_number(1)
+                        .e_tag(part.e_tag().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Reading the 0-byte part by partNumber must not panic / drop the
+    // connection (previously `0 + 0 - 1` underflowed).
+    let got = client
+        .get_object()
+        .bucket("mp-empty")
+        .key("empty.bin")
+        .part_number(1)
+        .send()
+        .await
+        .expect("get 0-byte part must succeed");
+    assert_eq!(got.content_length(), Some(0));
+}

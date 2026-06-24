@@ -378,7 +378,7 @@ impl AwsService for S3Service {
                 && key.is_none()
                 && req.query_params.contains_key("uploads")
             {
-                return self.list_multipart_uploads(account_id, b);
+                return self.list_multipart_uploads(account_id, b, &req.query_params);
             }
 
             // GET /{bucket}/{key}?uploadId=X — ListParts

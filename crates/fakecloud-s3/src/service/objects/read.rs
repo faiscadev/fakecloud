@@ -272,7 +272,11 @@ impl S3Service {
                 if let Some(pc) = obj.parts_count {
                     headers.insert("x-amz-mp-parts-count", pc.to_string().parse().unwrap());
                 }
-                let part_end = part_start + part_size - 1;
+                // A 0-byte part (the single/last part may legitimately be
+                // empty) makes `part_start + part_size - 1` underflow — a debug
+                // panic / release wrap to a garbage content-range. Saturate so
+                // an empty part reports `bytes 0-0/<total>` with length 0.
+                let part_end = (part_start + part_size).saturating_sub(1);
                 headers.insert(
                     "content-range",
                     format!("bytes {part_start}-{part_end}/{total_size}")
@@ -465,7 +469,11 @@ impl S3Service {
                 if let Some(pc) = obj.parts_count {
                     headers.insert("x-amz-mp-parts-count", pc.to_string().parse().unwrap());
                 }
-                let part_end = part_start + part_size - 1;
+                // A 0-byte part (the single/last part may legitimately be
+                // empty) makes `part_start + part_size - 1` underflow — a debug
+                // panic / release wrap to a garbage content-range. Saturate so
+                // an empty part reports `bytes 0-0/<total>` with length 0.
+                let part_end = (part_start + part_size).saturating_sub(1);
                 headers.insert(
                     "content-range",
                     format!("bytes {part_start}-{part_end}/{total_size}")

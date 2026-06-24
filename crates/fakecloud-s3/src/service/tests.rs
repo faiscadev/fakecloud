@@ -1198,7 +1198,9 @@ fn list_multipart_uploads_includes_all_in_flight() {
     seed_bucket(&svc, "b");
     let u1 = initiate_mpu(&svc, "b", "a");
     let u2 = initiate_mpu(&svc, "b", "b");
-    let resp = svc.list_multipart_uploads("123456789012", "b").unwrap();
+    let resp = svc
+        .list_multipart_uploads("123456789012", "b", &std::collections::HashMap::new())
+        .unwrap();
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
     assert!(body.contains(&u1));
     assert!(body.contains(&u2));
@@ -2610,7 +2612,9 @@ fn list_multipart_uploads() {
     svc.create_multipart_upload("123456789012", &req, "mpl", "f1.bin")
         .unwrap();
 
-    let resp = svc.list_multipart_uploads("123456789012", "mpl").unwrap();
+    let resp = svc
+        .list_multipart_uploads("123456789012", "mpl", &std::collections::HashMap::new())
+        .unwrap();
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
     assert!(body.contains("<Upload>"));
     assert!(body.contains("f1.bin"));
@@ -3928,14 +3932,18 @@ fn get_object_retention_bucket_not_found() {
 #[test]
 fn list_multipart_uploads_nonexistent_bucket() {
     let svc = make_service();
-    assert!(svc.list_multipart_uploads("123456789012", "ghost").is_err());
+    assert!(svc
+        .list_multipart_uploads("123456789012", "ghost", &std::collections::HashMap::new())
+        .is_err());
 }
 
 #[test]
 fn list_multipart_uploads_empty() {
     let svc = make_service();
     seed_bucket(&svc, "empmp");
-    let resp = svc.list_multipart_uploads("123456789012", "empmp").unwrap();
+    let resp = svc
+        .list_multipart_uploads("123456789012", "empmp", &std::collections::HashMap::new())
+        .unwrap();
     let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
     assert!(body.contains("<ListMultipartUploadsResult"));
 }
