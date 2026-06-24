@@ -308,8 +308,55 @@ impl GlueService {
             .dev_endpoints
             .get_mut(&name)
             .ok_or_else(|| entity_not_found(format!("DevEndpoint {name} not found")))?;
-        if let (Some(obj), Some(pk)) = (e.as_object_mut(), body.get("PublicKey")) {
-            obj.insert("PublicKey".into(), pk.clone());
+        if let Some(obj) = e.as_object_mut() {
+            if let Some(pk) = body.get("PublicKey") {
+                obj.insert("PublicKey".into(), pk.clone());
+            }
+            // Previously dropped (bug-hunt 2026-06-24, 1.13): the rest of the
+            // mutable DevEndpoint fields.
+            for scalar in ["CustomLibraries", "Arguments", "RoleArn"] {
+                if let Some(v) = body.get(scalar) {
+                    obj.insert(scalar.into(), v.clone());
+                }
+            }
+            if let Some(add) = body.get("AddPublicKeys").and_then(|v| v.as_array()) {
+                if let Some(keys) = obj
+                    .entry("PublicKeys")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                {
+                    for k in add {
+                        if !keys.contains(k) {
+                            keys.push(k.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(del) = body.get("DeletePublicKeys").and_then(|v| v.as_array()) {
+                if let Some(keys) = obj.get_mut("PublicKeys").and_then(|v| v.as_array_mut()) {
+                    keys.retain(|k| !del.contains(k));
+                }
+            }
+            if let Some(add) = body.get("AddArguments").and_then(|v| v.as_object()) {
+                if let Some(args) = obj
+                    .entry("Arguments")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                {
+                    for (k, v) in add {
+                        args.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            if let Some(del) = body.get("DeleteArguments").and_then(|v| v.as_array()) {
+                if let Some(args) = obj.get_mut("Arguments").and_then(|v| v.as_object_mut()) {
+                    for k in del {
+                        if let Some(k) = k.as_str() {
+                            args.remove(k);
+                        }
+                    }
+                }
+            }
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

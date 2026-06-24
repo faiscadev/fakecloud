@@ -1056,11 +1056,23 @@ impl GlueService {
                 })
                 .unwrap_or_default();
             let key = crate::service::partition_key(&values);
-            if !tbl.partitions.contains_key(&key) {
+            let Some(part) = tbl.partitions.get_mut(&key) else {
                 errors.push(json!({
                     "PartitionValueList": values,
                     "ErrorDetail": {"ErrorCode": "EntityNotFoundException", "ErrorMessage": "Partition not found"},
                 }));
+                continue;
+            };
+            // Apply the PartitionInput instead of just checking existence —
+            // batch partition edits were a silent no-op (bug-hunt 2026-06-24,
+            // 1.13).
+            let input = &e["PartitionInput"];
+            if input["StorageDescriptor"].is_object() {
+                part.storage_descriptor =
+                    crate::service::parse_storage_descriptor(&input["StorageDescriptor"]);
+            }
+            if input["Parameters"].is_object() {
+                part.parameters = crate::service::parse_string_map(&input["Parameters"]);
             }
         }
         Ok(AwsResponse::ok_json(json!({ "Errors": errors })))
