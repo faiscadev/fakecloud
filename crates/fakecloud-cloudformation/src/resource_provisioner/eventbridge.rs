@@ -72,7 +72,20 @@ impl ResourceProvisioner {
                 .map(|s| s.to_string()),
             managed_by: None,
             created_by: None,
-            targets: Vec::new(),
+            // Inline `Targets` declared on the CFN resource. Without this the
+            // rule matches events but delivers to nothing (PutEvents only
+            // dispatches to rules with non-empty targets), so a CFN/SAM
+            // schedule or event rule silently fired into the void.
+            targets: props
+                .get("Targets")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|t| t.get("Arn").and_then(|v| v.as_str()).is_some())
+                        .map(fakecloud_eventbridge::parse_target)
+                        .collect()
+                })
+                .unwrap_or_default(),
             tags: std::collections::BTreeMap::new(),
             last_fired: None,
         };

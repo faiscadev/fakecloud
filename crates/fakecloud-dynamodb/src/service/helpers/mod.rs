@@ -774,7 +774,7 @@ mod metrics;
 mod partiql;
 mod paths;
 mod request;
-mod schemas;
+pub(crate) mod schemas;
 mod table_descriptions;
 mod table_lookup;
 mod updates;

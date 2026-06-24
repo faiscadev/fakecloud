@@ -36,11 +36,49 @@ impl ResourceProvisioner {
             state.region, state.account_id, topic_name
         );
 
+        // Carry the topic configuration attributes a CFN topic can set, so
+        // GetTopicAttributes round-trips them instead of returning defaults.
+        let mut attributes = BTreeMap::new();
+        for key in [
+            "DisplayName",
+            "KmsMasterKeyId",
+            "SignatureVersion",
+            "TracingConfig",
+            "ArchivePolicy",
+            "FifoThroughputScope",
+        ] {
+            if let Some(s) = props.get(key).and_then(|v| v.as_str()) {
+                attributes.insert(key.to_string(), s.to_string());
+            }
+        }
+        for key in ["FifoTopic", "ContentBasedDeduplication"] {
+            if let Some(b) = props
+                .get(key)
+                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+            {
+                attributes.insert(key.to_string(), b.to_string());
+            }
+        }
+        let tags: Vec<(String, String)> = props
+            .get("Tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        Some((
+                            t.get("Key").and_then(|v| v.as_str())?.to_string(),
+                            t.get("Value").and_then(|v| v.as_str())?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let topic = SnsTopic {
             topic_arn: topic_arn.clone(),
             name: topic_name.to_string(),
-            attributes: BTreeMap::new(),
-            tags: Vec::new(),
+            attributes,
+            tags,
             is_fifo: topic_name.ends_with(".fifo"),
             created_at: Utc::now(),
             subscriptions_deleted: 0,
@@ -49,6 +87,35 @@ impl ResourceProvisioner {
         };
 
         state.topics.insert(topic_arn.clone(), topic);
+
+        // Inline `Subscription` list — SAM/CFN's shorthand for attaching
+        // subscriptions at topic-create time. Without this the topic is
+        // created with no subscribers and fan-out is silently broken.
+        if let Some(subs) = props.get("Subscription").and_then(|v| v.as_array()) {
+            for sub in subs {
+                let (Some(protocol), Some(endpoint)) = (
+                    sub.get("Protocol").and_then(|v| v.as_str()),
+                    sub.get("Endpoint").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                let sub_arn = format!("{}:{}", topic_arn, Uuid::new_v4());
+                state.subscriptions.insert(
+                    sub_arn.clone(),
+                    SnsSubscription {
+                        subscription_arn: sub_arn,
+                        topic_arn: topic_arn.clone(),
+                        protocol: protocol.to_string(),
+                        endpoint: endpoint.to_string(),
+                        owner: state.account_id.clone(),
+                        attributes: BTreeMap::new(),
+                        confirmed: true,
+                        confirmation_token: None,
+                    },
+                );
+            }
+        }
+
         Ok(ProvisionResult::new(topic_arn.clone())
             .with("TopicArn", topic_arn)
             .with("TopicName", topic_name))

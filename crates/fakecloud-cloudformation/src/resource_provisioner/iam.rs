@@ -46,6 +46,16 @@ impl ResourceProvisioner {
             .unwrap_or_default();
 
         let path = props.get("Path").and_then(|v| v.as_str()).unwrap_or("/");
+        let permissions_boundary = props
+            .get("PermissionsBoundary")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let max_session_duration = props
+            .get("MaxSessionDuration")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(3600);
+        let tags = parse_iam_tags(props.get("Tags"));
 
         let mut accounts = self.iam_state.write();
         let state = accounts.get_or_create(&self.account_id);
@@ -71,12 +81,51 @@ impl ResourceProvisioner {
                 .get("Description")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            max_session_duration: 3600,
-            tags: Vec::new(),
-            permissions_boundary: None,
+            max_session_duration,
+            tags,
+            permissions_boundary,
         };
 
         state.roles.insert(role_name.to_string(), role);
+
+        // Inline policies declared inline on the role. Mirror the IAM user arm
+        // so a CFN/SAM-provisioned role actually carries its grants — without
+        // this, every workload assuming the role is denied under `--iam`
+        // enforcement (the AWS-managed-policy catalog is now real).
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            let inline = state
+                .role_inline_policies
+                .entry(role_name.to_string())
+                .or_default();
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    inline.insert(n.to_string(), document);
+                }
+            }
+        }
+        // Managed policy ARNs attached inline on the role.
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            let attached = state
+                .role_policies
+                .entry(role_name.to_string())
+                .or_default();
+            for a in arns {
+                if let Some(s) = a.as_str() {
+                    if !attached.contains(&s.to_string()) {
+                        attached.push(s.to_string());
+                    }
+                }
+            }
+        }
+
         Ok(ProvisionResult::new(arn.clone())
             .with("Arn", arn)
             .with("RoleId", role_id))
