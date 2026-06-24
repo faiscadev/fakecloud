@@ -602,6 +602,20 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
         deny: &[],
     },
+    Service {
+        name: "sesv2",
+        // SES v2: the `_basic` smoke for configuration sets (+ event destination
+        // + data source), dedicated IP pools (+ data source), and email identity
+        // (+ feedback / mail-from attributes, policy, data sources). Fixes:
+        // GetConfigurationSet only reports DeliveryOptions/TrackingOptions when
+        // configured (an empty default block forced a perpetual plan diff) and
+        // round-trips max_delivery_seconds; ListTagsForResource resolves
+        // dedicated-ip-pool ARNs and pools persist create-time tags;
+        // PutEmailIdentityFeedbackAttributes treats an absent (false) bool as
+        // "disable forwarding".
+        run_regex: "^TestAccSESV2[A-Za-z0-9]+_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -902,6 +916,12 @@ pub const SHARDS: &[Shard] = &[
         name: "scheduler",
         service: "scheduler",
         run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "sesv2",
+        service: "sesv2",
+        run_regex: "^TestAccSESV2[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];

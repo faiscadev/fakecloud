@@ -144,6 +144,10 @@ impl ResourceProvisioner {
             sending_enabled,
             tls_policy,
             sending_pool_name,
+            max_delivery_seconds: props
+                .get("DeliveryOptions")
+                .and_then(|v| v.get("MaxDeliverySeconds"))
+                .and_then(|v| v.as_i64()),
             custom_redirect_domain,
             https_policy: props
                 .get("TrackingOptions")

@@ -60,6 +60,10 @@ pub struct ConfigurationSet {
     // Delivery options
     pub tls_policy: String,
     pub sending_pool_name: Option<String>,
+    /// Max seconds SES retries delivery before giving up. Optional; only
+    /// reported on GetConfigurationSet when explicitly configured.
+    #[serde(default)]
+    pub max_delivery_seconds: Option<i64>,
     // Tracking options
     pub custom_redirect_domain: Option<String>,
     pub https_policy: Option<String>,

@@ -605,9 +605,13 @@ impl SesV2Service {
             }
         };
 
-        if let Some(enabled) = body["EmailForwardingEnabled"].as_bool() {
-            identity.email_forwarding_enabled = enabled;
-        }
+        // EmailForwardingEnabled is a primitive bool: the AWS SDK omits it from
+        // the request body when it is `false` (restjson drops zero-value
+        // primitives), so an absent field means "disable forwarding", not "leave
+        // unchanged". Default to false so PutEmailIdentityFeedbackAttributes with
+        // an empty body turns forwarding off, matching the resource's default.
+        identity.email_forwarding_enabled =
+            body["EmailForwardingEnabled"].as_bool().unwrap_or(false);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
