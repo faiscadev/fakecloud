@@ -84,6 +84,13 @@ struct DataPlane {
     /// Sticky-session map: `AWSALB` cookie value -> `tg_arn|target_id|target_port`.
     sticky_targets: Arc<Mutex<BTreeMap<String, String>>>,
     upstream: reqwest::Client,
+    /// Address used to reach loopback-published sibling targets (EC2 instances
+    /// and ECS bridge-mode tasks publish their ports on the host daemon).
+    /// `127.0.0.1` when fakecloud runs on the host; the host alias
+    /// (`host.docker.internal` / `host.containers.internal`) when fakecloud is
+    /// itself containerized — otherwise the forward would hit fakecloud's own
+    /// loopback and 502 (#1539-class, bug-hunt 2026-06-24 0.B).
+    sibling_host: String,
 }
 
 pub fn spawn_dataplane(
@@ -136,6 +143,10 @@ pub fn spawn_dataplane_with_delivery(
         rr_counters: Arc::new(Mutex::new(BTreeMap::new())),
         sticky_targets: Arc::new(Mutex::new(BTreeMap::new())),
         upstream,
+        // Detect once: shelling the container CLI per request would be wasteful.
+        sibling_host: fakecloud_core::container_net::detect_container_cli()
+            .map(|cli| fakecloud_core::container_net::HostNetworking::detect(&cli).sibling_host)
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
     };
     tokio::spawn(supervisor_loop(dp));
     logger_for_caller
@@ -961,6 +972,20 @@ fn redirect_action(
     resp
 }
 
+/// Resolve the host to forward to for a chosen target. EC2-instance targets
+/// (`i-*`) and ECS bridge-mode tasks (registered with id `127.0.0.1`) publish
+/// their ports on the host daemon's loopback, so they're reached via
+/// `sibling_host` — `127.0.0.1` on the host, or the host alias when fakecloud
+/// is itself containerized. Any other id (a real container IP/DNS) is used
+/// verbatim.
+fn resolve_upstream_host(target_id: &str, sibling_host: &str) -> String {
+    if target_id.starts_with("i-") || target_id == "127.0.0.1" {
+        sibling_host.to_string()
+    } else {
+        target_id.to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward_action(
     dp: &DataPlane,
@@ -1064,11 +1089,7 @@ async fn forward_action(
 
     // Build upstream URL.
     let scheme = "http";
-    let upstream_host = if chosen.id.starts_with("i-") {
-        "127.0.0.1".to_string()
-    } else {
-        chosen.id.clone()
-    };
+    let upstream_host = resolve_upstream_host(&chosen.id, &dp.sibling_host);
     let upstream_port = chosen.port.or(tg.port).unwrap_or(80);
     log_ctx.target_ip = Some(upstream_host.clone());
     log_ctx.target_port = u16::try_from(upstream_port).ok();
@@ -1285,6 +1306,34 @@ fn extract_cookie<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 fn short_id() -> String {
     let id = Uuid::new_v4();
     id.simple().to_string()[0..16].to_string()
+}
+
+#[cfg(test)]
+mod upstream_host_tests {
+    use super::resolve_upstream_host;
+
+    #[test]
+    fn loopback_published_targets_use_sibling_host() {
+        // EC2 instance + ECS bridge-mode (id "127.0.0.1") go via sibling_host.
+        assert_eq!(
+            resolve_upstream_host("i-0123456789abcdef0", "host.docker.internal"),
+            "host.docker.internal"
+        );
+        assert_eq!(
+            resolve_upstream_host("127.0.0.1", "host.containers.internal"),
+            "host.containers.internal"
+        );
+        // On the host, sibling_host is 127.0.0.1 — unchanged behavior.
+        assert_eq!(resolve_upstream_host("i-abc", "127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn real_container_ip_used_verbatim() {
+        assert_eq!(
+            resolve_upstream_host("10.0.4.7", "host.docker.internal"),
+            "10.0.4.7"
+        );
+    }
 }
 
 #[cfg(test)]
