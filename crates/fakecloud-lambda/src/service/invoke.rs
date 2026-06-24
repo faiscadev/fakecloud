@@ -1,5 +1,7 @@
 //! `LambdaService` `invoke` family — extracted from service.rs by audit-2026-05-19.
 
+use base64::Engine as _;
+
 use super::*;
 
 impl LambdaService {
@@ -10,6 +12,7 @@ impl LambdaService {
         account_id: &str,
         invocation_type: InvocationType,
         qualifier: Option<&str>,
+        log_tail: bool,
     ) -> Result<AwsResponse, AwsServiceError> {
         // An unknown alias must 404 like GetFunction does, not silently fall
         // through to $LATEST. resolve_qualifier_to_version returns None for both
@@ -258,8 +261,22 @@ impl LambdaService {
                     Ok(resp)
                 }
                 InvocationType::RequestResponse | InvocationType::DryRun => {
-                    match runtime.invoke(&func, payload, &layer_zips).await {
-                        Ok(response_bytes) => {
+                    // With `LogType=Tail` AWS returns the base64 of the last
+                    // 4 KiB of the invocation's logs in `X-Amz-Log-Result`; the
+                    // buffered path previously never set it (bug-hunt
+                    // 2026-06-24, 1.20).
+                    let invoke_result = if log_tail {
+                        runtime
+                            .invoke_with_log_tail(&func, payload, &layer_zips)
+                            .await
+                    } else {
+                        runtime
+                            .invoke(&func, payload, &layer_zips)
+                            .await
+                            .map(|b| (b, None))
+                    };
+                    match invoke_result.map(|(bytes, logs)| (bytes, logs.filter(|_| log_tail))) {
+                        Ok((response_bytes, log_tail_text)) => {
                             // A handler that throws still returns HTTP 200 with
                             // the error payload in the body; AWS signals it with
                             // the `X-Amz-Function-Error` header (surfaced as
@@ -280,6 +297,19 @@ impl LambdaService {
                                     http::header::HeaderName::from_static("x-amz-function-error"),
                                     http::header::HeaderValue::from_static("Unhandled"),
                                 );
+                            }
+                            // LogType=Tail: base64 of the last 4 KiB of logs.
+                            if let Some(text) = log_tail_text {
+                                let bytes = text.as_bytes();
+                                let tail = &bytes[bytes.len().saturating_sub(4096)..];
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(tail);
+                                if let Ok(v) = http::header::HeaderValue::from_str(&encoded) {
+                                    resp.headers.insert(
+                                        http::header::HeaderName::from_static("x-amz-log-result"),
+                                        v,
+                                    );
+                                }
                             }
                             Ok(resp)
                         }

@@ -206,6 +206,18 @@ impl LambdaBackend for K8sBackend {
         }
     }
 
+    async fn instance_logs(&self, handle: &BackendHandle) -> Option<String> {
+        let BackendHandle::Pod { name, .. } = handle else {
+            return None;
+        };
+        // The function's RIE logs go to the Pod container's stdout/stderr.
+        self.client
+            .pod_logs(name, None)
+            .await
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
     /// Sweep Lambda Pods that belong to a previous fakecloud process.
     /// Without this, a fakecloud restart leaks the previous run's Pods
     /// and `Create` collides on function names. Mirrors the docker
