@@ -139,6 +139,9 @@ pub(super) fn expand_sam(value: &Value) -> Value {
     };
 
     let mut new_resources = serde_json::Map::new();
+    // Api/HttpApi routes collected from every function's Events, synthesized
+    // into the implicit API after the loop.
+    let mut sam_api_routes: Vec<super::sam_events::ApiRoute> = Vec::new();
     for (logical_id, resource) in resources_map.iter() {
         let Some(resource_obj) = resource.as_object() else {
             new_resources.insert(logical_id.clone(), resource.clone());
@@ -184,8 +187,11 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 // (sets Role, removes Policies/Events) and returns the extra
                 // native resources to add. Without this SAM functions deploy
                 // with no role and no triggers.
-                let extras =
-                    super::sam_events::expand_function_extras(logical_id, &mut lambda_props);
+                let extras = super::sam_events::expand_function_extras(
+                    logical_id,
+                    &mut lambda_props,
+                    &mut sam_api_routes,
+                );
 
                 let mut lambda_resource = serde_json::Map::new();
                 lambda_resource.insert("Type".to_string(), json!("AWS::Lambda::Function"));
@@ -360,6 +366,12 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 new_resources.insert(logical_id.clone(), resource.clone());
             }
         }
+    }
+
+    // Synthesize the implicit API resources from the collected Api/HttpApi
+    // routes (one RestApi/HttpApi shared across all functions).
+    for (id, res) in super::sam_events::synthesize_api_resources(&sam_api_routes) {
+        new_resources.entry(id).or_insert(res);
     }
 
     resources_map.clear();

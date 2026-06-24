@@ -13,14 +13,31 @@
 
 use serde_json::{json, Map, Value};
 
-/// Expand a Serverless::Function's `Policies` and non-API `Events`.
+/// One HTTP route a function exposes via an `Api`/`HttpApi` event, collected
+/// during the function pass and turned into native API resources afterward by
+/// [`synthesize_api_resources`].
+pub(super) struct ApiRoute {
+    pub function_id: String,
+    /// Explicit `RestApiId`/`ApiId` (a `Ref`/string), or `None` for the
+    /// implicit API SAM creates per protocol.
+    pub explicit_api: Option<Value>,
+    pub path: String,
+    /// Upper-case HTTP method, or `ANY`.
+    pub method: String,
+    /// `true` = `HttpApi` (API Gateway v2), `false` = `Api` (REST v1).
+    pub http_api: bool,
+}
+
+/// Expand a Serverless::Function's `Policies` and `Events`.
 ///
 /// Mutates `lambda_props` in place (removes `Policies`/`Events`, sets `Role`
-/// to the synthesized role when no explicit `Role` was given) and returns the
-/// extra native resources to add to the template, keyed by logical id.
+/// to the synthesized role when no explicit `Role` was given), returns the
+/// extra native resources to add, and pushes any `Api`/`HttpApi` routes onto
+/// `api_routes` for the post-pass implicit-API synthesis.
 pub(super) fn expand_function_extras(
     function_id: &str,
     lambda_props: &mut Map<String, Value>,
+    api_routes: &mut Vec<ApiRoute>,
 ) -> Vec<(String, Value)> {
     let mut extras: Vec<(String, Value)> = Vec::new();
 
@@ -76,7 +93,32 @@ pub(super) fn expand_function_extras(
             "EventBridgeRule" | "CloudWatchEvent" => {
                 extras.extend(eventbridge_event(function_id, &id_base, &props));
             }
-            // Api / HttpApi: handled by the implicit-API synthesis pass.
+            "Api" | "HttpApi" => {
+                // Collect the route; the API resources are synthesized in a
+                // post-pass so all functions sharing the implicit API land in
+                // one RestApi/HttpApi.
+                let http_api = event_type == "HttpApi";
+                let path = props
+                    .get("Path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/")
+                    .to_string();
+                let method = props
+                    .get("Method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ANY")
+                    .to_uppercase();
+                let explicit_api = props
+                    .get(if http_api { "ApiId" } else { "RestApiId" })
+                    .cloned();
+                api_routes.push(ApiRoute {
+                    function_id: function_id.to_string(),
+                    explicit_api,
+                    path,
+                    method,
+                    http_api,
+                });
+            }
             // S3 / Cognito / etc.: left for a dedicated pass.
             _ => {}
         }
@@ -298,6 +340,211 @@ fn lambda_permission(function_id: &str, principal: &str, source_arn: Value) -> V
     })
 }
 
+/// Strip a path/method into a logical-id-safe token (alphanumeric only).
+fn sanitize(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// The AWS_PROXY integration URI for a Lambda, resolved at provision time via
+/// `Fn::Sub` over the function's ARN.
+fn lambda_integration_uri(function_id: &str) -> Value {
+    json!({
+        "Fn::Sub": format!(
+            "arn:aws:apigateway:${{AWS::Region}}:lambda:path/2015-03-31/functions/${{{function_id}.Arn}}/invocations"
+        )
+    })
+}
+
+/// Turn the collected `Api`/`HttpApi` routes into native API resources. All
+/// routes without an explicit API id share one implicit API per protocol
+/// (`ServerlessRestApi` / `ServerlessHttpApi`), matching SAM. Returns the extra
+/// resources keyed by logical id. Without this a SAM function with an Api event
+/// deployed with no routes — every call 404'd (bug-hunt 2026-06-24, 1.1).
+pub(super) fn synthesize_api_resources(routes: &[ApiRoute]) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = Vec::new();
+    if routes.is_empty() {
+        return out;
+    }
+
+    // --- REST (v1) routes sharing the implicit ServerlessRestApi ---
+    let rest: Vec<&ApiRoute> = routes
+        .iter()
+        .filter(|r| !r.http_api && r.explicit_api.is_none())
+        .collect();
+    if !rest.is_empty() {
+        let api_id = "ServerlessRestApi";
+        out.push((
+            api_id.to_string(),
+            json!({
+                "Type": "AWS::ApiGateway::RestApi",
+                "Properties": { "Name": "ServerlessRestApi", "EndpointConfiguration": { "Types": ["REGIONAL"] } }
+            }),
+        ));
+        // Build the resource tree, deduping by full path prefix.
+        let mut resource_for_path: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut method_ids: Vec<String> = Vec::new();
+        for route in &rest {
+            // Resolve (creating as needed) the Resource for this path, then a
+            // Method + Permission targeting the function.
+            let mut parent_ref = json!({ "Fn::GetAtt": [api_id, "RootResourceId"] });
+            let mut prefix = String::new();
+            for segment in route.path.split('/').filter(|s| !s.is_empty()) {
+                prefix.push('/');
+                prefix.push_str(segment);
+                let res_id = format!("{api_id}Resource{}", sanitize(&prefix));
+                if !resource_for_path.contains_key(&prefix) {
+                    out.push((
+                        res_id.clone(),
+                        json!({
+                            "Type": "AWS::ApiGateway::Resource",
+                            "Properties": {
+                                "RestApiId": { "Ref": api_id },
+                                "ParentId": parent_ref,
+                                "PathPart": segment,
+                            }
+                        }),
+                    ));
+                    resource_for_path.insert(prefix.clone(), res_id.clone());
+                }
+                let id = resource_for_path.get(&prefix).cloned().unwrap();
+                parent_ref = json!({ "Fn::GetAtt": [id, "ResourceId"] });
+            }
+            // Root path "/" maps to the RestApi's root resource id directly.
+            let resource_ref = if route.path.trim_matches('/').is_empty() {
+                json!({ "Fn::GetAtt": [api_id, "RootResourceId"] })
+            } else {
+                json!({ "Ref": resource_for_path.get(&prefix).cloned().unwrap() })
+            };
+            let http_method = if route.method == "ANY" {
+                "ANY".to_string()
+            } else {
+                route.method.clone()
+            };
+            let method_id = format!(
+                "{api_id}Method{}{}{}",
+                sanitize(&route.function_id),
+                sanitize(&route.path),
+                sanitize(&http_method)
+            );
+            out.push((
+                method_id.clone(),
+                json!({
+                    "Type": "AWS::ApiGateway::Method",
+                    "Properties": {
+                        "RestApiId": { "Ref": api_id },
+                        "ResourceId": resource_ref,
+                        "HttpMethod": http_method,
+                        "AuthorizationType": "NONE",
+                        "Integration": {
+                            "Type": "AWS_PROXY",
+                            "IntegrationHttpMethod": "POST",
+                            "Uri": lambda_integration_uri(&route.function_id),
+                        }
+                    }
+                }),
+            ));
+            method_ids.push(method_id);
+            out.push((
+                format!("{api_id}Perm{}", sanitize(&route.function_id)),
+                lambda_permission(
+                    &route.function_id,
+                    "apigateway.amazonaws.com",
+                    json!({ "Fn::Sub": format!("arn:aws:execute-api:${{AWS::Region}}:${{AWS::AccountId}}:${{{api_id}}}/*") }),
+                ),
+            ));
+        }
+        // One Deployment (after all methods) + Stage.
+        out.push((
+            format!("{api_id}Deployment"),
+            json!({
+                "Type": "AWS::ApiGateway::Deployment",
+                "DependsOn": method_ids,
+                "Properties": { "RestApiId": { "Ref": api_id } }
+            }),
+        ));
+        out.push((
+            format!("{api_id}ProdStage"),
+            json!({
+                "Type": "AWS::ApiGateway::Stage",
+                "Properties": {
+                    "RestApiId": { "Ref": api_id },
+                    "DeploymentId": { "Ref": format!("{api_id}Deployment") },
+                    "StageName": "Prod",
+                }
+            }),
+        ));
+    }
+
+    // --- HTTP (v2) routes sharing the implicit ServerlessHttpApi ---
+    let http: Vec<&ApiRoute> = routes
+        .iter()
+        .filter(|r| r.http_api && r.explicit_api.is_none())
+        .collect();
+    if !http.is_empty() {
+        let api_id = "ServerlessHttpApi";
+        out.push((
+            api_id.to_string(),
+            json!({
+                "Type": "AWS::ApiGatewayV2::Api",
+                "Properties": { "Name": "ServerlessHttpApi", "ProtocolType": "HTTP" }
+            }),
+        ));
+        for route in &http {
+            let integ_id = format!("{api_id}Integ{}", sanitize(&route.function_id));
+            out.push((
+                integ_id.clone(),
+                json!({
+                    "Type": "AWS::ApiGatewayV2::Integration",
+                    "Properties": {
+                        "ApiId": { "Ref": api_id },
+                        "IntegrationType": "AWS_PROXY",
+                        "IntegrationUri": { "Fn::GetAtt": [route.function_id.clone(), "Arn"] },
+                        "PayloadFormatVersion": "2.0",
+                    }
+                }),
+            ));
+            let route_key = if route.method == "ANY" {
+                format!("ANY {}", route.path)
+            } else {
+                format!("{} {}", route.method, route.path)
+            };
+            out.push((
+                format!(
+                    "{api_id}Route{}{}",
+                    sanitize(&route.function_id),
+                    sanitize(&route.path)
+                ),
+                json!({
+                    "Type": "AWS::ApiGatewayV2::Route",
+                    "Properties": {
+                        "ApiId": { "Ref": api_id },
+                        "RouteKey": route_key,
+                        "Target": { "Fn::Sub": format!("integrations/${{{integ_id}}}") },
+                    }
+                }),
+            ));
+            out.push((
+                format!("{api_id}Perm{}", sanitize(&route.function_id)),
+                lambda_permission(
+                    &route.function_id,
+                    "apigateway.amazonaws.com",
+                    json!({ "Fn::Sub": format!("arn:aws:execute-api:${{AWS::Region}}:${{AWS::AccountId}}:${{{api_id}}}/*") }),
+                ),
+            ));
+        }
+        out.push((
+            format!("{api_id}DefaultStage"),
+            json!({
+                "Type": "AWS::ApiGatewayV2::Stage",
+                "Properties": { "ApiId": { "Ref": api_id }, "StageName": "$default", "AutoDeploy": true }
+            }),
+        ));
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +556,7 @@ mod tests {
             "Policies": ["AmazonS3ReadOnlyAccess", {"Statement": [{"Effect":"Allow","Action":"logs:PutLogEvents","Resource":"*"}]}]
         }))
         .unwrap();
-        let extras = expand_function_extras("MyFn", &mut props);
+        let extras = expand_function_extras("MyFn", &mut props, &mut Vec::new());
         // Role injected as GetAtt.
         assert_eq!(props["Role"], json!({"Fn::GetAtt": ["MyFnRole", "Arn"]}));
         assert!(props.get("Policies").is_none());
@@ -329,7 +576,7 @@ mod tests {
             "Policies": ["AmazonS3ReadOnlyAccess"]
         }))
         .unwrap();
-        let extras = expand_function_extras("MyFn", &mut props);
+        let extras = expand_function_extras("MyFn", &mut props, &mut Vec::new());
         assert_eq!(
             props["Role"],
             json!("arn:aws:iam::123456789012:role/explicit")
@@ -343,7 +590,7 @@ mod tests {
             "Events": { "Cron": { "Type": "Schedule", "Properties": { "Schedule": "rate(5 minutes)" } } }
         }))
         .unwrap();
-        let extras = expand_function_extras("MyFn", &mut props);
+        let extras = expand_function_extras("MyFn", &mut props, &mut Vec::new());
         let (_, rule) = extras.iter().find(|(id, _)| id == "MyFnCronRule").unwrap();
         assert_eq!(rule["Type"], "AWS::Events::Rule");
         assert_eq!(rule["Properties"]["ScheduleExpression"], "rate(5 minutes)");
@@ -364,7 +611,7 @@ mod tests {
             "Events": { "Q": { "Type": "SQS", "Properties": { "Queue": "arn:aws:sqs:us-east-1:000000000000:q", "BatchSize": 10 } } }
         }))
         .unwrap();
-        let extras = expand_function_extras("MyFn", &mut props);
+        let extras = expand_function_extras("MyFn", &mut props, &mut Vec::new());
         let (_, esm) = extras
             .iter()
             .find(|(id, _)| id == "MyFnQEventSourceMapping")
