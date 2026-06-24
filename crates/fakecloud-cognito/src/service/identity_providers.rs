@@ -11,8 +11,8 @@ use crate::state::IdentityProvider;
 use crate::state::CognitoState;
 
 use super::{
-    ensure_user_pool_exists, identity_provider_to_json, parse_string_map, require_str,
-    validate_provider_type, CognitoService,
+    default_attribute_mapping, ensure_user_pool_exists, identity_provider_to_json,
+    parse_string_map, require_str, validate_provider_type, CognitoService,
 };
 
 impl CognitoService {
@@ -29,7 +29,12 @@ impl CognitoService {
         validate_provider_type(provider_type)?;
 
         let provider_details = parse_string_map(&body["ProviderDetails"]);
-        let attribute_mapping = parse_string_map(&body["AttributeMapping"]);
+        // Social providers get a default `username` mapping when the caller
+        // omits one, matching Cognito's behavior the Terraform provider asserts.
+        let mut attribute_mapping = parse_string_map(&body["AttributeMapping"]);
+        if attribute_mapping.is_empty() {
+            attribute_mapping = default_attribute_mapping(provider_type);
+        }
         let idp_identifiers = body["IdpIdentifiers"]
             .as_array()
             .map(|arr| {

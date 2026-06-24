@@ -3406,6 +3406,66 @@ async fn cognito_create_describe_identity_provider() {
 }
 
 #[tokio::test]
+async fn cognito_social_provider_default_attribute_mapping() {
+    // A social provider created without an explicit AttributeMapping gets
+    // Cognito's default `username` mapping: `sub` for Google, `id` for Facebook.
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("default-map-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+
+    let google = client
+        .create_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("Google")
+        .provider_type(IdentityProviderTypeType::Google)
+        .provider_details("client_id", "id")
+        .provider_details("client_secret", "secret")
+        .provider_details("authorize_scopes", "email")
+        .send()
+        .await
+        .expect("create google idp");
+    assert_eq!(
+        google
+            .identity_provider()
+            .unwrap()
+            .attribute_mapping()
+            .unwrap()
+            .get("username")
+            .map(String::as_str),
+        Some("sub")
+    );
+
+    let facebook = client
+        .create_identity_provider()
+        .user_pool_id(pool_id)
+        .provider_name("Facebook")
+        .provider_type(IdentityProviderTypeType::Facebook)
+        .provider_details("client_id", "id")
+        .provider_details("client_secret", "secret")
+        .provider_details("authorize_scopes", "email")
+        .send()
+        .await
+        .expect("create facebook idp");
+    assert_eq!(
+        facebook
+            .identity_provider()
+            .unwrap()
+            .attribute_mapping()
+            .unwrap()
+            .get("username")
+            .map(String::as_str),
+        Some("id")
+    );
+}
+
+#[tokio::test]
 async fn cognito_update_identity_provider() {
     let server = TestServer::start().await;
     let client = server.cognito_client().await;
@@ -3808,6 +3868,28 @@ async fn cognito_create_describe_domain() {
     assert_eq!(desc.domain().unwrap(), "my-test-domain");
     assert_eq!(desc.user_pool_id().unwrap(), pool_id);
     assert_eq!(desc.status().unwrap(), &DomainStatusType::Active);
+    // Every hosted-UI domain is fronted by a CloudFront distribution and backed
+    // by a managed S3 assets bucket; both are reported even for prefix domains.
+    let cf = desc.cloud_front_distribution().unwrap();
+    assert!(
+        cf.ends_with(".cloudfront.net"),
+        "unexpected CloudFront domain: {cf}"
+    );
+    assert!(!desc.s3_bucket().unwrap().is_empty());
+    // The CloudFront domain is stable across describes.
+    let again = client
+        .describe_user_pool_domain()
+        .domain("my-test-domain")
+        .send()
+        .await
+        .expect("describe domain again");
+    assert_eq!(
+        again
+            .domain_description()
+            .unwrap()
+            .cloud_front_distribution(),
+        Some(cf)
+    );
 
     // Describe non-existent should return empty DomainDescription (not an error)
     let result = client

@@ -1175,6 +1175,21 @@ fn validate_provider_type(provider_type: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// Cognito injects a default `username` attribute mapping for the social
+/// identity providers when the caller does not supply one. The mapped source
+/// attribute is the provider's subject claim: `sub` for Google and Sign in with
+/// Apple, `id` for Facebook, and `user_id` for Login with Amazon. SAML and OIDC
+/// providers have no default mapping.
+fn default_attribute_mapping(provider_type: &str) -> BTreeMap<String, String> {
+    let subject = match provider_type {
+        "Google" | "SignInWithApple" => "sub",
+        "Facebook" => "id",
+        "LoginWithAmazon" => "user_id",
+        _ => return BTreeMap::new(),
+    };
+    BTreeMap::from([("username".to_string(), subject.to_string())])
+}
+
 fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
     val.as_object()
         .map(|obj| {
@@ -1223,20 +1238,44 @@ fn resource_server_to_json(rs: &ResourceServer) -> Value {
 }
 
 fn domain_description_to_json(d: &UserPoolDomain, account_id: &str) -> Value {
+    // Every Cognito hosted-UI domain (prefix or custom) is fronted by a
+    // CloudFront distribution and backed by a managed S3 assets bucket; AWS
+    // reports both on DescribeUserPoolDomain. The Terraform resource surfaces
+    // `cloudfront_distribution`/`cloudfront_distribution_arn` (both from
+    // CloudFrontDistribution) and `s3_bucket`, all of which it asserts are set.
     let mut val = json!({
         "UserPoolId": d.user_pool_id,
         "AWSAccountId": account_id,
         "Domain": d.domain,
         "Status": d.status,
         "Version": "20130630",
+        "CloudFrontDistribution": cloudfront_distribution_domain(&d.domain),
+        "S3Bucket": "aws-cognito-prod-iad-assets",
     });
     if let Some(ref config) = d.custom_domain_config {
         val["CustomDomainConfig"] = json!({
             "CertificateArn": config.certificate_arn,
         });
-        val["CloudFrontDistribution"] = json!(format!("d111111abcdef8.cloudfront.net"));
     }
     val
+}
+
+/// Derive a stable CloudFront distribution domain name for a Cognito hosted-UI
+/// domain. CloudFront domains are `d<13 lowercase base32 chars>.cloudfront.net`;
+/// we hash the Cognito domain so repeated describes return the same value.
+fn cloudfront_distribution_domain(domain: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in domain.bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut suffix = String::with_capacity(13);
+    for i in 0..13 {
+        let idx = ((hash >> (i * 5)) & 0x1f) as usize % ALPHABET.len();
+        suffix.push(ALPHABET[idx] as char);
+    }
+    format!("d{suffix}.cloudfront.net")
 }
 
 /// Convert a User to the JSON format AWS returns (for ListUsers and AdminCreateUser response).
