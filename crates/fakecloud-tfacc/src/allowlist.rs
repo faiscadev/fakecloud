@@ -114,11 +114,14 @@ pub const SERVICES: &[Service] = &[
         deny: &[
             // (CIDR collection ARN now omits the account id —
             //  `arn:aws:route53:::cidrcollection/...` — so that test runs.)
-            // --- gap: DNSSEC key-signing keys need a computed DS digest_value
-            //     (hex), which fakecloud leaves empty. ---
+            // --- gap: DNSSEC key-signing keys need real DNSSEC crypto derived
+            //     from the referenced KMS key — public_key, dnskey_record,
+            //     ds_record, and the SHA-256 digest_value (keytag + DS digest).
+            //     A focused follow-up. ---
             "TestAccRoute53KeySigningKey_basic",
-            // --- gap: VPC zone association apply path. ---
-            "TestAccRoute53ZoneAssociation_basic",
+            // (Private-zone VPC association now works: a zone created with a VPC
+            //  is private and carries default NS/SOA records, and
+            //  ListHostedZonesByVPC returns a bare HostedZoneId.)
         ],
     },
     Service {
