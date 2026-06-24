@@ -370,7 +370,7 @@ pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, valu
 }
 
 pub(crate) fn apply_method_patch(m: &mut ApiMethod, op: &str, path: &str, value: &Value) {
-    if op != "replace" && op != "add" {
+    if op != "replace" && op != "add" && op != "remove" {
         return;
     }
     match path {
@@ -386,6 +386,42 @@ pub(crate) fn apply_method_patch(m: &mut ApiMethod, op: &str, path: &str, value:
             }
         }
         "/operationName" => m.operation_name = value.as_str().map(String::from),
+        // Previously dropped (bug-hunt 2026-06-24, 1.11): request validation +
+        // Cognito authorization scopes. AWS patches map members at
+        // `/requestParameters/<name>` (bool) and `/requestModels/<contentType>`
+        // (model name).
+        "/requestValidatorId" => m.request_validator_id = value.as_str().map(String::from),
+        _ if path.starts_with("/requestParameters/") => {
+            let key = path.trim_start_matches("/requestParameters/").to_string();
+            if op == "remove" {
+                m.request_parameters.remove(&key);
+            } else {
+                let required = value
+                    .as_bool()
+                    .or_else(|| value.as_str().map(|s| s == "true"))
+                    .unwrap_or(false);
+                m.request_parameters.insert(key, required);
+            }
+        }
+        _ if path.starts_with("/requestModels/") => {
+            let key = path.trim_start_matches("/requestModels/").to_string();
+            if op == "remove" {
+                m.request_models.remove(&key);
+            } else if let Some(v) = value.as_str() {
+                m.request_models.insert(key, v.to_string());
+            }
+        }
+        "/authorizationScopes" if op == "add" => {
+            if let Some(s) = value.as_str() {
+                if !m.authorization_scopes.iter().any(|x| x == s) {
+                    m.authorization_scopes.push(s.to_string());
+                }
+            }
+        }
+        _ if path.starts_with("/authorizationScopes/") && op == "remove" => {
+            let target = path.trim_start_matches("/authorizationScopes/");
+            m.authorization_scopes.retain(|x| x != target);
+        }
         _ => {}
     }
 }

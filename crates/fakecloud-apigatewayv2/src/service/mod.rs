@@ -315,6 +315,22 @@ impl ApiGatewayV2Service {
             })?);
         }
 
+        // Previously dropped (bug-hunt 2026-06-24, 1.11): WebSocket route /
+        // API-key selection expressions, IP address type, and the
+        // execute-api-endpoint toggle could not be changed.
+        if let Some(v) = body["routeSelectionExpression"].as_str() {
+            api.route_selection_expression = v.to_string();
+        }
+        if let Some(v) = body["apiKeySelectionExpression"].as_str() {
+            api.api_key_selection_expression = v.to_string();
+        }
+        if let Some(v) = body["ipAddressType"].as_str() {
+            api.ip_address_type = v.to_string();
+        }
+        if let Some(b) = body["disableExecuteApiEndpoint"].as_bool() {
+            api.disable_execute_api_endpoint = b;
+        }
+
         Ok(AwsResponse::ok_json(json!(api)))
     }
 }

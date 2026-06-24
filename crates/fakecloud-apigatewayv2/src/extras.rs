@@ -378,6 +378,11 @@ impl ApiGatewayV2Service {
                     entry["DomainNameConfigurations"] =
                         domain_configs_with_status(body.get("DomainNameConfigurations"), name);
                 }
+                // Previously dropped (bug-hunt 2026-06-24, 1.11): the mTLS
+                // truststore config could not be updated.
+                if let Some(mtls) = body.get("MutualTlsAuthentication") {
+                    entry["MutualTlsAuthentication"] = mtls.clone();
+                }
                 ok(entry.clone())
             }
             "DeleteDomainName" => {
@@ -1123,21 +1128,35 @@ impl ApiGatewayV2Service {
                 .map(|s| s.to_string())
                 .ok_or_else(|| missing("ModelId"))?
         };
-        let mut entry = json!({
-            "ModelId": id,
-            "Name": body["Name"].as_str().unwrap_or(""),
-            "Schema": body["Schema"].as_str().unwrap_or("{}"),
-            "ContentType": body["ContentType"].as_str().unwrap_or("application/json"),
-        });
-        if let Some(desc) = body["Description"].as_str() {
-            entry["Description"] = json!(desc);
-        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let bucket = state.models.entry(api).or_default();
         if !is_create && !bucket.contains_key(&id) {
             return Err(not_found("Model", &id));
         }
+        // On update, start from the existing entry and overlay only the fields
+        // the request actually sent. Rebuilding from defaults clobbered Name to
+        // "" and ContentType to the default whenever the caller patched only
+        // Schema — true data loss (bug-hunt 2026-06-24, 1.11).
+        let mut entry = if is_create {
+            json!({
+                "ModelId": id,
+                "Name": body["Name"].as_str().unwrap_or(""),
+                "Schema": body["Schema"].as_str().unwrap_or("{}"),
+                "ContentType": body["ContentType"].as_str().unwrap_or("application/json"),
+            })
+        } else {
+            bucket
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| json!({ "ModelId": id }))
+        };
+        for field in ["Name", "Schema", "ContentType", "Description"] {
+            if let Some(v) = body.get(field).filter(|v| !v.is_null()) {
+                entry[field] = v.clone();
+            }
+        }
+        entry["ModelId"] = json!(id);
         bucket.insert(id.clone(), entry.clone());
         ok(entry)
     }
