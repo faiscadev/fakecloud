@@ -219,6 +219,12 @@ fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsService
         data_format_conversion_configuration: val["DataFormatConversionConfiguration"]
             .is_object()
             .then(|| val["DataFormatConversionConfiguration"].clone()),
+        cloudwatch_logging_options: val["CloudWatchLoggingOptions"]
+            .is_object()
+            .then(|| val["CloudWatchLoggingOptions"].clone()),
+        custom_time_zone: val["CustomTimeZone"].as_str().map(|s| s.to_string()),
+        s3_backup_mode: val["S3BackupMode"].as_str().map(|s| s.to_string()),
+        file_extension: val["FileExtension"].as_str().map(|s| s.to_string()),
     }))
 }
 
@@ -305,6 +311,19 @@ fn s3_destination_json(dest: &S3Destination) -> Value {
     }
     if let Some(ref dfc) = dest.data_format_conversion_configuration {
         extended["DataFormatConversionConfiguration"] = dfc.clone();
+    }
+    // AWS always reports these on the ExtendedS3 description, defaulting them
+    // when the caller omits the values. The Terraform resource reads the
+    // CloudWatch logging block, custom_time_zone, and s3_backup_mode
+    // unconditionally; an empty default block leaves them "not found" / "".
+    extended["CloudWatchLoggingOptions"] = dest
+        .cloudwatch_logging_options
+        .clone()
+        .unwrap_or_else(|| json!({ "Enabled": false }));
+    extended["CustomTimeZone"] = json!(dest.custom_time_zone.as_deref().unwrap_or("UTC"));
+    extended["S3BackupMode"] = json!(dest.s3_backup_mode.as_deref().unwrap_or("Disabled"));
+    if let Some(ref ext) = dest.file_extension {
+        extended["FileExtension"] = json!(ext);
     }
     json!({
         "DestinationId": dest.destination_id,

@@ -206,3 +206,8 @@ async fn sesv2_acceptance() {
 async fn wafv2_acceptance() {
     run_shard("wafv2").await;
 }
+
+#[tokio::test]
+async fn firehose_acceptance() {
+    run_shard("firehose").await;
+}

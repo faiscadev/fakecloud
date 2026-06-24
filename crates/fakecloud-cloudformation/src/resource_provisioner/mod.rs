@@ -5929,6 +5929,10 @@ fn parse_firehose_s3_destination(value: &serde_json::Value) -> Result<S3Destinat
         compression_format,
         processing_configuration: None,
         data_format_conversion_configuration: None,
+        cloudwatch_logging_options: None,
+        custom_time_zone: None,
+        s3_backup_mode: None,
+        file_extension: None,
     })
 }
 

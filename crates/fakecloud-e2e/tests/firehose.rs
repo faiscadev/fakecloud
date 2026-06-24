@@ -59,6 +59,21 @@ async fn firehose_create_describe_delete_roundtrip() {
     let d = desc.delivery_stream_description().unwrap();
     assert_eq!(d.delivery_stream_name(), "fh-stream-1");
     assert_eq!(d.delivery_stream_status().as_str(), "ACTIVE");
+    // AWS always reports the ExtendedS3 defaults the caller omitted: the
+    // CloudWatch logging block (disabled), custom_time_zone=UTC, and
+    // s3_backup_mode=Disabled.
+    let ext = d.destinations()[0]
+        .extended_s3_destination_description()
+        .expect("extended s3 description");
+    let cwl = ext
+        .cloud_watch_logging_options()
+        .expect("cloudwatch logging options");
+    assert_eq!(cwl.enabled(), Some(false));
+    assert_eq!(ext.custom_time_zone(), Some("UTC"));
+    assert_eq!(
+        ext.s3_backup_mode(),
+        Some(&aws_sdk_firehose::types::S3BackupMode::Disabled)
+    );
 
     let listed = firehose.list_delivery_streams().send().await.expect("list");
     assert!(listed
