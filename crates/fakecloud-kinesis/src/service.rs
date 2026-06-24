@@ -585,7 +585,18 @@ impl KinesisService {
         let total_records = shard.records.len();
         let shard_closed = !shard.is_open;
 
-        let millis_behind_latest = if end_index < total_records { 1 } else { 0 };
+        // MillisBehindLatest is the real time gap between the last record
+        // returned in this batch and the newest (tip) record in the shard —
+        // not a 0/1 flag. Consumers (Lambda ESM IteratorAge alarms, KCL
+        // catch-up detection, Flink watermarks) use it to gauge how far
+        // behind they are. Zero when caught up or the batch is empty.
+        let millis_behind_latest = if end_index >= total_records || end_index == 0 {
+            0
+        } else {
+            let last_returned = shard.records[end_index - 1].approximate_arrival_timestamp;
+            let tip = shard.records[total_records - 1].approximate_arrival_timestamp;
+            (tip - last_returned).num_milliseconds().max(0)
+        };
 
         // A shard closed by SplitShard/MergeShards and then fully read returns a
         // null NextShardIterator, signalling the consumer to move on to the
