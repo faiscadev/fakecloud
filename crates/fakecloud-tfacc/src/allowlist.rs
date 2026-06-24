@@ -159,6 +159,13 @@ pub const SERVICES: &[Service] = &[
         // connections (+ data source), registries (+ data source), data-quality
         // rulesets, security configurations, user-defined functions, and
         // workflows — 10 tests.
+        // Batch 15 reclaimed schema registry schemas, ML transforms, and dev
+        // endpoints: GetSchema resolves a schema by ARN (parsing both the
+        // registry and schema name out of the `schema/<reg>/<name>` path); ML
+        // transforms carry a `tfm-` id prefix and report the `Schema` computed
+        // from their input table's columns; dev endpoints settle to READY at
+        // once (fakecloud has no notebook env to provision) and default to 5
+        // nodes when no worker type is given.
         run_regex: "^TestAccGlue[A-Za-z]+_basic$",
         deny: &[
             // (Jobs and triggers reference the AWS-managed IAM policy
@@ -168,13 +175,6 @@ pub const SERVICES: &[Service] = &[
             //  round-trips (bucket/sort/skewed columns), and
             //  GetPartitionIndexes raises EntityNotFound on a deleted table,
             //  so the partition + partition-index tests run.)
-            // --- gap: schema registry schemas and ML transforms are not
-            //     implemented. ---
-            "TestAccGlueSchema_basic",
-            "TestAccGlueMlTransform_basic",
-            // --- gap: dev endpoints provision a notebook environment; the test
-            //     polls a creation waiter for ~15m before failing. ---
-            "TestAccGlueDevEndpoint_basic",
         ],
     },
     Service {

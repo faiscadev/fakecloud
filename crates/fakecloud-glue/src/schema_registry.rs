@@ -22,18 +22,24 @@ fn registry_name(id: &Value) -> Option<String> {
 }
 
 /// Resolve a schema's storage key (registry/schema) from a `SchemaId`.
+///
+/// A `SchemaId` identifies a schema either by `RegistryName` + `SchemaName` or
+/// by `SchemaArn`. The ARN's resource path is `schema/<registry>/<schema>`, so
+/// both the registry and schema name must come out of the ARN — not just the
+/// trailing segment (otherwise a by-ARN lookup keys off the wrong registry).
 fn schema_key(id: &Value) -> Option<String> {
-    let reg = id
-        .get("RegistryName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default-registry");
     if let Some(name) = id.get("SchemaName").and_then(|v| v.as_str()) {
+        let reg = id
+            .get("RegistryName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default-registry");
         return Some(format!("{reg}\u{1f}{name}"));
     }
-    id.get("SchemaArn")
-        .and_then(|v| v.as_str())
-        .and_then(|arn| arn.rsplit('/').next())
-        .map(|name| format!("{reg}\u{1f}{name}"))
+    let arn = id.get("SchemaArn").and_then(|v| v.as_str())?;
+    // `...:schema/<registry>/<schema>` -> ("<registry>", "<schema>")
+    let resource = arn.split(":schema/").nth(1).unwrap_or(arn);
+    let (reg, name) = resource.split_once('/')?;
+    Some(format!("{reg}\u{1f}{name}"))
 }
 
 impl GlueService {
