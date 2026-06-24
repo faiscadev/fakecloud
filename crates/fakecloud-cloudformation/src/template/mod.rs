@@ -2243,6 +2243,7 @@ mod intrinsics;
 mod mappings;
 mod parser;
 mod resolution;
+mod sam_events;
 use conditions::*;
 use for_each::*;
 use intrinsics::*;
