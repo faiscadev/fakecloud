@@ -53,6 +53,58 @@ async fn cloudfront_scope_arn_uses_us_east_1_region_segment() {
 }
 
 #[tokio::test]
+async fn regional_scope_arn_uses_regional_path_segment() {
+    // REGIONAL-scope ARNs use the literal `regional` resource-path prefix (not
+    // the region name), e.g. arn:aws:wafv2:us-east-1:acct:regional/ipset/name/id.
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_ip_set()
+        .name("rgn-ipset")
+        .scope(Scope::Regional)
+        .ip_address_version(aws_sdk_wafv2::types::IpAddressVersion::Ipv4)
+        .addresses("10.0.0.0/8")
+        .send()
+        .await
+        .expect("create")
+        .summary
+        .expect("summary");
+    let arn = summary.arn().expect("arn");
+    assert!(
+        arn.contains(":regional/ipset/rgn-ipset/"),
+        "REGIONAL ARN must use the `regional` path segment, got: {arn}"
+    );
+}
+
+#[tokio::test]
+async fn web_acl_without_token_domains_has_no_integration_url() {
+    // GetWebACL reports ApplicationIntegrationURL only when the ACL declares
+    // token domains; a basic ACL has none, so the field is absent.
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    waf.create_web_acl()
+        .name("no-captcha")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("no-captcha"))
+        .send()
+        .await
+        .expect("create");
+    let got = waf
+        .get_web_acl()
+        .name("no-captcha")
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .expect("get");
+    assert!(
+        got.application_integration_url().is_none(),
+        "no token domains -> no ApplicationIntegrationURL, got: {:?}",
+        got.application_integration_url()
+    );
+}
+
+#[tokio::test]
 async fn web_acl_create_get_update_delete_lifecycle() {
     let server = TestServer::start().await;
     let waf = server.wafv2_client().await;

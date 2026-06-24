@@ -201,3 +201,8 @@ async fn scheduler_acceptance() {
 async fn sesv2_acceptance() {
     run_shard("sesv2").await;
 }
+
+#[tokio::test]
+async fn wafv2_acceptance() {
+    run_shard("wafv2").await;
+}

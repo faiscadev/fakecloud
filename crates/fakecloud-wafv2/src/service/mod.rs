@@ -594,12 +594,13 @@ fn synth_arn(
         region
     };
     // Real AWS WAF v2 CLOUDFRONT-scope ARNs always use `us-east-1` as the
-    // region segment plus a `global/...` resource path. REGIONAL ARNs use
-    // the caller's region with the region as the resource-path prefix.
+    // region segment plus a `global/...` resource path. REGIONAL ARNs use the
+    // caller's region with the literal `regional` scope prefix in the resource
+    // path (e.g. `arn:aws:wafv2:us-east-1:acct:regional/ipset/name/id`).
     let (region_in_arn, scope_seg) = if scope == "CLOUDFRONT" {
         ("us-east-1", "global")
     } else {
-        (region, region)
+        (region, "regional")
     };
     Arn::new(
         "wafv2",
