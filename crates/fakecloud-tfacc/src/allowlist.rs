@@ -382,13 +382,14 @@ pub const SERVICES: &[Service] = &[
         // data sources — secret (+ data source), secret policy, secret version
         // data sources, random-password data source and ephemeral resource.
         // Passes against fakecloud out of the box.
+        // Batch 18 enabled secret rotation (resource + data source): RotateSecret
+        // is fully implemented — it persists the rotation lambda ARN + rules,
+        // marks rotation enabled, and actually invokes the rotation Lambda (via
+        // the container runtime, the same path the Lambda Function tfacc tests
+        // use) so RotateImmediately completes and the secret reports its
+        // rotation configuration.
         run_regex: "^TestAccSecretsManager[A-Za-z]+_basic$",
-        deny: &[
-            // --- gap: secret rotation drives a Lambda rotation function on a
-            //     schedule, which fakecloud does not orchestrate. ---
-            "TestAccSecretsManagerSecretRotation_basic",
-            "TestAccSecretsManagerSecretRotationDataSource_basic",
-        ],
+        deny: &[],
     },
     Service {
         name: "sqs",
