@@ -1933,6 +1933,7 @@ pub(crate) fn create_configuration_set(
             sending_enabled: true,
             tls_policy: "Optional".to_string(),
             sending_pool_name: None,
+            max_delivery_seconds: None,
             custom_redirect_domain: None,
             https_policy: None,
             suppressed_reasons: Vec::new(),

@@ -1648,6 +1648,7 @@ fn send_email_v1_config_set_pause() {
                 sending_enabled: false,
                 tls_policy: "OPTIONAL".to_string(),
                 sending_pool_name: None,
+                max_delivery_seconds: None,
                 custom_redirect_domain: None,
                 https_policy: None,
                 suppressed_reasons: Vec::new(),

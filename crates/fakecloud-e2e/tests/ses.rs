@@ -179,6 +179,87 @@ async fn ses_configuration_set_lifecycle() {
 }
 
 #[tokio::test]
+async fn sesv2_configuration_set_omits_unset_option_blocks() {
+    // A configuration set created with no delivery/tracking options reports
+    // neither block (AWS leaves them absent), so the Terraform resource does
+    // not see an empty default block and plan a perpetual diff. When delivery
+    // options ARE configured, max_delivery_seconds round-trips.
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_configuration_set()
+        .configuration_set_name("bare")
+        .send()
+        .await
+        .unwrap();
+    let bare = client
+        .get_configuration_set()
+        .configuration_set_name("bare")
+        .send()
+        .await
+        .unwrap();
+    assert!(bare.delivery_options().is_none());
+    assert!(bare.tracking_options().is_none());
+
+    client
+        .create_configuration_set()
+        .configuration_set_name("with-delivery")
+        .delivery_options(
+            aws_sdk_sesv2::types::DeliveryOptions::builder()
+                .max_delivery_seconds(300)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let d = client
+        .get_configuration_set()
+        .configuration_set_name("with-delivery")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        d.delivery_options().unwrap().max_delivery_seconds(),
+        Some(300)
+    );
+}
+
+#[tokio::test]
+async fn sesv2_dedicated_ip_pool_tags_listable_by_arn() {
+    // A dedicated IP pool persists its create-time tags, and
+    // ListTagsForResource resolves the pool ARN (previously 404'd).
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_dedicated_ip_pool()
+        .pool_name("pool1")
+        .tags(
+            aws_sdk_sesv2::types::Tag::builder()
+                .key("team")
+                .value("email")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:ses:us-east-1:123456789012:dedicated-ip-pool/pool1";
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .expect("list tags");
+    assert!(tags
+        .tags()
+        .iter()
+        .any(|t| t.key() == "team" && t.value() == "email"));
+}
+
+#[tokio::test]
 async fn ses_send_email_simple() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;

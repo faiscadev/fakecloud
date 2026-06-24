@@ -39,6 +39,8 @@ impl SesV2Service {
             state.configuration_sets.contains_key(name)
         } else if let Some(name) = resource.strip_prefix("contact-list/") {
             state.contact_lists.contains_key(name)
+        } else if let Some(name) = resource.strip_prefix("dedicated-ip-pool/") {
+            state.dedicated_ip_pools.contains_key(name)
         } else {
             false
         };
@@ -561,6 +563,24 @@ impl SesV2Service {
                         pool_name: pool_name.clone(),
                     },
                 );
+            }
+        }
+
+        // Persist create-time Tags under the pool ARN so ListTagsForResource
+        // returns them, matching the other taggable SESv2 resources.
+        let arn = format!(
+            "arn:aws:ses:{}:{}:dedicated-ip-pool/{}",
+            req.region, req.account_id, pool_name
+        );
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let mut tag_map = std::collections::BTreeMap::new();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            if !tag_map.is_empty() {
+                state.tags.insert(arn, tag_map);
             }
         }
 

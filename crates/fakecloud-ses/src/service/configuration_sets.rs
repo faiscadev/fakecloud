@@ -55,6 +55,7 @@ impl SesV2Service {
         let sending_pool_name = body["DeliveryOptions"]["SendingPoolName"]
             .as_str()
             .map(|s| s.to_string());
+        let max_delivery_seconds = body["DeliveryOptions"]["MaxDeliverySeconds"].as_i64();
         let custom_redirect_domain = body["TrackingOptions"]["CustomRedirectDomain"]
             .as_str()
             .map(|s| s.to_string());
@@ -87,6 +88,7 @@ impl SesV2Service {
                 sending_enabled,
                 tls_policy,
                 sending_pool_name,
+                max_delivery_seconds,
                 custom_redirect_domain,
                 https_policy,
                 suppressed_reasons,
@@ -161,24 +163,47 @@ impl SesV2Service {
             }
         };
 
-        let mut delivery_options = json!({
-            "TlsPolicy": cs.tls_policy,
-        });
-        if let Some(ref pool) = cs.sending_pool_name {
-            delivery_options["SendingPoolName"] = json!(pool);
-        }
+        // AWS only reports DeliveryOptions when the set carries non-default
+        // delivery configuration (a TLS policy other than the OPTIONAL default,
+        // or a sending pool). For a set created without a `delivery_options`
+        // block the field is absent, and the Terraform resource relies on that:
+        // it sets `delivery_options` only when the API returns the struct, so
+        // echoing a default-only block makes the resource plan a perpetual
+        // diff back to null.
+        let delivery_options = if cs.tls_policy != "OPTIONAL"
+            || cs.sending_pool_name.is_some()
+            || cs.max_delivery_seconds.is_some()
+        {
+            let mut d = json!({ "TlsPolicy": cs.tls_policy });
+            if let Some(ref pool) = cs.sending_pool_name {
+                d["SendingPoolName"] = json!(pool);
+            }
+            if let Some(secs) = cs.max_delivery_seconds {
+                d["MaxDeliverySeconds"] = json!(secs);
+            }
+            Some(d)
+        } else {
+            None
+        };
 
-        let mut tracking_options = json!({});
-        if let Some(ref domain) = cs.custom_redirect_domain {
-            tracking_options["CustomRedirectDomain"] = json!(domain);
-        }
-        if let Some(ref policy) = cs.https_policy {
-            tracking_options["HttpsPolicy"] = json!(policy);
-        }
+        // Like DeliveryOptions, AWS only reports TrackingOptions when a custom
+        // redirect domain (or https policy) is configured; otherwise the field
+        // is absent and the resource leaves its `tracking_options` block unset.
+        let tracking_options = if cs.custom_redirect_domain.is_some() || cs.https_policy.is_some() {
+            let mut t = json!({});
+            if let Some(ref domain) = cs.custom_redirect_domain {
+                t["CustomRedirectDomain"] = json!(domain);
+            }
+            if let Some(ref policy) = cs.https_policy {
+                t["HttpsPolicy"] = json!(policy);
+            }
+            Some(t)
+        } else {
+            None
+        };
 
         let mut response = json!({
             "ConfigurationSetName": name,
-            "DeliveryOptions": delivery_options,
             "ReputationOptions": {
                 "ReputationMetricsEnabled": cs.reputation_metrics_enabled,
             },
@@ -186,8 +211,14 @@ impl SesV2Service {
                 "SendingEnabled": cs.sending_enabled,
             },
             "Tags": [],
-            "TrackingOptions": tracking_options,
         });
+
+        if let Some(d) = delivery_options {
+            response["DeliveryOptions"] = d;
+        }
+        if let Some(t) = tracking_options {
+            response["TrackingOptions"] = t;
+        }
 
         if !cs.suppressed_reasons.is_empty() {
             response["SuppressionOptions"] = json!({
@@ -304,6 +335,9 @@ impl SesV2Service {
         }
         if let Some(pool) = body["SendingPoolName"].as_str() {
             cs.sending_pool_name = Some(pool.to_string());
+        }
+        if let Some(secs) = body["MaxDeliverySeconds"].as_i64() {
+            cs.max_delivery_seconds = Some(secs);
         }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
