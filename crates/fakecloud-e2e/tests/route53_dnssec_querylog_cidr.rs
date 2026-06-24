@@ -96,6 +96,22 @@ async fn ksk_lifecycle_and_status_transitions() {
     assert_eq!(ksk.name(), Some("primary_ksk"));
     assert_eq!(ksk.status(), Some("INACTIVE"));
     assert_eq!(ksk.flag(), 257);
+    // The response carries the full DNSSEC material derived from the keypair.
+    assert!(ksk.key_tag() > 0);
+    let public_key = ksk.public_key().expect("public_key");
+    assert!(!public_key.is_empty());
+    let digest_value = ksk.digest_value().expect("digest_value");
+    assert_eq!(digest_value.len(), 64);
+    assert!(digest_value
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+    let dnskey_record = ksk.dnskey_record().expect("dnskey_record");
+    assert_eq!(dnskey_record, format!("257 3 13 {public_key}"));
+    let ds_record = ksk.ds_record().expect("ds_record");
+    assert_eq!(
+        ds_record,
+        format!("{} 13 2 {}", ksk.key_tag(), digest_value)
+    );
 
     // Cannot delete an ACTIVE KSK; flip to ACTIVE first to confirm guard.
     r53.activate_key_signing_key()
