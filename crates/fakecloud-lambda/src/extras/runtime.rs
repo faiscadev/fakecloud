@@ -95,6 +95,12 @@ impl LambdaService {
         let qualifier = parse_qualifier(req);
         let region = self.region_for(&req.account_id);
         self.with_state_read(&req.account_id, &region, |state| {
+            // The config only exists while the function does; once the function
+            // is deleted GetRuntimeManagementConfig must 404 (the Terraform
+            // CheckDestroy relies on this), not synthesise a default.
+            if !state.functions.contains_key(function_name) {
+                return Err(not_found("Function", function_name));
+            }
             let cfg = state
                 .runtime_management
                 .get(&format!("{function_name}:{qualifier}"))

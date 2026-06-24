@@ -1278,3 +1278,49 @@ async fn lambda_add_permission_round_trips_event_source_token() {
     let cond = &doc["Statement"][0]["Condition"]["StringEquals"]["lambda:EventSourceToken"];
     assert_eq!(cond.as_str(), Some("my-token"));
 }
+
+#[tokio::test]
+async fn lambda_runtime_management_config_404s_after_function_delete() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("rmc-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // While the function exists, GetRuntimeManagementConfig returns the config.
+    client
+        .get_runtime_management_config()
+        .function_name("rmc-fn")
+        .send()
+        .await
+        .expect("config while function exists");
+
+    client
+        .delete_function()
+        .function_name("rmc-fn")
+        .send()
+        .await
+        .unwrap();
+
+    // Once the function is gone it must 404 (the Terraform CheckDestroy relies
+    // on this), not synthesise a default config.
+    let err = client
+        .get_runtime_management_config()
+        .function_name("rmc-fn")
+        .send()
+        .await
+        .expect_err("must 404 after function delete");
+    assert!(err.into_service_error().is_resource_not_found_exception());
+}
