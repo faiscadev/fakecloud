@@ -95,8 +95,13 @@ fn collect_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
 /// the same docs into both the evaluator (via `PolicyDocument::parse`)
 /// and the condition-key scanner used to populate
 /// `MissingContextValues`.
-fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// Resolve a principal's identity policy set as `(source_policy_id, document)`
+/// pairs. The `source_policy_id` mirrors AWS's policy-simulation naming: a
+/// managed policy is identified by its policy name, while an inline policy is
+/// `<principal-kind>_<principal-name>_<policy-name>` (e.g.
+/// `user_alice_AllowS3`). All carry the `IAM Policy` source type.
+fn collect_principal_policy_sources(state: &IamState, source_arn: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     let (kind, name) = match parse_principal_arn(source_arn) {
         Some(p) => p,
         None => return out,
@@ -119,13 +124,17 @@ fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<Str
                 .unwrap_or_default(),
         ),
     };
+    let kind_prefix = match kind {
+        PrincipalKind::User => "user",
+        PrincipalKind::Role => "role",
+    };
     for arn in &managed {
         if let Some(doc) = managed_default_doc(state, arn) {
-            out.push(doc);
+            out.push((managed_policy_source_id(arn), doc));
         }
     }
-    for doc in inline.values() {
-        out.push(doc.clone());
+    for (policy_name, doc) in &inline {
+        out.push((format!("{kind_prefix}_{name}_{policy_name}"), doc.clone()));
     }
     // Users inherit every policy attached to a group they belong to —
     // both managed and inline. Roles can't be group members so this
@@ -137,15 +146,24 @@ fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<Str
             }
             for arn in &group.attached_policies {
                 if let Some(doc) = managed_default_doc(state, arn) {
-                    out.push(doc);
+                    out.push((managed_policy_source_id(arn), doc));
                 }
             }
-            for doc in group.inline_policies.values() {
-                out.push(doc.clone());
+            for (policy_name, doc) in &group.inline_policies {
+                out.push((
+                    format!("group_{}_{}", group.group_name, policy_name),
+                    doc.clone(),
+                ));
             }
         }
     }
     out
+}
+
+/// A managed policy's simulation source id is its policy name — the last path
+/// segment of its ARN.
+fn managed_policy_source_id(arn: &str) -> String {
+    arn.rsplit('/').next().unwrap_or(arn).to_string()
 }
 
 /// Resolve a managed policy ARN to its default-version document, looking first
@@ -993,18 +1011,26 @@ impl IamService {
         // We collect the raw JSON alongside the parsed `PolicyDocument`
         // so MissingContextValues can scan the *resolved* doc set
         // (principal + group + boundary), not just the request inputs.
-        let mut identity_docs: Vec<PolicyDocument> = Vec::new();
+        // Each identity-side document is tracked with its simulation source id
+        // so MatchedStatements can attribute the decision to a policy.
+        let mut identity_sources: Vec<(String, PolicyDocument)> = Vec::new();
         let mut raw_policy_jsons: Vec<String> = Vec::new();
         let mut caller_arn: Option<String> = req.query_params.get("CallerArn").cloned();
         let mut boundary_docs: Option<Vec<PolicyDocument>> = None;
 
         match action {
             "SimulateCustomPolicy" => {
-                for body in collect_member_list(req, "PolicyInputList.member.") {
-                    identity_docs.push(PolicyDocument::parse(&body));
+                for (i, body) in collect_member_list(req, "PolicyInputList.member.")
+                    .into_iter()
+                    .enumerate()
+                {
+                    identity_sources.push((
+                        format!("PolicyInputList.{}", i + 1),
+                        PolicyDocument::parse(&body),
+                    ));
                     raw_policy_jsons.push(body);
                 }
-                if identity_docs.is_empty() {
+                if identity_sources.is_empty() {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "InvalidInput",
@@ -1035,11 +1061,10 @@ impl IamService {
                 let accounts = self.state.read();
                 let empty = IamState::new(&req.account_id);
                 let state = accounts.get(&req.account_id).unwrap_or(&empty);
-                let resolved = collect_principal_policy_jsons(state, source_arn);
-                for body in &resolved {
-                    identity_docs.push(PolicyDocument::parse(body));
+                for (source_id, body) in collect_principal_policy_sources(state, source_arn) {
+                    identity_sources.push((source_id, PolicyDocument::parse(&body)));
+                    raw_policy_jsons.push(body);
                 }
-                raw_policy_jsons.extend(resolved);
                 if let Some(boundary_arn) = principal_boundary(state, source_arn) {
                     if let Some(p) = state.policies.get(&boundary_arn) {
                         if let Some(v) = p.versions.iter().find(|v| v.is_default) {
@@ -1049,13 +1074,24 @@ impl IamService {
                     }
                 }
                 // Add policies attached via PolicyInputList overlay.
-                for body in collect_member_list(req, "PolicyInputList.member.") {
-                    identity_docs.push(PolicyDocument::parse(&body));
+                for (i, body) in collect_member_list(req, "PolicyInputList.member.")
+                    .into_iter()
+                    .enumerate()
+                {
+                    identity_sources.push((
+                        format!("PolicyInputList.{}", i + 1),
+                        PolicyDocument::parse(&body),
+                    ));
                     raw_policy_jsons.push(body);
                 }
             }
             _ => {}
         }
+
+        let identity_docs: Vec<PolicyDocument> = identity_sources
+            .iter()
+            .map(|(_, doc)| doc.clone())
+            .collect();
 
         let principal_arn_str = caller_arn
             .clone()
@@ -1105,15 +1141,39 @@ impl IamService {
                     Decision::ImplicitDeny => "implicitDeny",
                     Decision::ExplicitDeny => "explicitDeny",
                 };
+                // Attribute the matched statements to their source policies.
+                // An Allow decision is backed by the matching Allow statements;
+                // an explicit Deny by the matching Deny statements. An implicit
+                // deny matched nothing, so it reports no statements.
+                let matched_xml: String = match decision {
+                    Decision::ImplicitDeny => String::new(),
+                    other => {
+                        let want_allow = matches!(other, Decision::Allow);
+                        identity_sources
+                            .iter()
+                            .flat_map(|(source_id, doc)| {
+                                let n = doc.matching_identity_statements(&eval_req, want_allow);
+                                std::iter::repeat_with(move || source_id.clone()).take(n)
+                            })
+                            .map(|source_id| {
+                                format!(
+                                    "<member><SourcePolicyId>{}</SourcePolicyId><SourcePolicyType>IAM Policy</SourcePolicyType></member>",
+                                    xml_escape(&source_id)
+                                )
+                            })
+                            .collect()
+                    }
+                };
                 let missing_xml: String = missing_keys
                     .iter()
                     .map(|k| format!("<member>{}</member>", xml_escape(k)))
                     .collect();
                 members.push_str(&format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues>{}</MissingContextValues></member>",
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements>{}</MatchedStatements><MissingContextValues>{}</MissingContextValues></member>",
                     xml_escape(action_name),
                     xml_escape(resource),
                     decision_str,
+                    matched_xml,
                     missing_xml,
                 ));
             }

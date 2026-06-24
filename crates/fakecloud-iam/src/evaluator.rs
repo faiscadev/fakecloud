@@ -239,6 +239,29 @@ impl PolicyDocument {
     pub fn statement_count(&self) -> usize {
         self.statements.len()
     }
+
+    /// Count the identity-policy statements in this document that match the
+    /// request's action + resource (and condition, if any) and carry the given
+    /// effect (`allow` selects `Allow`, otherwise `Deny`). Used by policy
+    /// simulation to attribute `MatchedStatements` provenance: a statement that
+    /// contributed to the decision is reported with its source policy id.
+    /// Statements carrying a `Principal`/`NotPrincipal` (resource-policy only)
+    /// are never identity matches.
+    pub fn matching_identity_statements(&self, request: &EvalRequest<'_>, allow: bool) -> usize {
+        let want = if allow { Effect::Allow } else { Effect::Deny };
+        self.statements
+            .iter()
+            .filter(|s| matches!(s.principal, PrincipalPattern::None))
+            .filter(|s| s.effect == want)
+            .filter(|s| action_matches(&s.action, &request.action))
+            .filter(|s| resource_matches(&s.resource, &request.resource))
+            .filter(|s| {
+                s.condition
+                    .as_ref()
+                    .is_none_or(|c| c.matches(&request.context))
+            })
+            .count()
+    }
 }
 
 fn parse_statement(value: &Value) -> Option<ParsedStatement> {
