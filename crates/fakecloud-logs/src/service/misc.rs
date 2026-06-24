@@ -842,9 +842,18 @@ impl LogsService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let identifier = require_str(&body, "identifier")?;
-        validate_string_length("identifier", identifier, 1, 2048)?;
-        // No-op stub (we don't track detailed enough to remove specific sources)
+        let identifier = require_str(&body, "identifier")?.to_string();
+        validate_string_length("identifier", &identifier, 1, 2048)?;
+
+        // Remove the source identified by `identifier` from every integration
+        // it was associated with, mirroring what AssociateSource recorded.
+        // Previously a no-op, so ListSources kept returning a removed source.
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        for sources in state.s3_table_sources.values_mut() {
+            sources.retain(|s| s != &identifier);
+        }
+        state.s3_table_sources.retain(|_, v| !v.is_empty());
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 }
@@ -1423,12 +1432,23 @@ mod tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(body["sources"].as_array().unwrap().len(), 1);
 
+        // Disassociating the source removes it; ListSources then returns none.
         let req = make_request(
             "DisassociateSourceFromS3TableIntegration",
-            json!({ "identifier": "arn:aws:logs:us-east-1:123456789012:integration:test" }),
+            json!({ "identifier": "arn:aws:logs:us-east-1:123456789012:log-group:test" }),
         );
         svc.disassociate_source_from_s3_table_integration(&req)
             .unwrap();
+
+        let req = make_request(
+            "ListSourcesForS3TableIntegration",
+            json!({
+                "integrationArn": "arn:aws:logs:us-east-1:123456789012:integration:test"
+            }),
+        );
+        let resp = svc.list_sources_for_s3_table_integration(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["sources"].as_array().unwrap().len(), 0);
     }
 
     #[test]

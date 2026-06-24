@@ -2968,6 +2968,29 @@ async fn s3_bucket_versioning_put_get() {
         .await
         .unwrap();
     assert_eq!(resp.status(), Some(&BucketVersioningStatus::Suspended));
+
+    // MfaDelete set via PutBucketVersioning must round-trip (bug-hunt
+    // 2026-06-24, 1.13 — previously dropped, GetBucketVersioning omitted it).
+    use aws_sdk_s3::types::MfaDeleteStatus;
+    client
+        .put_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .versioning_configuration(
+            VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled)
+                .mfa_delete(aws_sdk_s3::types::MfaDelete::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_bucket_versioning()
+        .bucket("versioning-cfg-bucket")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.mfa_delete(), Some(&MfaDeleteStatus::Enabled));
 }
 
 #[tokio::test]

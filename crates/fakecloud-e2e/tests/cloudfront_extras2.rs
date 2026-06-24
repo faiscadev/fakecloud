@@ -11,9 +11,13 @@ use aws_sdk_cloudfront::types::{
 use helpers::TestServer;
 
 fn minimal_config(caller_ref: &str) -> DistributionConfig {
+    minimal_config_with_comment(caller_ref, "batch6b")
+}
+
+fn minimal_config_with_comment(caller_ref: &str, comment: &str) -> DistributionConfig {
     DistributionConfig::builder()
         .caller_reference(caller_ref)
-        .comment("batch6b")
+        .comment(comment)
         .enabled(true)
         .origins(
             Origins::builder()
@@ -197,9 +201,14 @@ async fn update_distribution_with_staging_config_swaps_etag() {
     let prod_id = prod.distribution().unwrap().id().to_string();
     let prod_etag = prod.e_tag().unwrap().to_string();
 
+    // Give the staging distribution a distinct config (different comment) so
+    // we can prove the promotion actually copies it onto prod.
     let staging = cf
         .create_distribution()
-        .distribution_config(minimal_config("staging"))
+        .distribution_config(minimal_config_with_comment(
+            "staging",
+            "promoted-staging-config",
+        ))
         .send()
         .await
         .expect("create staging");
@@ -214,4 +223,21 @@ async fn update_distribution_with_staging_config_swaps_etag() {
         .await
         .expect("promote staging");
     assert!(resp.e_tag().unwrap() != prod_etag);
+
+    // Promotion must copy the staging config onto prod (bug-hunt 2026-06-24,
+    // 1.13 — previously only the ETag changed). The promoted prod is no longer
+    // a staging distribution.
+    let got = cf
+        .get_distribution()
+        .id(&prod_id)
+        .send()
+        .await
+        .expect("get prod");
+    let cfg = got
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap();
+    assert_eq!(cfg.comment(), "promoted-staging-config");
+    assert_eq!(cfg.staging(), Some(false));
 }

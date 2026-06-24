@@ -103,6 +103,8 @@ pub struct S3Bucket {
     pub multipart_uploads: BTreeMap<String, MultipartUpload>,
     /// Versioning status: None = never enabled, Some("Enabled"), Some("Suspended").
     pub versioning: Option<String>,
+    /// MFA-Delete status: None = unset, Some("Enabled"), Some("Disabled").
+    pub mfa_delete: Option<String>,
     /// Object versions keyed by key, each value is a list of versions.
     pub object_versions: BTreeMap<String, Vec<S3Object>>,
     /// Bucket ACL (canned or XML).
@@ -161,6 +163,7 @@ impl S3Bucket {
             acl_owner_id: owner_id.to_string(),
             multipart_uploads: BTreeMap::new(),
             versioning: None,
+            mfa_delete: None,
             object_versions: BTreeMap::new(),
             acl: None,
             encryption_config: None,

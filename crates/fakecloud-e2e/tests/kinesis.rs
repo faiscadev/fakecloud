@@ -6,6 +6,59 @@ use aws_sdk_kinesis::types::ShardIteratorType;
 use helpers::TestServer;
 
 #[tokio::test]
+async fn kinesis_stream_summary_reports_warm_throughput_and_max_record_size() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("warm")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Before configuration these fields are absent.
+    let summary = client
+        .describe_stream_summary()
+        .stream_name("warm")
+        .send()
+        .await
+        .unwrap();
+    let s = summary.stream_description_summary().unwrap();
+    assert!(s.warm_throughput().is_none());
+    assert!(s.max_record_size_in_kib().is_none());
+    let stream_arn = s.stream_arn().to_string();
+
+    client
+        .update_stream_warm_throughput()
+        .stream_arn(&stream_arn)
+        .warm_throughput_mibps(64)
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_max_record_size()
+        .stream_arn(&stream_arn)
+        .max_record_size_in_kib(2048)
+        .send()
+        .await
+        .unwrap();
+
+    // DescribeStreamSummary must now report both (bug-hunt 2026-06-24, 1.13 —
+    // previously omitted, so the updates never read back).
+    let summary = client
+        .describe_stream_summary()
+        .stream_name("warm")
+        .send()
+        .await
+        .unwrap();
+    let s = summary.stream_description_summary().unwrap();
+    assert_eq!(s.warm_throughput().unwrap().target_mibps(), Some(64));
+    assert_eq!(s.max_record_size_in_kib(), Some(2048));
+}
+
+#[tokio::test]
 async fn kinesis_create_describe_list_delete_stream() {
     let server = TestServer::start().await;
     let client = server.kinesis_client().await;

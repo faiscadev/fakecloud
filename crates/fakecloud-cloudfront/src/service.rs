@@ -1691,7 +1691,10 @@ fn build_distribution_list_xml(dists: &[StoredDistribution], root: &str) -> Stri
             "<IsIPV6Enabled>{}</IsIPV6Enabled>",
             d.config.is_ipv6_enabled.unwrap_or(true)
         ));
-        out.push_str("<Staging>false</Staging>");
+        out.push_str(&format!(
+            "<Staging>{}</Staging>",
+            d.config.staging.unwrap_or(false)
+        ));
         out.push_str("</DistributionSummary>");
     }
     out.push_str("</Items>");

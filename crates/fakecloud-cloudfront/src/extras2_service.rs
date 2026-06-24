@@ -369,9 +369,12 @@ impl CloudFrontService {
             .accounts
             .get_mut(DEFAULT_ACCOUNT)
             .ok_or_else(|| not_found("Distribution", &id))?;
-        if !account.distributions.contains_key(&staging_id) {
-            return Err(not_found("Distribution", &staging_id));
-        }
+        let staging_config = account
+            .distributions
+            .get(&staging_id)
+            .ok_or_else(|| not_found("Distribution", &staging_id))?
+            .config
+            .clone();
         let dist = account
             .distributions
             .get_mut(&id)
@@ -379,6 +382,13 @@ impl CloudFrontService {
         if dist.etag != if_match {
             return Err(precondition_failed());
         }
+        // Promote: the staging distribution's configuration becomes the
+        // primary distribution's live config. AWS copies the config wholesale
+        // and the resulting primary is no longer a staging distribution.
+        // Previously this only bumped the ETag, leaving the old config live.
+        let mut promoted = staging_config;
+        promoted.staging = Some(false);
+        dist.config = promoted;
         dist.etag = generate_id_with_prefix("E");
         dist.last_modified_time = Utc::now();
         let snap = dist.clone();

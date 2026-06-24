@@ -348,22 +348,36 @@ impl KinesisService {
             json!([{ "ShardLevelMetrics": stream.enhanced_metrics }])
         };
 
+        let mut summary = json!({
+            "ConsumerCount": consumer_count,
+            "EncryptionType": stream.encryption_type,
+            "EnhancedMonitoring": enhanced_monitoring,
+            "KeyId": stream.key_id.as_deref().unwrap_or_default(),
+            "OpenShardCount": stream.open_shard_count,
+            "RetentionPeriodHours": stream.retention_period_hours,
+            "StreamARN": stream.stream_arn,
+            "StreamCreationTimestamp": stream.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+            "StreamModeDetails": {
+                "StreamMode": stream.stream_mode,
+            },
+            "StreamName": stream.stream_name,
+            "StreamStatus": stream.stream_status
+        });
+        // WarmThroughput / MaxRecordSizeInKiB are only present after the caller
+        // configures them via UpdateStreamWarmThroughput / UpdateMaxRecordSize;
+        // they were previously omitted, so those updates never read back.
+        if let Some(warm) = stream.warm_throughput_mibps {
+            summary["WarmThroughput"] = json!({
+                "TargetMiBps": warm,
+                "CurrentMiBps": warm,
+            });
+        }
+        if let Some(max_size) = stream.max_record_size_kib {
+            summary["MaxRecordSizeInKiB"] = json!(max_size);
+        }
+
         Ok(AwsResponse::ok_json(json!({
-            "StreamDescriptionSummary": {
-                "ConsumerCount": consumer_count,
-                "EncryptionType": stream.encryption_type,
-                "EnhancedMonitoring": enhanced_monitoring,
-                "KeyId": stream.key_id.as_deref().unwrap_or_default(),
-                "OpenShardCount": stream.open_shard_count,
-                "RetentionPeriodHours": stream.retention_period_hours,
-                "StreamARN": stream.stream_arn,
-                "StreamCreationTimestamp": stream.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
-                "StreamModeDetails": {
-                    "StreamMode": stream.stream_mode,
-                },
-                "StreamName": stream.stream_name,
-                "StreamStatus": stream.stream_status
-            }
+            "StreamDescriptionSummary": summary
         })))
     }
 

@@ -13,6 +13,7 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
         let status_val = extract_xml_value(body_str, "Status").unwrap_or_default();
+        let mfa_delete_val = extract_xml_value(body_str, "MfaDelete");
 
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
@@ -22,6 +23,11 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         if status_val == "Enabled" || status_val == "Suspended" {
             b.versioning = Some(status_val);
+        }
+        if let Some(mfa) = mfa_delete_val {
+            if mfa == "Enabled" || mfa == "Disabled" {
+                b.mfa_delete = Some(mfa);
+            }
         }
         let meta = bucket_meta_snapshot(b);
         self.store
@@ -51,10 +57,15 @@ impl S3Service {
             Some(s) => format!("<Status>{s}</Status>"),
             None => String::new(),
         };
+        let mfa_xml = match &b.mfa_delete {
+            Some(s) => format!("<MfaDelete>{s}</MfaDelete>"),
+            None => String::new(),
+        };
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              {status_xml}\
+             {mfa_xml}\
              </VersioningConfiguration>"
         );
         Ok(s3_xml(StatusCode::OK, body))
