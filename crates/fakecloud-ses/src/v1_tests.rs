@@ -1871,3 +1871,26 @@ fn set_and_get_identity_notification_topic() {
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(!body.contains("<BounceTopic>"), "cleared: {body}");
 }
+
+#[test]
+fn v1_write_action_response_includes_result_node() {
+    // The SES v1 Query protocol always wraps the response in a
+    // `<{Action}Result>` element; the AWS SDK fails to deserialize without it
+    // ("{Action}Result node not found"). A no-output write action like
+    // CreateConfigurationSet must still emit an empty result node.
+    let state = make_state();
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs1")],
+        ),
+    )
+    .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("<CreateConfigurationSetResult"),
+        "response must carry the result node: {body}"
+    );
+    assert!(body.contains("<CreateConfigurationSetResponse"));
+}

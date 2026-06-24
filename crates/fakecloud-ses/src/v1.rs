@@ -6,7 +6,7 @@ use chrono::Utc;
 use http::StatusCode;
 use std::collections::HashMap;
 
-use fakecloud_core::query::{query_metadata_only_xml, query_response_xml};
+use fakecloud_core::query::query_response_xml;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
