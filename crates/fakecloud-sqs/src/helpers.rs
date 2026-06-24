@@ -78,7 +78,7 @@ pub(crate) fn canonicalize_json_attr(name: &str, value: String) -> String {
 /// a typed `RedrivePolicy`. AWS accepts both string and integer encodings
 /// of `maxReceiveCount`, so we tolerate both. Returns `None` for any
 /// parse failure (the caller treats it as "no redrive policy").
-pub(crate) fn parse_redrive_policy(attr_str: &str) -> Option<RedrivePolicy> {
+pub fn parse_redrive_policy(attr_str: &str) -> Option<RedrivePolicy> {
     let rp: Value = serde_json::from_str(attr_str).ok()?;
     let dead_letter_target_arn = rp["deadLetterTargetArn"].as_str()?.to_string();
     let max_receive_count = rp["maxReceiveCount"]

@@ -109,7 +109,7 @@ pub(crate) fn parse_tags(body: &Value) -> BTreeMap<String, String> {
     tags
 }
 
-pub(crate) fn parse_target(target: &Value) -> EventTarget {
+pub fn parse_target(target: &Value) -> EventTarget {
     EventTarget {
         id: target["Id"].as_str().unwrap_or("").to_string(),
         arn: target["Arn"].as_str().unwrap_or("").to_string(),

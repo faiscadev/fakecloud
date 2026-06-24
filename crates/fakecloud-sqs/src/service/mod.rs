@@ -585,7 +585,7 @@ const SQS_NS: &str = "http://queue.amazonaws.com/doc/2012-11-05/";
 impl SqsService {}
 
 #[path = "../helpers.rs"]
-mod helpers;
+pub(crate) mod helpers;
 pub(crate) use helpers::*;
 
 #[cfg(test)]

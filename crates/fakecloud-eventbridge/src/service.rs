@@ -1644,7 +1644,7 @@ mod service_endpoints;
 mod service_partner_sources;
 
 #[path = "helpers.rs"]
-mod helpers;
+pub(crate) mod helpers;
 pub(crate) use helpers::*;
 
 #[cfg(test)]

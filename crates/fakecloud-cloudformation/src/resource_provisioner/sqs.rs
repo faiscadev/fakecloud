@@ -40,17 +40,61 @@ impl ResourceProvisioner {
 
         let is_fifo = queue_name.ends_with(".fifo");
         let mut attributes = std::collections::BTreeMap::new();
+        // Seed the real AWS SQS defaults so a CFN-created queue matches one
+        // created via the API (Terraform refreshes these on every plan and
+        // reports drift if they are absent).
+        attributes.insert("VisibilityTimeout".to_string(), "30".to_string());
+        attributes.insert("DelaySeconds".to_string(), "0".to_string());
+        attributes.insert("MaximumMessageSize".to_string(), "262144".to_string());
+        attributes.insert("MessageRetentionPeriod".to_string(), "345600".to_string());
+        attributes.insert("ReceiveMessageWaitTimeSeconds".to_string(), "0".to_string());
+        attributes.insert(
+            "KmsDataKeyReusePeriodSeconds".to_string(),
+            "300".to_string(),
+        );
+        attributes.insert("SqsManagedSseEnabled".to_string(), "true".to_string());
+        if is_fifo {
+            attributes.insert("FifoQueue".to_string(), "true".to_string());
+            attributes.insert("ContentBasedDeduplication".to_string(), "false".to_string());
+            attributes.insert("DeduplicationScope".to_string(), "queue".to_string());
+            attributes.insert("FifoThroughputLimit".to_string(), "perQueue".to_string());
+        }
+        // Override with provided properties. Object-valued attributes
+        // (RedrivePolicy, RedriveAllowPolicy, Policy) are serialized to compact
+        // JSON and boolean attributes (ContentBasedDeduplication) to their
+        // string form — the previous copy kept only string/integer values, so
+        // these were silently dropped.
         if let Some(obj) = props.as_object() {
             for (k, v) in obj {
-                if k != "QueueName" {
-                    if let Some(s) = v.as_str() {
-                        attributes.insert(k.clone(), s.to_string());
-                    } else if let Some(n) = v.as_i64() {
-                        attributes.insert(k.clone(), n.to_string());
-                    }
+                if k == "QueueName" || k == "Tags" {
+                    continue;
                 }
+                let value = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        serde_json::to_string(v).unwrap_or_default()
+                    }
+                    serde_json::Value::Null => continue,
+                };
+                attributes.insert(k.clone(), value);
             }
         }
+        // A KMS key implies SSE-KMS, so managed SSE is off (mirrors the native
+        // create_queue mutual-exclusion).
+        if attributes
+            .get("KmsMasterKeyId")
+            .is_some_and(|k| !k.is_empty())
+        {
+            attributes.insert("SqsManagedSseEnabled".to_string(), "false".to_string());
+        }
+
+        // Typed RedrivePolicy used for runtime DLQ routing — without it, CFN
+        // queues never route to their dead-letter queue.
+        let redrive_policy = attributes
+            .get("RedrivePolicy")
+            .and_then(|s| fakecloud_sqs::parse_redrive_policy(s));
 
         let queue = SqsQueue {
             queue_name: queue_name.to_string(),
@@ -62,7 +106,7 @@ impl ResourceProvisioner {
             attributes,
             is_fifo,
             dedup_cache: std::collections::BTreeMap::new(),
-            redrive_policy: None,
+            redrive_policy,
             tags: std::collections::BTreeMap::new(),
             next_sequence_number: 0,
             permission_labels: Vec::new(),

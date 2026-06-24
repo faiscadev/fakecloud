@@ -157,6 +157,42 @@ impl ResourceProvisioner {
         };
         let stream_arn_attr = stream_arn.clone();
 
+        // Secondary indexes, SSE and tags: parse via the same dynamodb helpers
+        // the native CreateTable uses, so a CFN/SAM table carries its GSIs/LSIs
+        // (otherwise a Query/Scan on the index name fails at runtime), its
+        // encryption config and its tags — instead of provisioning them empty.
+        let null = serde_json::Value::Null;
+        let gsi = fakecloud_dynamodb::parse_gsi(
+            props.get("GlobalSecondaryIndexes").unwrap_or(&null),
+            &billing_mode,
+        );
+        let lsi =
+            fakecloud_dynamodb::parse_lsi(props.get("LocalSecondaryIndexes").unwrap_or(&null));
+        let tags = props
+            .get("Tags")
+            .map(fakecloud_dynamodb::parse_tags)
+            .unwrap_or_default();
+        let (sse_type, sse_kms_key_arn) = match props.get("SSESpecification") {
+            Some(sse_spec)
+                if sse_spec
+                    .get("SSEEnabled")
+                    .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                    .unwrap_or(false) =>
+            {
+                let sse_type = sse_spec
+                    .get("SSEType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("KMS")
+                    .to_string();
+                let kms_key = sse_spec
+                    .get("KMSMasterKeyId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (Some(sse_type), kms_key)
+            }
+            _ => (None, None),
+        };
+
         let table = DynamoTable {
             name: table_name.to_string(),
             arn: arn.clone(),
@@ -165,9 +201,9 @@ impl ResourceProvisioner {
             attribute_definitions,
             provisioned_throughput,
             items: Vec::new(),
-            gsi: Vec::new(),
-            lsi: Vec::new(),
-            tags: BTreeMap::new(),
+            gsi,
+            lsi,
+            tags,
             created_at: Utc::now(),
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -184,8 +220,8 @@ impl ResourceProvisioner {
             stream_view_type,
             stream_arn,
             stream_records: Arc::new(RwLock::new(Vec::new())),
-            sse_type: None,
-            sse_kms_key_arn: None,
+            sse_type,
+            sse_kms_key_arn,
             deletion_protection_enabled,
             on_demand_throughput,
             table_class: props

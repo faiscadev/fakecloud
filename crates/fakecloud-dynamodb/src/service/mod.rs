@@ -471,7 +471,7 @@ impl AwsService for DynamoDbService {
     }
 }
 
-mod helpers;
+pub(crate) mod helpers;
 pub(crate) use helpers::*;
 
 #[cfg(test)]

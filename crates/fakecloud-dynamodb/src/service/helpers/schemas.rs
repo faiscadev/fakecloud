@@ -53,7 +53,7 @@ pub(crate) fn parse_provisioned_throughput(
     })
 }
 
-pub(crate) fn parse_gsi(val: &Value, billing_mode: &str) -> Vec<GlobalSecondaryIndex> {
+pub fn parse_gsi(val: &Value, billing_mode: &str) -> Vec<GlobalSecondaryIndex> {
     let Some(arr) = val.as_array() else {
         return Vec::new();
     };
@@ -79,7 +79,7 @@ pub(crate) fn parse_gsi(val: &Value, billing_mode: &str) -> Vec<GlobalSecondaryI
 /// `ProvisionedThroughput` block, and the Terraform provider's `flatten`
 /// code keys `name`/`read_capacity`/`write_capacity` off the presence of
 /// that field — returning `None` would desynchronise state.
-pub(crate) fn parse_gsi_throughput(val: &Value, billing_mode: &str) -> ProvisionedThroughput {
+pub fn parse_gsi_throughput(val: &Value, billing_mode: &str) -> ProvisionedThroughput {
     if billing_mode == "PAY_PER_REQUEST" {
         return ProvisionedThroughput {
             read_capacity_units: 0,
@@ -92,7 +92,7 @@ pub(crate) fn parse_gsi_throughput(val: &Value, billing_mode: &str) -> Provision
     }
 }
 
-pub(crate) fn parse_lsi(val: &Value) -> Vec<LocalSecondaryIndex> {
+pub fn parse_lsi(val: &Value) -> Vec<LocalSecondaryIndex> {
     let Some(arr) = val.as_array() else {
         return Vec::new();
     };
@@ -107,7 +107,7 @@ pub(crate) fn parse_lsi(val: &Value) -> Vec<LocalSecondaryIndex> {
         .collect()
 }
 
-pub(crate) fn parse_tags(val: &Value) -> BTreeMap<String, String> {
+pub fn parse_tags(val: &Value) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
     if let Some(arr) = val.as_array() {
         for tag in arr {
