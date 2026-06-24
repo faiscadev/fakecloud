@@ -19,6 +19,15 @@ pub struct KinesisState {
     pub account_id: String,
     pub region: String,
     pub streams: BTreeMap<String, KinesisStream>,
+    /// Shard-iterator leases are ephemeral (AWS expires them after 5 minutes
+    /// and they never survive a service restart). They were serialized into the
+    /// snapshot with an absolute `expires_at`, so after any restart taking
+    /// longer than 5 minutes every restored iterator was already expired —
+    /// half-done durability that guaranteed `ExpiredIteratorException` on the
+    /// first GetRecords. Skip persisting them; consumers re-acquire via
+    /// GetShardIterator against the (durable) sequence number, exactly as on AWS
+    /// (bug-hunt 2026-06-24, 4.2).
+    #[serde(skip)]
     pub iterators: BTreeMap<String, ShardIteratorLease>,
     pub lambda_checkpoints: BTreeMap<String, usize>,
     pub consumers: BTreeMap<String, KinesisConsumer>,
@@ -192,6 +201,23 @@ mod tests {
         assert!(state.streams.is_empty());
         assert!(state.iterators.is_empty());
         assert_eq!(state.shard_limit, 500);
+    }
+
+    #[test]
+    fn iterators_are_not_persisted_through_snapshot() {
+        let mut state = KinesisState::new("123456789012", "us-east-1");
+        let token = state.insert_iterator("s", "shardId-000000000000", 0);
+        assert!(state.iterators.contains_key(&token));
+
+        // Round-trip through the serde snapshot: the ephemeral iterator lease
+        // must not survive (it would be expired-on-load otherwise, 4.2).
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            !json.contains("expires_at"),
+            "iterator leases must not be serialized: {json}"
+        );
+        let restored: KinesisState = serde_json::from_str(&json).unwrap();
+        assert!(restored.iterators.is_empty());
     }
 
     #[test]
