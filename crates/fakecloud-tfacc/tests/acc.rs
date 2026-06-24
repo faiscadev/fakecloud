@@ -211,3 +211,8 @@ async fn wafv2_acceptance() {
 async fn firehose_acceptance() {
     run_shard("firehose").await;
 }
+
+#[tokio::test]
+async fn cloudwatch_acceptance() {
+    run_shard("cloudwatch").await;
+}

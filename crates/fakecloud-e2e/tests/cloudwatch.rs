@@ -245,3 +245,40 @@ async fn list_metrics_filters_by_dimension() {
         .expect("list filtered");
     assert_eq!(listed.metrics().len(), 1);
 }
+
+#[tokio::test]
+async fn dashboard_put_get_delete_roundtrip() {
+    // DeleteDashboards must return a parseable response (an empty
+    // DeleteDashboardsResult element) — the SDK errors if that node is absent.
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    let body = r#"{"widgets":[{"type":"text","x":0,"y":0,"width":6,"height":3,"properties":{"markdown":"hi"}}]}"#;
+    cw.put_dashboard()
+        .dashboard_name("dash1")
+        .dashboard_body(body)
+        .send()
+        .await
+        .expect("put dashboard");
+
+    let got = cw
+        .get_dashboard()
+        .dashboard_name("dash1")
+        .send()
+        .await
+        .expect("get dashboard");
+    assert!(got.dashboard_body().unwrap().contains("markdown"));
+
+    // Delete must succeed (response deserializes thanks to the result node).
+    cw.delete_dashboards()
+        .dashboard_names("dash1")
+        .send()
+        .await
+        .expect("delete dashboards");
+
+    let listed = cw.list_dashboards().send().await.expect("list");
+    assert!(listed
+        .dashboard_entries()
+        .iter()
+        .all(|e| e.dashboard_name() != Some("dash1")));
+}
