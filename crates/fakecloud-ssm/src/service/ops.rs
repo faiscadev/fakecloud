@@ -85,10 +85,12 @@ impl SsmService {
             created_by: Arn::global("iam", &state.account_id, "root").to_string(),
             last_modified_by: Arn::global("iam", &state.account_id, "root").to_string(),
             ops_item_type,
-            planned_start_time: None,
-            planned_end_time: None,
-            actual_start_time: None,
-            actual_end_time: None,
+            // Previously hardcoded None + never rendered, so change-management
+            // SLA timelines were lost on round-trip (bug-hunt 2026-06-24, 1.13).
+            planned_start_time: parse_epoch_ts(&body["PlannedStartTime"]),
+            planned_end_time: parse_epoch_ts(&body["PlannedEndTime"]),
+            actual_start_time: parse_epoch_ts(&body["ActualStartTime"]),
+            actual_end_time: parse_epoch_ts(&body["ActualEndTime"]),
         };
 
         state.ops_items.insert(ops_item_id.clone(), item);
@@ -163,6 +165,16 @@ impl SsmService {
         }
         if let Some(arr) = body["RelatedOpsItems"].as_array() {
             item.related_ops_items = arr.clone();
+        }
+        for (field, target) in [
+            ("PlannedStartTime", &mut item.planned_start_time),
+            ("PlannedEndTime", &mut item.planned_end_time),
+            ("ActualStartTime", &mut item.actual_start_time),
+            ("ActualEndTime", &mut item.actual_end_time),
+        ] {
+            if let Some(ts) = parse_epoch_ts(&body[field]) {
+                *target = Some(ts);
+            }
         }
 
         item.last_modified_time = Utc::now();
@@ -554,8 +566,18 @@ impl SsmService {
     // ── Automation ────────────────────────────────────────────────
 }
 
+/// Parse an epoch-seconds timestamp (float, optional fractional millis) as AWS
+/// encodes SSM timestamps in JSON.
+fn parse_epoch_ts(v: &Value) -> Option<chrono::DateTime<Utc>> {
+    let secs = v.as_f64()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp(secs.trunc() as i64, (secs.fract() * 1e9) as u32)
+}
+
 pub(super) fn ops_item_to_json(item: &SsmOpsItem) -> Value {
-    json!({
+    let mut obj = json!({
         "OpsItemId": item.ops_item_id,
         "Title": item.title,
         "Description": item.description,
@@ -572,5 +594,16 @@ pub(super) fn ops_item_to_json(item: &SsmOpsItem) -> Value {
         "CreatedBy": item.created_by,
         "LastModifiedBy": item.last_modified_by,
         "OpsItemType": item.ops_item_type,
-    })
+    });
+    for (field, ts) in [
+        ("PlannedStartTime", item.planned_start_time),
+        ("PlannedEndTime", item.planned_end_time),
+        ("ActualStartTime", item.actual_start_time),
+        ("ActualEndTime", item.actual_end_time),
+    ] {
+        if let Some(ts) = ts {
+            obj[field] = json!(ts.timestamp_millis() as f64 / 1000.0);
+        }
+    }
+    obj
 }

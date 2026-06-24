@@ -651,12 +651,18 @@ impl SsmService {
         })?;
 
         let account_ids = doc.permissions.get("Share").cloned().unwrap_or_default();
+        let shared_version = doc
+            .permissions
+            .get("__shared_version")
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_else(|| "$DEFAULT".to_string());
 
         Ok(AwsResponse::ok_json(json!({
             "AccountIds": account_ids,
             "AccountSharingInfoList": account_ids.iter().map(|id| json!({
                 "AccountId": id,
-                "SharedDocumentVersion": "$DEFAULT"
+                "SharedDocumentVersion": shared_version
             })).collect::<Vec<_>>(),
         })))
     }
@@ -765,6 +771,13 @@ impl SsmService {
             if let Some(entry) = doc.permissions.get_mut("Share") {
                 entry.retain(|id| !ids.contains(id));
             }
+        }
+
+        // Persist the shared version so DescribeDocumentPermission reflects it.
+        // Stored under a reserved key separate from the "Share" account list.
+        if let Some(ver) = shared_doc_version {
+            doc.permissions
+                .insert("__shared_version".to_string(), vec![ver.to_string()]);
         }
 
         Ok(AwsResponse::ok_json(json!({})))
