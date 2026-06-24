@@ -310,4 +310,5 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_SCHEDULER", "scheduler"),
     ("AWS_ENDPOINT_URL_WAFV2", "wafv2"),
     ("AWS_ENDPOINT_URL_FIREHOSE", "firehose"),
+    ("AWS_ENDPOINT_URL_CLOUDWATCH", "monitoring"),
 ];

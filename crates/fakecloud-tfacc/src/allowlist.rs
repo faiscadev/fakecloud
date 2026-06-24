@@ -644,6 +644,22 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccFirehoseDeliveryStream(_basic|DataSource_basic)$",
         deny: &[],
     },
+    Service {
+        name: "cloudwatch",
+        // CloudWatch: the `_basic` smoke for composite alarms, dashboards, metric
+        // alarms, metric streams, and contributor-insight rules. Fix:
+        // DeleteDashboards returns an (empty) DeleteDashboardsResult element so
+        // the SDK can deserialize the response.
+        run_regex: "^TestAccCloudWatch[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: managed contributor-insight rules are AWS-vendor-published
+            //     rule templates (per service namespace); fakecloud does not
+            //     model the managed-rule catalogue the resource + data source
+            //     enumerate. ---
+            "TestAccCloudWatchContributorManagedInsightRule_basic",
+            "TestAccCloudWatchContributorManagedInsightRulesDataSource_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -962,6 +978,12 @@ pub const SHARDS: &[Shard] = &[
         name: "firehose",
         service: "firehose",
         run_regex: "^TestAccFirehoseDeliveryStream(_basic|DataSource_basic)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "cloudwatch",
+        service: "cloudwatch",
+        run_regex: "^TestAccCloudWatch[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];

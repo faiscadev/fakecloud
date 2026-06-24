@@ -1389,7 +1389,18 @@ impl CloudWatchService {
         for n in names {
             acct.dashboards.remove(&n);
         }
-        Ok(empty_metadata_response("DeleteDashboards", &req.request_id))
+        // DeleteDashboards returns an (empty) DeleteDashboardsResult element;
+        // the AWS SDK fails to deserialize the response if the result node is
+        // absent ("DeleteDashboardsResult node not found").
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <DeleteDashboardsResponse xmlns=\"{NS}\">\
+             <DeleteDashboardsResult/>\
+             <ResponseMetadata><RequestId>{}</RequestId></ResponseMetadata>\
+             </DeleteDashboardsResponse>",
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, body))
     }
 
     fn list_dashboards(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
