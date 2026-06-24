@@ -892,9 +892,17 @@ fn action_matches(action: &ActionMatch, request_action: &str) -> bool {
         ActionMatch::Action(patterns) => patterns
             .iter()
             .any(|p| iam_glob_match(p, request_action, true)),
-        ActionMatch::NotAction(patterns) => patterns
-            .iter()
-            .all(|p| !iam_glob_match(p, request_action, true)),
+        // An EMPTY NotAction must match NOTHING, not everything: `[].all(...)`
+        // is vacuously true, so a degenerate `{Effect:Allow, NotAction:[],
+        // Resource:*}` (which a resource policy with no put-time validation can
+        // carry) became a public allow-all. AWS rejects such a policy; the safe
+        // interpretation here is deny-by-default (bug-hunt 2026-06-24, 5.2).
+        ActionMatch::NotAction(patterns) => {
+            !patterns.is_empty()
+                && patterns
+                    .iter()
+                    .all(|p| !iam_glob_match(p, request_action, true))
+        }
     }
 }
 
@@ -903,9 +911,13 @@ fn resource_matches(resource: &ResourceMatch, request_resource: &str) -> bool {
         ResourceMatch::Resource(patterns) => patterns
             .iter()
             .any(|p| iam_glob_match(p, request_resource, false)),
-        ResourceMatch::NotResource(patterns) => patterns
-            .iter()
-            .all(|p| !iam_glob_match(p, request_resource, false)),
+        // Empty NotResource matches nothing (see action_matches, 5.2).
+        ResourceMatch::NotResource(patterns) => {
+            !patterns.is_empty()
+                && patterns
+                    .iter()
+                    .all(|p| !iam_glob_match(p, request_resource, false))
+        }
         ResourceMatch::Implicit => true,
     }
 }

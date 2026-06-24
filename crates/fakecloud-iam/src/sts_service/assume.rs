@@ -856,6 +856,30 @@ impl StsService {
             None => 900,
         };
 
+        // AssumeRoot requires the centralized root-access "RootSessions" feature
+        // to be enabled in the caller's (management / delegated-admin) account —
+        // the organization-level gate AWS enforces. Previously fakecloud minted
+        // `:root` credentials for an arbitrary TargetPrincipal unconditionally,
+        // so a single `sts:AssumeRoot` grant escalated to root over every
+        // account with no organization trust (bug-hunt 2026-06-24, 5.1). Checked
+        // after input validation so malformed requests still surface their
+        // validation error first.
+        {
+            let accounts = self.state.read();
+            let enabled = accounts
+                .get(&req.account_id)
+                .map(|s| s.organizations_root_sessions)
+                .unwrap_or(false);
+            if !enabled {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDeniedException",
+                    "AssumeRoot requires centralized root access (RootSessions) to be \
+                     enabled for the organization (EnableOrganizationsRootSessions).",
+                ));
+            }
+        }
+
         // Target principal accepted shapes:
         //   - ARN: extract the account id from positions 4 (`arn:p:s:r:acct:`)
         //   - 12-digit account id: assume root ARN

@@ -231,6 +231,35 @@ fn not_action_excludes_listed_actions() {
 }
 
 #[test]
+fn empty_not_action_or_not_resource_matches_nothing() {
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    // A degenerate `{Allow, NotAction:[], Resource:*}` previously became a
+    // public allow-all (empty NotAction was vacuously match-everything). It must
+    // now grant nothing (5.2).
+    let empty_not_action = doc(json!({
+        "Statement": [{ "Effect": "Allow", "NotAction": [], "Resource": "*" }]
+    }));
+    assert_eq!(
+        evaluate(
+            &[empty_not_action],
+            &req(&p, "s3:GetObject", "arn:aws:s3:::bucket/key")
+        ),
+        Decision::ImplicitDeny
+    );
+    // Same for an empty NotResource.
+    let empty_not_resource = doc(json!({
+        "Statement": [{ "Effect": "Allow", "Action": "*", "NotResource": [] }]
+    }));
+    assert_eq!(
+        evaluate(
+            &[empty_not_resource],
+            &req(&p, "s3:GetObject", "arn:aws:s3:::bucket/key")
+        ),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
 fn not_resource_excludes_listed_resources() {
     let p = principal_user("arn:aws:iam::123456789012:user/alice");
     let policy = doc(json!({
