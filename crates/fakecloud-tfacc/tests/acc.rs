@@ -191,3 +191,8 @@ async fn dynamodb_h_z_acceptance() {
 async fn dynamodb_resources_acceptance() {
     run_shard("dynamodb-resources").await;
 }
+
+#[tokio::test]
+async fn scheduler_acceptance() {
+    run_shard("scheduler").await;
+}

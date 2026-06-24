@@ -1037,6 +1037,11 @@ fn parse_target(v: Option<&Value>) -> Result<Target, AwsServiceError> {
         dead_letter_config: v.get("DeadLetterConfig").map(|d| DeadLetterConfig {
             arn: d.get("Arn").and_then(|a| a.as_str()).map(String::from),
         }),
+        // Store the RetryPolicy exactly as supplied (None when the caller omits
+        // the block) so the simulated delivery ticker honors the real retry
+        // budget — a schedule with no RetryPolicy retries 0 times. AWS's
+        // reporting defaults (86400 / 185) are applied only in the
+        // GetSchedule serialization, not in stored state.
         retry_policy: v.get("RetryPolicy").map(|p| RetryPolicy {
             maximum_event_age_in_seconds: p
                 .get("MaximumEventAgeInSeconds")
@@ -1146,14 +1151,26 @@ fn target_json(t: &Target) -> Value {
         }
         out["DeadLetterConfig"] = Value::Object(dl);
     }
-    if let Some(ref p) = t.retry_policy {
+    // AWS always reports a RetryPolicy on a target, defaulting the fields the
+    // caller omitted (MaximumEventAgeInSeconds = 86400 / 24h,
+    // MaximumRetryAttempts = 185). The Terraform resource reads both
+    // unconditionally. Stored state keeps the supplied values (or None) so the
+    // delivery ticker uses the real retry budget; the defaults are presentation
+    // only.
+    {
+        let p = t.retry_policy.as_ref();
         let mut rp = serde_json::Map::new();
-        if let Some(n) = p.maximum_event_age_in_seconds {
-            rp.insert("MaximumEventAgeInSeconds".to_string(), Value::from(n));
-        }
-        if let Some(n) = p.maximum_retry_attempts {
-            rp.insert("MaximumRetryAttempts".to_string(), Value::from(n));
-        }
+        rp.insert(
+            "MaximumEventAgeInSeconds".to_string(),
+            Value::from(
+                p.and_then(|p| p.maximum_event_age_in_seconds)
+                    .unwrap_or(86400),
+            ),
+        );
+        rp.insert(
+            "MaximumRetryAttempts".to_string(),
+            Value::from(p.and_then(|p| p.maximum_retry_attempts).unwrap_or(185)),
+        );
         out["RetryPolicy"] = Value::Object(rp);
     }
     if let Some(ref s) = t.sqs_parameters {

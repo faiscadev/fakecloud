@@ -593,6 +593,15 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccSFN(StateMachineDataSource|Activity|ActivityDataSource)_basic$",
         deny: &[],
     },
+    Service {
+        name: "scheduler",
+        // EventBridge Scheduler: the `_basic` smoke for schedules and schedule
+        // groups. A target's RetryPolicy is always reported with AWS's defaults
+        // when omitted (MaximumEventAgeInSeconds=86400, MaximumRetryAttempts=185),
+        // which the resource reads unconditionally.
+        run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -887,6 +896,12 @@ pub const SHARDS: &[Shard] = &[
         name: "sfn",
         service: "sfn",
         run_regex: "^TestAccSFN(StateMachineDataSource|Activity|ActivityDataSource)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "scheduler",
+        service: "scheduler",
+        run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];
