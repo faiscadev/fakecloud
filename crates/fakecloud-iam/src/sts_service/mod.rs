@@ -1862,6 +1862,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assume_root_same_account_succeeds_without_root_sessions() {
+        // The member root managing its OWN account does not require the
+        // centralized RootSessions feature; this is the recorded AWS baseline
+        // (conformance sts_assume_root). Only cross-account targets are gated.
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "123456789012"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let resp = svc.assume_root(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("AccessKeyId"), "{body}");
+    }
+
+    #[tokio::test]
     async fn assume_root_missing_task_policy_rejected() {
         // `AssumeRoot` only declares `ExpiredTokenException` and
         // `RegionDisabledException` — no `MissingParameter`-style shape.

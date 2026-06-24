@@ -856,30 +856,6 @@ impl StsService {
             None => 900,
         };
 
-        // AssumeRoot requires the centralized root-access "RootSessions" feature
-        // to be enabled in the caller's (management / delegated-admin) account —
-        // the organization-level gate AWS enforces. Previously fakecloud minted
-        // `:root` credentials for an arbitrary TargetPrincipal unconditionally,
-        // so a single `sts:AssumeRoot` grant escalated to root over every
-        // account with no organization trust (bug-hunt 2026-06-24, 5.1). Checked
-        // after input validation so malformed requests still surface their
-        // validation error first.
-        {
-            let accounts = self.state.read();
-            let enabled = accounts
-                .get(&req.account_id)
-                .map(|s| s.organizations_root_sessions)
-                .unwrap_or(false);
-            if !enabled {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::FORBIDDEN,
-                    "AccessDeniedException",
-                    "AssumeRoot requires centralized root access (RootSessions) to be \
-                     enabled for the organization (EnableOrganizationsRootSessions).",
-                ));
-            }
-        }
-
         // Target principal accepted shapes:
         //   - ARN: extract the account id from positions 4 (`arn:p:s:r:acct:`)
         //   - 12-digit account id: assume root ARN
@@ -903,6 +879,29 @@ impl StsService {
                 format!("arn:{}:iam::{}:root", partition, default_account),
             )
         };
+
+        // Centralized root access ("RootSessions") gates AssumeRoot into OTHER
+        // accounts. Without it, a single `sts:AssumeRoot` grant would escalate
+        // to root over every member account with no organization trust
+        // (bug-hunt 2026-06-24, 5.1). Same-account AssumeRoot (the member root
+        // managing itself) is always allowed and matches the recorded AWS
+        // baseline; only cross-account targets require the feature enabled.
+        if target_account != req.account_id {
+            let accounts = self.state.read();
+            let enabled = accounts
+                .get(&req.account_id)
+                .map(|s| s.organizations_root_sessions)
+                .unwrap_or(false);
+            if !enabled {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDeniedException",
+                    "AssumeRoot into another account requires centralized root access \
+                     (RootSessions) to be enabled for the organization \
+                     (EnableOrganizationsRootSessions).",
+                ));
+            }
+        }
 
         // Don't call `compute_expiration_at` — that helper re-parses
         // `DurationSeconds` and returns the undeclared `ValidationError`
