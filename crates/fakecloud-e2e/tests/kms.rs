@@ -1089,3 +1089,65 @@ async fn kms_re_encrypt_with_destination_context_changes_required_decrypt_contex
         .unwrap();
     assert_eq!(dec.plaintext().unwrap().as_ref(), b"x");
 }
+
+#[tokio::test]
+async fn kms_generate_data_key_binds_encryption_context() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let key_id = client
+        .create_key()
+        .send()
+        .await
+        .unwrap()
+        .key_metadata()
+        .unwrap()
+        .key_id()
+        .to_string();
+
+    let dk = client
+        .generate_data_key()
+        .key_id(&key_id)
+        .key_spec(aws_sdk_kms::types::DataKeySpec::Aes256)
+        .encryption_context("app", "prod")
+        .send()
+        .await
+        .unwrap();
+    let blob = dk.ciphertext_blob().unwrap().clone();
+
+    // Decrypt with the SAME context recovers the data key.
+    let ok = client
+        .decrypt()
+        .ciphertext_blob(blob.clone())
+        .encryption_context("app", "prod")
+        .send()
+        .await
+        .expect("decrypt with matching context");
+    assert_eq!(
+        ok.plaintext().unwrap().as_ref(),
+        dk.plaintext().unwrap().as_ref()
+    );
+
+    // Decrypt with NO context must fail (the EC is bound as AAD).
+    assert!(
+        client
+            .decrypt()
+            .ciphertext_blob(blob.clone())
+            .send()
+            .await
+            .is_err(),
+        "decrypt without the encryption context must fail"
+    );
+
+    // Decrypt with a DIFFERENT context must fail.
+    assert!(
+        client
+            .decrypt()
+            .ciphertext_blob(blob)
+            .encryption_context("app", "staging")
+            .send()
+            .await
+            .is_err(),
+        "decrypt with a different encryption context must fail"
+    );
+}

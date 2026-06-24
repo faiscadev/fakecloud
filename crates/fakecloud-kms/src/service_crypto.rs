@@ -372,8 +372,19 @@ impl KmsService {
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
         let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(&data_key_bytes);
 
-        // Wrap the data key in the AWS-shaped binary blob.
-        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &data_key_bytes);
+        // Wrap the data key in the AWS-shaped binary blob, binding the
+        // caller's EncryptionContext into the AAD so Decrypt with the same
+        // context succeeds and Decrypt with a different/absent context fails —
+        // matching real KMS and the Encrypt/ReEncrypt paths. Previously the
+        // context was ignored, so the recommended envelope-encryption pattern
+        // (GenerateDataKey + EncryptionContext) could never decrypt its key.
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let blob = crate::blob::encode_with_context(
+            &state.master_key_bytes,
+            &key.key_id,
+            &data_key_bytes,
+            &ec_aad,
+        );
         let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
@@ -951,8 +962,15 @@ impl KmsService {
         let private_plaintext_b64 =
             base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
 
-        // Wrap the private key in the AWS-shaped binary blob.
-        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &private_key_bytes);
+        // Wrap the private key in the AWS-shaped binary blob, binding the
+        // caller's EncryptionContext into the AAD (see GenerateDataKey).
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let blob = crate::blob::encode_with_context(
+            &state.master_key_bytes,
+            &key.key_id,
+            &private_key_bytes,
+            &ec_aad,
+        );
         let private_ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
