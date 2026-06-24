@@ -23,5 +23,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 fakecloud-aws = { workspace = true }
 tempfile = { workspace = true }
