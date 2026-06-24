@@ -100,6 +100,13 @@ pub(crate) fn resolve_stream_name(
 }
 
 pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
+    // The advertised StartingSequenceNumber must match the format records are
+    // actually minted with — a per-shard discriminator packed into the low
+    // digits (see `append_record`). Advertising the bare `00…01` for every
+    // shard meant GetShardIterator(AT_SEQUENCE_NUMBER, <advertised>) on shard
+    // N>0 looked up a sequence no record in that shard has, returning
+    // InvalidArgumentException (bug-hunt 2026-06-24, 1.19).
+    let disc = shard_discriminator(&shard.shard_id);
     let mut obj = json!({
         "ShardId": shard.shard_id,
         "HashKeyRange": {
@@ -107,7 +114,7 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
             "EndingHashKey": shard.ending_hash_key,
         },
         "SequenceNumberRange": {
-            "StartingSequenceNumber": format!("{:056}", 1),
+            "StartingSequenceNumber": format!("{:05}{:051}", disc, 1),
         },
     });
     if let Some(ref parent) = shard.parent_shard_id {
@@ -118,7 +125,8 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
     }
     if !shard.is_open {
         obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(format!(
-            "{:056}",
+            "{:05}{:051}",
+            disc,
             shard.next_sequence_number.saturating_sub(1).max(1)
         ));
     }
