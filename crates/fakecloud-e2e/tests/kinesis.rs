@@ -487,3 +487,72 @@ async fn kinesis_update_shard_count_reshard_lineage_matches_aws() {
     assert_eq!(closed.len(), 4, "scaling 2 -> 3 must close 4 shards");
     assert_eq!(open.len(), 3, "scaling 2 -> 3 must leave 3 open shards");
 }
+
+#[tokio::test]
+async fn kinesis_get_records_reports_real_millis_behind_latest() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    let put = client
+        .create_stream()
+        .stream_name("lag")
+        .shard_count(1)
+        .send()
+        .await;
+    assert!(put.is_ok());
+
+    // First record, then a >1s gap, then a second record. Reading only the
+    // first leaves the consumer ~1s behind the tip.
+    let first = client
+        .put_record()
+        .stream_name("lag")
+        .partition_key("k")
+        .data(Blob::new(b"first"))
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    client
+        .put_record()
+        .stream_name("lag")
+        .partition_key("k")
+        .data(Blob::new(b"second"))
+        .send()
+        .await
+        .unwrap();
+
+    let it = client
+        .get_shard_iterator()
+        .stream_name("lag")
+        .shard_id(first.shard_id())
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let recs = client
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(recs.records().len(), 1);
+    // The last returned record is ~1.1s behind the tip, so MillisBehindLatest
+    // must reflect a real gap (>= ~1000ms), not the old 0/1 flag.
+    let lag = recs.millis_behind_latest().unwrap_or(0);
+    assert!(
+        lag >= 1000,
+        "expected real lag >= 1000ms behind tip, got {lag}"
+    );
+
+    // Reading the rest catches up: MillisBehindLatest returns to 0.
+    let it2 = recs.next_shard_iterator().unwrap();
+    let caught_up = client
+        .get_records()
+        .shard_iterator(it2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(caught_up.millis_behind_latest(), Some(0));
+}
