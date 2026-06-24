@@ -458,6 +458,12 @@ impl EcsService {
                 if let Some(a) = body.get("serviceRegistries").and_then(|v| v.as_array()) {
                     svc.service_registries = a.clone();
                 }
+                if let Some(s) = opt_str(&body, "availabilityZoneRebalancing") {
+                    svc.availability_zone_rebalancing = Some(s.to_string());
+                }
+                if let Some(a) = body.get("volumeConfigurations").and_then(|v| v.as_array()) {
+                    svc.volume_configurations = a.clone();
+                }
 
                 if let Some(n) = new_desired {
                     let n = n.max(0) as i32;

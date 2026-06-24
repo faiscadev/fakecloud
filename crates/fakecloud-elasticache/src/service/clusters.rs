@@ -483,6 +483,36 @@ impl ElastiCacheService {
         if let Some(t) = new_node_type {
             cluster.cache_node_type = t;
         }
+        if let Some(v) = optional_query_param(request, "EngineVersion") {
+            cluster.engine_version = v;
+        }
+        if let Some(v) = optional_query_param(request, "CacheParameterGroupName") {
+            cluster.cache_parameter_group_name = Some(v);
+        }
+        if let Some(v) = optional_query_param(request, "PreferredMaintenanceWindow") {
+            cluster.preferred_maintenance_window = Some(v);
+        }
+        if let Some(v) = optional_query_param(request, "NotificationTopicArn") {
+            cluster.notification_topic_arn = Some(v);
+        }
+        if let Some(v) = optional_query_param(request, "SnapshotRetentionLimit")
+            .and_then(|v| v.parse::<i32>().ok())
+        {
+            cluster.snapshot_retention_limit = v;
+        }
+        if let Some(v) = optional_query_param(request, "SnapshotWindow") {
+            cluster.snapshot_window = Some(v);
+        }
+        if let Some(v) = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )? {
+            cluster.auto_minor_version_upgrade = v;
+        }
+        // Replace the security-group set only when the caller supplies one.
+        let sg_ids = parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
+        if !sg_ids.is_empty() {
+            cluster.security_group_ids = sg_ids;
+        }
         cluster.cache_cluster_status = "modifying".to_string();
         let xml = cache_cluster_xml(cluster, true);
         Ok(AwsResponse::xml(

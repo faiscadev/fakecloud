@@ -89,6 +89,66 @@ async fn elasticache_create_cache_cluster_and_describe() {
 }
 
 #[tokio::test]
+async fn elasticache_modify_cache_cluster_applies_fields() {
+    if !require_docker_or_skip("elasticache_modify_cache_cluster_applies_fields") {
+        return;
+    }
+
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("modify-cluster")
+        .cache_node_type("cache.t3.micro")
+        .engine("redis")
+        .send()
+        .await
+        .unwrap();
+    helpers::wait_for_cache_cluster_available(&client, "modify-cluster", 120).await;
+
+    // ModifyCacheCluster must persist the full set of mutable fields, not just
+    // node count / type (bug-hunt 2026-06-24, 1.13).
+    let resp = client
+        .modify_cache_cluster()
+        .cache_cluster_id("modify-cluster")
+        .engine_version("7.0")
+        .preferred_maintenance_window("sun:23:00-mon:01:30")
+        .notification_topic_arn("arn:aws:sns:us-east-1:123456789012:cache-events")
+        .snapshot_retention_limit(5)
+        .snapshot_window("05:00-06:00")
+        .auto_minor_version_upgrade(false)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+    let c = resp.cache_cluster().expect("cache cluster");
+    assert_eq!(c.engine_version(), Some("7.0"));
+    assert_eq!(
+        c.preferred_maintenance_window(),
+        Some("sun:23:00-mon:01:30")
+    );
+    assert_eq!(c.snapshot_retention_limit(), Some(5));
+    assert_eq!(c.snapshot_window(), Some("05:00-06:00"));
+    assert_eq!(c.auto_minor_version_upgrade(), Some(false));
+
+    // Read back to confirm it persisted, not just echoed.
+    let describe = client
+        .describe_cache_clusters()
+        .cache_cluster_id("modify-cluster")
+        .send()
+        .await
+        .unwrap();
+    let c = &describe.cache_clusters()[0];
+    assert_eq!(c.engine_version(), Some("7.0"));
+    assert_eq!(c.snapshot_retention_limit(), Some(5));
+    assert_eq!(
+        c.notification_configuration().and_then(|n| n.topic_arn()),
+        Some("arn:aws:sns:us-east-1:123456789012:cache-events")
+    );
+}
+
+#[tokio::test]
 async fn elasticache_describe_cache_clusters_paginates() {
     if !require_docker_or_skip("elasticache_describe_cache_clusters_paginates") {
         return;
