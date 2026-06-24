@@ -634,6 +634,16 @@ pub const SERVICES: &[Service] = &[
             "TestAccWAFV2WebACLLoggingConfiguration_basic",
         ],
     },
+    Service {
+        name: "firehose",
+        // Kinesis Data Firehose: the `_basic` smoke for the extended-S3 delivery
+        // stream (+ data source). DescribeDeliveryStream now reports the
+        // ExtendedS3 defaults AWS always returns -- the CloudWatchLoggingOptions
+        // block (Enabled=false), custom_time_zone (UTC), and s3_backup_mode
+        // (Disabled) -- which the resource reads unconditionally.
+        run_regex: "^TestAccFirehoseDeliveryStream(_basic|DataSource_basic)$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -946,6 +956,12 @@ pub const SHARDS: &[Shard] = &[
         name: "wafv2",
         service: "wafv2",
         run_regex: "^TestAccWAFV2[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "firehose",
+        service: "firehose",
+        run_regex: "^TestAccFirehoseDeliveryStream(_basic|DataSource_basic)$",
         extra_deny: &[],
     },
 ];

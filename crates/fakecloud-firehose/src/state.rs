@@ -111,4 +111,18 @@ pub struct S3Destination {
     /// Parquet/ORC conversion config; stored + echoed.
     #[serde(default)]
     pub data_format_conversion_configuration: Option<serde_json::Value>,
+    /// CloudWatch logging options; AWS always reports this block (Enabled=false
+    /// default) on the ExtendedS3 description.
+    #[serde(default)]
+    pub cloudwatch_logging_options: Option<serde_json::Value>,
+    /// Time zone for the prefix's custom time format. Defaults to `UTC`.
+    #[serde(default)]
+    pub custom_time_zone: Option<String>,
+    /// Source-record S3 backup mode (`Disabled`/`Enabled`). Defaults to
+    /// `Disabled`.
+    #[serde(default)]
+    pub s3_backup_mode: Option<String>,
+    /// Optional appended object-name extension (e.g. `.parquet`).
+    #[serde(default)]
+    pub file_extension: Option<String>,
 }
