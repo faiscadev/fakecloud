@@ -583,42 +583,11 @@ impl RdsService {
             }
         }
 
-        let running = if let Some(runtime) = self.runtime.as_ref() {
-            match runtime
-                .ensure_postgres(
-                    &db_instance_identifier,
-                    &instance.engine,
-                    &instance.engine_version,
-                    &instance.master_username,
-                    &instance.master_user_password,
-                    instance
-                        .db_name
-                        .as_deref()
-                        .unwrap_or(default_db_name(&instance.engine)),
-                    &request.account_id,
-                    &request.region,
-                    &instance.tags,
-                )
-                .await
-            {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    // Roll the row back to `stopped` so the next
-                    // Describe doesn't report a permanently-`starting`
-                    // instance with no container behind it.
-                    let mut accounts = self.state.write();
-                    let state = accounts.get_or_create(&request.account_id);
-                    if let Some(inst) = state.instances.get_mut(&db_instance_identifier) {
-                        inst.db_instance_status = "stopped".to_string();
-                    }
-                    return Err(runtime_error_to_service_error(e));
-                }
-            }
-        } else {
-            // No container runtime configured: StartDBInstance should
-            // fail rather than report success against a backend that
-            // does not exist. Roll the row back so subsequent calls
-            // don't see a stuck `starting` state.
+        // No container runtime configured: fail synchronously (fast) rather
+        // than report success against a backend that does not exist, rolling
+        // the row back from `starting` so subsequent calls don't see a stuck
+        // state.
+        let Some(runtime) = self.runtime.clone() else {
             {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&request.account_id);
@@ -633,32 +602,80 @@ impl RdsService {
             ));
         };
 
-        let instance = {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&request.account_id);
-            let inst = state
-                .instances
-                .get_mut(&db_instance_identifier)
-                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
-            inst.db_instance_status = "available".to_string();
-            inst.endpoint_address = "127.0.0.1".to_string();
-            if let Some(r) = running {
-                inst.endpoint_address = r.endpoint_address.clone();
-                inst.port = i32::from(r.endpoint_port);
-                inst.host_port = r.host_port;
-                inst.container_id = r.container_id;
-            }
-            inst.clone()
-        };
-
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &db_instance_identifier,
-            &instance.db_instance_arn,
-            "RDS-EVENT-0088",
-            &["notification"],
-            "DB instance started",
-        );
+        // Background the container start + readiness wait and return
+        // immediately with `starting`. `ensure_postgres` can pull a cold image
+        // and wait for engine readiness (3-6 min for Oracle/SQL Server/Db2),
+        // far past the ~60s client read timeout — awaiting it inline timed the
+        // CLI out (bug-hunt 2026-06-24, 3.2). CreateDBInstance already
+        // backgrounds this exact call.
+        {
+            let state_handle = self.state.clone();
+            let delivery_bus = self.delivery_bus.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let id = db_instance_identifier.clone();
+            let account_id = request.account_id.clone();
+            let region = request.region.clone();
+            let inst = instance.clone();
+            tokio::spawn(async move {
+                let logical_db = inst
+                    .db_name
+                    .clone()
+                    .unwrap_or_else(|| default_db_name(&inst.engine).to_string());
+                match runtime
+                    .ensure_postgres(
+                        &id,
+                        &inst.engine,
+                        &inst.engine_version,
+                        &inst.master_username,
+                        &inst.master_user_password,
+                        &logical_db,
+                        &account_id,
+                        &region,
+                        &inst.tags,
+                    )
+                    .await
+                {
+                    Ok(r) => {
+                        let arn = {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            let Some(inst) = state.instances.get_mut(&id) else {
+                                return;
+                            };
+                            inst.db_instance_status = "available".to_string();
+                            inst.endpoint_address = r.endpoint_address.clone();
+                            inst.port = i32::from(r.endpoint_port);
+                            inst.host_port = r.host_port;
+                            inst.container_id = r.container_id;
+                            inst.db_instance_arn.clone()
+                        };
+                        emit_event_static_with_state(
+                            delivery_bus.as_ref(),
+                            Some(&state_handle),
+                            Some(&account_id),
+                            RdsSourceType::DbInstance,
+                            &id,
+                            &arn,
+                            "RDS-EVENT-0088",
+                            &["notification"],
+                            "DB instance started",
+                        );
+                        save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock)
+                            .await;
+                    }
+                    Err(_) => {
+                        // Roll back to `stopped` so the next Describe doesn't
+                        // report a permanently-`starting` instance.
+                        let mut accounts = state_handle.write();
+                        let state = accounts.get_or_create(&account_id);
+                        if let Some(inst) = state.instances.get_mut(&id) {
+                            inst.db_instance_status = "stopped".to_string();
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -667,7 +684,7 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, None)
+                    db_instance_xml(&instance, Some("starting"))
                 ),
                 &request.request_id,
             ),

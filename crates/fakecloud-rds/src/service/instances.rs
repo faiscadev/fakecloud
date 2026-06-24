@@ -943,33 +943,25 @@ impl RdsService {
             ));
         }
 
-        let instance = {
+        {
+            // Validate existence before touching the runtime so a missing
+            // identifier returns DBInstanceNotFoundFault, not a runtime error.
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
             let state = accounts.get(&request.account_id).unwrap_or(&empty);
-            state
-                .instances
-                .get(&db_instance_identifier)
-                .cloned()
-                .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?
-        };
+            if !state.instances.contains_key(&db_instance_identifier) {
+                return Err(db_instance_not_found(&db_instance_identifier));
+            }
+        }
 
         let runtime = self.require_runtime()?;
 
-        let running = runtime
-            .restart_container(
-                &db_instance_identifier,
-                &instance.engine,
-                &instance.master_username,
-                &instance.master_user_password,
-                instance
-                    .db_name
-                    .as_deref()
-                    .unwrap_or(default_db_name(&instance.engine)),
-            )
-            .await
-            .map_err(runtime_error_to_service_error)?;
-
+        // Flip the stored status to `rebooting` and return immediately. The
+        // container restart + readiness wait runs in the background — for
+        // engines like Oracle / SQL Server / Db2 it can take 3-6 minutes
+        // (runtime log-marker deadlines), well past the ~60s client read
+        // timeout. Awaiting it inline timed out the CLI on every non-PG/MySQL
+        // reboot (bug-hunt 2026-06-24, 3.1); mirror the EC2 RebootInstances fix.
         let instance = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
@@ -977,26 +969,72 @@ impl RdsService {
                 .instances
                 .get_mut(&db_instance_identifier)
                 .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
-            instance.host_port = running.host_port;
-            instance.port = i32::from(running.endpoint_port);
-            instance.endpoint_address = running.endpoint_address.clone();
-
-            // Apply any pending modifications
+            instance.db_instance_status = "rebooting".to_string();
+            // Apply pending modifications SYNCHRONOUSLY: AWS applies these to the
+            // instance metadata as part of the reboot, and the response must
+            // reflect the new values with pending cleared. Only the container
+            // restart (the slow part) is backgrounded below.
             if let Some(pending) = instance.pending_modified_values.take() {
                 apply_pending_to_instance(instance, pending);
             }
-
             instance.clone()
         };
 
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &db_instance_identifier,
-            &instance.db_instance_arn,
-            "RDS-EVENT-0006",
-            &["availability"],
-            "DB instance restarted",
-        );
+        {
+            let state_handle = self.state.clone();
+            let runtime = runtime.clone();
+            let delivery_bus = self.delivery_bus.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let id = db_instance_identifier.clone();
+            let account_id = request.account_id.clone();
+            let inst = instance.clone();
+            tokio::spawn(async move {
+                let logical_db = inst
+                    .db_name
+                    .clone()
+                    .unwrap_or_else(|| default_db_name(&inst.engine).to_string());
+                let Ok(running) = runtime
+                    .restart_container(
+                        &id,
+                        &inst.engine,
+                        &inst.master_username,
+                        &inst.master_user_password,
+                        &logical_db,
+                    )
+                    .await
+                else {
+                    return;
+                };
+                let arn = {
+                    let mut accounts = state_handle.write();
+                    let state = accounts.get_or_create(&account_id);
+                    let Some(instance) = state.instances.get_mut(&id) else {
+                        return;
+                    };
+                    instance.host_port = running.host_port;
+                    instance.port = i32::from(running.endpoint_port);
+                    instance.endpoint_address = running.endpoint_address.clone();
+                    // Pending modifications were already applied synchronously
+                    // in the handler; the background task only reconciles the
+                    // restarted container's endpoint + flips to available.
+                    instance.db_instance_status = "available".to_string();
+                    instance.db_instance_arn.clone()
+                };
+                emit_event_static_with_state(
+                    delivery_bus.as_ref(),
+                    Some(&state_handle),
+                    Some(&account_id),
+                    RdsSourceType::DbInstance,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0006",
+                    &["availability"],
+                    "DB instance restarted",
+                );
+                save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+            });
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
