@@ -1238,6 +1238,64 @@ async fn test_mock_integration() {
 }
 
 #[tokio::test]
+async fn request_authorizer_roundtrips_lambda_fields() {
+    // A REQUEST (Lambda) authorizer round-trips the payload-format-version, the
+    // result TTL, and enable_simple_responses through create -> get -> update,
+    // so the Terraform resource's update step does not re-plan.
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("auth-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id().unwrap();
+
+    let created = client
+        .create_authorizer()
+        .api_id(api_id)
+        .authorizer_type(aws_sdk_apigatewayv2::types::AuthorizerType::Request)
+        .name("lambda-auth")
+        .authorizer_uri("arn:aws:lambda:us-east-1:123456789012:function:authz")
+        .identity_source("$request.header.Authorization")
+        .authorizer_payload_format_version("2.0")
+        .authorizer_result_ttl_in_seconds(300)
+        .enable_simple_responses(false)
+        .send()
+        .await
+        .unwrap();
+    let auth_id = created.authorizer_id().unwrap();
+    assert_eq!(created.authorizer_payload_format_version(), Some("2.0"));
+    assert_eq!(created.authorizer_result_ttl_in_seconds(), Some(300));
+    assert_eq!(created.enable_simple_responses(), Some(false));
+
+    // Flip enable_simple_responses; the read reflects the new value.
+    let updated = client
+        .update_authorizer()
+        .api_id(api_id)
+        .authorizer_id(auth_id)
+        .enable_simple_responses(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.enable_simple_responses(), Some(true));
+
+    let got = client
+        .get_authorizer()
+        .api_id(api_id)
+        .authorizer_id(auth_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.enable_simple_responses(), Some(true));
+    assert_eq!(got.authorizer_payload_format_version(), Some("2.0"));
+    assert_eq!(got.authorizer_result_ttl_in_seconds(), Some(300));
+}
+
+#[tokio::test]
 async fn test_authorizer_crud() {
     let server = TestServer::start().await;
     let client = server.apigatewayv2_client().await;
