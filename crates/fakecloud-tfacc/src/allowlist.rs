@@ -659,6 +659,37 @@ pub const SERVICES: &[Service] = &[
             "TestAccCloudWatchContributorManagedInsightRulesDataSource_basic",
         ],
     },
+    Service {
+        name: "ses",
+        // SES v1 (Query/XML protocol): the `_basic` smoke for domain identities
+        // (+ data source / verification), DKIM, mail-from, identity notification
+        // topics, and identity policies. Fixes: identity lookups accept the ARN
+        // form (not just the bare name); the domain-verification token is
+        // deterministic per identity and stored so verify + get-attributes agree;
+        // Get{Verification,MailFrom}Attributes omit unknown identities so the
+        // provider's CheckDestroy reads them as gone; DescribeConfigurationSet
+        // reports the ReputationOptions block (last_fresh_start / sending_enabled
+        // / reputation_metrics_enabled).
+        run_regex: "^TestAccSES[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: ConfigurationSet and EventDestination pass their apply +
+            //     checks but error in the post-apply destroy when a refresh read
+            //     hits a configuration set the SDK reports as already gone; the
+            //     destroy-time lifecycle for these two still needs work. ---
+            "TestAccSESConfigurationSet_basic",
+            "TestAccSESEventDestination_basic",
+            // --- gap: the template destroy hits the same already-deleted refresh
+            //     path (GetTemplate raising TemplateDoesNotExist during destroy). ---
+            "TestAccSESTemplate_basic",
+            // --- gap: inbound email receipt rules need the SES email-receiving
+            //     feature (active rule sets, rule ordering); the receipt tests'
+            //     shared PreCheck requires a provisioned rule set that fakecloud
+            //     does not model. ---
+            "TestAccSESReceiptFilter_basic",
+            "TestAccSESReceiptRule_basic",
+            "TestAccSESReceiptRuleSet_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -983,6 +1014,12 @@ pub const SHARDS: &[Shard] = &[
         name: "cloudwatch",
         service: "cloudwatch",
         run_regex: "^TestAccCloudWatch[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ses",
+        service: "ses",
+        run_regex: "^TestAccSES[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];

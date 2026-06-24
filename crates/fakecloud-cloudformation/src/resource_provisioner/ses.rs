@@ -321,6 +321,7 @@ impl ResourceProvisioner {
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         };
         let mut accounts = self.ses_state.write();
         let state = accounts.get_or_create(&self.account_id);

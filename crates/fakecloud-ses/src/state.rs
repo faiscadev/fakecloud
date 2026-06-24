@@ -41,6 +41,11 @@ pub struct EmailIdentity {
     pub complaint_topic: Option<String>,
     #[serde(default)]
     pub delivery_topic: Option<String>,
+    /// Domain-verification TXT token. Deterministic per identity and stored so
+    /// VerifyDomainIdentity and GetIdentityVerificationAttributes report the
+    /// same value (the Terraform data source asserts they match).
+    #[serde(default)]
+    pub verification_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

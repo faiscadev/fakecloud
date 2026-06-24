@@ -45,6 +45,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         },
     );
 }
@@ -872,7 +873,13 @@ fn test_get_identity_verification_attributes() {
     let resp = handle_v1_action(&state, &req).unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<VerificationStatus>Success</VerificationStatus>"));
-    assert!(body.contains("<VerificationStatus>NotStarted</VerificationStatus>"));
+    // AWS omits unknown identities from the VerificationAttributes map entirely
+    // (the Terraform provider relies on absent-from-map == NotFound), so the
+    // unknown identity must NOT appear in the response.
+    assert!(
+        !body.contains("unknown@test.com"),
+        "unknown identity must be omitted: {body}"
+    );
 }
 
 #[test]
