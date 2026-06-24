@@ -871,6 +871,12 @@ impl SecretsManagerService {
             if let Some(days) = rules.automatically_after_days {
                 rules_json["AutomaticallyAfterDays"] = json!(days);
             }
+            if let Some(ref duration) = rules.duration {
+                rules_json["Duration"] = json!(duration);
+            }
+            if let Some(ref expr) = rules.schedule_expression {
+                rules_json["ScheduleExpression"] = json!(expr);
+            }
             response["RotationRules"] = rules_json;
         }
         if let Some(last_rotated) = secret.last_rotated_at {
@@ -1347,6 +1353,14 @@ impl SecretsManagerService {
             let days = rules.get("AutomaticallyAfterDays").and_then(|v| v.as_i64());
             secret.rotation_rules = Some(RotationRules {
                 automatically_after_days: days,
+                duration: rules
+                    .get("Duration")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                schedule_expression: rules
+                    .get("ScheduleExpression")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             });
         }
 

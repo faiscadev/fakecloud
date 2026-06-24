@@ -32,6 +32,13 @@ pub struct Secret {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RotationRules {
     pub automatically_after_days: Option<i64>,
+    /// The length of the rotation window, e.g. "2h" / "1d". AWS's modern
+    /// rotation scheduling form alongside ScheduleExpression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    /// A cron() or rate() expression for the rotation schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
