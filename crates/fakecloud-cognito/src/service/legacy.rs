@@ -60,7 +60,7 @@ impl CognitoService {
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+        let token_data = state.valid_access_token(access_token).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",

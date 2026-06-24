@@ -220,7 +220,28 @@ pub struct LinkedProvider {
     pub provider_attribute_value: Option<String>,
 }
 
+/// Cognito access tokens are valid for 1 hour (the `ExpiresIn: 3600` minted
+/// at sign-in). Used to expire tokens on first-party operations.
+pub const ACCESS_TOKEN_TTL_SECS: i64 = 3600;
+
 impl CognitoState {
+    /// Look up an access token, returning it only if it exists AND has not
+    /// expired. First-party operations (GetUser, ChangePassword, MFA, ...)
+    /// previously validated by a bare map lookup that never checked expiry, so
+    /// an expired-but-not-revoked token kept authorizing indefinitely (bug-hunt
+    /// 2026-06-24, 5.3).
+    pub fn valid_access_token(&self, token: &str) -> Option<&AccessTokenData> {
+        let data = self.access_tokens.get(token)?;
+        let age = Utc::now()
+            .signed_duration_since(data.issued_at)
+            .num_seconds();
+        if age > ACCESS_TOKEN_TTL_SECS {
+            None
+        } else {
+            Some(data)
+        }
+    }
+
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
@@ -882,6 +903,30 @@ pub fn default_schema_attributes() -> Vec<SchemaAttribute> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_access_token_rejects_expired() {
+        let mut state = CognitoState::new("123456789012", "us-east-1");
+        let mk = |issued_at| AccessTokenData {
+            user_pool_id: "pool".to_string(),
+            username: "u".to_string(),
+            client_id: "c".to_string(),
+            issued_at,
+        };
+        // Fresh token: accepted.
+        state
+            .access_tokens
+            .insert("fresh".to_string(), mk(Utc::now()));
+        assert!(state.valid_access_token("fresh").is_some());
+        // Token issued > 1h ago: rejected (was accepted indefinitely, 5.3).
+        state.access_tokens.insert(
+            "stale".to_string(),
+            mk(Utc::now() - chrono::Duration::seconds(ACCESS_TOKEN_TTL_SECS + 60)),
+        );
+        assert!(state.valid_access_token("stale").is_none());
+        // Unknown token: rejected.
+        assert!(state.valid_access_token("nope").is_none());
+    }
 
     #[test]
     fn new_initializes_empty() {
