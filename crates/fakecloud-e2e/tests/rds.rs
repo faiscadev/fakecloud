@@ -425,6 +425,11 @@ async fn rds_reboot_db_instance() {
         Some("rebooting")
     );
 
+    // RebootDBInstance returns immediately with `rebooting`; the container
+    // restart runs in the background (so slow engines don't time the client
+    // out). A real client waits for `available` before reconnecting.
+    helpers::wait_for_db_available(&client, "orders-reboot-db", 180).await;
+
     let describe_after = client
         .describe_db_instances()
         .db_instance_identifier("orders-reboot-db")
