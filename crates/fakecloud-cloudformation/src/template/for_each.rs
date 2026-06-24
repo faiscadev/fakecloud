@@ -178,6 +178,15 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                     lambda_props.remove("InlineCode");
                     lambda_props.insert("Code".to_string(), json!({"ZipFile": inline}));
                 }
+                // Expand the function's `Policies` (-> implicit execution role)
+                // and non-API `Events` (-> Events::Rule / EventSourceMapping /
+                // SNS::Subscription + Lambda::Permission). Mutates lambda_props
+                // (sets Role, removes Policies/Events) and returns the extra
+                // native resources to add. Without this SAM functions deploy
+                // with no role and no triggers.
+                let extras =
+                    super::sam_events::expand_function_extras(logical_id, &mut lambda_props);
+
                 let mut lambda_resource = serde_json::Map::new();
                 lambda_resource.insert("Type".to_string(), json!("AWS::Lambda::Function"));
                 lambda_resource.insert("Properties".to_string(), Value::Object(lambda_props));
@@ -187,6 +196,9 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                     }
                 }
                 new_resources.insert(logical_id.clone(), Value::Object(lambda_resource));
+                for (extra_id, extra) in extras {
+                    new_resources.entry(extra_id).or_insert(extra);
+                }
             }
             "AWS::Serverless::Api" => {
                 let mut api_props = merge_global_properties(&global_api, &properties);
@@ -620,7 +632,8 @@ mod tests {
             }
         });
 
-        let props = &expand_sam(&template)["Resources"]["F"]["Properties"];
+        let expanded = expand_sam(&template);
+        let props = &expanded["Resources"]["F"]["Properties"];
         assert_eq!(
             props["Layers"],
             json!([
@@ -628,10 +641,18 @@ mod tests {
                 "arn:aws:lambda:::layer:local:2"
             ])
         );
-        assert_eq!(
-            props["Policies"],
-            json!(["AWSLambdaBasicExecutionRole", "AmazonS3ReadOnlyAccess"])
-        );
+        // `Policies` are now additively merged (Globals ++ resource) and then
+        // consumed into the synthesized execution role's ManagedPolicyArns,
+        // rather than left on the function Properties.
+        assert!(props.get("Policies").is_none());
+        let role_arns = &expanded["Resources"]["FRole"]["Properties"]["ManagedPolicyArns"];
+        let arns = role_arns.as_array().unwrap();
+        assert!(arns
+            .iter()
+            .any(|a| a == "arn:aws:iam::aws:policy/AWSLambdaBasicExecutionRole"));
+        assert!(arns
+            .iter()
+            .any(|a| a == "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"));
     }
 
     // Globals on the non-Function sections (Api/HttpApi/SimpleTable/StateMachine)
