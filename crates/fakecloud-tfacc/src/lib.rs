@@ -308,4 +308,5 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_ECS", "ecs"),
     ("AWS_ENDPOINT_URL_COGNITO_IDENTITY", "cognito-identity"),
     ("AWS_ENDPOINT_URL_SCHEDULER", "scheduler"),
+    ("AWS_ENDPOINT_URL_WAFV2", "wafv2"),
 ];

@@ -616,6 +616,24 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccSESV2[A-Za-z0-9]+_basic$",
         deny: &[],
     },
+    Service {
+        name: "wafv2",
+        // WAF v2: the `_basic` smoke for IP sets, regex pattern sets, rule groups,
+        // and web ACLs (+ their data sources / association). Fixes: REGIONAL-scope
+        // ARNs use the literal `regional` resource-path prefix (was the region
+        // name), and GetWebACL only reports ApplicationIntegrationURL when the ACL
+        // declares token domains (the provider always sends a default CaptchaConfig
+        // even for a basic ACL, so the CAPTCHA endpoint must gate on token domains).
+        run_regex: "^TestAccWAFV2[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: the logging-configuration test provisions a Firehose
+            //     delivery stream as the log destination, which drifts on
+            //     Firehose's extended_s3_configuration computed defaults
+            //     (custom_time_zone, s3_backup_mode) — a Firehose-fidelity gap,
+            //     not a WAF one. ---
+            "TestAccWAFV2WebACLLoggingConfiguration_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -922,6 +940,12 @@ pub const SHARDS: &[Shard] = &[
         name: "sesv2",
         service: "sesv2",
         run_regex: "^TestAccSESV2[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "wafv2",
+        service: "wafv2",
+        run_regex: "^TestAccWAFV2[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];

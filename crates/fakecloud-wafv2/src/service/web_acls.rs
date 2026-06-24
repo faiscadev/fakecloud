@@ -101,15 +101,17 @@ impl Wafv2Service {
                 .get(&(scope, name))
                 .ok_or_else(|| not_found("WebACL"))?
         };
-        let cleared = body
-            .get("ARN")
-            .is_none() // when fetched by name+scope path, AWS may return ApplicationIntegrationURL
-            ;
         let mut response = json!({
             "WebACL": web_acl_detail_json(acl),
             "LockToken": acl.lock_token,
         });
-        if cleared {
+        // AWS only surfaces ApplicationIntegrationURL (the CAPTCHA/Challenge
+        // integration endpoint) for a web ACL that declares token domains. The
+        // provider always sends a default CaptchaConfig (immunity time) even for
+        // a basic ACL, so gating on token domains — not the CAPTCHA config — is
+        // what matches AWS; the Terraform resource asserts the URL is empty when
+        // no token domains are configured.
+        if !acl.token_domains.is_empty() {
             response.as_object_mut().unwrap().insert(
                 "ApplicationIntegrationURL".to_string(),
                 Value::String(format!(
