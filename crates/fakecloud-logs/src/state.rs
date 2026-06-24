@@ -280,6 +280,10 @@ pub struct DeliveryDestination {
     pub arn: String,
     pub output_format: Option<String>,
     pub delivery_destination_configuration: BTreeMap<String, String>,
+    /// `CWL`/`S3`/`FH`/`XRAY` — derived from the destination resource ARN when
+    /// the caller does not specify it. AWS always reports it on read.
+    #[serde(default)]
+    pub delivery_destination_type: String,
     pub tags: BTreeMap<String, String>,
     pub delivery_destination_policy: Option<String>,
 }
@@ -365,6 +369,8 @@ pub struct AnomalyDetector {
     pub creation_time: i64,
     pub last_modified_time: i64,
     pub enabled: bool,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

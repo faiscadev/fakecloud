@@ -316,19 +316,21 @@ pub const SERVICES: &[Service] = &[
         // filter `unit` field (DescribeMetricFilters defaults it to None) and
         // fixed the Lambda empty-Environment drift the subscription-filter test
         // surfaced via its Lambda destination.
+        // Batch 17 reclaimed anomaly detectors (ListTagsForResource now resolves
+        // their ARNs), data-protection policies (the put/get echo the supplied
+        // logGroupIdentifier verbatim so log_group_name round-trips), and the
+        // vended-log delivery destinations (DescribeDeliveryDestination reports
+        // the destination type — derived from the destination resource ARN — and
+        // ListTagsForResource resolves delivery-destination ARNs).
         run_regex: "^TestAccLogs[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: log anomaly detection — needs the anomaly-detector
-            //     engine fakecloud does not model. ---
-            "TestAccLogsAnomalyDetector_basic",
-            // --- gap: data-protection policies — needs the data-protection
-            //     policy engine (audit/deidentify) fakecloud does not model. ---
-            "TestAccLogsDataProtectionPolicy_basic",
+            // --- gap: this data source's document GENERATION round-trips, but
+            //     its acceptance config provisions a Firehose delivery stream as
+            //     a findings destination, which drifts on Firehose's
+            //     `extended_s3_configuration` computed defaults (custom_time_zone,
+            //     s3_backup_mode) and the cross-service `LogDeliveryEnabled`
+            //     auto-tag. That is a Firehose-fidelity gap, not a logs one. ---
             "TestAccLogsDataProtectionPolicyDocumentDataSource_basic",
-            // --- gap: CloudWatch Logs v2 vended-log delivery (delivery
-            //     sources/destinations) is not implemented. ---
-            "TestAccLogsDeliveryDestination_basic",
-            "TestAccLogsDeliveryDestinationPolicy_basic",
         ],
     },
     Service {

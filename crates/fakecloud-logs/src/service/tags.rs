@@ -270,6 +270,22 @@ impl LogsService {
             ));
         }
 
+        // Try anomaly detector
+        if let Some(detector) = state.anomaly_detectors.get(arn) {
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({ "tags": detector.tags })).unwrap(),
+            ));
+        }
+
+        // Try delivery destination (keyed by name, so match on the ARN field)
+        if let Some(dest) = state.delivery_destinations.values().find(|d| d.arn == arn) {
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                serde_json::to_string(&json!({ "tags": dest.tags })).unwrap(),
+            ));
+        }
+
         Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "ResourceNotFoundException",

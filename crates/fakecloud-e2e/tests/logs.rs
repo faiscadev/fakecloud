@@ -2818,3 +2818,118 @@ async fn logs_index_policy_round_trips_without_arn_suffix() {
     assert_eq!(read_id, put_id);
     assert!(!read_id.ends_with(":*"));
 }
+
+#[tokio::test]
+async fn logs_anomaly_detector_tags_listable_by_arn() {
+    // CreateLogAnomalyDetector stores create-time tags, and
+    // ListTagsForResource resolves the anomaly-detector ARN.
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/anom/app")
+        .send()
+        .await
+        .unwrap();
+    let group = client
+        .describe_log_groups()
+        .log_group_name_prefix("/anom/app")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = group.log_groups()[0].arn().unwrap().to_string();
+
+    let created = client
+        .create_log_anomaly_detector()
+        .log_group_arn_list(group_arn)
+        .detector_name("d1")
+        .tags("team", "obs")
+        .send()
+        .await
+        .unwrap();
+    let arn = created.anomaly_detector_arn().unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        tags.tags().and_then(|t| t.get("team")).map(String::as_str),
+        Some("obs")
+    );
+}
+
+#[tokio::test]
+async fn logs_data_protection_policy_identifier_round_trips() {
+    // Put/Get echo the supplied logGroupIdentifier verbatim (the bare name),
+    // so the resource's log_group_name does not drift to the ARN form.
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/dp/app")
+        .send()
+        .await
+        .unwrap();
+
+    let doc = r#"{"Name":"p","Version":"2021-06-01","Statement":[{"Sid":"Audit","DataIdentifier":["arn:aws:dataprotection::aws:data-identifier/EmailAddress"],"Operation":{"Audit":{"FindingsDestination":{}}}}]}"#;
+    let put = client
+        .put_data_protection_policy()
+        .log_group_identifier("/dp/app")
+        .policy_document(doc)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.log_group_identifier(), Some("/dp/app"));
+
+    let got = client
+        .get_data_protection_policy()
+        .log_group_identifier("/dp/app")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.log_group_identifier(), Some("/dp/app"));
+}
+
+#[tokio::test]
+async fn logs_delivery_destination_reports_type_and_tags() {
+    // PutDeliveryDestination infers the destination type from the destination
+    // resource ARN (CloudWatch Logs -> CWL) and ListTagsForResource resolves
+    // the delivery-destination ARN.
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    let cfg = aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+        .destination_resource_arn("arn:aws:logs:us-east-1:123456789012:log-group:/dest:*")
+        .build()
+        .unwrap();
+    let created = client
+        .put_delivery_destination()
+        .name("dest1")
+        .delivery_destination_configuration(cfg)
+        .tags("team", "obs")
+        .send()
+        .await
+        .unwrap();
+    let dd = created.delivery_destination().unwrap();
+    assert_eq!(
+        dd.delivery_destination_type(),
+        Some(&aws_sdk_cloudwatchlogs::types::DeliveryDestinationType::Cwl)
+    );
+    let arn = dd.arn().unwrap();
+
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        tags.tags().and_then(|t| t.get("team")).map(String::as_str),
+        Some("obs")
+    );
+}
