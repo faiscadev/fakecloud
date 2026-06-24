@@ -855,3 +855,127 @@ async fn get_partition_indexes_not_found_after_table_delete() {
         .expect_err("table gone");
     assert!(err.into_service_error().is_entity_not_found_exception());
 }
+
+#[tokio::test]
+async fn schema_resolves_by_arn() {
+    // GetSchema must resolve a schema by its ARN, parsing both the registry and
+    // schema name out of the `schema/<registry>/<schema>` resource path.
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    let registry_id = aws_sdk_glue::types::RegistryId::builder()
+        .registry_name("my-registry")
+        .build();
+    glue.create_registry()
+        .registry_name("my-registry")
+        .send()
+        .await
+        .expect("create registry");
+
+    let created = glue
+        .create_schema()
+        .registry_id(registry_id)
+        .schema_name("my-schema")
+        .data_format(aws_sdk_glue::types::DataFormat::Avro)
+        .compatibility(aws_sdk_glue::types::Compatibility::Backward)
+        .schema_definition(r#"{"type":"record","name":"r","fields":[]}"#)
+        .send()
+        .await
+        .expect("create schema");
+    let arn = created.schema_arn().expect("schema arn").to_string();
+    assert!(arn.ends_with(":schema/my-registry/my-schema"), "arn={arn}");
+
+    // Look it up purely by ARN (no registry/schema name in the SchemaId).
+    let by_arn = glue
+        .get_schema()
+        .schema_id(
+            aws_sdk_glue::types::SchemaId::builder()
+                .schema_arn(&arn)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("get schema by arn");
+    assert_eq!(by_arn.schema_name(), Some("my-schema"));
+    assert_eq!(by_arn.registry_name(), Some("my-registry"));
+}
+
+#[tokio::test]
+async fn ml_transform_id_prefix_and_computed_schema() {
+    // An ML transform gets a `tfm-` id and reports the schema derived from its
+    // input record table's columns.
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("ml_db").build().unwrap())
+        .send()
+        .await
+        .expect("create db");
+    glue.create_table()
+        .database_name("ml_db")
+        .table_input(table_input("ml_table"))
+        .send()
+        .await
+        .expect("create table");
+
+    let created = glue
+        .create_ml_transform()
+        .name("my-transform")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .input_record_tables(
+            aws_sdk_glue::types::GlueTable::builder()
+                .database_name("ml_db")
+                .table_name("ml_table")
+                .build()
+                .unwrap(),
+        )
+        .parameters(
+            aws_sdk_glue::types::TransformParameters::builder()
+                .transform_type(aws_sdk_glue::types::TransformType::FindMatches)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create ml transform");
+    let id = created.transform_id().expect("transform id").to_string();
+    assert!(id.starts_with("tfm-"), "id={id}");
+
+    let got = glue
+        .get_ml_transform()
+        .transform_id(&id)
+        .send()
+        .await
+        .expect("get ml transform");
+    // Input table has two columns (id, amount), so the schema has two entries.
+    let schema = got.schema();
+    assert_eq!(schema.len(), 2);
+    assert_eq!(schema[0].name(), Some("id"));
+    assert_eq!(schema[1].name(), Some("amount"));
+}
+
+#[tokio::test]
+async fn dev_endpoint_is_ready_with_default_nodes() {
+    // A dev endpoint is READY at once (nothing to provision) and defaults to 5
+    // nodes when no worker type is given.
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_dev_endpoint()
+        .endpoint_name("my-endpoint")
+        .role_arn("arn:aws:iam::123456789012:role/glue")
+        .send()
+        .await
+        .expect("create dev endpoint");
+
+    let got = glue
+        .get_dev_endpoint()
+        .endpoint_name("my-endpoint")
+        .send()
+        .await
+        .expect("get dev endpoint");
+    let ep = got.dev_endpoint().expect("dev endpoint");
+    assert_eq!(ep.status(), Some("READY"));
+    assert_eq!(ep.number_of_nodes(), 5);
+}

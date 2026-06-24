@@ -35,7 +35,9 @@ impl GlueService {
         req_present(&body, "InputRecordTables")?;
         req_present(&body, "Parameters")?;
         req_str(&body, "Role")?;
-        let id = new_id();
+        // Glue ML transform ids carry a `tfm-` prefix; the resource ARN is
+        // `mlTransform/<id>`, which the provider asserts matches `tfm-.+`.
+        let id = format!("tfm-{}", new_id());
         let now = now_ts();
         let stored = crate::common::entity(
             &body,
@@ -61,11 +63,44 @@ impl GlueService {
         let body = req.json_body();
         let id = req_str(&body, "TransformId")?;
         let accounts = self.state.read();
-        let t = accounts
+        let state = accounts
             .get(&req.account_id)
-            .and_then(|s| s.ml_transforms.get(id))
             .ok_or_else(|| entity_not_found(format!("MLTransform {id} not found")))?;
-        Ok(AwsResponse::ok_json(t.clone()))
+        let t = state
+            .ml_transforms
+            .get(id)
+            .ok_or_else(|| entity_not_found(format!("MLTransform {id} not found")))?;
+        let mut out = t.clone();
+        // AWS computes the transform's `Schema` from the columns of its input
+        // record table; the Terraform resource reads it back as `schema`.
+        if let Some(schema) = self.input_table_schema(state, &req.region, t) {
+            out["Schema"] = schema;
+        }
+        Ok(AwsResponse::ok_json(out))
+    }
+
+    /// Build the `Schema` list (`[{Name, DataType}]`) for an ML transform from
+    /// the columns of its first input record table, mirroring how AWS derives a
+    /// transform's schema from the catalog table it reads.
+    fn input_table_schema(
+        &self,
+        state: &crate::state::GlueState,
+        region: &str,
+        transform: &Value,
+    ) -> Option<Value> {
+        let table_ref = transform
+            .get("InputRecordTables")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())?;
+        let db_name = table_ref.get("DatabaseName").and_then(|v| v.as_str())?;
+        let table_name = table_ref.get("TableName").and_then(|v| v.as_str())?;
+        let table = state.dbs_in(region)?.get(db_name)?.tables.get(table_name)?;
+        let columns = &table.storage_descriptor.as_ref()?.columns;
+        let schema: Vec<Value> = columns
+            .iter()
+            .map(|c| json!({ "Name": c.name, "DataType": c.column_type }))
+            .collect();
+        Some(json!(schema))
     }
 
     pub(crate) fn get_ml_transforms(

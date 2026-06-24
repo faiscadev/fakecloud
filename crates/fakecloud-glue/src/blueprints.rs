@@ -208,8 +208,18 @@ impl GlueService {
                 }
             }
         }
-        stored.insert("Status".into(), json!("PROVISIONING"));
+        // A real dev endpoint takes minutes to provision its notebook
+        // environment; fakecloud has nothing to stand up, so it is READY at
+        // once and the provider's creation waiter completes on its first poll
+        // (otherwise it spins for ~15m and times out).
+        stored.insert("Status".into(), json!("READY"));
         stored.insert("CreatedTimestamp".into(), json!(now));
+        stored.insert("LastModifiedTimestamp".into(), json!(now));
+        // AWS defaults a worker-type-less dev endpoint to 5 nodes, which the
+        // resource reads back as `number_of_nodes`.
+        if !stored.contains_key("NumberOfNodes") && !stored.contains_key("WorkerType") {
+            stored.insert("NumberOfNodes".into(), json!(5));
+        }
         let stored = Value::Object(stored);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
