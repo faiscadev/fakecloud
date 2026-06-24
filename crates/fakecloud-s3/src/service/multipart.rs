@@ -4,7 +4,7 @@ use http::{HeaderMap, StatusCode};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use fakecloud_persistence::BodySource;
+use fakecloud_persistence::{BodyRef, BodySource};
 
 use crate::persistence::{mpu_init_snapshot, object_meta_snapshot};
 use crate::state::{MultipartUpload, S3Object, UploadPart};
@@ -624,7 +624,7 @@ impl S3Service {
             .as_deref()
             .and_then(|algo| super::compute_composite_checksum(algo, &part_checksum_digests));
         let data = Bytes::from(combined_data);
-        let store_body = data.clone();
+        let object_size = data.len() as u64;
 
         let tags = if let Some(ref tagging) = upload.tagging {
             parse_url_encoded_tags(tagging).into_iter().collect()
@@ -693,21 +693,22 @@ impl S3Service {
                     return Err(precondition_failed("If-None-Match"));
                 }
             }
-            // Checks passed — persist, then commit to memory, all under the lock.
-            self.store
+            // Checks passed — persist, then commit to memory, all under the
+            // lock. In disk mode `mpu_complete` streams the parts straight into
+            // the object file and returns a disk-backed ref; use it as the
+            // object body instead of writing the whole object a SECOND time
+            // from RAM via `put_object`. The old double-write held the entire
+            // object resident twice and wrote it to disk twice, OOMing large
+            // completes (bug-hunt 2026-06-24, 4.1). In memory mode
+            // `mpu_complete` returns an empty placeholder, so the in-memory
+            // body set at construction is kept.
+            let assembled_body = self
+                .store
                 .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
                 .map_err(super::persistence_error)?;
-            let returned_body = self
-                .store
-                .put_object(
-                    bucket,
-                    key,
-                    meta.version_id.as_deref(),
-                    BodySource::Bytes(store_body.clone()),
-                    &meta,
-                )
-                .map_err(super::persistence_error)?;
-            obj.body = returned_body.clone();
+            if !matches!(assembled_body, BodyRef::Memory(_)) {
+                obj.body = assembled_body;
+            }
             let b = accts
                 .get_or_create(account_id)
                 .buckets
@@ -785,7 +786,7 @@ impl S3Service {
         // cannot deadlock against an outstanding write.
         let bucket_name = bucket.to_string();
         let obj_key = key.to_string();
-        let obj_size = store_body.len() as u64;
+        let obj_size = object_size;
         let obj_etag = etag.clone();
         if let Some(ref config) = notification_config {
             super::deliver_notifications(
@@ -856,6 +857,7 @@ impl S3Service {
         &self,
         account_id: &str,
         bucket: &str,
+        query: &std::collections::HashMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
@@ -865,10 +867,70 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
+        let prefix = query.get("prefix").cloned().unwrap_or_default();
+        let delimiter = query.get("delimiter").cloned().unwrap_or_default();
+        let key_marker = query.get("key-marker").cloned().unwrap_or_default();
+        let upload_id_marker = query.get("upload-id-marker").cloned().unwrap_or_default();
+        // AWS clamps max-uploads to 1..=1000, defaulting to 1000.
+        let max_uploads = query
+            .get("max-uploads")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1000)
+            .clamp(1, 1000);
+
+        // AWS orders ListMultipartUploads by key, then by upload-id.
+        let mut sorted_uploads: Vec<_> = b
+            .multipart_uploads
+            .values()
+            .filter(|u| u.key.starts_with(&prefix))
+            .collect();
+        sorted_uploads.sort_by(|a, c| a.key.cmp(&c.key).then(a.upload_id.cmp(&c.upload_id)));
+
+        // Skip everything at or before (key-marker, upload-id-marker). With an
+        // upload-id-marker the boundary key is resumed mid-way; without one,
+        // every upload up to and including the marker key is skipped.
+        let after_marker = |key: &str, upload_id: &str| -> bool {
+            if key_marker.is_empty() {
+                return true;
+            }
+            match key.cmp(key_marker.as_str()) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => {
+                    !upload_id_marker.is_empty() && upload_id > upload_id_marker.as_str()
+                }
+            }
+        };
+
         let mut uploads_xml = String::new();
-        let mut sorted_uploads: Vec<_> = b.multipart_uploads.values().collect();
-        sorted_uploads.sort_by_key(|u| &u.key);
-        for upload in &sorted_uploads {
+        let mut common_prefixes: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut emitted = 0usize;
+        let mut is_truncated = false;
+        let mut next_key_marker = String::new();
+        let mut next_upload_id_marker = String::new();
+
+        for upload in sorted_uploads
+            .iter()
+            .filter(|u| after_marker(&u.key, &u.upload_id))
+        {
+            // Roll keys up under a delimiter into CommonPrefixes (deduped),
+            // matching ListObjects semantics.
+            if !delimiter.is_empty() {
+                let rest = &upload.key[prefix.len()..];
+                if let Some(idx) = rest.find(&delimiter) {
+                    let cp = format!("{}{}", prefix, &rest[..idx + delimiter.len()]);
+                    common_prefixes.insert(cp);
+                    continue;
+                }
+            }
+            if emitted >= max_uploads {
+                // The page is full: mark truncated. The Next*Marker pair points
+                // at the LAST emitted upload so the next page resumes strictly
+                // after it (AWS semantics).
+                is_truncated = true;
+                break;
+            }
             uploads_xml.push_str(&format!(
                 "<Upload>\
                  <Key>{}</Key>\
@@ -881,15 +943,59 @@ impl S3Service {
                 upload.initiated.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 xml_escape(&upload.storage_class),
             ));
+            next_key_marker = upload.key.clone();
+            next_upload_id_marker = upload.upload_id.clone();
+            emitted += 1;
         }
+
+        let mut markers_xml = String::new();
+        if !key_marker.is_empty() {
+            markers_xml.push_str(&format!(
+                "<KeyMarker>{}</KeyMarker>",
+                xml_escape(&key_marker)
+            ));
+        }
+        if !upload_id_marker.is_empty() {
+            markers_xml.push_str(&format!(
+                "<UploadIdMarker>{}</UploadIdMarker>",
+                xml_escape(&upload_id_marker)
+            ));
+        }
+        if is_truncated {
+            markers_xml.push_str(&format!(
+                "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{}</NextUploadIdMarker>",
+                xml_escape(&next_key_marker),
+                xml_escape(&next_upload_id_marker)
+            ));
+        }
+        if !prefix.is_empty() {
+            markers_xml.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(&prefix)));
+        }
+        if !delimiter.is_empty() {
+            markers_xml.push_str(&format!(
+                "<Delimiter>{}</Delimiter>",
+                xml_escape(&delimiter)
+            ));
+        }
+        let common_prefixes_xml: String = common_prefixes
+            .iter()
+            .map(|cp| {
+                format!(
+                    "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+                    xml_escape(cp)
+                )
+            })
+            .collect();
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <Bucket>{}</Bucket>\
-             <MaxUploads>1000</MaxUploads>\
-             <IsTruncated>false</IsTruncated>\
+             {markers_xml}\
+             <MaxUploads>{max_uploads}</MaxUploads>\
+             <IsTruncated>{is_truncated}</IsTruncated>\
              {uploads_xml}\
+             {common_prefixes_xml}\
              </ListMultipartUploadsResult>",
             xml_escape(bucket),
         );
