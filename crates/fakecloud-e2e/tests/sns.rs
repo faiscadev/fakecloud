@@ -1140,3 +1140,120 @@ async fn sns_simulation_http_subscription_pending_and_confirm() {
         "pending confirmation"
     );
 }
+
+#[tokio::test]
+async fn sns_publish_batch_applies_filter_policy() {
+    use aws_sdk_sns::types::PublishBatchRequestEntry;
+
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    let queue_url = sqs
+        .create_queue()
+        .queue_name("batch-filter-q")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    let topic_arn = sns
+        .create_topic()
+        .name("batch-filter-topic")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+
+    let sub_arn = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .return_subscription_arn(true)
+        .send()
+        .await
+        .unwrap()
+        .subscription_arn()
+        .unwrap()
+        .to_string();
+
+    // Only deliver messages whose `kind` attribute equals "keep".
+    sns.set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("FilterPolicy")
+        .attribute_value(r#"{"kind":["keep"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let attr = |v: &str| {
+        aws_sdk_sns::types::MessageAttributeValue::builder()
+            .data_type("String")
+            .string_value(v)
+            .build()
+            .unwrap()
+    };
+    let keep = PublishBatchRequestEntry::builder()
+        .id("keep")
+        .message("delivered")
+        .message_attributes("kind", attr("keep"))
+        .build()
+        .unwrap();
+    let drop = PublishBatchRequestEntry::builder()
+        .id("drop")
+        .message("filtered-out")
+        .message_attributes("kind", attr("drop"))
+        .build()
+        .unwrap();
+
+    sns.publish_batch()
+        .topic_arn(&topic_arn)
+        .set_publish_batch_request_entries(Some(vec![keep, drop]))
+        .send()
+        .await
+        .expect("publish_batch");
+
+    // Give async delivery a moment.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut bodies = Vec::new();
+    for _ in 0..3 {
+        let recv = sqs
+            .receive_message()
+            .queue_url(&queue_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(1)
+            .send()
+            .await
+            .unwrap();
+        for m in recv.messages() {
+            bodies.push(m.body().unwrap().to_string());
+        }
+    }
+    // The filter policy must drop the "drop" entry; only "keep" is delivered.
+    assert!(
+        bodies.iter().any(|b| b.contains("delivered")),
+        "kept message missing: {bodies:?}"
+    );
+    assert!(
+        !bodies.iter().any(|b| b.contains("filtered-out")),
+        "filter policy not applied on batch: {bodies:?}"
+    );
+}
