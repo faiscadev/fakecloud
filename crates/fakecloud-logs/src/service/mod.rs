@@ -445,6 +445,21 @@ fn dd_config_json(config: &std::collections::BTreeMap<String, String>) -> Value 
     Value::Object(m)
 }
 
+/// Infer a delivery destination's type from its destination resource ARN's
+/// service. Defaults to `CWL` (the most common case) when the ARN is absent or
+/// unrecognised.
+pub fn infer_delivery_destination_type(destination_arn: Option<&String>) -> String {
+    let arn = destination_arn.map(String::as_str).unwrap_or("");
+    let service = arn.split(':').nth(2).unwrap_or("");
+    match service {
+        "s3" => "S3",
+        "firehose" => "FH",
+        "xray" => "XRAY",
+        _ => "CWL",
+    }
+    .to_string()
+}
+
 fn generate_sequence_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

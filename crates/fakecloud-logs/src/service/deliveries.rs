@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use crate::validation::*;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use super::dd_config_json;
+use super::{dd_config_json, infer_delivery_destination_type};
 use super::{require_str, LogsService};
 use crate::state::{Delivery, DeliveryDestination, DeliverySource};
 
@@ -91,6 +91,16 @@ impl LogsService {
             state.region, state.account_id, name
         );
 
+        // The destination type is either supplied explicitly or inferred from
+        // the destination resource ARN's service: CloudWatch Logs -> CWL,
+        // S3 -> S3, Firehose -> FH, X-Ray -> XRAY.
+        let delivery_destination_type = body["deliveryDestinationType"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                infer_delivery_destination_type(config.get("destinationResourceArn"))
+            });
+
         let existing_policy = state
             .delivery_destinations
             .get(&name)
@@ -101,6 +111,7 @@ impl LogsService {
             arn: arn.clone(),
             output_format: output_format.clone(),
             delivery_destination_configuration: config.clone(),
+            delivery_destination_type: delivery_destination_type.clone(),
             tags: tags.clone(),
             delivery_destination_policy: existing_policy,
         };
@@ -121,6 +132,7 @@ impl LogsService {
             "deliveryDestination": {
                 "name": name,
                 "arn": arn,
+                "deliveryDestinationType": delivery_destination_type,
                 "deliveryDestinationConfiguration": config_resp,
             }
         });
@@ -166,6 +178,7 @@ impl LogsService {
         let mut obj = json!({
             "name": dd.name,
             "arn": dd.arn,
+            "deliveryDestinationType": dd.delivery_destination_type,
             "deliveryDestinationConfiguration": dd_config_json(&dd.delivery_destination_configuration),
         });
         if let Some(ref fmt) = dd.output_format {
@@ -196,6 +209,7 @@ impl LogsService {
                 let mut obj = json!({
                     "name": dd.name,
                     "arn": dd.arn,
+                    "deliveryDestinationType": dd.delivery_destination_type,
                     "deliveryDestinationConfiguration": dd_config_json(&dd.delivery_destination_configuration),
                 });
                 if let Some(ref fmt) = dd.output_format {

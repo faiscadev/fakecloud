@@ -64,6 +64,14 @@ impl LogsService {
         let evaluation_frequency = body["evaluationFrequency"].as_str().map(|s| s.to_string());
         let filter_pattern = body["filterPattern"].as_str().map(|s| s.to_string());
         let anomaly_visibility_time = body["anomalyVisibilityTime"].as_i64();
+        let tags = body["tags"]
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let now = Utc::now().timestamp_millis();
         let mut accounts = self.state.write();
@@ -84,6 +92,7 @@ impl LogsService {
             creation_time: now,
             last_modified_time: now,
             enabled: true,
+            tags,
         };
 
         state.anomaly_detectors.insert(arn.clone(), detector);

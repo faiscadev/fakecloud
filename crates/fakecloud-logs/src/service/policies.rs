@@ -369,7 +369,10 @@ impl LogsService {
                 format!("The specified log group does not exist: {group_name}"),
             )
         })?;
-        let log_group_id_resp = group.arn.clone();
+        // Echo back the identifier exactly as supplied (AWS round-trips it), so
+        // the resource's `log_group_name` matches the configured value instead of
+        // drifting to the ARN form.
+        let log_group_id_resp = log_group_id.clone();
 
         group.data_protection_policy = Some(DataProtectionPolicy {
             policy_document: policy_document.clone(),
@@ -427,7 +430,7 @@ impl LogsService {
         })?;
 
         let mut result = json!({
-            "logGroupIdentifier": group.arn,
+            "logGroupIdentifier": log_group_id,
         });
         if let Some(ref dp) = group.data_protection_policy {
             result["policyDocument"] = json!(dp.policy_document);

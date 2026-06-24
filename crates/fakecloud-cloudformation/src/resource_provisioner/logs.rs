@@ -190,11 +190,21 @@ impl ResourceProvisioner {
             "arn:aws:logs:{}:{}:delivery-destination:{name}",
             self.region, self.account_id
         );
+        let delivery_destination_type = props
+            .get("DeliveryDestinationType")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                fakecloud_logs::infer_delivery_destination_type(
+                    configuration.get("destinationResourceArn"),
+                )
+            });
         let dd = DeliveryDestination {
             name: name.clone(),
             arn: arn.clone(),
             output_format,
             delivery_destination_configuration: configuration,
+            delivery_destination_type,
             tags: BTreeMap::new(),
             delivery_destination_policy: policy,
         };
