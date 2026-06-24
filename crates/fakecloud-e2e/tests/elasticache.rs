@@ -3483,3 +3483,41 @@ async fn elasticache_user_group_engine_case_insensitive_and_modify_settles_activ
     assert_eq!(modified.status(), Some("active"));
     assert_eq!(modified.user_ids().len(), 2);
 }
+
+#[tokio::test]
+async fn elasticache_reboot_returns_immediately() {
+    if !require_docker_or_skip("elasticache_reboot_returns_immediately") {
+        return;
+    }
+
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("reboot-cluster")
+        .cache_node_type("cache.t3.micro")
+        .preferred_availability_zone("us-east-1a")
+        .send()
+        .await
+        .unwrap();
+    helpers::wait_for_cache_cluster_available(&client, "reboot-cluster", 120).await;
+
+    // Reboot backgrounds the container restart (up to ~120s on k8s), so it must
+    // return immediately reporting the rebooting state rather than blocking.
+    let resp = client
+        .reboot_cache_cluster()
+        .cache_cluster_id("reboot-cluster")
+        .cache_node_ids_to_reboot("0001")
+        .send()
+        .await
+        .expect("reboot");
+    assert_eq!(
+        resp.cache_cluster().and_then(|c| c.cache_cluster_status()),
+        Some("rebooting cache cluster nodes"),
+        "RebootCacheCluster must return immediately with the rebooting status"
+    );
+
+    // It converges back to available in the background.
+    helpers::wait_for_cache_cluster_available(&client, "reboot-cluster", 120).await;
+}

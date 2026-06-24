@@ -523,24 +523,33 @@ impl ElastiCacheService {
                 .unwrap_or_default();
             (xml, pod_tags)
         };
-        // Restart the underlying engine container so a real client
-        // observes the reboot. Best-effort: if no runtime is wired up
-        // (eg. tests, environments without docker) the API call still
-        // reflects the rebooting state.
-        if let Some(runtime) = &self.runtime {
-            if let Err(error) = runtime.restart_container(&id, &pod_tags).await {
-                tracing::warn!(
-                    cluster_id = %id,
-                    %error,
-                    "RebootCacheCluster: container restart failed, returning rebooting state anyway"
-                );
-            } else {
-                let mut accounts = self.state.write();
-                let state = accounts.get_or_create(&request.account_id);
+        // Restart the underlying engine container in the BACKGROUND so a real
+        // client observes the reboot without the request blocking on it. The
+        // restart + readiness wait can take up to ~120s on the k8s backend
+        // (Pod recreate + IP wait + TCP wait), past the ~60s client read
+        // timeout — awaiting it inline timed the CLI out (bug-hunt 2026-06-24,
+        // 3.3). EC2 RebootInstances and the Create paths already background
+        // theirs. Best-effort: with no runtime wired up (tests, no docker) the
+        // API still reflects the rebooting state.
+        if let Some(runtime) = self.runtime.clone() {
+            let state_handle = self.state.clone();
+            let account_id = request.account_id.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = runtime.restart_container(&id, &pod_tags).await {
+                    tracing::warn!(
+                        cluster_id = %id,
+                        %error,
+                        "RebootCacheCluster: container restart failed, leaving rebooting state"
+                    );
+                    return;
+                }
+                let mut accounts = state_handle.write();
+                let state = accounts.get_or_create(&account_id);
                 if let Some(cluster) = state.cache_clusters.get_mut(&id) {
                     cluster.cache_cluster_status = "available".to_string();
                 }
-            }
+            });
         }
         Ok(AwsResponse::xml(
             StatusCode::OK,

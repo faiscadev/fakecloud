@@ -1834,3 +1834,54 @@ async fn rds_subnet_group_reports_supported_network_types() {
     // The aws_db_subnet_group resource asserts supported_network_types = [IPV4].
     assert_eq!(g.supported_network_types(), &["IPV4".to_string()]);
 }
+
+#[tokio::test]
+async fn rds_start_db_instance_returns_starting_immediately() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-start-db").await;
+    helpers::wait_for_db_available(&client, "orders-start-db", 180).await;
+
+    client
+        .stop_db_instance()
+        .db_instance_identifier("orders-start-db")
+        .send()
+        .await
+        .expect("stop");
+
+    // Wait until the instance reports stopped.
+    for _ in 0..60 {
+        let d = client
+            .describe_db_instances()
+            .db_instance_identifier("orders-start-db")
+            .send()
+            .await
+            .unwrap();
+        if d.db_instances()
+            .first()
+            .and_then(|i| i.db_instance_status())
+            == Some("stopped")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    // Start backgrounds the container boot + readiness wait, so it must return
+    // immediately with `starting` rather than blocking until `available`.
+    let resp = client
+        .start_db_instance()
+        .db_instance_identifier("orders-start-db")
+        .send()
+        .await
+        .expect("start");
+    assert_eq!(
+        resp.db_instance().and_then(|i| i.db_instance_status()),
+        Some("starting"),
+        "StartDBInstance must return immediately with 'starting'"
+    );
+
+    // It eventually converges to available in the background.
+    helpers::wait_for_db_available(&client, "orders-start-db", 180).await;
+}
