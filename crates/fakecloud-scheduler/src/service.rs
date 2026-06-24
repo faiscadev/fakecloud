@@ -1037,11 +1037,25 @@ fn parse_target(v: Option<&Value>) -> Result<Target, AwsServiceError> {
         dead_letter_config: v.get("DeadLetterConfig").map(|d| DeadLetterConfig {
             arn: d.get("Arn").and_then(|a| a.as_str()).map(String::from),
         }),
-        retry_policy: v.get("RetryPolicy").map(|p| RetryPolicy {
-            maximum_event_age_in_seconds: p
-                .get("MaximumEventAgeInSeconds")
-                .and_then(|n| n.as_i64()),
-            maximum_retry_attempts: p.get("MaximumRetryAttempts").and_then(|n| n.as_i64()),
+        // AWS always reports a RetryPolicy on a target, defaulting both fields
+        // when the caller omits the block entirely (MaximumEventAgeInSeconds =
+        // 86400 / 24h, MaximumRetryAttempts = 185). The Terraform resource reads
+        // `target.retry_policy.maximum_event_age_in_seconds` /
+        // `maximum_retry_attempts` unconditionally. An explicit 0 is preserved.
+        retry_policy: Some({
+            let p = v.get("RetryPolicy");
+            RetryPolicy {
+                maximum_event_age_in_seconds: Some(
+                    p.and_then(|p| p.get("MaximumEventAgeInSeconds"))
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(86400),
+                ),
+                maximum_retry_attempts: Some(
+                    p.and_then(|p| p.get("MaximumRetryAttempts"))
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(185),
+                ),
+            }
         }),
         sqs_parameters: v.get("SqsParameters").map(|s| SqsParameters {
             message_group_id: s

@@ -123,6 +123,35 @@ async fn scheduler_create_get_delete_schedule() {
 }
 
 #[tokio::test]
+async fn scheduler_target_reports_default_retry_policy() {
+    // A target created without a RetryPolicy is reported with AWS's defaults:
+    // MaximumEventAgeInSeconds=86400, MaximumRetryAttempts=185. The Terraform
+    // resource reads these unconditionally, so they must always be present.
+    let server = TestServer::start().await;
+    let client = server.scheduler_client().await;
+
+    client
+        .create_schedule()
+        .name("retry-default")
+        .schedule_expression("rate(1 hour)")
+        .flexible_time_window(off_window())
+        .target(sqs_target())
+        .send()
+        .await
+        .expect("create_schedule");
+
+    let got = client
+        .get_schedule()
+        .name("retry-default")
+        .send()
+        .await
+        .expect("get_schedule");
+    let rp = got.target().unwrap().retry_policy().expect("retry_policy");
+    assert_eq!(rp.maximum_event_age_in_seconds(), Some(86400));
+    assert_eq!(rp.maximum_retry_attempts(), Some(185));
+}
+
+#[tokio::test]
 async fn scheduler_update_is_idempotent_upsert() {
     let server = TestServer::start().await;
     let client = server.scheduler_client().await;
