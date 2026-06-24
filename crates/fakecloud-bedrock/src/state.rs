@@ -250,6 +250,8 @@ pub struct Guardrail {
     pub word_policy: Option<serde_json::Value>,
     pub sensitive_information_policy: Option<serde_json::Value>,
     pub topic_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    pub contextual_grounding_policy: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -268,6 +270,8 @@ pub struct GuardrailVersion {
     pub word_policy: Option<serde_json::Value>,
     pub sensitive_information_policy: Option<serde_json::Value>,
     pub topic_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    pub contextual_grounding_policy: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
 

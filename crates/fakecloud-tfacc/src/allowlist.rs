@@ -215,18 +215,17 @@ pub const SERVICES: &[Service] = &[
         // Batch 10 + widen: the foundation-model data sources (single + list),
         // which return the expected ListFoundationModels / GetFoundationModel
         // shapes out of the box.
+        // Batch 16 reclaimed guardrails and inference profiles. GetGuardrail now
+        // renders the stored policies in their read shape (dropping the `Config`
+        // suffix from the wrapper keys, e.g. `filtersConfig` -> `filters`) and
+        // round-trips the contextual-grounding policy, so a guardrail refreshes
+        // cleanly; guardrail ops accept the ARN as the identifier so
+        // CreateGuardrailVersion resolves. Inference profiles report status
+        // `ACTIVE` and an `application-inference-profile/<id>` ARN, and the
+        // AWS-managed SYSTEM_DEFINED cross-region catalogue is listed/resolvable
+        // so the data sources read it.
         run_regex: "^TestAccBedrock[A-Za-z]+_basic$",
-        deny: &[
-            // --- gap: guardrails need the content-policy / topic-policy
-            //     evaluation engine, which fakecloud's Bedrock does not model. ---
-            "TestAccBedrockGuardrail_basic",
-            "TestAccBedrockGuardrailVersion_basic",
-            // --- gap: inference profiles (cross-region model routing) are not
-            //     modelled. ---
-            "TestAccBedrockInferenceProfile_basic",
-            "TestAccBedrockInferenceProfileDataSource_basic",
-            "TestAccBedrockInferenceProfilesDataSource_basic",
-        ],
+        deny: &[],
     },
     Service {
         name: "apigatewayv2",

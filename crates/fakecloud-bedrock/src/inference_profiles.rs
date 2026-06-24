@@ -17,9 +17,12 @@ pub(crate) fn create_inference_profile(
         .as_str()
         .unwrap_or(&default_name);
 
-    let profile_id = Uuid::new_v4().to_string();
+    // An application inference profile gets a lowercase-alphanumeric id and an
+    // `application-inference-profile/<id>` ARN (system-defined profiles use the
+    // bare `inference-profile/` resource); the provider asserts this shape.
+    let profile_id = Uuid::new_v4().simple().to_string()[..12].to_string();
     let profile_arn = format!(
-        "arn:aws:bedrock:{}:{}:inference-profile/{}",
+        "arn:aws:bedrock:{}:{}:application-inference-profile/{}",
         req.region, req.account_id, profile_id
     );
 
@@ -29,7 +32,9 @@ pub(crate) fn create_inference_profile(
         inference_profile_name: profile_name.to_string(),
         description: body["description"].as_str().map(|s| s.to_string()),
         model_source: body.get("modelSource").cloned().unwrap_or(json!({})),
-        status: "Active".to_string(),
+        // AWS reports the status in upper case (`ACTIVE`); the provider's
+        // creation waiter compares case-sensitively against `ACTIVE`.
+        status: "ACTIVE".to_string(),
         inference_profile_type: "APPLICATION".to_string(),
         created_at: now,
         updated_at: now,
@@ -69,22 +74,29 @@ pub(crate) fn get_inference_profile(
     let accts = state.read();
     let empty = crate::state::BedrockState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
-    let profile = s
-        .inference_profiles
-        .get(identifier)
-        .or_else(|| {
-            s.inference_profiles.values().find(|p| {
-                p.inference_profile_name == identifier
-                    || p.inference_profile_arn.ends_with(&format!("/{identifier}"))
-            })
+    let profile = match s.inference_profiles.get(identifier).or_else(|| {
+        s.inference_profiles.values().find(|p| {
+            p.inference_profile_name == identifier
+                || p.inference_profile_arn.ends_with(&format!("/{identifier}"))
         })
-        .ok_or_else(|| {
-            AwsServiceError::aws_error(
+    }) {
+        Some(profile) => profile,
+        None => {
+            // Fall back to the AWS-managed system-defined catalogue, resolving
+            // by profile id or ARN suffix.
+            if let Some((id, model)) = SYSTEM_INFERENCE_PROFILES
+                .iter()
+                .find(|(id, _)| *id == identifier || identifier.ends_with(&format!("/{id}")))
+            {
+                return Ok(AwsResponse::ok_json(system_profile_json(req, id, model)));
+            }
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!("Inference profile {identifier} not found"),
-            )
-        })?;
+            ));
+        }
+    };
 
     // GetInferenceProfileResponse intentionally does not surface the
     // creation-time `modelSource` blob; only the resolved `models` list
@@ -129,11 +141,22 @@ pub(crate) fn list_inference_profiles(
         0
     };
 
-    let page: Vec<Value> = items
-        .iter()
-        .skip(start)
-        .take(max_results)
-        .map(|p| {
+    // SYSTEM_DEFINED (AWS-managed cross-region) profiles exist out of the box;
+    // list them alongside any user-created APPLICATION profiles. A `type`
+    // filter, when present, narrows to one kind.
+    let type_filter = req
+        .query_params
+        .get("type")
+        .or_else(|| req.query_params.get("typeEquals"));
+    let include_application = type_filter.map(|t| t == "APPLICATION").unwrap_or(true);
+    let include_system = type_filter.map(|t| t == "SYSTEM_DEFINED").unwrap_or(true);
+
+    let mut summaries: Vec<Value> = Vec::new();
+    if include_system {
+        summaries.extend(system_profiles(req));
+    }
+    if include_application {
+        summaries.extend(items.iter().map(|p| {
             json!({
                 "inferenceProfileArn": p.inference_profile_arn,
                 "inferenceProfileId": profile_id_from_arn(&p.inference_profile_arn),
@@ -145,14 +168,26 @@ pub(crate) fn list_inference_profiles(
                 "createdAt": p.created_at.to_rfc3339(),
                 "updatedAt": p.updated_at.to_rfc3339(),
             })
-        })
+        }));
+    }
+
+    let total = summaries.len();
+    let page: Vec<Value> = summaries
+        .into_iter()
+        .skip(start)
+        .take(max_results)
         .collect();
 
     let mut resp = json!({ "inferenceProfileSummaries": page });
     let end = start.saturating_add(max_results);
-    if end < items.len() {
-        if let Some(last) = items.get(end - 1) {
-            resp["nextToken"] = json!(last.inference_profile_arn);
+    if end < total {
+        // Page on the last item's id so the caller can continue.
+        if let Some(last) = resp["inferenceProfileSummaries"]
+            .as_array()
+            .and_then(|a| a.last())
+            .and_then(|v| v["inferenceProfileId"].as_str())
+        {
+            resp["nextToken"] = json!(last);
         }
     }
 
@@ -163,6 +198,104 @@ pub(crate) fn list_inference_profiles(
 /// echoes back in the summary, so we just split on `/`.
 fn profile_id_from_arn(arn: &str) -> String {
     arn.rsplit('/').next().unwrap_or(arn).to_string()
+}
+
+/// AWS-managed cross-region (SYSTEM_DEFINED) inference profiles for the US
+/// commercial regions. Each routes to one foundation model across us-east-1 and
+/// us-west-2. Bedrock exposes these out of the box (no create call), so
+/// `ListInferenceProfiles` returns them and the data sources resolve against
+/// them. `(profile_id, foundation_model_id)` pairs; the `us.` prefix is the
+/// geographic routing scope.
+const SYSTEM_INFERENCE_PROFILES: &[(&str, &str)] = &[
+    (
+        "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    ),
+    (
+        "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ),
+    (
+        "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+    ),
+    (
+        "us.anthropic.claude-3-haiku-20240307-v1:0",
+        "anthropic.claude-3-haiku-20240307-v1:0",
+    ),
+    (
+        "us.anthropic.claude-3-sonnet-20240229-v1:0",
+        "anthropic.claude-3-sonnet-20240229-v1:0",
+    ),
+    (
+        "us.anthropic.claude-3-opus-20240229-v1:0",
+        "anthropic.claude-3-opus-20240229-v1:0",
+    ),
+    ("us.amazon.nova-pro-v1:0", "amazon.nova-pro-v1:0"),
+    ("us.amazon.nova-lite-v1:0", "amazon.nova-lite-v1:0"),
+    ("us.amazon.nova-micro-v1:0", "amazon.nova-micro-v1:0"),
+    (
+        "us.meta.llama3-1-8b-instruct-v1:0",
+        "meta.llama3-1-8b-instruct-v1:0",
+    ),
+    (
+        "us.meta.llama3-1-70b-instruct-v1:0",
+        "meta.llama3-1-70b-instruct-v1:0",
+    ),
+    (
+        "us.meta.llama3-2-1b-instruct-v1:0",
+        "meta.llama3-2-1b-instruct-v1:0",
+    ),
+    (
+        "us.meta.llama3-2-3b-instruct-v1:0",
+        "meta.llama3-2-3b-instruct-v1:0",
+    ),
+    (
+        "us.meta.llama3-2-11b-instruct-v1:0",
+        "meta.llama3-2-11b-instruct-v1:0",
+    ),
+    (
+        "us.meta.llama3-2-90b-instruct-v1:0",
+        "meta.llama3-2-90b-instruct-v1:0",
+    ),
+];
+
+/// The US commercial regions a `us.`-scoped system profile routes across.
+const SYSTEM_PROFILE_REGIONS: &[&str] = &["us-east-1", "us-west-2"];
+
+/// Build the JSON summary for one system-defined inference profile.
+fn system_profile_json(req: &AwsRequest, profile_id: &str, model_id: &str) -> Value {
+    let arn = format!(
+        "arn:aws:bedrock:{}:{}:inference-profile/{}",
+        req.region, req.account_id, profile_id
+    );
+    let models: Vec<Value> = SYSTEM_PROFILE_REGIONS
+        .iter()
+        .map(|region| {
+            json!({
+                "modelArn": format!("arn:aws:bedrock:{region}::foundation-model/{model_id}")
+            })
+        })
+        .collect();
+    json!({
+        "inferenceProfileArn": arn,
+        "inferenceProfileId": profile_id,
+        "inferenceProfileName": profile_id,
+        "description": format!("Routes requests to {model_id} across US regions."),
+        "models": models,
+        "status": "ACTIVE",
+        "type": "SYSTEM_DEFINED",
+        "createdAt": "2024-01-01T00:00:00+00:00",
+        "updatedAt": "2024-01-01T00:00:00+00:00",
+    })
+}
+
+/// All system-defined inference-profile summaries, keyed for lookup by id/arn.
+fn system_profiles(req: &AwsRequest) -> Vec<Value> {
+    SYSTEM_INFERENCE_PROFILES
+        .iter()
+        .map(|(id, model)| system_profile_json(req, id, model))
+        .collect()
 }
 
 /// Build the `models` summary list. We try to extract a copyFrom model ARN

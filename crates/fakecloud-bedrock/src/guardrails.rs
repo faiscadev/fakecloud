@@ -7,6 +7,16 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{Guardrail, GuardrailVersion, SharedBedrockState};
 
+/// Normalize a guardrail identifier to its storage key. The API accepts either
+/// the bare guardrail id or the full ARN (`arn:...:guardrail/<id>`); operations
+/// such as CreateGuardrailVersion are called by the provider with the ARN.
+fn guardrail_key(identifier: &str) -> &str {
+    identifier
+        .rsplit_once("guardrail/")
+        .map(|(_, id)| id)
+        .unwrap_or(identifier)
+}
+
 pub(crate) fn create_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
@@ -50,6 +60,7 @@ pub(crate) fn create_guardrail(
         word_policy: body.get("wordPolicyConfig").cloned(),
         sensitive_information_policy: body.get("sensitiveInformationPolicyConfig").cloned(),
         topic_policy: body.get("topicPolicyConfig").cloned(),
+        contextual_grounding_policy: body.get("contextualGroundingPolicyConfig").cloned(),
         created_at: now,
         updated_at: now,
     };
@@ -74,6 +85,7 @@ pub(crate) fn get_guardrail(
     req: &AwsRequest,
     guardrail_id: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let guardrail_id = guardrail_key(guardrail_id);
     // Check if a specific version is requested
     let version = req.query_params.get("guardrailVersion");
 
@@ -169,6 +181,7 @@ pub(crate) fn update_guardrail(
     guardrail_id: &str,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let guardrail_id = guardrail_key(guardrail_id);
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let guardrail = s.guardrails.get_mut(guardrail_id).ok_or_else(|| {
@@ -203,6 +216,9 @@ pub(crate) fn update_guardrail(
     if let Some(policy) = body.get("topicPolicyConfig") {
         guardrail.topic_policy = Some(policy.clone());
     }
+    if let Some(policy) = body.get("contextualGroundingPolicyConfig") {
+        guardrail.contextual_grounding_policy = Some(policy.clone());
+    }
 
     guardrail.updated_at = Utc::now();
 
@@ -221,6 +237,7 @@ pub(crate) fn delete_guardrail(
     req: &AwsRequest,
     guardrail_id: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let guardrail_id = guardrail_key(guardrail_id);
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     s.guardrails.remove(guardrail_id).ok_or_else(|| {
@@ -243,6 +260,7 @@ pub(crate) fn create_guardrail_version(
     guardrail_id: &str,
     body: &Value,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let guardrail_id = guardrail_key(guardrail_id);
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
     let guardrail = s.guardrails.get_mut(guardrail_id).ok_or_else(|| {
@@ -276,6 +294,7 @@ pub(crate) fn create_guardrail_version(
         word_policy: guardrail.word_policy.clone(),
         sensitive_information_policy: guardrail.sensitive_information_policy.clone(),
         topic_policy: guardrail.topic_policy.clone(),
+        contextual_grounding_policy: guardrail.contextual_grounding_policy.clone(),
         created_at: now,
     };
 
@@ -299,6 +318,7 @@ pub(crate) fn apply_guardrail(
     guardrail_version: &str,
     body: &[u8],
 ) -> Result<AwsResponse, AwsServiceError> {
+    let guardrail_id = guardrail_key(guardrail_id);
     let input: Value = serde_json::from_slice(body).unwrap_or_default();
 
     let accts = state.read();
@@ -583,6 +603,28 @@ fn evaluate_content_view(guardrail: &GuardrailView<'_>, text: &str) -> Vec<Value
 
 // ── JSON helpers ───────────────────────────────────────────────────
 
+/// Convert a stored guardrail policy (held in the `*Config` request shape) into
+/// the shape Get/DescribeGuardrail returns. AWS drops the `Config` suffix from
+/// the wrapper keys: `filtersConfig` -> `filters`, `topicsConfig` -> `topics`,
+/// `piiEntitiesConfig` -> `piiEntities`, `regexesConfig` -> `regexes`,
+/// `wordsConfig` -> `words`, `managedWordListsConfig` -> `managedWordLists`.
+/// Echoing the request shape verbatim leaves the Terraform provider reading
+/// empty `filters`/`topics`/... and re-planning the policy on every refresh.
+fn policy_read_shape(config: &Value) -> Value {
+    match config {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                let key = k.strip_suffix("Config").unwrap_or(k).to_string();
+                out.insert(key, policy_read_shape(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(policy_read_shape).collect()),
+        other => other.clone(),
+    }
+}
+
 fn guardrail_to_json(g: &Guardrail) -> Value {
     let mut obj = json!({
         "guardrailId": g.guardrail_id,
@@ -598,16 +640,19 @@ fn guardrail_to_json(g: &Guardrail) -> Value {
     });
 
     if let Some(ref policy) = g.content_policy {
-        obj["contentPolicy"] = policy.clone();
+        obj["contentPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = g.word_policy {
-        obj["wordPolicy"] = policy.clone();
+        obj["wordPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = g.sensitive_information_policy {
-        obj["sensitiveInformationPolicy"] = policy.clone();
+        obj["sensitiveInformationPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = g.topic_policy {
-        obj["topicPolicy"] = policy.clone();
+        obj["topicPolicy"] = policy_read_shape(policy);
+    }
+    if let Some(ref policy) = g.contextual_grounding_policy {
+        obj["contextualGroundingPolicy"] = policy_read_shape(policy);
     }
 
     obj
@@ -627,16 +672,19 @@ fn guardrail_version_to_json(gv: &GuardrailVersion) -> Value {
     });
 
     if let Some(ref policy) = gv.content_policy {
-        obj["contentPolicy"] = policy.clone();
+        obj["contentPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = gv.word_policy {
-        obj["wordPolicy"] = policy.clone();
+        obj["wordPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = gv.sensitive_information_policy {
-        obj["sensitiveInformationPolicy"] = policy.clone();
+        obj["sensitiveInformationPolicy"] = policy_read_shape(policy);
     }
     if let Some(ref policy) = gv.topic_policy {
-        obj["topicPolicy"] = policy.clone();
+        obj["topicPolicy"] = policy_read_shape(policy);
+    }
+    if let Some(ref policy) = gv.contextual_grounding_policy {
+        obj["contextualGroundingPolicy"] = policy_read_shape(policy);
     }
 
     obj
@@ -682,6 +730,7 @@ mod tests {
             word_policy: None,
             sensitive_information_policy: None,
             topic_policy: None,
+            contextual_grounding_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

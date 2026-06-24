@@ -2192,3 +2192,106 @@ async fn bedrock_resource_policy_crud() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+#[tokio::test]
+async fn bedrock_guardrail_content_policy_read_shape_and_arn_identifier() {
+    use aws_sdk_bedrock::types::{
+        GuardrailContentFilterConfig, GuardrailContentFilterType, GuardrailContentPolicyConfig,
+        GuardrailFilterStrength,
+    };
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    let content_policy = GuardrailContentPolicyConfig::builder()
+        .filters_config(
+            GuardrailContentFilterConfig::builder()
+                .r#type(GuardrailContentFilterType::Hate)
+                .input_strength(GuardrailFilterStrength::Medium)
+                .output_strength(GuardrailFilterStrength::Medium)
+                .build()
+                .unwrap(),
+        )
+        .filters_config(
+            GuardrailContentFilterConfig::builder()
+                .r#type(GuardrailContentFilterType::Violence)
+                .input_strength(GuardrailFilterStrength::High)
+                .output_strength(GuardrailFilterStrength::High)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    let created = client
+        .create_guardrail()
+        .name("content-guardrail")
+        .blocked_input_messaging("blocked")
+        .blocked_outputs_messaging("blocked")
+        .content_policy_config(content_policy)
+        .send()
+        .await
+        .unwrap();
+    let arn = created.guardrail_arn().to_string();
+
+    // GetGuardrail must render the stored content policy in its read shape, so
+    // the SDK can parse `content_policy.filters` (not the `*Config` wrapper).
+    let got = client
+        .get_guardrail()
+        .guardrail_identifier(&arn) // resolve by ARN, not just the short id
+        .send()
+        .await
+        .unwrap();
+    let filters = got.content_policy().expect("content policy").filters();
+    assert_eq!(filters.len(), 2);
+    assert_eq!(filters[0].r#type(), &GuardrailContentFilterType::Hate);
+
+    // CreateGuardrailVersion is called by the provider with the ARN identifier.
+    let version = client
+        .create_guardrail_version()
+        .guardrail_identifier(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!version.version().is_empty());
+}
+
+#[tokio::test]
+async fn bedrock_inference_profiles_catalogue_and_application_arn() {
+    use aws_sdk_bedrock::types::{InferenceProfileModelSource, InferenceProfileType};
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    // The AWS-managed SYSTEM_DEFINED catalogue is listed out of the box.
+    let listed = client.list_inference_profiles().send().await.unwrap();
+    let summaries = listed.inference_profile_summaries();
+    assert!(!summaries.is_empty());
+    let system = summaries
+        .iter()
+        .find(|s| s.r#type() == &InferenceProfileType::SystemDefined)
+        .expect("a system-defined profile");
+    assert!(system.description().is_some());
+
+    // It resolves via GetInferenceProfile by id.
+    let got = client
+        .get_inference_profile()
+        .inference_profile_identifier(system.inference_profile_id())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.r#type(), &InferenceProfileType::SystemDefined);
+    assert!(!got.models().is_empty());
+
+    // An APPLICATION profile gets the application-inference-profile ARN.
+    let created = client
+        .create_inference_profile()
+        .inference_profile_name("my-app-profile")
+        .model_source(InferenceProfileModelSource::CopyFrom(
+            "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1".to_string(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(created
+        .inference_profile_arn()
+        .contains("application-inference-profile/"));
+}
