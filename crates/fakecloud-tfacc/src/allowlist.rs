@@ -195,17 +195,18 @@ pub const SERVICES: &[Service] = &[
         // signing-certificate data source. The widen batch added the user-pool
         // client defaults the provider asserts (AuthSessionValidity = 3,
         // RefreshTokenValidity = 30, EnablePropagateAdditionalUserContextData).
+        // Batch 14 added federated identity providers (social providers get the
+        // default `username` attribute mapping Cognito injects — `sub` for
+        // Google/Apple, `id` for Facebook, `user_id` for Login with Amazon) and
+        // user-pool domains (DescribeUserPoolDomain now reports the fronting
+        // CloudFront distribution domain and the managed S3 assets bucket, which
+        // the resource surfaces as cloudfront_distribution/_arn and s3_bucket).
         run_regex: "^TestAccCognitoIDP[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: federated identity providers need real SAML/OIDC
-            //     metadata handling and attribute-mapping round-trip. ---
-            "TestAccCognitoIDPIdentityProvider_basic",
-            // --- gap: a user-pool domain provisions a CloudFront distribution
-            //     (cloudfront_distribution / _arn), which fakecloud's Cognito
-            //     does not stand up. ---
-            "TestAccCognitoIDPUserPoolDomain_basic",
-            // --- gap: managed (AWS-provisioned) user-pool clients are created
-            //     by other AWS services, not directly; not modelled. ---
+            // --- unsupportable: a managed user-pool client is auto-created by a
+            //     companion AWS service; this test stands up an
+            //     `aws_opensearch_domain` (named `AmazonOpenSearchService-...`)
+            //     to provision it, and fakecloud does not implement OpenSearch. ---
             "TestAccCognitoIDPManagedUserPoolClient_basic",
         ],
     },
