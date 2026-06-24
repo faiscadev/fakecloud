@@ -378,6 +378,15 @@ pub struct Authorizer {
     pub identity_source: Option<Vec<String>>, // e.g., ["$request.header.Authorization"]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jwt_configuration: Option<JwtConfiguration>,
+    /// Payload format version for a REQUEST (Lambda) authorizer (`1.0`/`2.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer_payload_format_version: Option<String>,
+    /// TTL (seconds) for cached authorizer results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer_result_ttl_in_seconds: Option<i64>,
+    /// Whether a `2.0` Lambda authorizer returns a simple boolean response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_simple_responses: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

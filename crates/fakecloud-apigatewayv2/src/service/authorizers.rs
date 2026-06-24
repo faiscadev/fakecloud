@@ -72,6 +72,11 @@ impl ApiGatewayV2Service {
             authorizer_uri,
             identity_source,
             jwt_configuration,
+            authorizer_payload_format_version: body["authorizerPayloadFormatVersion"]
+                .as_str()
+                .map(|s| s.to_string()),
+            authorizer_result_ttl_in_seconds: body["authorizerResultTtlInSeconds"].as_i64(),
+            enable_simple_responses: body["enableSimpleResponses"].as_bool(),
         };
 
         let mut accounts = self.state.write();
@@ -255,6 +260,18 @@ impl ApiGatewayV2Service {
                         format!("Invalid jwtConfiguration: {}", e),
                     )
                 })?);
+        }
+
+        if let Some(v) = body["authorizerPayloadFormatVersion"].as_str() {
+            authorizer.authorizer_payload_format_version = Some(v.to_string());
+        }
+
+        if let Some(v) = body["authorizerResultTtlInSeconds"].as_i64() {
+            authorizer.authorizer_result_ttl_in_seconds = Some(v);
+        }
+
+        if let Some(v) = body["enableSimpleResponses"].as_bool() {
+            authorizer.enable_simple_responses = Some(v);
         }
 
         Ok(AwsResponse::ok_json(json!(authorizer)))

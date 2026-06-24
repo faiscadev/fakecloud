@@ -243,14 +243,14 @@ pub const SERVICES: &[Service] = &[
         // integrations their protocol-specific default timeout (29000ms for
         // WEBSOCKET, 30000ms for HTTP) so the export data source — which renders
         // the full integration into its OpenAPI document — round-trips cleanly.
+        // Batch 19 reclaimed the REQUEST (Lambda) authorizer: fakecloud stands
+        // up the authorizer Lambda via the container runtime (the same path the
+        // Lambda Function tfacc tests use), and CreateAuthorizer/UpdateAuthorizer
+        // now round-trip enable_simple_responses, authorizer_payload_format_version,
+        // and authorizer_result_ttl_in_seconds so the update step does not drift.
         run_regex:
             "^TestAccAPIGatewayV2([A-Za-z]+_basic|API_basicHTTP|Integration_basic(HTTP|WebSocket))$",
-        deny: &[
-            // --- gap: a REQUEST authorizer wires up a real Lambda authorizer
-            //     function, which fakecloud cannot stand up without a working
-            //     Lambda runtime in this environment. ---
-            "TestAccAPIGatewayV2Authorizer_basic",
-        ],
+        deny: &[],
     },
     Service {
         name: "kinesis",

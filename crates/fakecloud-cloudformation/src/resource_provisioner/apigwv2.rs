@@ -612,6 +612,14 @@ impl ResourceProvisioner {
                 .map(String::from),
             identity_source,
             jwt_configuration,
+            authorizer_payload_format_version: props
+                .get("AuthorizerPayloadFormatVersion")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            authorizer_result_ttl_in_seconds: props
+                .get("AuthorizerResultTtlInSeconds")
+                .and_then(|v| v.as_i64()),
+            enable_simple_responses: props.get("EnableSimpleResponses").and_then(|v| v.as_bool()),
         };
         let mut accounts = self.apigatewayv2_state.write();
         let state = accounts.get_or_create(&self.account_id);
