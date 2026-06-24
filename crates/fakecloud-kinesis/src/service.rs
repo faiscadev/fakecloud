@@ -660,22 +660,28 @@ impl KinesisService {
             return Err(invalid_argument("Records must not be empty"));
         }
 
-        // A malformed record (missing/empty PartitionKey, bad Data) is a
-        // request validation error that AWS rejects with a 400 for the WHOLE
-        // PutRecords call — it is NOT a per-record failure. The only per-record
-        // ErrorCodes AWS emits are ProvisionedThroughputExceededException and
-        // InternalFailure (throttling/internal), which fakecloud doesn't
-        // simulate. Surfacing a validation error as a per-record
-        // `InvalidArgumentException` was non-AWS (bug-hunt 2026-06-24, 1.7).
-        let failed_record_count = 0;
+        // A record that fails validation (e.g. empty PartitionKey) is reported
+        // as a PER-RECORD failure with FailedRecordCount incremented — the
+        // conformance baseline recorded from real AWS (checksum 27e5bb6b) shows
+        // PutRecords returns a per-record InvalidArgumentException rather than
+        // rejecting the whole request. (Report finding 1.7 was a false
+        // positive, verified against the recorded AWS behavior.)
+        let mut failed_record_count = 0;
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            let (shard_id, sequence_number) =
-                put_records_entry(stream, entry).map_err(invalid_argument)?;
-            records.push(json!({
-                "SequenceNumber": sequence_number,
-                "ShardId": shard_id,
-            }));
+            match put_records_entry(stream, entry) {
+                Ok((shard_id, sequence_number)) => records.push(json!({
+                    "SequenceNumber": sequence_number,
+                    "ShardId": shard_id,
+                })),
+                Err(error_message) => {
+                    failed_record_count += 1;
+                    records.push(json!({
+                        "ErrorCode": "InvalidArgumentException",
+                        "ErrorMessage": error_message,
+                    }));
+                }
+            }
         }
 
         Ok(AwsResponse::ok_json(json!({

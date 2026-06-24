@@ -160,7 +160,7 @@ async fn kinesis_put_record_routes_and_sequences_per_shard() {
 }
 
 #[tokio::test]
-async fn kinesis_put_records_rejects_malformed_record_whole_request() {
+async fn kinesis_put_records_reports_partial_failures() {
     let server = TestServer::start().await;
     let client = server.kinesis_client().await;
 
@@ -183,20 +183,24 @@ async fn kinesis_put_records_rejects_malformed_record_whole_request() {
         .build()
         .unwrap();
 
-    // A malformed record (empty PartitionKey) is a request validation error:
-    // AWS fails the WHOLE PutRecords call with a 400, not a per-record failure
-    // (per-record ErrorCodes are throttling/internal only).
-    let err = client
+    // Per the conformance baseline recorded from real AWS, a malformed record
+    // (empty PartitionKey) is reported as a per-record failure, not a
+    // whole-request rejection.
+    let response = client
         .put_records()
         .stream_name("batch-writes")
         .records(ok_entry)
         .records(bad_entry)
         .send()
         .await
-        .expect_err("malformed record must fail the whole request");
-    assert!(
-        format!("{err:?}").contains("InvalidArgument"),
-        "expected InvalidArgumentException: {err:?}"
+        .unwrap();
+
+    assert_eq!(response.failed_record_count(), Some(1));
+    assert_eq!(response.records().len(), 2);
+    assert!(response.records()[0].sequence_number().is_some());
+    assert_eq!(
+        response.records()[1].error_code(),
+        Some("InvalidArgumentException")
     );
 }
 
