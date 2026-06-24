@@ -2774,3 +2774,47 @@ async fn logs_describe_log_groups_returns_log_group_class() {
         Some(&aws_sdk_cloudwatchlogs::types::LogGroupClass::Standard)
     );
 }
+
+#[tokio::test]
+async fn logs_index_policy_round_trips_without_arn_suffix() {
+    // PutIndexPolicy / DescribeIndexPolicies must report `logGroupIdentifier`
+    // without the `:*` resource suffix that the log-group ARN carries, so the
+    // Terraform resource's `log_group_name` does not force replacement.
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/idx/app")
+        .send()
+        .await
+        .unwrap();
+
+    let doc = r#"{"Fields":["request.method"]}"#;
+    let put = client
+        .put_index_policy()
+        .log_group_identifier("/idx/app")
+        .policy_document(doc)
+        .send()
+        .await
+        .unwrap();
+
+    let put_id = put.index_policy().unwrap().log_group_identifier().unwrap();
+    assert!(
+        !put_id.ends_with(":*"),
+        "logGroupIdentifier must not carry the :* suffix: {put_id}"
+    );
+    assert!(put_id.ends_with("log-group:/idx/app"));
+
+    let described = client
+        .describe_index_policies()
+        .log_group_identifiers("/idx/app")
+        .send()
+        .await
+        .unwrap();
+    let policies = described.index_policies();
+    assert_eq!(policies.len(), 1);
+    let read_id = policies[0].log_group_identifier().unwrap();
+    assert_eq!(read_id, put_id);
+    assert!(!read_id.ends_with(":*"));
+}

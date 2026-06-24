@@ -219,6 +219,18 @@ impl ResourceProvisioner {
                 .get("IntegrationUri")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            integration_method: props
+                .get("IntegrationMethod")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            integration_response_selection_expression: props
+                .get("IntegrationResponseSelectionExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            passthrough_behavior: props
+                .get("PassthroughBehavior")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             payload_format_version: props
                 .get("PayloadFormatVersion")
                 .and_then(|v| v.as_str())

@@ -559,11 +559,16 @@ impl LogsService {
             });
         }
 
+        // The log-group ARN stored on the group keeps the `:*` resource-suffix;
+        // the index-policy `logGroupIdentifier` reports it without the suffix so
+        // the resource's `log_group_name` round-trips (otherwise the read sees a
+        // `:*`-suffixed identifier and forces replacement).
+        let log_group_identifier = group.arn.trim_end_matches(":*").to_string();
         let result = json!({
             "indexPolicy": {
                 "policyName": policy_name,
                 "policyDocument": policy_document,
-                "logGroupIdentifier": group.arn,
+                "logGroupIdentifier": log_group_identifier,
                 "lastUpdateTime": now,
             }
         });
@@ -601,11 +606,12 @@ impl LogsService {
                 id.to_string()
             };
             if let Some(group) = state.log_groups.get(&group_name) {
+                let log_group_identifier = group.arn.trim_end_matches(":*");
                 for p in &group.index_policies {
                     policies.push(json!({
                         "policyName": p.policy_name,
                         "policyDocument": p.policy_document,
-                        "logGroupIdentifier": group.arn,
+                        "logGroupIdentifier": log_group_identifier,
                         "lastUpdateTime": p.last_updated_time,
                     }));
                 }

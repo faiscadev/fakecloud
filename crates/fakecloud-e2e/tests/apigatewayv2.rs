@@ -379,6 +379,77 @@ async fn test_create_integration() {
 }
 
 #[tokio::test]
+async fn integration_http_api_defaults() {
+    // An HTTP API integration with no timeout reports AWS's 30000ms default and
+    // round-trips integration_method; the WebSocket-only fields stay unset.
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("http-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id().unwrap();
+
+    let integration = client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::HttpProxy)
+        .integration_method("GET")
+        .integration_uri("https://example.com")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(integration.timeout_in_millis(), Some(30000));
+    assert_eq!(integration.integration_method(), Some("GET"));
+    assert_eq!(
+        integration.integration_response_selection_expression(),
+        None
+    );
+    assert_eq!(integration.passthrough_behavior(), None);
+}
+
+#[tokio::test]
+async fn integration_websocket_api_defaults() {
+    // A WebSocket API integration defaults timeout to 29000ms and is reported
+    // with the response-selection-expression and passthrough-behavior defaults.
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("ws-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Websocket)
+        .route_selection_expression("$request.body.action")
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id().unwrap();
+
+    let integration = client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::Mock)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(integration.timeout_in_millis(), Some(29000));
+    assert_eq!(
+        integration.integration_response_selection_expression(),
+        Some("${integration.response.statuscode}")
+    );
+    assert_eq!(
+        integration.passthrough_behavior(),
+        Some(&aws_sdk_apigatewayv2::types::PassthroughBehavior::WhenNoMatch)
+    );
+}
+
+#[tokio::test]
 async fn test_get_integration() {
     let server = TestServer::start().await;
     let client = server.apigatewayv2_client().await;

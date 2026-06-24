@@ -288,6 +288,18 @@ pub struct Integration {
     pub payload_format_version: Option<String>, // "2.0"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_in_millis: Option<i64>,
+    /// HTTP method for an HTTP/HTTP_PROXY integration (e.g. `GET`). Round-tripped
+    /// so the `aws_apigatewayv2_integration` resource doesn't re-plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_method: Option<String>,
+    /// Selection expression for the integration response. WEBSOCKET APIs default
+    /// this to `${integration.response.statuscode}`; HTTP APIs leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_response_selection_expression: Option<String>,
+    /// Passthrough behavior (`WHEN_NO_MATCH`/`WHEN_NO_TEMPLATES`/`NEVER`).
+    /// WEBSOCKET APIs default to `WHEN_NO_MATCH`; HTTP APIs leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passthrough_behavior: Option<String>,
     /// "INTERNET" (default) or "VPC_LINK". AWS always reports it, so the
     /// Terraform provider re-plans an integration whose GetIntegration response
     /// omits it.

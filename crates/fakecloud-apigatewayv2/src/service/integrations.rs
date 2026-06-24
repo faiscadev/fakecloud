@@ -33,6 +33,7 @@ impl ApiGatewayV2Service {
             .to_string();
 
         let integration_uri = body["integrationUri"].as_str().map(|s| s.to_string());
+        let integration_method = body["integrationMethod"].as_str().map(|s| s.to_string());
         let payload_format_version = body["payloadFormatVersion"].as_str().map(|s| s.to_string());
         let timeout_in_millis = body["timeoutInMillis"].as_i64();
         let connection_type = body["connectionType"]
@@ -42,26 +43,54 @@ impl ApiGatewayV2Service {
 
         let integration_id = generate_id("integration");
 
-        let integration = Integration {
-            integration_id: integration_id.clone(),
-            integration_type,
-            integration_uri,
-            payload_format_version,
-            timeout_in_millis,
-            connection_type,
-        };
-
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
         // Verify API exists
-        if !state.apis.contains_key(api_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NotFoundException",
-                format!("API not found: {}", api_id),
-            ));
-        }
+        let protocol_type = match state.apis.get(api_id) {
+            Some(api) => api.protocol_type.clone(),
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("API not found: {}", api_id),
+                ));
+            }
+        };
+
+        // AWS applies a protocol-specific default integration timeout when the
+        // request omits one: 29000ms for WEBSOCKET APIs, 30000ms for HTTP APIs.
+        let is_websocket = protocol_type.eq_ignore_ascii_case("WEBSOCKET");
+
+        let timeout_in_millis =
+            Some(timeout_in_millis.unwrap_or(if is_websocket { 29000 } else { 30000 }));
+
+        // WEBSOCKET integrations report a default response selection expression;
+        // an explicit request value overrides it. HTTP APIs leave it unset.
+        let integration_response_selection_expression = body
+            ["integrationResponseSelectionExpression"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| is_websocket.then(|| "${integration.response.statuscode}".to_string()));
+
+        // WEBSOCKET integrations default passthrough_behavior to WHEN_NO_MATCH;
+        // HTTP APIs leave it unset. An explicit request value overrides.
+        let passthrough_behavior = body["passthroughBehavior"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| is_websocket.then(|| "WHEN_NO_MATCH".to_string()));
+
+        let integration = Integration {
+            integration_id: integration_id.clone(),
+            integration_type,
+            integration_uri,
+            integration_method,
+            integration_response_selection_expression,
+            passthrough_behavior,
+            payload_format_version,
+            timeout_in_millis,
+            connection_type,
+        };
 
         state
             .integrations
@@ -202,6 +231,14 @@ impl ApiGatewayV2Service {
 
         if let Some(integration_uri) = body["integrationUri"].as_str() {
             integration.integration_uri = Some(integration_uri.to_string());
+        }
+
+        if let Some(integration_method) = body["integrationMethod"].as_str() {
+            integration.integration_method = Some(integration_method.to_string());
+        }
+
+        if let Some(passthrough_behavior) = body["passthroughBehavior"].as_str() {
+            integration.passthrough_behavior = Some(passthrough_behavior.to_string());
         }
 
         if let Some(payload_format_version) = body["payloadFormatVersion"].as_str() {
