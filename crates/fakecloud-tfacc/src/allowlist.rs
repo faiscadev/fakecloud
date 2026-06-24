@@ -325,12 +325,13 @@ pub const SERVICES: &[Service] = &[
         // ListTagsForResource resolves delivery-destination ARNs).
         run_regex: "^TestAccLogs[A-Za-z]+_basic$",
         deny: &[
-            // --- gap: this data source's document GENERATION round-trips, but
-            //     its acceptance config provisions a Firehose delivery stream as
-            //     a findings destination, which drifts on Firehose's
-            //     `extended_s3_configuration` computed defaults (custom_time_zone,
-            //     s3_backup_mode) and the cross-service `LogDeliveryEnabled`
-            //     auto-tag. That is a Firehose-fidelity gap, not a logs one. ---
+            // --- gap: this data source's document GENERATION round-trips, and
+            //     the Firehose extended_s3 default-options drift is now fixed, but
+            //     its config still drifts on the cross-service `LogDeliveryEnabled`
+            //     auto-tag: when a CloudWatch Logs data-protection policy names a
+            //     Firehose stream as a findings destination, AWS tags that stream
+            //     `LogDeliveryEnabled=true`. fakecloud does not perform that
+            //     logs -> firehose cross-service tag write. ---
             "TestAccLogsDataProtectionPolicyDocumentDataSource_basic",
         ],
     },
@@ -624,15 +625,13 @@ pub const SERVICES: &[Service] = &[
         // name), and GetWebACL only reports ApplicationIntegrationURL when the ACL
         // declares token domains (the provider always sends a default CaptchaConfig
         // even for a basic ACL, so the CAPTCHA endpoint must gate on token domains).
+        // (WebACLLoggingConfiguration now passes: it provisions a Firehose
+        //  delivery stream as the log destination, and Firehose's ExtendedS3
+        //  description now reports the default option blocks AWS returns
+        //  (CloudWatchLoggingOptions/CustomTimeZone/S3BackupMode), so the stream
+        //  no longer re-plans.)
         run_regex: "^TestAccWAFV2[A-Za-z0-9]+_basic$",
-        deny: &[
-            // --- gap: the logging-configuration test provisions a Firehose
-            //     delivery stream as the log destination, which drifts on
-            //     Firehose's extended_s3_configuration computed defaults
-            //     (custom_time_zone, s3_backup_mode) — a Firehose-fidelity gap,
-            //     not a WAF one. ---
-            "TestAccWAFV2WebACLLoggingConfiguration_basic",
-        ],
+        deny: &[],
     },
     Service {
         name: "firehose",
