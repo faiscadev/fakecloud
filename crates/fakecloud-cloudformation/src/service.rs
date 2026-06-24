@@ -95,6 +95,21 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Bedrock" => "bedrock",
         "Scheduler" => "scheduler",
         "IAM" => "iam",
+        // Services whose CloudFormation namespace differs from their fakecloud
+        // service name, and which were missing from this table: their
+        // provisioner mutates snapshot-backed state directly, so CFN-created
+        // (and CFN-deleted) resources vanished on restart while their
+        // direct-API equivalents persisted (#1766 class). Each has a registered
+        // snapshot hook in the server.
+        "CertificateManager" => "acm",
+        "ElasticLoadBalancingV2" => "elbv2",
+        "CloudFront" => "cloudfront",
+        "Route53" => "route53",
+        "KinesisFirehose" => "firehose",
+        "Glue" => "glue",
+        "WAFv2" => "wafv2",
+        "Athena" => "athena",
+        "Organizations" => "organizations",
         _ => return None,
     })
 }
@@ -3304,12 +3319,43 @@ mod tests {
             Some("eventbridge")
         );
         assert_eq!(service_key_for_type("AWS::Logs::LogGroup"), Some("logs"));
+        assert_eq!(
+            service_key_for_type("AWS::ElastiCache::CacheCluster"),
+            Some("elasticache")
+        );
         // S3 has no snapshot hook (it persists via the S3Store write-through).
         assert_eq!(service_key_for_type("AWS::S3::Bucket"), None);
-        // Non-snapshot-backed services.
+        // Snapshot-backed services whose CFN namespace differs from the
+        // fakecloud service name (these were missing from the map, #1766 class).
         assert_eq!(
             service_key_for_type("AWS::CertificateManager::Certificate"),
-            None
+            Some("acm")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::ElasticLoadBalancingV2::LoadBalancer"),
+            Some("elbv2")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::CloudFront::Distribution"),
+            Some("cloudfront")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::Route53::HostedZone"),
+            Some("route53")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::KinesisFirehose::DeliveryStream"),
+            Some("firehose")
+        );
+        assert_eq!(service_key_for_type("AWS::Glue::Database"), Some("glue"));
+        assert_eq!(service_key_for_type("AWS::WAFv2::WebACL"), Some("wafv2"));
+        assert_eq!(
+            service_key_for_type("AWS::Athena::WorkGroup"),
+            Some("athena")
+        );
+        assert_eq!(
+            service_key_for_type("AWS::Organizations::Organization"),
+            Some("organizations")
         );
         // Malformed / non-AWS types.
         assert_eq!(service_key_for_type("AWS::Lambda"), None);

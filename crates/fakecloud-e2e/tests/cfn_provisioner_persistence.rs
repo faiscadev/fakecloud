@@ -22,7 +22,11 @@ const CFN_TEMPLATE: &str = r#"{"Resources":{
   "F":{"Type":"AWS::Lambda::Function","Properties":{
     "FunctionName":"cfn-fn","Runtime":"provided.al2","Handler":"index.handler",
     "Role":"arn:aws:iam::123456789012:role/r",
-    "Code":{"ZipFile":"def handler(event, context):\n    return {}\n"}}}}}"#;
+    "Code":{"ZipFile":"def handler(event, context):\n    return {}\n"}}},
+  "Zone":{"Type":"AWS::Route53::HostedZone","Properties":{"Name":"cfn-zone.example.com."}},
+  "GlueDb":{"Type":"AWS::Glue::Database","Properties":{
+    "CatalogId":"123456789012",
+    "DatabaseInput":{"Name":"cfn_glue_db"}}}}}"#;
 
 fn minimal_zip() -> Vec<u8> {
     use std::io::Write;
@@ -75,6 +79,34 @@ async fn queue_urls(server: &TestServer) -> Vec<String> {
         .unwrap()
         .queue_urls()
         .to_vec()
+}
+
+async fn hosted_zone_names(server: &TestServer) -> Vec<String> {
+    server
+        .route53_client()
+        .await
+        .list_hosted_zones()
+        .send()
+        .await
+        .unwrap()
+        .hosted_zones()
+        .iter()
+        .map(|z| z.name().to_string())
+        .collect()
+}
+
+async fn glue_database_names(server: &TestServer) -> Vec<String> {
+    server
+        .glue_client()
+        .await
+        .get_databases()
+        .send()
+        .await
+        .unwrap()
+        .database_list()
+        .iter()
+        .map(|d| d.name().to_string())
+        .collect()
 }
 
 async fn bucket_names(server: &TestServer) -> Vec<String> {
@@ -206,6 +238,20 @@ async fn cfn_provisioned_resources_survive_restart() {
     assert!(
         buckets.contains(&"api-bucket".to_string()),
         "api-bucket lost: {buckets:?}"
+    );
+
+    // Services whose CFN namespace differs from the fakecloud service name and
+    // were missing from `service_key_for_type` (#1766 class): these vanished on
+    // restart before the fix.
+    let zones = hosted_zone_names(&server).await;
+    assert!(
+        zones.iter().any(|n| n == "cfn-zone.example.com."),
+        "cfn-zone lost: {zones:?}"
+    );
+    let glue_dbs = glue_database_names(&server).await;
+    assert!(
+        glue_dbs.contains(&"cfn_glue_db".to_string()),
+        "cfn_glue_db lost: {glue_dbs:?}"
     );
 }
 
