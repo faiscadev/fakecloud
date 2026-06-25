@@ -312,10 +312,24 @@ fn endpoints_proxies_secgroups() {
     );
     ok_on(&svc, "DescribeDBProxyEndpoints", &[]);
     ok_on(&svc, "DescribeDBProxyTargetGroups", &[]);
-    ok_on(&svc, "DescribeDBProxyTargets", &[]);
+    ok_on(&svc, "DescribeDBProxyTargets", &[("DBProxyName", "p1")]);
     ok_on(&svc, "ModifyDBProxyTargetGroup", &[("DBProxyName", "p1")]);
-    ok_on(&svc, "RegisterDBProxyTargets", &[]);
-    ok_on(&svc, "DeregisterDBProxyTargets", &[]);
+    ok_on(
+        &svc,
+        "RegisterDBProxyTargets",
+        &[
+            ("DBProxyName", "p1"),
+            ("DBInstanceIdentifiers.member.1", "db1"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "DeregisterDBProxyTargets",
+        &[
+            ("DBProxyName", "p1"),
+            ("DBInstanceIdentifiers.member.1", "db1"),
+        ],
+    );
     ok_on(
         &svc,
         "DeleteDBProxyEndpoint",
@@ -369,8 +383,16 @@ fn option_groups_event_subs_global_clusters() {
         "ModifyEventSubscription",
         &[("SubscriptionName", "es1")],
     );
-    ok_on(&svc, "AddSourceIdentifierToSubscription", &[]);
-    ok_on(&svc, "RemoveSourceIdentifierFromSubscription", &[]);
+    ok_on(
+        &svc,
+        "AddSourceIdentifierToSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "db1")],
+    );
+    ok_on(
+        &svc,
+        "RemoveSourceIdentifierFromSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "db1")],
+    );
     ok_on(&svc, "DescribeEventSubscriptions", &[]);
     ok_on(
         &svc,
@@ -382,10 +404,26 @@ fn option_groups_event_subs_global_clusters() {
         "CreateGlobalCluster",
         &[("GlobalClusterIdentifier", "gc1")],
     );
-    ok_on(&svc, "ModifyGlobalCluster", &[]);
-    ok_on(&svc, "FailoverGlobalCluster", &[]);
-    ok_on(&svc, "SwitchoverGlobalCluster", &[]);
-    ok_on(&svc, "RemoveFromGlobalCluster", &[]);
+    ok_on(
+        &svc,
+        "ModifyGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")],
+    );
+    ok_on(
+        &svc,
+        "FailoverGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")],
+    );
+    ok_on(
+        &svc,
+        "SwitchoverGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")],
+    );
+    ok_on(
+        &svc,
+        "RemoveFromGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")],
+    );
     ok_on(&svc, "DescribeGlobalClusters", &[]);
     ok_on(
         &svc,
@@ -398,7 +436,11 @@ fn option_groups_event_subs_global_clusters() {
 fn integrations_blue_green_shard_groups_tenant_dbs() {
     let svc = svc();
     ok_on(&svc, "CreateIntegration", &[("IntegrationName", "i1")]);
-    ok_on(&svc, "ModifyIntegration", &[]);
+    ok_on(
+        &svc,
+        "ModifyIntegration",
+        &[("IntegrationIdentifier", "i1")],
+    );
     ok_on(&svc, "DescribeIntegrations", &[]);
     ok_on(
         &svc,
@@ -1853,12 +1895,109 @@ fn modify_option_group_persists_options_to_include_and_remove() {
         ],
     );
     let v = extras_value(&svc, "option_groups", "og1");
-    assert_eq!(v["OptionsToInclude"][0]["OptionName"].as_str(), Some("OEM"));
-    assert_eq!(v["OptionsToInclude"][0]["Port"].as_str(), Some("1158"));
-    assert_eq!(
-        v["OptionsToRemove"][0].as_str(),
-        Some("Native Network Encryption")
+    // The effective Options list reflects the included option; the removed
+    // name was never present, so it stays absent. DescribeOptionGroups now
+    // renders this set instead of an empty <Options/>.
+    assert_eq!(v["Options"][0]["OptionName"].as_str(), Some("OEM"));
+    assert_eq!(v["Options"][0]["Port"].as_str(), Some("1158"));
+    assert!(!v["Options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|o| o["OptionName"].as_str() == Some("Native Network Encryption")));
+}
+
+#[test]
+fn event_subscription_round_trips_source_ids_and_categories() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateEventSubscription",
+        &[
+            ("SubscriptionName", "es1"),
+            ("SnsTopicArn", "arn:aws:sns:us-east-1:000000000000:t"),
+            ("SourceIds.member.1", "db1"),
+            ("SourceIds.member.2", "db2"),
+            ("EventCategories.member.1", "creation"),
+        ],
     );
+    let v = extras_value(&svc, "event_subscriptions", "es1");
+    assert_eq!(v["SourceIdsList"][0].as_str(), Some("db1"));
+    assert_eq!(v["SourceIdsList"][1].as_str(), Some("db2"));
+    assert_eq!(v["EventCategoriesList"][0].as_str(), Some("creation"));
+    // Add/remove a source identifier mutates the persisted list.
+    ok_on(
+        &svc,
+        "AddSourceIdentifierToSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "db3")],
+    );
+    let v = extras_value(&svc, "event_subscriptions", "es1");
+    assert!(v["SourceIdsList"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x.as_str() == Some("db3")));
+    ok_on(
+        &svc,
+        "RemoveSourceIdentifierFromSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "db1")],
+    );
+    let v = extras_value(&svc, "event_subscriptions", "es1");
+    assert!(!v["SourceIdsList"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x.as_str() == Some("db1")));
+}
+
+#[test]
+fn register_db_proxy_targets_round_trips() {
+    let svc = svc();
+    ok_on(&svc, "CreateDBProxy", &[("DBProxyName", "p1")]);
+    ok_on(
+        &svc,
+        "RegisterDBProxyTargets",
+        &[
+            ("DBProxyName", "p1"),
+            ("DBInstanceIdentifiers.member.1", "db1"),
+        ],
+    );
+    let v = extras_value(&svc, "proxy_targets", "p1/default");
+    assert_eq!(v[0]["RdsResourceId"].as_str(), Some("db1"));
+    assert_eq!(v[0]["Type"].as_str(), Some("RDS_INSTANCE"));
+    ok_on(
+        &svc,
+        "DeregisterDBProxyTargets",
+        &[
+            ("DBProxyName", "p1"),
+            ("DBInstanceIdentifiers.member.1", "db1"),
+        ],
+    );
+    let v = extras_value(&svc, "proxy_targets", "p1/default");
+    assert_eq!(v.as_array().map(|a| a.len()), Some(0));
+}
+
+#[test]
+fn modify_global_cluster_persists_deletion_protection() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "gc1"),
+            ("Engine", "aurora-postgresql"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "ModifyGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "gc1"),
+            ("DeletionProtection", "true"),
+        ],
+    );
+    let v = extras_value(&svc, "global_clusters", "gc1");
+    assert_eq!(v["DeletionProtection"].as_bool(), Some(true));
 }
 
 #[test]
