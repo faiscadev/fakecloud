@@ -129,11 +129,10 @@ async fn test_get_identity_verification_attributes() {
         aws_sdk_ses::types::VerificationStatus::Success
     );
 
-    let unknown = attrs.get("unknown@example.com").expect("unknown entry");
-    assert_eq!(
-        *unknown.verification_status(),
-        aws_sdk_ses::types::VerificationStatus::NotStarted
-    );
+    // AWS omits unknown identities from the VerificationAttributes map entirely
+    // (the Terraform provider relies on absent-from-map == NotFound for its
+    // CheckDestroy), so the unknown identity is not present in the response.
+    assert!(!attrs.contains_key("unknown@example.com"));
 }
 
 #[tokio::test]
