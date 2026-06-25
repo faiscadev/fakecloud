@@ -200,6 +200,35 @@ impl ApiGatewayService {
                         s.variables.insert(k, v.to_string());
                     }
                 }
+                // Access-log + canary settings were dropped: their patch arms
+                // fell through, so enabling access logging or a canary
+                // deployment silently no-op'd (bug-hunt 2026-06-24, 1.11).
+                _ if path.starts_with("/accessLogSettings/") => {
+                    let key = path.trim_start_matches("/accessLogSettings/").to_string();
+                    let obj = s
+                        .access_log_settings
+                        .get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = obj.as_object_mut() {
+                        if op == "remove" {
+                            m.remove(&key);
+                        } else {
+                            m.insert(key, value.clone());
+                        }
+                    }
+                }
+                _ if path.starts_with("/canarySettings/") => {
+                    let key = path.trim_start_matches("/canarySettings/").to_string();
+                    let obj = s
+                        .canary_settings
+                        .get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = obj.as_object_mut() {
+                        if op == "remove" {
+                            m.remove(&key);
+                        } else {
+                            m.insert(key, value.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
         });

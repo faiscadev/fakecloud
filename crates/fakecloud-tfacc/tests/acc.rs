@@ -193,6 +193,11 @@ async fn dynamodb_resources_acceptance() {
 }
 
 #[tokio::test]
+async fn ses_acceptance() {
+    run_shard("ses").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }

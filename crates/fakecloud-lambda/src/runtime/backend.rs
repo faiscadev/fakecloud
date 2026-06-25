@@ -114,4 +114,11 @@ pub trait LambdaBackend: Send + Sync + 'static {
     async fn prepull_image(&self, _image: &str) -> Result<(), RuntimeError> {
         Ok(())
     }
+
+    /// Fetch the recent stdout/stderr of a running instance, used to build the
+    /// `X-Amz-Log-Result` tail an `Invoke` with `LogType=Tail` returns. Default
+    /// `None` (no logs available); the container backends override it.
+    async fn instance_logs(&self, _handle: &BackendHandle) -> Option<String> {
+        None
+    }
 }

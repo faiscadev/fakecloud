@@ -97,6 +97,90 @@ async fn firehose_create_describe_delete_roundtrip() {
 }
 
 #[tokio::test]
+async fn firehose_http_endpoint_destination_round_trips() {
+    use aws_sdk_firehose::types::{
+        HttpEndpointConfiguration, HttpEndpointDestinationConfiguration,
+        HttpEndpointDestinationUpdate,
+    };
+
+    let server = TestServer::start().await;
+    let firehose = setup(&server, "fh-http-bucket").await;
+
+    // A non-S3 (HTTP endpoint) destination must round-trip through
+    // DescribeDeliveryStream instead of being dropped (bug-hunt 2026-06-24,
+    // 1.13 — UpdateDestination/Create only handled S3/ExtendedS3).
+    firehose
+        .create_delivery_stream()
+        .delivery_stream_name("fh-http")
+        .http_endpoint_destination_configuration(
+            HttpEndpointDestinationConfiguration::builder()
+                .endpoint_configuration(
+                    HttpEndpointConfiguration::builder()
+                        .url("https://example.com/ingest")
+                        .name("my-endpoint")
+                        .build()
+                        .unwrap(),
+                )
+                .role_arn("arn:aws:iam::123456789012:role/firehose")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create http endpoint stream");
+
+    let desc = firehose
+        .describe_delivery_stream()
+        .delivery_stream_name("fh-http")
+        .send()
+        .await
+        .expect("describe");
+    let d = desc.delivery_stream_description().unwrap();
+    let http = d.destinations()[0]
+        .http_endpoint_destination_description()
+        .expect("http endpoint description present");
+    assert_eq!(
+        http.endpoint_configuration().and_then(|e| e.url()),
+        Some("https://example.com/ingest")
+    );
+
+    // UpdateDestination must also persist a changed HTTP endpoint.
+    let version = d.version_id();
+    let dest_id = d.destinations()[0].destination_id();
+    firehose
+        .update_destination()
+        .delivery_stream_name("fh-http")
+        .current_delivery_stream_version_id(version)
+        .destination_id(dest_id)
+        .http_endpoint_destination_update(
+            HttpEndpointDestinationUpdate::builder()
+                .endpoint_configuration(
+                    HttpEndpointConfiguration::builder()
+                        .url("https://example.com/v2")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update http endpoint");
+
+    let desc = firehose
+        .describe_delivery_stream()
+        .delivery_stream_name("fh-http")
+        .send()
+        .await
+        .expect("describe after update");
+    let http = desc.delivery_stream_description().unwrap().destinations()[0]
+        .http_endpoint_destination_description()
+        .expect("http endpoint description after update");
+    assert_eq!(
+        http.endpoint_configuration().and_then(|e| e.url()),
+        Some("https://example.com/v2")
+    );
+}
+
+#[tokio::test]
 async fn firehose_put_record_writes_to_s3() {
     let server = TestServer::start().await;
     let firehose = setup(&server, "fh-bucket-put").await;

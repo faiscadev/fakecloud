@@ -26,7 +26,8 @@ const LAMBDA_RUNTIME_PYTHON_FILTER: &str = concat!(
     "test(test_invoke_warm_start) | ",
     "test(test_invoke_with_payload) | ",
     "test(test_invoke_with_environment) | ",
-    "test(test_invoke_no_code)",
+    "test(test_invoke_no_code) | ",
+    "test(invoke_with_log_type_tail_returns_log_result)",
     ")"
 );
 const LAMBDA_RUNTIME_NODEJS_FILTER: &str = concat!(

@@ -65,6 +65,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         },
     );
 }

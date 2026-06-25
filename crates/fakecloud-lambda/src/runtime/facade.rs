@@ -214,6 +214,30 @@ impl LambdaRuntime {
         payload: &[u8],
         layers: &[Vec<u8>],
     ) -> Result<Vec<u8>, RuntimeError> {
+        self.invoke_inner(func, payload, layers, false)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// Like [`Self::invoke`] but also returns the instance's recent log tail
+    /// (for `Invoke` with `LogType=Tail` -> `X-Amz-Log-Result`). `None` when the
+    /// backend can't supply logs.
+    pub async fn invoke_with_log_tail(
+        &self,
+        func: &LambdaFunction,
+        payload: &[u8],
+        layers: &[Vec<u8>],
+    ) -> Result<(Vec<u8>, Option<String>), RuntimeError> {
+        self.invoke_inner(func, payload, layers, true).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        func: &LambdaFunction,
+        payload: &[u8],
+        layers: &[Vec<u8>],
+        capture_logs: bool,
+    ) -> Result<(Vec<u8>, Option<String>), RuntimeError> {
         let client = reqwest::Client::builder()
             .connect_timeout(REACHABILITY_PROBE_TIMEOUT)
             .build()
@@ -263,7 +287,18 @@ impl LambdaRuntime {
                     let body = resp.bytes().await;
                     *slot.entry.last_used.write() = Instant::now();
                     return match body {
-                        Ok(b) => Ok(b.to_vec()),
+                        Ok(b) => {
+                            // Capture the instance's log tail while the slot
+                            // (and thus the container/Pod) is still alive.
+                            let logs = if capture_logs {
+                                self.backend
+                                    .instance_logs(&slot.entry.instance.handle)
+                                    .await
+                            } else {
+                                None
+                            };
+                            Ok((b.to_vec(), logs))
+                        }
                         Err(e) => {
                             // Response failed mid-stream — the instance is
                             // suspect. Evict it but don't retry: the

@@ -660,6 +660,12 @@ impl KinesisService {
             return Err(invalid_argument("Records must not be empty"));
         }
 
+        // A record that fails validation (e.g. empty PartitionKey) is reported
+        // as a PER-RECORD failure with FailedRecordCount incremented — the
+        // conformance baseline recorded from real AWS (checksum 27e5bb6b) shows
+        // PutRecords returns a per-record InvalidArgumentException rather than
+        // rejecting the whole request. (Report finding 1.7 was a false
+        // positive, verified against the recorded AWS behavior.)
         let mut failed_record_count = 0;
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -1819,14 +1825,97 @@ impl KinesisService {
             )));
         }
 
-        Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ResourceNotFoundException",
-            format!(
-                "Consumer {} for shard {} not found.",
-                consumer_arn, shard_id
-            ),
-        ))
+        // Enhanced fan-out: consult the registered consumers. Previously this
+        // returned ResourceNotFoundException unconditionally — even for a
+        // consumer that Register/Describe had populated — so every fan-out read
+        // failed (bug-hunt 2026-06-24, 1.9). Resolve the consumer, its stream
+        // and shard, the starting position, and stream the records back as a
+        // `SubscribeToShardEvent` over the eventstream wire format the SDK
+        // expects.
+        let accounts = self.state.read();
+        let empty = KinesisState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let consumer = state.consumers.get(consumer_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                format!("Consumer {consumer_arn} not found."),
+            )
+        })?;
+        let stream_name = consumer
+            .stream_arn
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let stream = state
+            .streams
+            .get(&stream_name)
+            .ok_or_else(|| stream_not_found(&state.account_id, &stream_name))?;
+        let shard = stream
+            .shards
+            .iter()
+            .find(|s| s.shard_id == shard_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Shard {shard_id} not found in stream {stream_name}."),
+                )
+            })?;
+
+        // SubscribeToShard's StartingPosition uses `SequenceNumber`;
+        // GetShardIterator (which `shard_iterator_start_index` reads) uses
+        // `StartingSequenceNumber`. Bridge the field names.
+        let synthetic = json!({
+            "StartingSequenceNumber": starting_position.get("SequenceNumber").cloned().unwrap_or(Value::Null),
+            "Timestamp": starting_position.get("Timestamp").cloned().unwrap_or(Value::Null),
+        });
+        let start_index = shard_iterator_start_index(shard, position_type, &synthetic)?;
+
+        // AWS caps a SubscribeToShard event at 1000 records / 10 MiB.
+        let end_index = shard.records.len().min(start_index.saturating_add(1000));
+        let records: Vec<Value> = shard.records[start_index..end_index]
+            .iter()
+            .map(|record| {
+                json!({
+                    "ApproximateArrivalTimestamp": record.approximate_arrival_timestamp.timestamp_millis() as f64 / 1000.0,
+                    "Data": base64::engine::general_purpose::STANDARD.encode(&record.data),
+                    "PartitionKey": record.partition_key,
+                    "SequenceNumber": record.sequence_number,
+                })
+            })
+            .collect();
+
+        let continuation = shard
+            .records
+            .get(end_index.saturating_sub(1))
+            .map(|r| r.sequence_number.clone());
+        let total = shard.records.len();
+        let millis_behind_latest = if end_index >= total || end_index == 0 {
+            0
+        } else {
+            let last = shard.records[end_index - 1].approximate_arrival_timestamp;
+            let tip = shard.records[total - 1].approximate_arrival_timestamp;
+            (tip - last).num_milliseconds().max(0)
+        };
+
+        let mut event = json!({
+            "Records": records,
+            "MillisBehindLatest": millis_behind_latest,
+        });
+        if let Some(c) = continuation {
+            event["ContinuationSequenceNumber"] = json!(c);
+        }
+        let payload = serde_json::to_vec(&event).unwrap_or_default();
+        let frame = crate::eventstream::subscribe_to_shard_event_frame(&payload);
+
+        Ok(AwsResponse {
+            status: StatusCode::OK,
+            content_type: "application/vnd.amazon.eventstream".to_string(),
+            body: frame.into(),
+            headers: http::HeaderMap::new(),
+        })
     }
 }
 

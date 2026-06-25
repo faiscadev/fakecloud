@@ -10,6 +10,34 @@ pub(crate) fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
+/// Normalize an `Identity` parameter to the bare identity name used as the
+/// state map key. SES v1 accepts either the bare email/domain or the identity
+/// ARN (`arn:aws:ses:<region>:<acct>:identity/<name>`); the Terraform provider
+/// passes the ARN to actions like SetIdentityNotificationTopic and
+/// DeleteIdentity, so a lookup keyed on the raw param would miss.
+pub(crate) fn identity_key(identity: &str) -> &str {
+    identity
+        .rsplit_once(":identity/")
+        .map(|(_, name)| name)
+        .unwrap_or(identity)
+}
+
+/// Deterministic 64-hex-char domain-verification token for an identity. Real
+/// SES returns a stable token per identity; deriving it from the name keeps
+/// VerifyDomainIdentity and GetIdentityVerificationAttributes in agreement
+/// across calls and process restarts.
+pub(crate) fn verification_token_for(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"fakecloud-ses-verification:");
+    hasher.update(name.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Dispatch a v1 Query protocol action.
 pub fn handle_v1_action(
     state: &SharedSesState,
@@ -692,6 +720,7 @@ pub(crate) fn verify_email_identity(
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         });
     Ok(xml_metadata_only("VerifyEmailIdentity", &req.request_id))
 }
@@ -727,6 +756,7 @@ pub(crate) fn verify_email_address(
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         });
     Ok(xml_metadata_only("VerifyEmailAddress", &req.request_id))
 }
@@ -786,6 +816,7 @@ pub(crate) fn verify_domain_identity(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let domain = required_param(&req.query_params, "Domain")?;
+    let token = verification_token_for(domain);
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
     st.identities
@@ -809,9 +840,8 @@ pub(crate) fn verify_domain_identity(
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: Some(token.clone()),
         });
-    // Return a verification token
-    let token = format!("{:x}{:x}{:x}", rand_u64(), rand_u64(), rand_u64());
     let inner = format!("<VerificationToken>{token}</VerificationToken>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
@@ -849,6 +879,7 @@ pub(crate) fn verify_domain_dkim(
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         });
     // VerifyDomainDkim is the moment SES tells you "ok, I generated DKIM
     // keys, here are the CNAMEs you must publish". Lazily create the
@@ -912,24 +943,33 @@ pub(crate) fn get_identity_verification_attributes(
         let key = format!("Identities.member.{i}");
         match req.query_params.get(&key) {
             Some(identity_name) => {
+                // AWS omits unknown identities from the VerificationAttributes
+                // map entirely; the Terraform provider treats absent-from-map as
+                // NotFound (its CheckDestroy relies on this). Emitting a
+                // NotStarted entry for a deleted identity would read as "still
+                // exists", so only emit an entry when the identity is in state.
+                let Some(identity) = st.identities.get(identity_key(identity_name)) else {
+                    continue;
+                };
                 inner.push_str("<entry>");
                 inner.push_str(&format!("<key>{}</key>", xml_escape(identity_name)));
                 inner.push_str("<value>");
-                if let Some(identity) = st.identities.get(identity_name.as_str()) {
-                    let status = if identity.verified {
-                        "Success"
-                    } else {
-                        "Pending"
-                    };
-                    inner.push_str(&format!(
-                        "<VerificationStatus>{status}</VerificationStatus>"
-                    ));
-                    if identity.identity_type == "Domain" {
-                        let token = format!("{:x}", rand_u64());
-                        inner.push_str(&format!("<VerificationToken>{token}</VerificationToken>"));
-                    }
+                let status = if identity.verified {
+                    "Success"
                 } else {
-                    inner.push_str("<VerificationStatus>NotStarted</VerificationStatus>");
+                    "Pending"
+                };
+                inner.push_str(&format!(
+                    "<VerificationStatus>{status}</VerificationStatus>"
+                ));
+                if identity.identity_type == "Domain" {
+                    // Report the stored deterministic token (falling back to
+                    // deriving it for identities created before the field).
+                    let token = identity
+                        .verification_token
+                        .clone()
+                        .unwrap_or_else(|| verification_token_for(&identity.identity_name));
+                    inner.push_str(&format!("<VerificationToken>{token}</VerificationToken>"));
                 }
                 inner.push_str("</value>");
                 inner.push_str("</entry>");
@@ -964,7 +1004,7 @@ pub(crate) fn get_identity_dkim_attributes(
                 inner.push_str("<entry>");
                 inner.push_str(&format!("<key>{}</key>", xml_escape(identity_name)));
                 inner.push_str("<value>");
-                if let Some(identity) = st.identities.get(identity_name.as_str()) {
+                if let Some(identity) = st.identities.get(identity_key(identity_name)) {
                     let enabled = identity.dkim_signing_enabled;
                     let status = if identity.verified {
                         "Success"
@@ -1008,6 +1048,7 @@ pub(crate) fn delete_identity(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let identity = required_param(&req.query_params, "Identity")?;
+    let identity = identity_key(identity);
     state
         .write()
         .get_or_create(&req.account_id)
@@ -1021,6 +1062,7 @@ pub(crate) fn set_identity_dkim_enabled(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let identity = required_param(&req.query_params, "Identity")?;
+    let identity = identity_key(identity);
     let enabled = required_param(&req.query_params, "DkimEnabled")? == "true";
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
@@ -1059,6 +1101,7 @@ pub(crate) fn set_identity_notification_topic(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let identity = required_param(&req.query_params, "Identity")?;
+    let identity = identity_key(identity);
     let notification_type = required_param(&req.query_params, "NotificationType")?;
     // SnsTopic is optional, and an empty value clears the topic (disables SNS
     // notifications for that type), matching AWS.
@@ -1100,6 +1143,7 @@ pub(crate) fn set_identity_feedback_forwarding_enabled(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let identity = required_param(&req.query_params, "Identity")?;
+    let identity = identity_key(identity);
     let enabled = required_param(&req.query_params, "ForwardingEnabled")? == "true";
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
@@ -1133,7 +1177,7 @@ pub(crate) fn get_identity_notification_attributes(
                 inner.push_str("<entry>");
                 inner.push_str(&format!("<key>{}</key>", xml_escape(identity_name)));
                 inner.push_str("<value>");
-                if let Some(identity) = st.identities.get(identity_name.as_str()) {
+                if let Some(identity) = st.identities.get(identity_key(identity_name)) {
                     inner.push_str(&format!(
                         "<ForwardingEnabled>{}</ForwardingEnabled>\
                          <HeadersInBounceNotificationsEnabled>false</HeadersInBounceNotificationsEnabled>\
@@ -1193,34 +1237,32 @@ pub(crate) fn get_identity_mail_from_domain_attributes(
         let key = format!("Identities.member.{i}");
         match req.query_params.get(&key) {
             Some(identity_name) => {
+                // AWS omits unknown identities from the map; the provider treats
+                // absent-from-map as NotFound (mail-from CheckDestroy relies on
+                // it). Only emit an entry for an identity that exists.
+                let Some(identity) = st.identities.get_mut(identity_key(identity_name)) else {
+                    continue;
+                };
+                let mail_from = identity.mail_from_domain.clone().unwrap_or_default();
+                if identity.mail_from_domain_status == "Pending" && !mail_from.is_empty() {
+                    identity.mail_from_domain_status = "Success".to_string();
+                }
+                if mail_from.is_empty() {
+                    identity.mail_from_domain_status = "NotStarted".to_string();
+                }
+                let behavior = identity.mail_from_behavior_on_mx_failure.clone();
+                let status = identity.mail_from_domain_status.clone();
                 inner.push_str("<entry>");
                 inner.push_str(&format!("<key>{}</key>", xml_escape(identity_name)));
                 inner.push_str("<value>");
-                if let Some(identity) = st.identities.get_mut(identity_name.as_str()) {
-                    let mail_from = identity.mail_from_domain.clone().unwrap_or_default();
-                    if identity.mail_from_domain_status == "Pending" && !mail_from.is_empty() {
-                        identity.mail_from_domain_status = "Success".to_string();
-                    }
-                    if mail_from.is_empty() {
-                        identity.mail_from_domain_status = "NotStarted".to_string();
-                    }
-                    let behavior = identity.mail_from_behavior_on_mx_failure.clone();
-                    let status = identity.mail_from_domain_status.clone();
-                    inner.push_str(&format!(
-                        "<MailFromDomain>{}</MailFromDomain>\
-                         <MailFromDomainStatus>{}</MailFromDomainStatus>\
-                         <BehaviorOnMXFailure>{}</BehaviorOnMXFailure>",
-                        xml_escape(&mail_from),
-                        xml_escape(&status),
-                        xml_escape(&behavior),
-                    ));
-                } else {
-                    inner.push_str(
-                        "<MailFromDomain/>\
-                         <MailFromDomainStatus>NotStarted</MailFromDomainStatus>\
-                         <BehaviorOnMXFailure>UseDefaultValue</BehaviorOnMXFailure>",
-                    );
-                }
+                inner.push_str(&format!(
+                    "<MailFromDomain>{}</MailFromDomain>\
+                     <MailFromDomainStatus>{}</MailFromDomainStatus>\
+                     <BehaviorOnMXFailure>{}</BehaviorOnMXFailure>",
+                    xml_escape(&mail_from),
+                    xml_escape(&status),
+                    xml_escape(&behavior),
+                ));
                 inner.push_str("</value>");
                 inner.push_str("</entry>");
             }
@@ -1244,6 +1286,7 @@ pub(crate) fn set_identity_mail_from_domain(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let identity = required_param(&req.query_params, "Identity")?;
+    let identity = identity_key(identity);
     let mail_from_domain = req.query_params.get("MailFromDomain").cloned();
     let behavior = req
         .query_params
@@ -1988,6 +2031,21 @@ pub(crate) fn describe_configuration_set(
         "<ConfigurationSet><Name>{}</Name></ConfigurationSet>",
         xml_escape(&cs.name)
     );
+    // ReputationOptions: AWS always reports LastFreshStart (the time reputation
+    // metrics were last reset for the set). The Terraform resource reads
+    // `last_fresh_start` and asserts it is set. We report a stable timestamp so
+    // it is present without re-planning.
+    // The SES v1 DescribeConfigurationSet response nests SendingEnabled inside
+    // ReputationOptions (the resource reads last_fresh_start /
+    // reputation_metrics_enabled / sending_enabled all from this block).
+    inner.push_str(&format!(
+        "<ReputationOptions>\
+         <SendingEnabled>{}</SendingEnabled>\
+         <ReputationMetricsEnabled>{}</ReputationMetricsEnabled>\
+         <LastFreshStart>2024-01-01T00:00:00Z</LastFreshStart>\
+         </ReputationOptions>",
+        cs.sending_enabled, cs.reputation_metrics_enabled
+    ));
     // Include event destinations if requested
     if let Some(dests) = st.event_destinations.get(name) {
         inner.push_str("<EventDestinations>");

@@ -182,6 +182,29 @@ impl ApiGatewayService {
                         integration.request_templates.insert(k, v.to_string());
                     }
                 }
+                // Previously dropped (bug-hunt 2026-06-24, 1.11): VPC-link
+                // connection id, cache namespace/keys, and mTLS backend config.
+                "/connectionId" => integration.connection_id = value.as_str().map(String::from),
+                "/cacheNamespace" => integration.cache_namespace = value.as_str().map(String::from),
+                "/tlsConfig/insecureSkipVerification" => {
+                    let obj = integration
+                        .tls_config
+                        .get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(m) = obj.as_object_mut() {
+                        m.insert("insecureSkipVerification".to_string(), value.clone());
+                    }
+                }
+                "/cacheKeyParameters" if op == "add" => {
+                    if let Some(s) = value.as_str() {
+                        if !integration.cache_key_parameters.iter().any(|x| x == s) {
+                            integration.cache_key_parameters.push(s.to_string());
+                        }
+                    }
+                }
+                _ if path.starts_with("/cacheKeyParameters/") && op == "remove" => {
+                    let target = path.trim_start_matches("/cacheKeyParameters/");
+                    integration.cache_key_parameters.retain(|x| x != target);
+                }
                 _ => {}
             }
         });

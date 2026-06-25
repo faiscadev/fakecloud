@@ -65,6 +65,7 @@ impl ResourceProvisioner {
             destination,
             tags,
             encryption: None,
+            extra_destinations: std::collections::BTreeMap::new(),
         };
 
         let mut state = self.firehose_state.write();

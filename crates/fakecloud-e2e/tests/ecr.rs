@@ -66,6 +66,68 @@ async fn create_describe_list_delete_repository() {
 }
 
 #[tokio::test]
+async fn delete_repository_with_images_requires_force() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+
+    client
+        .create_repository()
+        .repository_name("nonempty-repo")
+        .send()
+        .await
+        .expect("create_repository");
+
+    let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":7023,"digest":"sha256:dummy"},"layers":[]}"#;
+    client
+        .put_image()
+        .repository_name("nonempty-repo")
+        .image_manifest(manifest)
+        .image_tag("v1")
+        .send()
+        .await
+        .expect("put_image");
+
+    // Without force, a repository holding images must not delete (bug-hunt
+    // 2026-06-24, 1.13 — force was accepted but ignored).
+    let err = client
+        .delete_repository()
+        .repository_name("nonempty-repo")
+        .send()
+        .await
+        .expect_err("delete without force should fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("RepositoryNotEmpty"),
+        "unexpected error: {msg}"
+    );
+
+    // The repository must still exist.
+    let still = client
+        .describe_repositories()
+        .repository_names("nonempty-repo")
+        .send()
+        .await
+        .expect("repo still present");
+    assert_eq!(still.repositories().len(), 1);
+
+    // With force=true the delete succeeds.
+    client
+        .delete_repository()
+        .repository_name("nonempty-repo")
+        .force(true)
+        .send()
+        .await
+        .expect("force delete");
+    let err = client
+        .describe_repositories()
+        .repository_names("nonempty-repo")
+        .send()
+        .await
+        .expect_err("gone after force delete");
+    assert!(format!("{err:?}").contains("RepositoryNotFound"));
+}
+
+#[tokio::test]
 async fn create_repository_with_options() {
     let server = TestServer::start().await;
     let client = server.ecr_client().await;

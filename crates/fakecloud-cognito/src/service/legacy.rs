@@ -77,7 +77,7 @@ impl CognitoService {
         let state = accounts.get_or_create(&req.account_id);
 
         let (pool_id, username) = {
-            let token_data = state.access_tokens.get(&access_token).ok_or_else(|| {
+            let token_data = state.valid_access_token(&access_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",

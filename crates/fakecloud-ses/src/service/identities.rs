@@ -99,6 +99,7 @@ impl SesV2Service {
             bounce_topic: None,
             complaint_topic: None,
             delivery_topic: None,
+            verification_token: None,
         };
 
         state.identities.insert(identity_name.clone(), identity);

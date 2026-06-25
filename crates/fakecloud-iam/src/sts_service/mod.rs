@@ -1788,7 +1788,12 @@ mod tests {
 
     #[tokio::test]
     async fn assume_root_with_account_id_succeeds() {
-        let (svc, _) = make_sts_service();
+        let (svc, state) = make_sts_service();
+        // AssumeRoot requires the RootSessions feature enabled (5.1).
+        state
+            .write()
+            .get_or_create("123456789012")
+            .organizations_root_sessions = true;
         let req = sts_request(
             "AssumeRoot",
             vec![
@@ -1807,7 +1812,12 @@ mod tests {
 
     #[tokio::test]
     async fn assume_root_with_arn_succeeds() {
-        let (svc, _) = make_sts_service();
+        let (svc, state) = make_sts_service();
+        // AssumeRoot requires the RootSessions feature enabled (5.1).
+        state
+            .write()
+            .get_or_create("123456789012")
+            .organizations_root_sessions = true;
         let req = sts_request(
             "AssumeRoot",
             vec![
@@ -1826,6 +1836,51 @@ mod tests {
             body.contains("<SourceIdentity>alice</SourceIdentity>"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn assume_root_denied_without_root_sessions() {
+        // Without the centralized root-access RootSessions feature enabled,
+        // AssumeRoot must be denied — previously it minted :root credentials
+        // unconditionally (5.1).
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let err = svc
+            .assume_root(&req)
+            .err()
+            .expect("AssumeRoot must be denied without RootSessions");
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[tokio::test]
+    async fn assume_root_same_account_succeeds_without_root_sessions() {
+        // The member root managing its OWN account does not require the
+        // centralized RootSessions feature; this is the recorded AWS baseline
+        // (conformance sts_assume_root). Only cross-account targets are gated.
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "123456789012"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let resp = svc.assume_root(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("AccessKeyId"), "{body}");
     }
 
     #[tokio::test]

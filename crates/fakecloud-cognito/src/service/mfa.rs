@@ -9,7 +9,7 @@ use crate::state::{
     CognitoState, MfaPreferences, SmsConfiguration, SmsMfaConfiguration,
     SoftwareTokenMfaConfiguration,
 };
-// AccessTokenData is used via state.access_tokens.get()
+// AccessTokenData is used via state.valid_access_token()
 
 use super::{ensure_user_pool_exists, generate_totp_secret, require_str, CognitoService};
 
@@ -209,7 +209,7 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+        let token_data = state.valid_access_token(access_token).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",
@@ -264,7 +264,7 @@ impl CognitoService {
 
         // Identify user from access token or session
         let (pool_id, username) = if let Some(access_token) = body["AccessToken"].as_str() {
-            let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            let token_data = state.valid_access_token(access_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",
@@ -338,7 +338,7 @@ impl CognitoService {
 
         // Identify user from access token or session
         let (pool_id, username) = if let Some(access_token) = body["AccessToken"].as_str() {
-            let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+            let token_data = state.valid_access_token(access_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",
@@ -406,7 +406,7 @@ impl CognitoService {
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+        let token_data = state.valid_access_token(access_token).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",

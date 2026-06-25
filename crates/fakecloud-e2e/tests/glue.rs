@@ -979,3 +979,64 @@ async fn dev_endpoint_is_ready_with_default_nodes() {
     assert_eq!(ep.status(), Some("READY"));
     assert_eq!(ep.number_of_nodes(), 5);
 }
+
+#[tokio::test]
+async fn delete_schema_versions_actually_deletes() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_registry()
+        .registry_name("dsv-registry")
+        .send()
+        .await
+        .expect("create registry");
+    glue.create_schema()
+        .registry_id(
+            aws_sdk_glue::types::RegistryId::builder()
+                .registry_name("dsv-registry")
+                .build(),
+        )
+        .schema_name("dsv-schema")
+        .data_format(aws_sdk_glue::types::DataFormat::Avro)
+        .compatibility(aws_sdk_glue::types::Compatibility::None)
+        .schema_definition(r#"{"type":"record","name":"r","fields":[]}"#)
+        .send()
+        .await
+        .expect("create schema (v1)");
+
+    let schema_id = aws_sdk_glue::types::SchemaId::builder()
+        .registry_name("dsv-registry")
+        .schema_name("dsv-schema")
+        .build();
+
+    // Register a second version.
+    glue.register_schema_version()
+        .schema_id(schema_id.clone())
+        .schema_definition(r#"{"type":"record","name":"r","fields":[{"name":"x","type":"int"}]}"#)
+        .send()
+        .await
+        .expect("register v2");
+
+    // Delete version 2 — must actually remove it.
+    glue.delete_schema_versions()
+        .schema_id(schema_id.clone())
+        .versions("2")
+        .send()
+        .await
+        .expect("delete_schema_versions");
+
+    let v2 = glue
+        .get_schema_version()
+        .schema_id(schema_id)
+        .schema_version_number(
+            aws_sdk_glue::types::SchemaVersionNumber::builder()
+                .version_number(2)
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(
+        v2.is_err(),
+        "version 2 must be gone after delete_schema_versions"
+    );
+}

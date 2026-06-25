@@ -891,3 +891,61 @@ async fn test_invoke_authorizer_honors_identity_source() {
         .expect("test_invoke_authorizer allowed");
     assert_eq!(allowed.client_status(), 200);
 }
+
+#[tokio::test]
+async fn update_usage_plan_adds_api_stage() {
+    use aws_sdk_apigateway::types::{Op, PatchOperation};
+
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let api_id = client
+        .create_rest_api()
+        .name("metered")
+        .send()
+        .await
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+
+    let plan_id = client
+        .create_usage_plan()
+        .name("plan-no-stages")
+        .send()
+        .await
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+
+    // Attach an API stage via PATCH — previously dropped, so the standard
+    // "create plan then attach stage" flow silently no-op'd.
+    client
+        .update_usage_plan()
+        .usage_plan_id(&plan_id)
+        .patch_operations(
+            PatchOperation::builder()
+                .op(Op::Add)
+                .path("/apiStages")
+                .value(format!("{api_id}:prod"))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_usage_plan");
+
+    let got = client
+        .get_usage_plan()
+        .usage_plan_id(&plan_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        got.api_stages()
+            .iter()
+            .any(|s| s.api_id() == Some(api_id.as_str()) && s.stage() == Some("prod")),
+        "apiStage must be attached: {:?}",
+        got.api_stages()
+    );
+}

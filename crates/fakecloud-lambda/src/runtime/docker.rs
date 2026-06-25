@@ -468,6 +468,27 @@ impl LambdaBackend for DockerBackend {
         }
     }
 
+    async fn instance_logs(&self, handle: &BackendHandle) -> Option<String> {
+        let BackendHandle::Container { id } = handle else {
+            return None;
+        };
+        // `docker logs` writes the container's stdout to our stdout and stderr
+        // to our stderr; the RIE prints the function's logs there. Tail the
+        // recent lines — the Invoke caller keeps only the last 4 KiB.
+        let output = tokio::process::Command::new(&self.cli)
+            .args(["logs", "--tail", "200", id])
+            .output()
+            .await
+            .ok()?;
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        if combined.is_empty() {
+            None
+        } else {
+            Some(combined)
+        }
+    }
+
     async fn prepull_image(&self, image: &str) -> Result<(), RuntimeError> {
         // Translate AWS-flavored ECR URIs to fakecloud's local registry so
         // private-ECR `Image` package functions can be warmed too. Falls

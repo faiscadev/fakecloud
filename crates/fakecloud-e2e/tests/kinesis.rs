@@ -183,6 +183,9 @@ async fn kinesis_put_records_reports_partial_failures() {
         .build()
         .unwrap();
 
+    // Per the conformance baseline recorded from real AWS, a malformed record
+    // (empty PartitionKey) is reported as a per-record failure, not a
+    // whole-request rejection.
     let response = client
         .put_records()
         .stream_name("batch-writes")
@@ -555,4 +558,174 @@ async fn kinesis_get_records_reports_real_millis_behind_latest() {
         .await
         .unwrap();
     assert_eq!(caught_up.millis_behind_latest(), Some(0));
+}
+
+#[tokio::test]
+async fn kinesis_at_sequence_number_works_on_non_zero_shard() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("multishard")
+        .shard_count(4)
+        .send()
+        .await
+        .unwrap();
+
+    // Put records across keys until one lands on a non-first shard, capture it.
+    let mut target_shard = String::new();
+    let mut target_seq = String::new();
+    for i in 0..40 {
+        let put = client
+            .put_record()
+            .stream_name("multishard")
+            .partition_key(format!("key-{i}"))
+            .data(Blob::new(format!("d{i}").into_bytes()))
+            .send()
+            .await
+            .unwrap();
+        if put.shard_id() != "shardId-000000000000" {
+            target_shard = put.shard_id().to_string();
+            target_seq = put.sequence_number().to_string();
+            break;
+        }
+    }
+    assert!(
+        !target_shard.is_empty(),
+        "expected a record on a non-first shard"
+    );
+
+    // The shard's advertised StartingSequenceNumber must be a usable anchor for
+    // GetShardIterator(AT_SEQUENCE_NUMBER) — previously it advertised 0…01 for
+    // every shard, so this 400'd on shard N>0.
+    let desc = client
+        .describe_stream()
+        .stream_name("multishard")
+        .send()
+        .await
+        .unwrap();
+    let shard = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .iter()
+        .find(|s| s.shard_id() == target_shard)
+        .unwrap();
+    let advertised = shard
+        .sequence_number_range()
+        .unwrap()
+        .starting_sequence_number();
+
+    let it = client
+        .get_shard_iterator()
+        .stream_name("multishard")
+        .shard_id(&target_shard)
+        .shard_iterator_type(ShardIteratorType::AtSequenceNumber)
+        .starting_sequence_number(advertised)
+        .send()
+        .await
+        .expect("AT_SEQUENCE_NUMBER with the advertised StartingSequenceNumber must not 400");
+    let recs = client
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        recs.records()
+            .iter()
+            .any(|r| r.sequence_number() == target_seq),
+        "the shard's first record should be readable from its advertised start"
+    );
+}
+
+#[tokio::test]
+async fn kinesis_subscribe_to_shard_streams_records() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    let created = client
+        .create_stream()
+        .stream_name("efo")
+        .shard_count(1)
+        .send()
+        .await;
+    assert!(created.is_ok());
+
+    let stream_arn = client
+        .describe_stream_summary()
+        .stream_name("efo")
+        .send()
+        .await
+        .unwrap()
+        .stream_description_summary()
+        .unwrap()
+        .stream_arn()
+        .to_string();
+
+    let consumer_arn = client
+        .register_stream_consumer()
+        .stream_arn(&stream_arn)
+        .consumer_name("efo-consumer")
+        .send()
+        .await
+        .unwrap()
+        .consumer()
+        .unwrap()
+        .consumer_arn()
+        .to_string();
+
+    let shard_id = client
+        .describe_stream()
+        .stream_name("efo")
+        .send()
+        .await
+        .unwrap()
+        .stream_description()
+        .unwrap()
+        .shards()[0]
+        .shard_id()
+        .to_string();
+
+    client
+        .put_record()
+        .stream_name("efo")
+        .partition_key("k")
+        .data(Blob::new(b"fan-out"))
+        .send()
+        .await
+        .unwrap();
+
+    // SubscribeToShard must consult the registered consumer and stream the
+    // records back — previously it returned ResourceNotFoundException
+    // unconditionally.
+    let mut resp = client
+        .subscribe_to_shard()
+        .consumer_arn(&consumer_arn)
+        .shard_id(&shard_id)
+        .starting_position(
+            aws_sdk_kinesis::types::StartingPosition::builder()
+                .r#type(aws_sdk_kinesis::types::ShardIteratorType::TrimHorizon)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("subscribe_to_shard");
+
+    let mut saw_record = false;
+    while let Some(event) = resp.event_stream.recv().await.expect("recv event") {
+        if let aws_sdk_kinesis::types::SubscribeToShardEventStream::SubscribeToShardEvent(ev) =
+            event
+        {
+            if ev.records().iter().any(|r| r.data().as_ref() == b"fan-out") {
+                saw_record = true;
+            }
+        }
+    }
+    assert!(
+        saw_record,
+        "SubscribeToShard must stream the put record to the consumer"
+    );
 }
