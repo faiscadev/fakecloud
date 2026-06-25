@@ -1037,6 +1037,23 @@ pub const SHARDS: &[Shard] = &[
         ),
         extra_deny: &[],
     },
+    // NAT gateways, VPC peering connections (+ their modifiable peering
+    // options), DHCP-options-set associations, and flow logs. Split out of
+    // the core `ec2` shard to keep that job's wall time down and isolate
+    // these newer families. All run purely in the control plane (no Docker).
+    Shard {
+        name: "ec2-vpc2",
+        service: "ec2",
+        run_regex: concat!(
+            "^TestAcc(",
+            "VPCNATGateway",
+            "|VPCPeeringConnection|VPCPeeringConnectionOptions",
+            "|VPCDHCPOptionsAssociation",
+            "|VPCFlowLog",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
     Shard {
         name: "rds",
         service: "rds",
