@@ -227,6 +227,13 @@ impl Wafv2Service {
         if body.get("DataProtectionConfig").is_some() {
             acl.data_protection_config = body.get("DataProtectionConfig").cloned();
         }
+        if body.get("OnSourceDDoSProtectionConfig").is_some() {
+            acl.on_source_d_do_s_protection_config =
+                body.get("OnSourceDDoSProtectionConfig").cloned();
+        }
+        if body.get("ApplicationConfig").is_some() {
+            acl.application_config = body.get("ApplicationConfig").cloned();
+        }
         acl.lock_token = synth_uuid();
         Ok(AwsResponse::ok_json(
             json!({ "NextLockToken": acl.lock_token }),

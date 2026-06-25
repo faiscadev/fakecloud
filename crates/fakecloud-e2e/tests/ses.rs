@@ -618,7 +618,7 @@ async fn ses_contact_list_lifecycle() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
 
-    // Create contact list with topics
+    // Create contact list with topics + tags
     client
         .create_contact_list()
         .contact_list_name("my-list")
@@ -629,6 +629,13 @@ async fn ses_contact_list_lifecycle() {
                 .display_name("Newsletters")
                 .description("Weekly newsletters")
                 .default_subscription_status(SubscriptionStatus::OptIn)
+                .build()
+                .unwrap(),
+        )
+        .tags(
+            aws_sdk_sesv2::types::Tag::builder()
+                .key("team")
+                .value("growth")
                 .build()
                 .unwrap(),
         )
@@ -645,6 +652,11 @@ async fn ses_contact_list_lifecycle() {
         .unwrap();
     assert_eq!(get.contact_list_name(), Some("my-list"));
     assert_eq!(get.description(), Some("A test list"));
+    // Tags set on create must round-trip (bug-hunt 2026-06-24, 1.13).
+    let tags = get.tags();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), "team");
+    assert_eq!(tags[0].value(), "growth");
     let topics = get.topics();
     assert_eq!(topics.len(), 1);
     assert_eq!(topics[0].topic_name(), "newsletters");

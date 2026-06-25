@@ -52,7 +52,23 @@ impl SesV2Service {
                 last_updated_at: now,
             },
         );
-        state.contacts.insert(name, BTreeMap::new());
+        state.contacts.insert(name.clone(), BTreeMap::new());
+
+        // Persist tags under the contact-list ARN so GetContactList echoes
+        // them (previously dropped).
+        if let Some(tags_arr) = body["Tags"].as_array() {
+            let arn = format!(
+                "arn:aws:ses:{}:{}:contact-list/{}",
+                req.region, req.account_id, name
+            );
+            let mut tag_map = BTreeMap::new();
+            for tag in tags_arr {
+                if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
+                    tag_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            state.tags.insert(arn, tag_map);
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -89,13 +105,23 @@ impl SesV2Service {
             })
             .collect();
 
+        let arn = format!(
+            "arn:aws:ses:{}:{}:contact-list/{}",
+            req.region, req.account_id, name
+        );
+        let tags = state
+            .tags
+            .get(&arn)
+            .map(|m| Value::Array(fakecloud_core::tags::tags_to_json(m, "Key", "Value")))
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+
         let response = json!({
             "ContactListName": list.contact_list_name,
             "Description": list.description,
             "Topics": topics,
             "CreatedTimestamp": list.created_at.timestamp() as f64,
             "LastUpdatedTimestamp": list.last_updated_at.timestamp() as f64,
-            "Tags": [],
+            "Tags": tags,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))

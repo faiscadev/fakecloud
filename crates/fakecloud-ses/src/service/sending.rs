@@ -34,6 +34,23 @@ pub(super) fn is_simulator_address(email: &str) -> bool {
     matches!(email.split_once('@'), Some((_, "simulator.amazonses.com")))
 }
 
+/// Parse a SESv2 message-tag list (`[{Name, Value}]`) into name/value pairs.
+fn parse_message_tags(value: &Value) -> Vec<(String, String)> {
+    value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some((
+                        t["Name"].as_str()?.to_string(),
+                        t["Value"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Match an email against verified identities: exact email or matching
 /// verified-domain. Shared between sender + sandbox-recipient gates.
 /// Mailbox-simulator addresses bypass the gate (real SES treats them as
@@ -467,6 +484,9 @@ impl SesV2Service {
             }
         }
 
+        // Tags applied to every entry unless overridden per-entry.
+        let default_tags = parse_message_tags(&body["DefaultEmailTags"]);
+
         let mut results = Vec::new();
 
         for entry in &entries {
@@ -527,6 +547,17 @@ impl SesV2Service {
                 template_data.as_deref(),
             );
 
+            // Per-entry ReplacementTags override the batch default tags by name
+            // (previously dropped, so bulk sends carried no message tags).
+            let mut email_tags = default_tags.clone();
+            for (name, value) in parse_message_tags(&entry["ReplacementTags"]) {
+                if let Some(existing) = email_tags.iter_mut().find(|(n, _)| *n == name) {
+                    existing.1 = value;
+                } else {
+                    email_tags.push((name, value));
+                }
+            }
+
             let sent = SentEmail {
                 message_id: message_id.clone(),
                 from: from.clone(),
@@ -542,7 +573,7 @@ impl SesV2Service {
                 dkim_signature: None,
                 headers: Vec::new(),
                 timestamp: Utc::now(),
-                email_tags: Vec::new(),
+                email_tags,
                 delivery_insights: Vec::new(),
             };
             let signed = self.compute_dkim_signature(&req.account_id, &sent);

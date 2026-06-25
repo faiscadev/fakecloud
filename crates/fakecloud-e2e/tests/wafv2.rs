@@ -176,6 +176,77 @@ async fn web_acl_create_get_update_delete_lifecycle() {
 }
 
 #[tokio::test]
+async fn update_web_acl_persists_ddos_and_application_config() {
+    use aws_sdk_wafv2::types::{
+        ApplicationAttribute, ApplicationConfig, LowReputationMode, OnSourceDDoSProtectionConfig,
+    };
+
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+
+    let summary = waf
+        .create_web_acl()
+        .name("ddos-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("ddos-acl"))
+        .send()
+        .await
+        .expect("create")
+        .summary
+        .expect("summary");
+    let id = summary.id().expect("id").to_owned();
+    let lock = summary.lock_token().expect("lock").to_owned();
+
+    // UpdateWebACL previously dropped OnSourceDDoSProtectionConfig +
+    // ApplicationConfig (bug-hunt 2026-06-24, 1.13).
+    waf.update_web_acl()
+        .name("ddos-acl")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&lock)
+        .default_action(allow_default())
+        .visibility_config(vis("ddos-acl"))
+        .on_source_d_do_s_protection_config(
+            OnSourceDDoSProtectionConfig::builder()
+                .alb_low_reputation_mode(LowReputationMode::ActiveUnderDdos)
+                .build()
+                .unwrap(),
+        )
+        .application_config(
+            ApplicationConfig::builder()
+                .attributes(
+                    ApplicationAttribute::builder()
+                        .name("HostHeader")
+                        .values("example.com")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update");
+
+    let got = waf
+        .get_web_acl()
+        .name("ddos-acl")
+        .scope(Scope::Regional)
+        .id(&id)
+        .send()
+        .await
+        .expect("get");
+    let acl = got.web_acl().expect("acl");
+    assert_eq!(
+        acl.on_source_d_do_s_protection_config()
+            .map(|c| c.alb_low_reputation_mode().clone()),
+        Some(LowReputationMode::ActiveUnderDdos)
+    );
+    let app = acl.application_config().expect("application config");
+    assert_eq!(app.attributes().len(), 1);
+    assert_eq!(app.attributes()[0].name(), Some("HostHeader"));
+}
+
+#[tokio::test]
 async fn update_with_stale_lock_token_returns_optimistic_lock_error() {
     let server = TestServer::start().await;
     let waf = server.wafv2_client().await;

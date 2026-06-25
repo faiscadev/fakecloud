@@ -771,6 +771,10 @@ impl CognitoService {
         if let Some(v) = body["EnablePropagateAdditionalUserContextData"].as_bool() {
             client.enable_propagate_additional_user_context_data = v;
         }
+        if body["RefreshTokenRotation"].is_object() {
+            client.refresh_token_rotation =
+                parse_refresh_token_rotation(&body["RefreshTokenRotation"]);
+        }
 
         client.last_modified_date = Utc::now();
 

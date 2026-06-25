@@ -112,6 +112,7 @@ impl CognitoService {
                 totp_verified: false,
                 devices: BTreeMap::new(),
                 linked_providers: Vec::new(),
+                mfa_options: Vec::new(),
             };
 
             let resp = user_to_json(&user);
@@ -726,7 +727,10 @@ impl CognitoService {
             "UserCreateDate": user.user_create_date.timestamp() as f64,
             "UserLastModifiedDate": user.user_last_modified_date.timestamp() as f64,
             "UserStatus": user.user_status,
-            "MFAOptions": [],
+            "MFAOptions": user.mfa_options.iter().map(|o| json!({
+                "DeliveryMedium": o.delivery_medium,
+                "AttributeName": o.attribute_name,
+            })).collect::<Vec<Value>>(),
         });
 
         Ok(AwsResponse::ok_json(response))
