@@ -763,3 +763,52 @@ exports.handler = async (event) => {
     }
     assert!(saw_error_complete, "missing InvokeComplete with error");
 }
+
+#[tokio::test]
+async fn invoke_with_log_type_tail_returns_log_result() {
+    use aws_sdk_lambda::types::LogType;
+    use base64::Engine as _;
+
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    // A handler that prints a unique marker to stdout (-> container logs).
+    let handler_src = "\
+def handler(event, context):
+    print('LOGMARKER_ALPHA_9F3X')
+    return {'ok': True}
+";
+    let zip = make_zip(&[("lambda_function.py", handler_src.as_bytes())]);
+    client
+        .create_function()
+        .function_name("logtail-fn")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("lambda_function.handler")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("logtail-fn")
+        .log_type(LogType::Tail)
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    // X-Amz-Log-Result must be present and decode to the function's logs.
+    let log_result = resp
+        .log_result()
+        .expect("LogType=Tail must return a LogResult");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(log_result)
+        .expect("LogResult must be valid base64");
+    let logs = String::from_utf8_lossy(&decoded);
+    assert!(
+        logs.contains("LOGMARKER_ALPHA_9F3X"),
+        "LogResult should contain the function's stdout: {logs}"
+    );
+}

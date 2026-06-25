@@ -1360,6 +1360,11 @@ impl AwsService for LambdaService {
                         .get("x-amz-invocation-type")
                         .and_then(|v| v.to_str().ok()),
                 );
+                let log_tail = req
+                    .headers
+                    .get("x-amz-log-type")
+                    .and_then(|v| v.to_str().ok())
+                    == Some("Tail");
                 // `?Qualifier=` wins; otherwise honor a qualifier embedded in
                 // the function ARN/ref (1.3).
                 let qualifier = req
@@ -1373,6 +1378,7 @@ impl AwsService for LambdaService {
                     aid,
                     invocation_type,
                     qualifier,
+                    log_tail,
                 )
                 .await
             }
