@@ -12,9 +12,7 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_core::query::{
-    optional_query_param, query_metadata_only_xml, query_response_xml, required_query_param,
-};
+use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 

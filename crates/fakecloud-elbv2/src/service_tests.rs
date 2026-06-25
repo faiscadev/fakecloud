@@ -132,10 +132,18 @@ async fn delete_load_balancer_succeeds_when_protection_disabled() {
     let svc = svc();
     let arn = create_lb_and_get_arn(&svc, "unguarded").await;
 
-    svc.handle(req("DeleteLoadBalancer", &[("LoadBalancerArn", &arn)]))
+    let resp = svc
+        .handle(req("DeleteLoadBalancer", &[("LoadBalancerArn", &arn)]))
         .await
         .unwrap();
     assert!(!lb_exists(&svc, &arn), "LB must be removed after delete");
+    // The Query-protocol response must carry the result node so the AWS SDK can
+    // deserialize it ("DeleteLoadBalancerResult node not found" otherwise).
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("<DeleteLoadBalancerResult"),
+        "response must include the result node: {body}"
+    );
 }
 
 #[tokio::test]

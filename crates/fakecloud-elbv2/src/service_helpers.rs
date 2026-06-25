@@ -6,7 +6,11 @@ pub(crate) fn xml_resp(action: &str, inner: String, request_id: &str) -> AwsResp
 }
 
 pub(crate) fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = query_metadata_only_xml(action, NS, request_id);
+    // The ELBv2 Query protocol always wraps the response in a `<{Action}Result>`
+    // element (empty for actions with no output members). Omitting it makes the
+    // AWS SDK fail to deserialize with "{Action}Result node not found" -- e.g.
+    // DeleteLoadBalancer, which the Terraform provider's destroy relies on.
+    let xml = query_response_xml(action, NS, "", request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
