@@ -21,7 +21,17 @@ pub(super) async fn http_proxy(
         Method::OPTIONS => reqwest::Method::OPTIONS,
         _ => reqwest::Method::GET,
     };
-    let client = reqwest::Client::new();
+    // API Gateway enforces a per-integration timeout (default 29s for REST,
+    // configurable via timeoutInMillis up to that ceiling). Without it a hung
+    // backend would hold the execute-api request open forever.
+    let timeout_ms = integration
+        .timeout_in_millis
+        .filter(|v| *v > 0)
+        .unwrap_or(29_000) as u64;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|e| bad_gateway(format!("failed to build HTTP client: {e}")))?;
     let mut builder = client.request(method, url);
     for (k, v) in req.headers.iter() {
         if let Ok(s) = v.to_str() {
@@ -32,10 +42,15 @@ pub(super) async fn http_proxy(
     if !body.is_empty() {
         builder = builder.body(body.clone().to_vec());
     }
-    let resp = builder
-        .send()
-        .await
-        .map_err(|e| bad_gateway(format!("backend HTTP failure: {e}")))?;
+    let resp = builder.send().await.map_err(|e| {
+        if e.is_timeout() {
+            gateway_timeout(format!(
+                "backend integration timed out after {timeout_ms} ms"
+            ))
+        } else {
+            bad_gateway(format!("backend HTTP failure: {e}"))
+        }
+    })?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = http::HeaderMap::new();
     for (k, v) in resp.headers().iter() {
