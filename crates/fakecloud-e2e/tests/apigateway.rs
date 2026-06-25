@@ -232,6 +232,11 @@ async fn get_export_returns_openapi_with_real_paths() {
         .send()
         .await
         .expect("get_export");
+    // AWS returns the export as a download attachment; the export data source
+    // reads `content_disposition` from this header.
+    assert!(export
+        .content_disposition()
+        .is_some_and(|d| d.starts_with("attachment;")));
     let body_blob = export.body().expect("export body should be present");
     let body: serde_json::Value =
         serde_json::from_slice(body_blob.as_ref()).expect("export body must be JSON");
@@ -948,4 +953,57 @@ async fn update_usage_plan_adds_api_stage() {
         "apiStage must be attached: {:?}",
         got.api_stages()
     );
+}
+
+#[tokio::test]
+async fn update_request_validator_keeps_boolean_flags() {
+    // UpdateRequestValidator applies JSON-Patch string values; the boolean
+    // validator flags must be stored as real booleans so GetRequestValidator
+    // returns the type the SDK expects (not a string).
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let api = client
+        .create_rest_api()
+        .name("rv-api")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+
+    let rv = client
+        .create_request_validator()
+        .rest_api_id(&api_id)
+        .name("rv")
+        .validate_request_body(false)
+        .validate_request_parameters(false)
+        .send()
+        .await
+        .expect("create_request_validator");
+    let rv_id = rv.id().unwrap().to_string();
+
+    client
+        .update_request_validator()
+        .rest_api_id(&api_id)
+        .request_validator_id(&rv_id)
+        .patch_operations(
+            aws_sdk_apigateway::types::PatchOperation::builder()
+                .op(aws_sdk_apigateway::types::Op::Replace)
+                .path("/validateRequestBody")
+                .value("true")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_request_validator");
+
+    // Deserializes only if the flag is stored as a real boolean.
+    let got = client
+        .get_request_validator()
+        .rest_api_id(&api_id)
+        .request_validator_id(&rv_id)
+        .send()
+        .await
+        .expect("get_request_validator");
+    assert_eq!(got.validate_request_body(), true);
 }

@@ -198,6 +198,11 @@ async fn ses_acceptance() {
 }
 
 #[tokio::test]
+async fn apigateway_acceptance() {
+    run_shard("apigateway").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }

@@ -110,7 +110,24 @@ impl ApiGatewayService {
             .ok_or_else(|| not_found("RequestValidator not found"))?;
         apply_patch_operations(req, |_op, path, value| {
             if let Some(o) = v.as_object_mut() {
-                o.insert(path.trim_start_matches('/').to_string(), value.clone());
+                let key = path.trim_start_matches('/').to_string();
+                // JSON Patch sends scalar values as strings; the boolean
+                // validator flags must be stored as real booleans so
+                // GetRequestValidator returns the type the SDK expects
+                // ("expected Boolean ... got string instead").
+                let coerced = if matches!(
+                    key.as_str(),
+                    "validateRequestBody" | "validateRequestParameters"
+                ) {
+                    match value.as_str() {
+                        Some("true") => serde_json::Value::Bool(true),
+                        Some("false") => serde_json::Value::Bool(false),
+                        _ => value.clone(),
+                    }
+                } else {
+                    value.clone()
+                };
+                o.insert(key, coerced);
             }
         });
         ok(v.clone())

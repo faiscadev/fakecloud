@@ -390,11 +390,24 @@ impl ApiGatewayService {
             })
             .to_string()
         };
+        // AWS returns the export as a downloadable attachment; the
+        // Content-Disposition header is surfaced by the `aws_api_gateway_export`
+        // data source as `content_disposition`.
+        let export_type = params
+            .get("exportType")
+            .cloned()
+            .unwrap_or_else(|| "oas30".to_string());
+        let mut headers = http::HeaderMap::new();
+        if let Ok(v) = http::HeaderValue::from_str(&format!(
+            "attachment; filename=\"{api_id}-{export_type}.json\""
+        )) {
+            headers.insert(http::header::CONTENT_DISPOSITION, v);
+        }
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/json".to_string(),
             body: bytes::Bytes::from(body.into_bytes()).into(),
-            headers: http::HeaderMap::new(),
+            headers,
         })
     }
 
@@ -408,11 +421,19 @@ impl ApiGatewayService {
         // returns a deterministic dummy zip header — enough for SDK
         // tests that just want to verify the endpoint exists.
         let body = format!("PK\x03\x04fakecloud-{sdk_type}-stub-zip\x00\x00\x00",);
+        // The `aws_api_gateway_sdk` data source reads `content_disposition` from
+        // the attachment header AWS returns.
+        let mut headers = http::HeaderMap::new();
+        if let Ok(v) =
+            http::HeaderValue::from_str(&format!("attachment; filename=\"{sdk_type}.zip\""))
+        {
+            headers.insert(http::header::CONTENT_DISPOSITION, v);
+        }
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/octet-stream".to_string(),
             body: bytes::Bytes::from(body.into_bytes()).into(),
-            headers: http::HeaderMap::new(),
+            headers,
         })
     }
 
