@@ -941,11 +941,12 @@ impl RdsService {
             // ── Event subscriptions ──
             "CreateEventSubscription" => {
                 let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
-                let entry = json!({"CustSubscriptionId": name, "SnsTopicArn": get_param(req, "SnsTopicArn").unwrap_or_default(), "Status": "active", "Enabled": true});
+                let arn = Arn::new("rds", region, &aid, &format!("es:{name}")).to_string();
+                let entry = json!({"CustSubscriptionId": name, "CustomerAwsId": aid, "EventSubscriptionArn": arn, "SnsTopicArn": get_param(req, "SnsTopicArn").unwrap_or_default(), "SourceType": get_param(req, "SourceType").unwrap_or_default(), "Status": "active", "Enabled": true});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "event_subscriptions").insert(name.clone(), entry.clone());
-                Ok(xml_response("CreateEventSubscription", event_sub_xml(&entry), &rid))
+                Ok(xml_response("CreateEventSubscription", format!("    <EventSubscription>\n{}\n    </EventSubscription>", event_sub_xml(&entry)), &rid))
             }
             "ModifyEventSubscription" => {
                 let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
@@ -983,18 +984,33 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("event_subscriptions") { m.remove(&name); }
                 Ok(xml_response("DeleteEventSubscription", "    <EventSubscription/>".to_string(), &rid))
             }
-            "DescribeEventSubscriptions" => list_extras_xml(self, &aid, "event_subscriptions", "EventSubscriptionsList", "DescribeEventSubscriptions", event_sub_xml, &rid),
+            "DescribeEventSubscriptions" => {
+                let wanted = get_param(req, "SubscriptionName");
+                list_extras_named_xml(self, &aid, "event_subscriptions", "EventSubscriptionsList", "EventSubscription", "DescribeEventSubscriptions", event_sub_xml, wanted.as_deref(), "CustSubscriptionId", "SubscriptionNotFound", &rid)
+            }
             "AddSourceIdentifierToSubscription" | "RemoveSourceIdentifierFromSubscription" => Ok(xml_response(action.as_str(), "    <EventSubscription/>".to_string(), &rid)),
 
             // ── Global clusters ──
             "CreateGlobalCluster" => {
                 let id = get_param(req, "GlobalClusterIdentifier").ok_or_else(|| missing("GlobalClusterIdentifier"))?;
                 let arn = Arn::global("rds", &aid, &format!("global-cluster:{id}")).to_string();
-                let entry = json!({"GlobalClusterIdentifier": id, "GlobalClusterArn": arn, "Status": "available"});
+                let entry = json!({
+                    "GlobalClusterIdentifier": id,
+                    "GlobalClusterArn": arn,
+                    "GlobalClusterResourceId": new_cluster_resource_id(),
+                    "Endpoint": format!("{id}.global.{region}.rds.amazonaws.com"),
+                    "Status": "available",
+                    "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
+                    "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "16.4".to_string()),
+                    "EngineLifecycleSupport": get_param(req, "EngineLifecycleSupport").unwrap_or_else(|| "open-source-rds-extended-support".to_string()),
+                    "DatabaseName": get_param(req, "DatabaseName").unwrap_or_default(),
+                    "DeletionProtection": get_param(req, "DeletionProtection").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false),
+                    "StorageEncrypted": get_param(req, "StorageEncrypted").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false),
+                });
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "global_clusters").insert(id.clone(), entry.clone());
-                Ok(xml_response("CreateGlobalCluster", global_cluster_xml(&entry), &rid))
+                Ok(xml_response("CreateGlobalCluster", format!("    <GlobalCluster>\n{}\n    </GlobalCluster>", global_cluster_xml(&entry)), &rid))
             }
             "ModifyGlobalCluster" | "FailoverGlobalCluster" | "SwitchoverGlobalCluster" | "RemoveFromGlobalCluster" => Ok(xml_response(action.as_str(), "    <GlobalCluster/>".to_string(), &rid)),
             "DeleteGlobalCluster" => {
@@ -1004,7 +1020,13 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("global_clusters") { m.remove(&id); }
                 Ok(xml_response("DeleteGlobalCluster", "    <GlobalCluster/>".to_string(), &rid))
             }
-            "DescribeGlobalClusters" => list_extras_xml(self, &aid, "global_clusters", "GlobalClusters", "DescribeGlobalClusters", global_cluster_xml, &rid),
+            "DescribeGlobalClusters" => {
+                let wanted = get_param(req, "GlobalClusterIdentifier");
+                // RDS names this list's member `<GlobalClusterMember>`, not the
+                // usual singular-of-wrapper (`<GlobalCluster>`); the SDK
+                // unmarshals an empty list with any other tag.
+                list_extras_named_xml(self, &aid, "global_clusters", "GlobalClusters", "GlobalClusterMember", "DescribeGlobalClusters", global_cluster_xml, wanted.as_deref(), "GlobalClusterIdentifier", "GlobalClusterNotFoundFault", &rid)
+            }
 
             // ── Integrations ──
             "CreateIntegration" => {

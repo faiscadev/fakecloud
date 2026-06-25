@@ -1079,6 +1079,16 @@ pub const SHARDS: &[Shard] = &[
         run_regex: "^TestAccRDSOptionGroup_basic$",
         extra_deny: &[],
     },
+    // Event subscriptions and global clusters. Both Describe lists now use
+    // their named member tags (<EventSubscription> / <GlobalClusterMember>)
+    // and the Create responses wrap the resource element, so the provider
+    // no longer nil-derefs reading them back.
+    Shard {
+        name: "rds-event-global",
+        service: "rds",
+        run_regex: "^TestAccRDS(EventSubscription|GlobalCluster)_basic$",
+        extra_deny: &[],
+    },
     Shard {
         name: "elasticache",
         service: "elasticache",

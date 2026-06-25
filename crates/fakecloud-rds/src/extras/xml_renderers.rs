@@ -334,9 +334,12 @@ pub(super) fn option_group_xml(v: &Value) -> String {
 
 pub(super) fn event_sub_xml(v: &Value) -> String {
     format!(
-        "          <CustSubscriptionId>{}</CustSubscriptionId>\n          <SnsTopicArn>{}</SnsTopicArn>\n          <Status>{}</Status>\n          <Enabled>{}</Enabled>",
+        "          <CustSubscriptionId>{}</CustSubscriptionId>\n          <CustomerAwsId>{}</CustomerAwsId>\n          <EventSubscriptionArn>{}</EventSubscriptionArn>\n          <SnsTopicArn>{}</SnsTopicArn>\n          <SourceType>{}</SourceType>\n          <Status>{}</Status>\n          <Enabled>{}</Enabled>\n          <EventCategoriesList/>\n          <SourceIdsList/>",
         xml_escape(v["CustSubscriptionId"].as_str().unwrap_or("")),
+        xml_escape(v["CustomerAwsId"].as_str().unwrap_or("")),
+        xml_escape(v["EventSubscriptionArn"].as_str().unwrap_or("")),
         xml_escape(v["SnsTopicArn"].as_str().unwrap_or("")),
+        xml_escape(v["SourceType"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("active")),
         v["Enabled"].as_bool().unwrap_or(true),
     )
@@ -344,10 +347,18 @@ pub(super) fn event_sub_xml(v: &Value) -> String {
 
 pub(super) fn global_cluster_xml(v: &Value) -> String {
     format!(
-        "          <GlobalClusterIdentifier>{}</GlobalClusterIdentifier>\n          <GlobalClusterArn>{}</GlobalClusterArn>\n          <Status>{}</Status>",
+        "          <GlobalClusterIdentifier>{}</GlobalClusterIdentifier>\n          <GlobalClusterArn>{}</GlobalClusterArn>\n          <GlobalClusterResourceId>{}</GlobalClusterResourceId>\n          <Endpoint>{}</Endpoint>\n          <Status>{}</Status>\n          <Engine>{}</Engine>\n          <EngineVersion>{}</EngineVersion>\n          <EngineLifecycleSupport>{}</EngineLifecycleSupport>\n          <DatabaseName>{}</DatabaseName>\n          <DeletionProtection>{}</DeletionProtection>\n          <StorageEncrypted>{}</StorageEncrypted>",
         xml_escape(v["GlobalClusterIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["GlobalClusterArn"].as_str().unwrap_or("")),
+        xml_escape(v["GlobalClusterResourceId"].as_str().unwrap_or("")),
+        xml_escape(v["Endpoint"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("available")),
+        xml_escape(v["Engine"].as_str().unwrap_or("aurora-postgresql")),
+        xml_escape(v["EngineVersion"].as_str().unwrap_or("")),
+        xml_escape(v["EngineLifecycleSupport"].as_str().unwrap_or("open-source-rds-extended-support")),
+        xml_escape(v["DatabaseName"].as_str().unwrap_or("")),
+        v["DeletionProtection"].as_bool().unwrap_or(false),
+        v["StorageEncrypted"].as_bool().unwrap_or(false),
     )
 }
 
