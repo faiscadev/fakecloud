@@ -190,6 +190,36 @@ fn missing(field: &str) -> AwsServiceError {
     )
 }
 
+/// Non-S3 destination base names. Firehose names each destination's input
+/// `<Base>Configuration` (create) / `<Base>Update` (update) and reports it as
+/// `<Base>Description`. fakecloud models S3/ExtendedS3 field-by-field; these
+/// are round-tripped as raw JSON so DescribeDeliveryStream reflects them.
+const EXTRA_DESTINATION_BASES: &[&str] = &[
+    "RedshiftDestination",
+    "ElasticsearchDestination",
+    "AmazonopensearchserviceDestination",
+    "AmazonOpenSearchServerlessDestination",
+    "SplunkDestination",
+    "HttpEndpointDestination",
+    "SnowflakeDestination",
+    "IcebergDestination",
+];
+
+/// Pull any non-S3 destination config/update blocks out of `body`, keyed by
+/// their `<Base>Description` field name. `suffix` is "Configuration" (create)
+/// or "Update" (update). The HTTP-endpoint destination redacts its access key
+/// in the description, mirroring real Firehose.
+fn extract_extra_destinations(body: &Value, suffix: &str) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    for base in EXTRA_DESTINATION_BASES {
+        let input_key = format!("{base}{suffix}");
+        if let Some(cfg) = body.get(&input_key).filter(|v| v.is_object()) {
+            out.insert(format!("{base}Description"), cfg.clone());
+        }
+    }
+    out
+}
+
 fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsServiceError> {
     if !val.is_object() {
         return Ok(None);
@@ -379,6 +409,7 @@ impl FirehoseService {
             Some(d) => Some(d),
             None => parse_s3_destination(&body["ExtendedS3DestinationConfiguration"])?,
         };
+        let extra_destinations = extract_extra_destinations(&body, "Configuration");
 
         let now = Utc::now();
         let mut accounts = self.state.write();
@@ -403,6 +434,7 @@ impl FirehoseService {
             destination: s3_dest,
             tags: BTreeMap::new(),
             encryption: None,
+            extra_destinations,
         };
         streams.insert(name, stream);
         Ok(AwsResponse::ok_json(json!({
@@ -424,11 +456,24 @@ impl FirehoseService {
             .and_then(|s| s.get(name))
             .ok_or_else(|| not_found(name))?;
 
-        let destinations: Vec<Value> = stream
-            .destination
-            .as_ref()
-            .map(|d| vec![s3_destination_json(d)])
-            .unwrap_or_default();
+        // A delivery stream reports a single destination object carrying every
+        // configured destination description. Start from the S3 description (if
+        // any) and fold in the non-S3 descriptions so a Redshift/OpenSearch/
+        // Splunk/HTTP destination round-trips instead of vanishing.
+        let destinations: Vec<Value> =
+            if stream.destination.is_none() && stream.extra_destinations.is_empty() {
+                Vec::new()
+            } else {
+                let mut dest = stream
+                    .destination
+                    .as_ref()
+                    .map(s3_destination_json)
+                    .unwrap_or_else(|| json!({ "DestinationId": "destinationId-000000000001" }));
+                for (key, value) in &stream.extra_destinations {
+                    dest[key] = value.clone();
+                }
+                vec![dest]
+            };
 
         let mut description = json!({
             "DeliveryStreamName": stream.name,
@@ -683,6 +728,11 @@ impl FirehoseService {
         };
         if let Some(d) = updated {
             stream.destination = Some(d);
+        }
+        // Non-S3 destinations (Redshift/OpenSearch/Splunk/HTTP/...) were
+        // previously dropped on update; merge any supplied ones in.
+        for (key, value) in extract_extra_destinations(&body, "Update") {
+            stream.extra_destinations.insert(key, value);
         }
         stream.last_update = Utc::now();
         Ok(AwsResponse::ok_json(json!({})))
