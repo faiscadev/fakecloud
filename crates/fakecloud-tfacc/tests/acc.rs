@@ -118,6 +118,11 @@ async fn rds_option_groups_acceptance() {
 }
 
 #[tokio::test]
+async fn rds_event_global_acceptance() {
+    run_shard("rds-event-global").await;
+}
+
+#[tokio::test]
 async fn cloudfront_acceptance() {
     run_shard("cloudfront").await;
 }

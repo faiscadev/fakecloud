@@ -170,3 +170,56 @@ pub(super) fn list_extras_xml(
     );
     Ok(xml_response(action, inner, rid))
 }
+
+/// Like [`list_extras_xml`] but wraps each element in the list's *named*
+/// member tag (e.g. `<GlobalCluster>`) instead of the generic `<member>`.
+/// RDS query-protocol Describe lists use the named member tag, and the AWS
+/// SDK unmarshals an empty list when it sees `<member>` — which makes the
+/// Terraform provider nil-deref on read. Also filters by a single id field
+/// and raises `not_found_code` when a requested id is absent, matching AWS.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn list_extras_named_xml(
+    svc: &RdsService,
+    aid: &str,
+    category: &str,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    render: impl Fn(&Value) -> String,
+    wanted: Option<&str>,
+    id_field: &str,
+    not_found_code: &str,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state_handle().read();
+    let items: Vec<Value> = accounts
+        .get(aid)
+        .and_then(|s| s.extras.get(category))
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
+    if let Some(w) = wanted {
+        if !items.iter().any(|v| v[id_field].as_str() == Some(w)) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                not_found_code,
+                format!("{w} not found."),
+            ));
+        }
+    }
+    let body = items
+        .iter()
+        .filter(|v| wanted.is_none_or(|w| v[id_field].as_str() == Some(w)))
+        .map(|v| {
+            format!(
+                "        <{member_tag}>\n{}\n        </{member_tag}>",
+                render(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(xml_response(
+        action,
+        format!("    <{wrapper}>\n{body}\n    </{wrapper}>"),
+        rid,
+    ))
+}
