@@ -76,9 +76,18 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        // Repository-image state lands in Batch 2; until then, nothing
-        // to block the delete, so `force` is accepted but noop-ish.
-        let _ = force;
+        // AWS refuses to delete a repository that still holds images unless
+        // `force` is set, returning RepositoryNotEmptyException.
+        if !force && !repo.images.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "RepositoryNotEmptyException",
+                format!(
+                    "The repository with name '{name}' in registry with id '{account}' \
+                     cannot be deleted because it still contains images",
+                ),
+            ));
+        }
         let snapshot = repository_to_json(repo);
         state.repositories.remove(&name);
         Ok(AwsResponse::ok_json(json!({ "repository": snapshot })))

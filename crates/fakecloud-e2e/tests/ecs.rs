@@ -862,6 +862,60 @@ async fn update_service_scales_up_and_down() {
 }
 
 #[tokio::test]
+async fn update_service_applies_az_rebalancing_and_volume_configs() {
+    if !require_docker_or_skip("update_service_applies_az_rebalancing_and_volume_configs") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "azr-cluster", "azr-td").await;
+    client
+        .create_service()
+        .cluster("azr-cluster")
+        .service_name("web")
+        .task_definition("azr-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_ecs::types::{AvailabilityZoneRebalancing, ServiceVolumeConfiguration};
+    // UpdateService previously dropped availabilityZoneRebalancing +
+    // volumeConfigurations (bug-hunt 2026-06-24, 1.13).
+    let updated = client
+        .update_service()
+        .cluster("azr-cluster")
+        .service("web")
+        .availability_zone_rebalancing(AvailabilityZoneRebalancing::Enabled)
+        .volume_configurations(
+            ServiceVolumeConfiguration::builder()
+                .name("data")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("update_service");
+    assert_eq!(
+        updated.service().unwrap().availability_zone_rebalancing(),
+        Some(&AvailabilityZoneRebalancing::Enabled)
+    );
+
+    // Read back via Describe to confirm it persisted.
+    let desc = client
+        .describe_services()
+        .cluster("azr-cluster")
+        .services("web")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.services()[0].availability_zone_rebalancing(),
+        Some(&AvailabilityZoneRebalancing::Enabled)
+    );
+}
+
+#[tokio::test]
 async fn update_service_new_task_definition_triggers_rolling_deployment() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
