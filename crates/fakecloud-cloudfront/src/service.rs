@@ -1036,7 +1036,7 @@ impl CloudFrontService {
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
 
-    fn list_distributions(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_distributions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let mut dists: Vec<StoredDistribution> = state
             .accounts
@@ -1045,7 +1045,40 @@ impl CloudFrontService {
             .collect();
         dists.sort_by_key(|a| a.last_modified_time);
         drop(state);
-        let body = build_distribution_list_xml(&dists, "DistributionList");
+
+        // CloudFront paginates with Marker (the next distribution Id) + MaxItems.
+        let max_items = req
+            .query_params
+            .get("MaxItems")
+            .or_else(|| req.query_params.get("maxitems"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let marker = req
+            .query_params
+            .get("Marker")
+            .or_else(|| req.query_params.get("marker"));
+        let start_idx = match marker {
+            Some(m) if !m.is_empty() => {
+                dists.iter().position(|d| &d.id == m).unwrap_or(dists.len())
+            }
+            _ => 0,
+        };
+        let page: Vec<StoredDistribution> = dists
+            .iter()
+            .skip(start_idx)
+            .take(max_items)
+            .cloned()
+            .collect();
+        let next_marker = dists.get(start_idx + page.len()).map(|d| d.id.clone());
+
+        let body = build_distribution_list_xml(
+            &page,
+            "DistributionList",
+            marker.map(String::as_str).unwrap_or(""),
+            max_items,
+            next_marker.as_deref(),
+        );
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
 
@@ -1624,13 +1657,25 @@ pub(crate) fn build_distribution_xml(dist: &StoredDistribution) -> String {
     out
 }
 
-fn build_distribution_list_xml(dists: &[StoredDistribution], root: &str) -> String {
+fn build_distribution_list_xml(
+    dists: &[StoredDistribution],
+    root: &str,
+    marker: &str,
+    max_items: usize,
+    next_marker: Option<&str>,
+) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     out.push_str(&format!("<{root} xmlns=\"{ns}\">", ns = crate::NAMESPACE));
-    out.push_str("<Marker></Marker>");
-    out.push_str(&format!("<MaxItems>{}</MaxItems>", dists.len().max(100)));
-    out.push_str("<IsTruncated>false</IsTruncated>");
+    out.push_str(&format!("<Marker>{}</Marker>", esc(marker)));
+    if let Some(nm) = next_marker {
+        out.push_str(&format!("<NextMarker>{}</NextMarker>", esc(nm)));
+    }
+    out.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+    out.push_str(&format!(
+        "<IsTruncated>{}</IsTruncated>",
+        next_marker.is_some()
+    ));
     out.push_str(&format!("<Quantity>{}</Quantity>", dists.len()));
     if dists.is_empty() {
         out.push_str(&format!("</{root}>"));
@@ -2005,6 +2050,22 @@ fn parse_query_value(query: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distribution_list_xml_renders_pagination_fields() {
+        // Truncated page: echoes the request marker, the requested MaxItems,
+        // IsTruncated=true, and the NextMarker cursor.
+        let xml =
+            build_distribution_list_xml(&[], "DistributionList", "EDFDVBD6", 2, Some("E2NEXT"));
+        assert!(xml.contains("<Marker>EDFDVBD6</Marker>"));
+        assert!(xml.contains("<MaxItems>2</MaxItems>"));
+        assert!(xml.contains("<IsTruncated>true</IsTruncated>"));
+        assert!(xml.contains("<NextMarker>E2NEXT</NextMarker>"));
+        // Final page: no NextMarker, IsTruncated=false.
+        let xml = build_distribution_list_xml(&[], "DistributionList", "", 100, None);
+        assert!(xml.contains("<IsTruncated>false</IsTruncated>"));
+        assert!(!xml.contains("<NextMarker>"));
+    }
 
     #[test]
     fn placeholder_label_detects_braces_and_percent_encoding() {
