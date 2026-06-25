@@ -129,11 +129,10 @@ async fn test_get_identity_verification_attributes() {
         aws_sdk_ses::types::VerificationStatus::Success
     );
 
-    let unknown = attrs.get("unknown@example.com").expect("unknown entry");
-    assert_eq!(
-        *unknown.verification_status(),
-        aws_sdk_ses::types::VerificationStatus::NotStarted
-    );
+    // AWS omits unknown identities from the VerificationAttributes map entirely
+    // (the Terraform provider relies on absent-from-map == NotFound for its
+    // CheckDestroy), so the unknown identity is not present in the response.
+    assert!(!attrs.contains_key("unknown@example.com"));
 }
 
 #[tokio::test]
@@ -797,4 +796,50 @@ async fn test_get_account_sending_enabled() {
         .expect("get account sending enabled");
 
     assert!(resp.enabled());
+}
+
+#[tokio::test]
+async fn verification_token_is_stable_and_identity_accepts_arn() {
+    // The domain-verification token returned by VerifyDomainIdentity matches the
+    // one GetIdentityVerificationAttributes reports (deterministic + stored).
+    // GetIdentityVerificationAttributes omits unknown identities entirely, and
+    // SetIdentityNotificationTopic accepts the identity ARN form.
+    let server = TestServer::start().await;
+    let client = server.ses_client().await;
+
+    let verify = client
+        .verify_domain_identity()
+        .domain("stable.example.com")
+        .send()
+        .await
+        .expect("verify");
+    let token = verify.verification_token().to_string();
+    assert!(!token.is_empty());
+
+    let attrs = client
+        .get_identity_verification_attributes()
+        .identities("stable.example.com")
+        .identities("missing.example.com")
+        .send()
+        .await
+        .expect("get attrs");
+    let map = attrs.verification_attributes();
+    // Known identity present with the same token; unknown one omitted.
+    assert_eq!(
+        map.get("stable.example.com")
+            .and_then(|a| a.verification_token()),
+        Some(token.as_str())
+    );
+    assert!(!map.contains_key("missing.example.com"));
+
+    // SetIdentityNotificationTopic resolves the ARN form to the identity.
+    let arn = "arn:aws:ses:us-east-1:123456789012:identity/stable.example.com";
+    client
+        .set_identity_notification_topic()
+        .identity(arn)
+        .notification_type(aws_sdk_ses::types::NotificationType::Bounce)
+        .sns_topic("arn:aws:sns:us-east-1:123456789012:t")
+        .send()
+        .await
+        .expect("set notification topic via ARN");
 }
