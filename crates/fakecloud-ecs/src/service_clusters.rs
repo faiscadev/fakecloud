@@ -120,16 +120,25 @@ impl EcsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
+        let active_services = state
+            .clusters
+            .get(&name)
+            .ok_or_else(|| cluster_not_found(&name))?
+            .active_services_count;
+        if active_services > 0 {
+            return Err(cluster_contains_services());
+        }
+        // Scan live task records rather than the cluster's cached running/
+        // pending counters, which can drift under rapid task churn (a
+        // container that exits immediately may skip a clean RUNNING->STOPPED
+        // counter decrement). STOPPED tasks are history and don't block delete.
+        if cluster_active_task_count(state, &name) > 0 {
+            return Err(cluster_contains_tasks());
+        }
         let cluster = state
             .clusters
             .get_mut(&name)
             .ok_or_else(|| cluster_not_found(&name))?;
-        if cluster.active_services_count > 0 {
-            return Err(cluster_contains_services());
-        }
-        if cluster.running_tasks_count > 0 || cluster.pending_tasks_count > 0 {
-            return Err(cluster_contains_tasks());
-        }
         cluster.status = "INACTIVE".to_string();
         let snapshot = cluster.clone();
         // Real ECS keeps the cluster visible as INACTIVE for about an

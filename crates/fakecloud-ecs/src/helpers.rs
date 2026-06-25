@@ -1094,6 +1094,45 @@ pub(crate) fn recompute_service_counts(
     }
 }
 
+/// True while a service still owns any task that has not reached STOPPED
+/// (RUNNING / PENDING / PROVISIONING). Used to decide when a DRAINING
+/// (deleted) service has fully drained and may transition to INACTIVE.
+pub(crate) fn service_has_live_tasks(
+    state: &EcsState,
+    service_name: &str,
+    cluster_name: &str,
+) -> bool {
+    let service_tag = format!("ecs-svc/{}", service_name);
+    state.tasks.values().any(|t| {
+        t.started_by.as_deref() == Some(service_tag.as_str())
+            && t.cluster_name == cluster_name
+            && matches!(
+                t.last_status.as_str(),
+                "RUNNING" | "PENDING" | "PROVISIONING"
+            )
+    })
+}
+
+/// Count tasks in a cluster that have not yet reached STOPPED. Authoritative
+/// for DeleteCluster's ClusterContainsTasksException check: the cached
+/// running/pending counters on the cluster can drift under rapid task churn
+/// (e.g. a container that exits immediately may transition PENDING -> STOPPED
+/// without a clean RUNNING decrement), so the gate scans live task records
+/// instead. STOPPED tasks linger as history and never block cluster deletion.
+pub(crate) fn cluster_active_task_count(state: &EcsState, cluster_name: &str) -> usize {
+    state
+        .tasks
+        .values()
+        .filter(|t| {
+            t.cluster_name == cluster_name
+                && matches!(
+                    t.last_status.as_str(),
+                    "RUNNING" | "PENDING" | "PROVISIONING"
+                )
+        })
+        .count()
+}
+
 pub(crate) fn inject_service_task_sets(
     state: &EcsState,
     service_name: &str,

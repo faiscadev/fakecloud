@@ -765,6 +765,17 @@ pub const SERVICES: &[Service] = &[
             "TestAccBedrockAgentAgentKnowledgeBaseAssociation_basic",
         ],
     },
+    Service {
+        name: "appautoscaling",
+        // Application Auto Scaling: the `_basic` smoke for scalable targets
+        // (`aws_appautoscaling_target`) and scaling policies
+        // (`aws_appautoscaling_policy`). Both register an ECS service as the
+        // scalable dimension (ecs:service:DesiredCount), so they exercise the
+        // ECS control plane on create and the deregister + ECS-service destroy
+        // waiters on teardown.
+        run_regex: "^TestAccAppAutoScaling[A-Za-z0-9]+_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1113,6 +1124,12 @@ pub const SHARDS: &[Shard] = &[
         name: "bedrockagent",
         service: "bedrockagent",
         run_regex: "^TestAccBedrockAgent[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "appautoscaling",
+        service: "appautoscaling",
+        run_regex: "^TestAccAppAutoScaling[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];
