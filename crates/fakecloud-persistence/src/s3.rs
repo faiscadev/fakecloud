@@ -60,6 +60,9 @@ pub struct BucketMeta {
     pub region: String,
     #[serde(default)]
     pub versioning: Option<String>,
+    /// MFA-Delete status ("Enabled"/"Disabled") set via PutBucketVersioning.
+    #[serde(default)]
+    pub mfa_delete: Option<String>,
     #[serde(default)]
     pub acl: Option<String>,
     #[serde(default)]
