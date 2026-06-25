@@ -1005,5 +1005,5 @@ async fn update_request_validator_keeps_boolean_flags() {
         .send()
         .await
         .expect("get_request_validator");
-    assert_eq!(got.validate_request_body(), true);
+    assert!(got.validate_request_body());
 }
