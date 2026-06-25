@@ -208,6 +208,11 @@ async fn elbv2_acceptance() {
 }
 
 #[tokio::test]
+async fn bedrockagent_acceptance() {
+    run_shard("bedrockagent").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }

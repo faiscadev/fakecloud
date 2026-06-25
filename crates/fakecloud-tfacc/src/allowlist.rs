@@ -749,6 +749,22 @@ pub const SERVICES: &[Service] = &[
             "TestAccELBV2TargetGroupAttachment_basic",
         ],
     },
+    Service {
+        name: "bedrockagent",
+        // Bedrock Agent control plane: the `_basic` smoke for agents, agent
+        // action groups, agent aliases, agent collaborators, and the
+        // agent-versions data source.
+        run_regex: "^TestAccBedrockAgent[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: a knowledge-base association requires a real Bedrock
+            //     knowledge base, which in turn provisions an Aurora
+            //     PostgreSQL (pgvector) cluster as its vector store and runs
+            //     embedding ingestion. fakecloud models neither the vector
+            //     store nor KB ingestion, so the dependency chain cannot be
+            //     stood up. ---
+            "TestAccBedrockAgentAgentKnowledgeBaseAssociation_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1091,6 +1107,12 @@ pub const SHARDS: &[Shard] = &[
         name: "elbv2",
         service: "elbv2",
         run_regex: "^TestAccELBV2[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "bedrockagent",
+        service: "bedrockagent",
+        run_regex: "^TestAccBedrockAgent[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];
