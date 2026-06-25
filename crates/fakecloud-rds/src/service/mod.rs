@@ -860,11 +860,12 @@ impl RdsService {}
 /// Render a single user-set parameter as the XML shape AWS emits inside
 /// `DescribeDB(Cluster)Parameters` responses. We don't store metadata
 /// alongside user values so we report `dynamic`/`string` defaults.
-pub(crate) fn render_user_parameter_xml(name: &str, value: &str) -> String {
+pub(crate) fn render_user_parameter_xml(name: &str, value: &str, apply_method: &str) -> String {
     format!(
-        "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
+        "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <ApplyMethod>{}</ApplyMethod>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
         xml_escape(name),
         xml_escape(value),
+        xml_escape(apply_method),
     )
 }
 
@@ -890,15 +891,24 @@ pub(crate) fn render_engine_default_parameter_xml(
 /// (the `Parameter` list location name from the Smithy model); we also
 /// accept the generic `Parameters.member.N` form so hand-built clients
 /// using the default Query list shape keep working. Skips members
-/// missing a name or value; ApplyMethod is accepted but ignored
-/// (single-state model).
-pub(crate) fn parse_db_parameter_members(request: &AwsRequest) -> Vec<(String, String)> {
+/// missing a name or value. `ApplyMethod` defaults to `immediate` (AWS's
+/// default) and is preserved so a `Describe` round-trip echoes it back —
+/// the Terraform provider sets `apply_method = "immediate"` by default and
+/// drifts if the read-back omits it.
+pub(crate) struct DbParameterInput {
+    pub name: String,
+    pub value: String,
+    pub apply_method: String,
+}
+
+pub(crate) fn parse_db_parameter_members(request: &AwsRequest) -> Vec<DbParameterInput> {
     let mut out = Vec::new();
     for prefix in ["Parameters.Parameter", "Parameters.member"] {
         let mut index = 1;
         loop {
             let name_key = format!("{prefix}.{index}.ParameterName");
             let value_key = format!("{prefix}.{index}.ParameterValue");
+            let apply_key = format!("{prefix}.{index}.ApplyMethod");
             let name = optional_query_param(request, &name_key);
             let value = optional_query_param(request, &value_key);
             if name.is_none() && value.is_none() {
@@ -906,7 +916,14 @@ pub(crate) fn parse_db_parameter_members(request: &AwsRequest) -> Vec<(String, S
             }
             if let (Some(n), Some(v)) = (name, value) {
                 if !n.is_empty() {
-                    out.push((n, v));
+                    let apply_method = optional_query_param(request, &apply_key)
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| "immediate".to_string());
+                    out.push(DbParameterInput {
+                        name: n,
+                        value: v,
+                        apply_method,
+                    });
                 }
             }
             index += 1;

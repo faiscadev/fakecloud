@@ -274,19 +274,20 @@ pub(super) fn cluster_snapshot_member_xml(v: &Value) -> String {
     )
 }
 
-pub(super) fn cluster_pg_xml(name: &str, arn: &str, family: &str) -> String {
+pub(super) fn cluster_pg_xml(name: &str, arn: &str, family: &str, description: &str) -> String {
     format!(
-        "    <DBClusterParameterGroup>\n      <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>\n      <DBClusterParameterGroupArn>{}</DBClusterParameterGroupArn>\n      <DBParameterGroupFamily>{}</DBParameterGroupFamily>\n    </DBClusterParameterGroup>",
-        xml_escape(name), xml_escape(arn), xml_escape(family),
+        "    <DBClusterParameterGroup>\n      <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>\n      <DBClusterParameterGroupArn>{}</DBClusterParameterGroupArn>\n      <DBParameterGroupFamily>{}</DBParameterGroupFamily>\n      <Description>{}</Description>\n    </DBClusterParameterGroup>",
+        xml_escape(name), xml_escape(arn), xml_escape(family), xml_escape(description),
     )
 }
 
 pub(super) fn cluster_pg_member_xml(v: &Value) -> String {
     format!(
-        "          <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>\n          <DBClusterParameterGroupArn>{}</DBClusterParameterGroupArn>\n          <DBParameterGroupFamily>{}</DBParameterGroupFamily>",
+        "          <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>\n          <DBClusterParameterGroupArn>{}</DBClusterParameterGroupArn>\n          <DBParameterGroupFamily>{}</DBParameterGroupFamily>\n          <Description>{}</Description>",
         xml_escape(v["DBClusterParameterGroupName"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterParameterGroupArn"].as_str().unwrap_or("")),
         xml_escape(v["DBParameterGroupFamily"].as_str().unwrap_or("")),
+        xml_escape(v["Description"].as_str().unwrap_or("")),
     )
 }
 

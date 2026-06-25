@@ -96,6 +96,7 @@ impl ResourceProvisioner {
             db_parameter_group_family: family,
             description,
             parameters,
+            parameter_apply_methods: std::collections::BTreeMap::new(),
             tags,
         };
         state.parameter_groups.insert(name.clone(), group);

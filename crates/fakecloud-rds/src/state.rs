@@ -413,6 +413,11 @@ pub struct DbParameterGroup {
     pub db_parameter_group_family: String,
     pub description: String,
     pub parameters: BTreeMap<String, String>,
+    /// Per-parameter `ApplyMethod` (`immediate` | `pending-reboot`),
+    /// keyed by parameter name. Defaulted for snapshots written before
+    /// this field existed; a missing entry reads back as `immediate`.
+    #[serde(default)]
+    pub parameter_apply_methods: BTreeMap<String, String>,
     pub tags: Vec<RdsTag>,
 }
 
@@ -867,6 +872,7 @@ pub fn default_parameter_groups(
             db_parameter_group_family: family.to_string(),
             description: description.to_string(),
             parameters: BTreeMap::new(),
+            parameter_apply_methods: BTreeMap::new(),
             tags: Vec::new(),
         };
         groups.insert(group_name, group);

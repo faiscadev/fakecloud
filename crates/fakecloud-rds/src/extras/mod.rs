@@ -351,11 +351,12 @@ impl RdsService {
                     .ok_or_else(|| missing("DBClusterParameterGroupName"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-pg:{name}")).to_string();
                 let family = get_param(req, "DBParameterGroupFamily").unwrap_or_else(|| "aurora-postgresql15".to_string());
-                let entry = json!({"DBClusterParameterGroupName": name, "DBClusterParameterGroupArn": arn, "DBParameterGroupFamily": family, "Description": get_param(req, "Description").unwrap_or_default()});
+                let description = get_param(req, "Description").unwrap_or_default();
+                let entry = json!({"DBClusterParameterGroupName": name, "DBClusterParameterGroupArn": arn, "DBParameterGroupFamily": family, "Description": description});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "cluster_param_groups").insert(name.clone(), entry);
-                Ok(xml_response(action.as_str(), cluster_pg_xml(&name, &arn, &family), &rid))
+                Ok(xml_response(action.as_str(), cluster_pg_xml(&name, &arn, &family, &description), &rid))
             }
             "ModifyDBClusterParameterGroup" => {
                 let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
@@ -368,9 +369,27 @@ impl RdsService {
                             if !obj.contains_key("Parameters") {
                                 obj.insert("Parameters".to_string(), json!({}));
                             }
+                            if !obj.contains_key("ParameterApplyMethods") {
+                                obj.insert("ParameterApplyMethods".to_string(), json!({}));
+                            }
+                            // Capture values and apply methods separately so the
+                            // existing string-valued `Parameters` map shape stays
+                            // backward compatible with older persisted snapshots.
+                            let apply_methods: Vec<(String, String)> = parsed
+                                .iter()
+                                .map(|p| (p.name.clone(), p.apply_method.clone()))
+                                .collect();
                             if let Some(p) = obj.get_mut("Parameters").and_then(|p| p.as_object_mut()) {
-                                for (n, v) in parsed {
-                                    p.insert(n, json!(v));
+                                for param in &parsed {
+                                    p.insert(param.name.clone(), json!(param.value));
+                                }
+                            }
+                            if let Some(m) = obj
+                                .get_mut("ParameterApplyMethods")
+                                .and_then(|m| m.as_object_mut())
+                            {
+                                for (n, am) in apply_methods {
+                                    m.insert(n, json!(am));
                                 }
                             }
                         }
@@ -380,6 +399,35 @@ impl RdsService {
             }
             "ResetDBClusterParameterGroup" => {
                 let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
+                let reset_all = get_param(req, "ResetAllParameters")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let named: Vec<String> = crate::service::parse_db_parameter_members(req)
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(entry) = state
+                        .extras
+                        .get_mut("cluster_param_groups")
+                        .and_then(|m| m.get_mut(&name))
+                        .and_then(|e| e.as_object_mut())
+                    {
+                        for key in ["Parameters", "ParameterApplyMethods"] {
+                            if let Some(obj) = entry.get_mut(key).and_then(|p| p.as_object_mut()) {
+                                if reset_all || named.is_empty() {
+                                    obj.clear();
+                                } else {
+                                    for n in &named {
+                                        obj.remove(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(xml_response("ResetDBClusterParameterGroup", format!("    <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>", xml_escape(&name)), &rid))
             }
             "DeleteDBClusterParameterGroup" => {
@@ -389,7 +437,52 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("cluster_param_groups") { m.remove(&name); }
                 xml_empty_action(&action, &rid)
             }
-            "DescribeDBClusterParameterGroups" => list_extras_xml(self, &aid, "cluster_param_groups", "DBClusterParameterGroups", "DescribeDBClusterParameterGroups", cluster_pg_member_xml, &rid),
+            "DescribeDBClusterParameterGroups" => {
+                // RDS query lists wrap each element in its named member tag
+                // (`<DBClusterParameterGroup>`), not the generic `<member>`;
+                // the AWS SDK unmarshaler returns an empty list otherwise.
+                // AWS also filters by name and raises NotFound for an unknown
+                // group rather than returning everything.
+                let wanted = get_param(req, "DBClusterParameterGroupName");
+                let accounts = self.state_handle().read();
+                let groups: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_param_groups"))
+                    .map(|m| m.values().cloned().collect())
+                    .unwrap_or_default();
+                if let Some(name) = &wanted {
+                    let found = groups.iter().any(|g| {
+                        g["DBClusterParameterGroupName"].as_str() == Some(name.as_str())
+                    });
+                    if !found {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBParameterGroupNotFound",
+                            format!("DBClusterParameterGroup not found: {name}"),
+                        ));
+                    }
+                }
+                let members = groups
+                    .iter()
+                    .filter(|g| {
+                        wanted.as_deref().is_none_or(|n| {
+                            g["DBClusterParameterGroupName"].as_str() == Some(n)
+                        })
+                    })
+                    .map(|g| {
+                        format!(
+                            "        <DBClusterParameterGroup>\n{}\n        </DBClusterParameterGroup>",
+                            cluster_pg_member_xml(g)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(xml_response(
+                    "DescribeDBClusterParameterGroups",
+                    format!("    <DBClusterParameterGroups>\n{members}\n    </DBClusterParameterGroups>"),
+                    &rid,
+                ))
+            }
             "DescribeDBClusterParameters" => {
                 let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
                 let source_filter = get_param(req, "Source");
@@ -411,10 +504,16 @@ impl RdsService {
                     .and_then(|p| p.as_object())
                     .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
                     .unwrap_or_default();
+                let apply_methods: BTreeMap<String, String> = entry
+                    .and_then(|e| e.get("ParameterApplyMethods"))
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+                    .unwrap_or_default();
                 let mut members = String::new();
                 if include_user {
                     for (n, v) in &user_params {
-                        members.push_str(&crate::service::render_user_parameter_xml(n, v));
+                        let apply_method = apply_methods.get(n).map(String::as_str).unwrap_or("immediate");
+                        members.push_str(&crate::service::render_user_parameter_xml(n, v, apply_method));
                     }
                 }
                 if include_engine_default {
@@ -1239,6 +1338,32 @@ impl RdsService {
             "DescribeDBParameters" => Ok(xml_response("DescribeDBParameters", "    <Parameters/>".to_string(), &rid)),
             "ResetDBParameterGroup" => {
                 let name = get_param(req, "DBParameterGroupName").ok_or_else(|| missing("DBParameterGroupName"))?;
+                // Resetting a parameter flips its source back from `user` to
+                // `engine-default`, so we drop it from the user-set map. With
+                // `ResetAllParameters=true` (or no explicit list) every user
+                // value is cleared; otherwise only the named parameters are.
+                let reset_all = get_param(req, "ResetAllParameters")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let named: Vec<String> = crate::service::parse_db_parameter_members(req)
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(group) = state.parameter_groups.get_mut(&name) {
+                        if reset_all || named.is_empty() {
+                            group.parameters.clear();
+                            group.parameter_apply_methods.clear();
+                        } else {
+                            for n in &named {
+                                group.parameters.remove(n);
+                                group.parameter_apply_methods.remove(n);
+                            }
+                        }
+                    }
+                }
                 Ok(xml_response("ResetDBParameterGroup", format!("    <DBParameterGroupName>{}</DBParameterGroupName>", xml_escape(&name)), &rid))
             }
             "DescribeEngineDefaultParameters" => {

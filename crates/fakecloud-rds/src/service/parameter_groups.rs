@@ -53,6 +53,7 @@ impl RdsService {
             db_parameter_group_family,
             description,
             parameters: std::collections::BTreeMap::new(),
+            parameter_apply_methods: std::collections::BTreeMap::new(),
             tags,
         };
 
@@ -238,8 +239,13 @@ impl RdsService {
             parameter_group.description = new_description;
         }
 
-        for (name, value) in parsed_params {
-            parameter_group.parameters.insert(name, value);
+        for param in parsed_params {
+            parameter_group
+                .parameters
+                .insert(param.name.clone(), param.value);
+            parameter_group
+                .parameter_apply_methods
+                .insert(param.name, param.apply_method);
         }
 
         let parameter_group_clone = parameter_group.clone();
@@ -311,7 +317,12 @@ impl RdsService {
         let mut members_xml = String::new();
         if include_user {
             for (name, value) in &parameter_group.parameters {
-                members_xml.push_str(&render_user_parameter_xml(name, value));
+                let apply_method = parameter_group
+                    .parameter_apply_methods
+                    .get(name)
+                    .map(String::as_str)
+                    .unwrap_or("immediate");
+                members_xml.push_str(&render_user_parameter_xml(name, value, apply_method));
             }
         }
         if include_engine_default {
