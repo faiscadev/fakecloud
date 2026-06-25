@@ -20,9 +20,9 @@ fn make_python_zip() -> Vec<u8> {
 // Function lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateFunction", checksum = "5e8fbe96")]
-#[test_action("lambda", "GetFunction", checksum = "fd796230")]
-#[test_action("lambda", "DeleteFunction", checksum = "70eb2012")]
+#[test_action("lambda", "CreateFunction", checksum = "f7076114")]
+#[test_action("lambda", "GetFunction", checksum = "57f68067")]
+#[test_action("lambda", "DeleteFunction", checksum = "22b50c89")]
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
     let server = TestServer::start().await;
@@ -72,7 +72,7 @@ async fn lambda_create_get_delete_function() {
     assert!(result.is_err());
 }
 
-#[test_action("lambda", "ListFunctions", checksum = "c607f5a0")]
+#[test_action("lambda", "ListFunctions", checksum = "00e5d169")]
 #[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;
@@ -103,7 +103,7 @@ async fn lambda_list_functions() {
 // Invoke
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "Invoke", checksum = "3cfe4e09")]
+#[test_action("lambda", "Invoke", checksum = "f941254d")]
 #[tokio::test]
 async fn lambda_invoke() {
     let server = TestServer::start().await;
@@ -148,7 +148,7 @@ async fn lambda_invoke() {
 // PublishVersion
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "PublishVersion", checksum = "2bf524c5")]
+#[test_action("lambda", "PublishVersion", checksum = "c98c71b6")]
 #[tokio::test]
 async fn lambda_publish_version() {
     let server = TestServer::start().await;
@@ -184,9 +184,9 @@ async fn lambda_publish_version() {
 // Event source mappings
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateEventSourceMapping", checksum = "b9f5b731")]
-#[test_action("lambda", "GetEventSourceMapping", checksum = "abb053d9")]
-#[test_action("lambda", "DeleteEventSourceMapping", checksum = "96206508")]
+#[test_action("lambda", "CreateEventSourceMapping", checksum = "6c00be25")]
+#[test_action("lambda", "GetEventSourceMapping", checksum = "4821f650")]
+#[test_action("lambda", "DeleteEventSourceMapping", checksum = "8c9643a0")]
 #[tokio::test]
 async fn lambda_create_get_delete_event_source_mapping() {
     let server = TestServer::start().await;
@@ -234,7 +234,7 @@ async fn lambda_create_get_delete_event_source_mapping() {
         .unwrap();
 }
 
-#[test_action("lambda", "ListEventSourceMappings", checksum = "6df074f2")]
+#[test_action("lambda", "ListEventSourceMappings", checksum = "8f52c766")]
 #[tokio::test]
 async fn lambda_list_event_source_mappings() {
     let server = TestServer::start().await;
@@ -271,9 +271,9 @@ async fn lambda_list_event_source_mappings() {
 // Resource-based policies
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "AddPermission", checksum = "ad24af73")]
-#[test_action("lambda", "GetPolicy", checksum = "150a22ab")]
-#[test_action("lambda", "RemovePermission", checksum = "5a09e35b")]
+#[test_action("lambda", "AddPermission", checksum = "08162d94")]
+#[test_action("lambda", "GetPolicy", checksum = "95bf09af")]
+#[test_action("lambda", "RemovePermission", checksum = "ddbad384")]
 #[tokio::test]
 async fn lambda_resource_policy_roundtrip() {
     let server = TestServer::start().await;
@@ -358,11 +358,11 @@ async fn make_basic_function(client: &aws_sdk_lambda::Client, name: &str) {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateAlias", checksum = "65ac724f")]
-#[test_action("lambda", "GetAlias", checksum = "0f1b80b3")]
-#[test_action("lambda", "ListAliases", checksum = "19d9fd09")]
-#[test_action("lambda", "UpdateAlias", checksum = "40391fc3")]
-#[test_action("lambda", "DeleteAlias", checksum = "adda10f0")]
+#[test_action("lambda", "CreateAlias", checksum = "3930da4d")]
+#[test_action("lambda", "GetAlias", checksum = "d0e32b46")]
+#[test_action("lambda", "ListAliases", checksum = "feba7256")]
+#[test_action("lambda", "UpdateAlias", checksum = "16e245c2")]
+#[test_action("lambda", "DeleteAlias", checksum = "e93abeb4")]
 #[tokio::test]
 async fn lambda_alias_lifecycle() {
     let server = TestServer::start().await;
@@ -406,7 +406,7 @@ async fn lambda_alias_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "ListVersionsByFunction", checksum = "c5c64131")]
+#[test_action("lambda", "ListVersionsByFunction", checksum = "3654e09a")]
 #[tokio::test]
 async fn lambda_list_versions_by_function() {
     let server = TestServer::start().await;
@@ -420,9 +420,9 @@ async fn lambda_list_versions_by_function() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetFunctionConfiguration", checksum = "ed3e523e")]
-#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "4f61fde9")]
-#[test_action("lambda", "UpdateFunctionCode", checksum = "76866594")]
+#[test_action("lambda", "GetFunctionConfiguration", checksum = "4d62937b")]
+#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "3f7a88a0")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "32f6c196")]
 #[tokio::test]
 async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
@@ -458,8 +458,8 @@ async fn lambda_get_account_settings() {
     client.get_account_settings().send().await.unwrap();
 }
 
-#[test_action("lambda", "InvokeAsync", checksum = "77173d97")]
-#[test_action("lambda", "InvokeWithResponseStream", checksum = "0360e051")]
+#[test_action("lambda", "InvokeAsync", checksum = "350f942d")]
+#[test_action("lambda", "InvokeWithResponseStream", checksum = "0189ebbc")]
 #[tokio::test]
 async fn lambda_invoke_async_and_stream() {
     let server = TestServer::start().await;
@@ -492,15 +492,15 @@ async fn lambda_invoke_async_and_stream() {
     }
 }
 
-#[test_action("lambda", "PublishLayerVersion", checksum = "dfb9dc3f")]
-#[test_action("lambda", "GetLayerVersion", checksum = "325abc36")]
-#[test_action("lambda", "GetLayerVersionByArn", checksum = "bf086dbd")]
-#[test_action("lambda", "ListLayers", checksum = "43dac112")]
-#[test_action("lambda", "ListLayerVersions", checksum = "717445fc")]
-#[test_action("lambda", "DeleteLayerVersion", checksum = "a4da17aa")]
-#[test_action("lambda", "GetLayerVersionPolicy", checksum = "009bc482")]
-#[test_action("lambda", "AddLayerVersionPermission", checksum = "c004e857")]
-#[test_action("lambda", "RemoveLayerVersionPermission", checksum = "cc2bc2ae")]
+#[test_action("lambda", "PublishLayerVersion", checksum = "3ba91caf")]
+#[test_action("lambda", "GetLayerVersion", checksum = "76bb0ab8")]
+#[test_action("lambda", "GetLayerVersionByArn", checksum = "974e0a01")]
+#[test_action("lambda", "ListLayers", checksum = "bb68d1a8")]
+#[test_action("lambda", "ListLayerVersions", checksum = "1b7464f9")]
+#[test_action("lambda", "DeleteLayerVersion", checksum = "b20beffd")]
+#[test_action("lambda", "GetLayerVersionPolicy", checksum = "bf6587aa")]
+#[test_action("lambda", "AddLayerVersionPermission", checksum = "eb0edb3b")]
+#[test_action("lambda", "RemoveLayerVersionPermission", checksum = "608f8e62")]
 #[tokio::test]
 async fn lambda_layer_lifecycle() {
     let server = TestServer::start().await;
@@ -572,11 +572,11 @@ async fn lambda_layer_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateFunctionUrlConfig", checksum = "8f9df133")]
-#[test_action("lambda", "GetFunctionUrlConfig", checksum = "d9433859")]
-#[test_action("lambda", "UpdateFunctionUrlConfig", checksum = "59ae9dd1")]
-#[test_action("lambda", "DeleteFunctionUrlConfig", checksum = "b732300c")]
-#[test_action("lambda", "ListFunctionUrlConfigs", checksum = "e259d280")]
+#[test_action("lambda", "CreateFunctionUrlConfig", checksum = "ff923ac6")]
+#[test_action("lambda", "GetFunctionUrlConfig", checksum = "6d7a91e1")]
+#[test_action("lambda", "UpdateFunctionUrlConfig", checksum = "09d18d2d")]
+#[test_action("lambda", "DeleteFunctionUrlConfig", checksum = "d34fb1aa")]
+#[test_action("lambda", "ListFunctionUrlConfigs", checksum = "de8719d1")]
 #[tokio::test]
 async fn lambda_function_url_lifecycle() {
     let server = TestServer::start().await;
@@ -616,13 +616,13 @@ async fn lambda_function_url_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "PutFunctionConcurrency", checksum = "1ce389c3")]
-#[test_action("lambda", "GetFunctionConcurrency", checksum = "15aced4e")]
-#[test_action("lambda", "DeleteFunctionConcurrency", checksum = "b812af88")]
-#[test_action("lambda", "PutProvisionedConcurrencyConfig", checksum = "d6a30419")]
-#[test_action("lambda", "GetProvisionedConcurrencyConfig", checksum = "ddfff6d6")]
-#[test_action("lambda", "DeleteProvisionedConcurrencyConfig", checksum = "0e3c3a8c")]
-#[test_action("lambda", "ListProvisionedConcurrencyConfigs", checksum = "2d45075c")]
+#[test_action("lambda", "PutFunctionConcurrency", checksum = "445ff17b")]
+#[test_action("lambda", "GetFunctionConcurrency", checksum = "e4afcd43")]
+#[test_action("lambda", "DeleteFunctionConcurrency", checksum = "a467d900")]
+#[test_action("lambda", "PutProvisionedConcurrencyConfig", checksum = "4d32625d")]
+#[test_action("lambda", "GetProvisionedConcurrencyConfig", checksum = "afeebf8b")]
+#[test_action("lambda", "DeleteProvisionedConcurrencyConfig", checksum = "9d9c2c2e")]
+#[test_action("lambda", "ListProvisionedConcurrencyConfigs", checksum = "a4a98be4")]
 #[tokio::test]
 async fn lambda_concurrency_lifecycle() {
     let server = TestServer::start().await;
@@ -677,15 +677,15 @@ async fn lambda_concurrency_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateCodeSigningConfig", checksum = "12386c1f")]
-#[test_action("lambda", "GetCodeSigningConfig", checksum = "cb1852fc")]
-#[test_action("lambda", "UpdateCodeSigningConfig", checksum = "060abb7e")]
-#[test_action("lambda", "DeleteCodeSigningConfig", checksum = "cbe92c43")]
-#[test_action("lambda", "ListCodeSigningConfigs", checksum = "9dde614b")]
-#[test_action("lambda", "PutFunctionCodeSigningConfig", checksum = "07561a74")]
-#[test_action("lambda", "GetFunctionCodeSigningConfig", checksum = "f0c71958")]
-#[test_action("lambda", "DeleteFunctionCodeSigningConfig", checksum = "ca797fe7")]
-#[test_action("lambda", "ListFunctionsByCodeSigningConfig", checksum = "c4877f19")]
+#[test_action("lambda", "CreateCodeSigningConfig", checksum = "033e02b3")]
+#[test_action("lambda", "GetCodeSigningConfig", checksum = "6ab7c192")]
+#[test_action("lambda", "UpdateCodeSigningConfig", checksum = "babf3cfd")]
+#[test_action("lambda", "DeleteCodeSigningConfig", checksum = "2b03107b")]
+#[test_action("lambda", "ListCodeSigningConfigs", checksum = "d0a0f166")]
+#[test_action("lambda", "PutFunctionCodeSigningConfig", checksum = "2d0c93ed")]
+#[test_action("lambda", "GetFunctionCodeSigningConfig", checksum = "eb62995a")]
+#[test_action("lambda", "DeleteFunctionCodeSigningConfig", checksum = "9e53fbf3")]
+#[test_action("lambda", "ListFunctionsByCodeSigningConfig", checksum = "fcee00dc")]
 #[tokio::test]
 async fn lambda_code_signing_lifecycle() {
     let server = TestServer::start().await;
@@ -757,11 +757,11 @@ async fn lambda_code_signing_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "PutFunctionEventInvokeConfig", checksum = "550a290d")]
-#[test_action("lambda", "GetFunctionEventInvokeConfig", checksum = "19a1ee68")]
-#[test_action("lambda", "UpdateFunctionEventInvokeConfig", checksum = "ceb633d0")]
-#[test_action("lambda", "DeleteFunctionEventInvokeConfig", checksum = "a1b423f6")]
-#[test_action("lambda", "ListFunctionEventInvokeConfigs", checksum = "48046264")]
+#[test_action("lambda", "PutFunctionEventInvokeConfig", checksum = "a05d2cbd")]
+#[test_action("lambda", "GetFunctionEventInvokeConfig", checksum = "b8cc0e93")]
+#[test_action("lambda", "UpdateFunctionEventInvokeConfig", checksum = "e3522646")]
+#[test_action("lambda", "DeleteFunctionEventInvokeConfig", checksum = "bba8194f")]
+#[test_action("lambda", "ListFunctionEventInvokeConfigs", checksum = "c2505c63")]
 #[tokio::test]
 async fn lambda_event_invoke_lifecycle() {
     let server = TestServer::start().await;
@@ -802,8 +802,8 @@ async fn lambda_event_invoke_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "PutRuntimeManagementConfig", checksum = "d86ea37a")]
-#[test_action("lambda", "GetRuntimeManagementConfig", checksum = "170e6028")]
+#[test_action("lambda", "PutRuntimeManagementConfig", checksum = "29a12cb3")]
+#[test_action("lambda", "GetRuntimeManagementConfig", checksum = "a21c79cb")]
 #[tokio::test]
 async fn lambda_runtime_management() {
     let server = TestServer::start().await;
@@ -824,8 +824,8 @@ async fn lambda_runtime_management() {
         .unwrap();
 }
 
-#[test_action("lambda", "PutFunctionRecursionConfig", checksum = "3805e69b")]
-#[test_action("lambda", "GetFunctionRecursionConfig", checksum = "86ff28a0")]
+#[test_action("lambda", "PutFunctionRecursionConfig", checksum = "0e6d5032")]
+#[test_action("lambda", "GetFunctionRecursionConfig", checksum = "5eac1575")]
 #[tokio::test]
 async fn lambda_recursion_config() {
     let server = TestServer::start().await;
@@ -846,8 +846,8 @@ async fn lambda_recursion_config() {
         .unwrap();
 }
 
-#[test_action("lambda", "PutFunctionScalingConfig", checksum = "32595a34")]
-#[test_action("lambda", "GetFunctionScalingConfig", checksum = "8096164f")]
+#[test_action("lambda", "PutFunctionScalingConfig", checksum = "f8f9ac32")]
+#[test_action("lambda", "GetFunctionScalingConfig", checksum = "a900473b")]
 #[tokio::test]
 async fn lambda_scaling_config_via_route() {
     // Function scaling config — the live AWS route is
@@ -881,9 +881,9 @@ async fn lambda_scaling_config_via_route() {
     assert!(resp.status().is_success(), "get status: {}", resp.status());
 }
 
-#[test_action("lambda", "TagResource", checksum = "481a09a0")]
-#[test_action("lambda", "UntagResource", checksum = "4c7c9139")]
-#[test_action("lambda", "ListTags", checksum = "7d9fadf7")]
+#[test_action("lambda", "TagResource", checksum = "0662a9c9")]
+#[test_action("lambda", "UntagResource", checksum = "0d55cb3a")]
+#[test_action("lambda", "ListTags", checksum = "ef1e8bc2")]
 #[tokio::test]
 async fn lambda_tag_resource_lifecycle() {
     let server = TestServer::start().await;
@@ -907,15 +907,15 @@ async fn lambda_tag_resource_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateCapacityProvider", checksum = "716c4344")]
-#[test_action("lambda", "GetCapacityProvider", checksum = "e0aa8ee9")]
-#[test_action("lambda", "ListCapacityProviders", checksum = "efb43bca")]
-#[test_action("lambda", "UpdateCapacityProvider", checksum = "0209aaaa")]
-#[test_action("lambda", "DeleteCapacityProvider", checksum = "88a85b26")]
+#[test_action("lambda", "CreateCapacityProvider", checksum = "4a7d5f01")]
+#[test_action("lambda", "GetCapacityProvider", checksum = "63ccc56f")]
+#[test_action("lambda", "ListCapacityProviders", checksum = "cae7a785")]
+#[test_action("lambda", "UpdateCapacityProvider", checksum = "3ec3e35c")]
+#[test_action("lambda", "DeleteCapacityProvider", checksum = "5a43e158")]
 #[test_action(
     "lambda",
     "ListFunctionVersionsByCapacityProvider",
-    checksum = "d51f5143"
+    checksum = "863173ca"
 )]
 #[tokio::test]
 async fn lambda_capacity_provider_lifecycle() {
@@ -973,18 +973,18 @@ async fn lambda_capacity_provider_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetDurableExecution", checksum = "e76992ce")]
-#[test_action("lambda", "GetDurableExecutionHistory", checksum = "54910a95")]
+#[test_action("lambda", "GetDurableExecution", checksum = "99257851")]
+#[test_action("lambda", "GetDurableExecutionHistory", checksum = "9371fa69")]
 #[test_action("lambda", "GetDurableExecutionState", checksum = "467d4d29")]
-#[test_action("lambda", "CheckpointDurableExecution", checksum = "9ea9391f")]
+#[test_action("lambda", "CheckpointDurableExecution", checksum = "6fc282cb")]
 #[test_action("lambda", "StopDurableExecution", checksum = "dc468fea")]
-#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "7e7ba943")]
-#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "2ff17f12")]
-#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "4f3d7101")]
+#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "299e69a7")]
+#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "a12a1a27")]
+#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "638a3d2f")]
 #[test_action(
     "lambda",
     "SendDurableExecutionCallbackHeartbeat",
-    checksum = "a797352f"
+    checksum = "ca713bf1"
 )]
 #[tokio::test]
 async fn lambda_durable_execution_lifecycle() {
@@ -1048,7 +1048,7 @@ async fn lambda_durable_execution_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "UpdateEventSourceMapping", checksum = "5b51a313")]
+#[test_action("lambda", "UpdateEventSourceMapping", checksum = "b2c589c7")]
 #[tokio::test]
 async fn lambda_update_event_source_mapping() {
     let server = TestServer::start().await;

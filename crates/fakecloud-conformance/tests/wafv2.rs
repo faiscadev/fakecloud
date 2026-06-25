@@ -99,7 +99,7 @@ async fn make_regex_set(server: &TestServer, name: &str) -> (String, String, Str
     )
 }
 
-#[test_action("wafv2", "CreateWebACL", checksum = "5fbdb689")]
+#[test_action("wafv2", "CreateWebACL", checksum = "43232eb5")]
 #[tokio::test]
 async fn waf_create_web_acl() {
     let server = TestServer::start().await;
@@ -116,7 +116,7 @@ async fn waf_create_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetWebACL", checksum = "348aa682")]
+#[test_action("wafv2", "GetWebACL", checksum = "587701da")]
 #[tokio::test]
 async fn waf_get_web_acl() {
     let server = TestServer::start().await;
@@ -133,7 +133,7 @@ async fn waf_get_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListWebACLs", checksum = "4fa7672b")]
+#[test_action("wafv2", "ListWebACLs", checksum = "1659a5a4")]
 #[tokio::test]
 async fn waf_list_web_acls() {
     let server = TestServer::start().await;
@@ -147,7 +147,7 @@ async fn waf_list_web_acls() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UpdateWebACL", checksum = "79a78639")]
+#[test_action("wafv2", "UpdateWebACL", checksum = "43cbab40")]
 #[tokio::test]
 async fn waf_update_web_acl() {
     let server = TestServer::start().await;
@@ -167,7 +167,7 @@ async fn waf_update_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteWebACL", checksum = "e62ee19f")]
+#[test_action("wafv2", "DeleteWebACL", checksum = "6c96fae9")]
 #[tokio::test]
 async fn waf_delete_web_acl() {
     let server = TestServer::start().await;
@@ -185,7 +185,7 @@ async fn waf_delete_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "CreateRuleGroup", checksum = "8f4803cf")]
+#[test_action("wafv2", "CreateRuleGroup", checksum = "38854299")]
 #[tokio::test]
 async fn waf_create_rule_group() {
     let server = TestServer::start().await;
@@ -202,7 +202,7 @@ async fn waf_create_rule_group() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetRuleGroup", checksum = "6beafd0e")]
+#[test_action("wafv2", "GetRuleGroup", checksum = "d48b472b")]
 #[tokio::test]
 async fn waf_get_rule_group() {
     let server = TestServer::start().await;
@@ -219,7 +219,7 @@ async fn waf_get_rule_group() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListRuleGroups", checksum = "1f63c827")]
+#[test_action("wafv2", "ListRuleGroups", checksum = "1ca4a444")]
 #[tokio::test]
 async fn waf_list_rule_groups() {
     let server = TestServer::start().await;
@@ -233,7 +233,7 @@ async fn waf_list_rule_groups() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UpdateRuleGroup", checksum = "1d65ba7e")]
+#[test_action("wafv2", "UpdateRuleGroup", checksum = "2bf5e4fb")]
 #[tokio::test]
 async fn waf_update_rule_group() {
     let server = TestServer::start().await;
@@ -252,7 +252,7 @@ async fn waf_update_rule_group() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteRuleGroup", checksum = "d784691a")]
+#[test_action("wafv2", "DeleteRuleGroup", checksum = "e8e3044c")]
 #[tokio::test]
 async fn waf_delete_rule_group() {
     let server = TestServer::start().await;
@@ -270,7 +270,7 @@ async fn waf_delete_rule_group() {
         .unwrap();
 }
 
-#[test_action("wafv2", "CreateIPSet", checksum = "d4a618da")]
+#[test_action("wafv2", "CreateIPSet", checksum = "d188659f")]
 #[tokio::test]
 async fn waf_create_ip_set() {
     let server = TestServer::start().await;
@@ -287,7 +287,7 @@ async fn waf_create_ip_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetIPSet", checksum = "8fe1aaf2")]
+#[test_action("wafv2", "GetIPSet", checksum = "0e378ad0")]
 #[tokio::test]
 async fn waf_get_ip_set() {
     let server = TestServer::start().await;
@@ -304,7 +304,7 @@ async fn waf_get_ip_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListIPSets", checksum = "f46cd1f6")]
+#[test_action("wafv2", "ListIPSets", checksum = "bdd8a7e6")]
 #[tokio::test]
 async fn waf_list_ip_sets() {
     let server = TestServer::start().await;
@@ -318,7 +318,7 @@ async fn waf_list_ip_sets() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UpdateIPSet", checksum = "9d033528")]
+#[test_action("wafv2", "UpdateIPSet", checksum = "5ab8ad58")]
 #[tokio::test]
 async fn waf_update_ip_set() {
     let server = TestServer::start().await;
@@ -337,7 +337,7 @@ async fn waf_update_ip_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteIPSet", checksum = "137f99f9")]
+#[test_action("wafv2", "DeleteIPSet", checksum = "e8d0103e")]
 #[tokio::test]
 async fn waf_delete_ip_set() {
     let server = TestServer::start().await;
@@ -355,7 +355,7 @@ async fn waf_delete_ip_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "CreateRegexPatternSet", checksum = "238f2d00")]
+#[test_action("wafv2", "CreateRegexPatternSet", checksum = "2981f28e")]
 #[tokio::test]
 async fn waf_create_regex_pattern_set() {
     let server = TestServer::start().await;
@@ -370,7 +370,7 @@ async fn waf_create_regex_pattern_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetRegexPatternSet", checksum = "54012e56")]
+#[test_action("wafv2", "GetRegexPatternSet", checksum = "49413f28")]
 #[tokio::test]
 async fn waf_get_regex_pattern_set() {
     let server = TestServer::start().await;
@@ -387,7 +387,7 @@ async fn waf_get_regex_pattern_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListRegexPatternSets", checksum = "9343bbfb")]
+#[test_action("wafv2", "ListRegexPatternSets", checksum = "1836f6e2")]
 #[tokio::test]
 async fn waf_list_regex_pattern_sets() {
     let server = TestServer::start().await;
@@ -401,7 +401,7 @@ async fn waf_list_regex_pattern_sets() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UpdateRegexPatternSet", checksum = "cf71439a")]
+#[test_action("wafv2", "UpdateRegexPatternSet", checksum = "852bb410")]
 #[tokio::test]
 async fn waf_update_regex_pattern_set() {
     let server = TestServer::start().await;
@@ -419,7 +419,7 @@ async fn waf_update_regex_pattern_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteRegexPatternSet", checksum = "1e54e064")]
+#[test_action("wafv2", "DeleteRegexPatternSet", checksum = "d35b60f4")]
 #[tokio::test]
 async fn waf_delete_regex_pattern_set() {
     let server = TestServer::start().await;
@@ -437,7 +437,7 @@ async fn waf_delete_regex_pattern_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "AssociateWebACL", checksum = "b734f627")]
+#[test_action("wafv2", "AssociateWebACL", checksum = "b8cc61fe")]
 #[tokio::test]
 async fn waf_associate_web_acl() {
     let server = TestServer::start().await;
@@ -453,7 +453,7 @@ async fn waf_associate_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DisassociateWebACL", checksum = "bf328119")]
+#[test_action("wafv2", "DisassociateWebACL", checksum = "8c83ee23")]
 #[tokio::test]
 async fn waf_disassociate_web_acl() {
     let server = TestServer::start().await;
@@ -467,7 +467,7 @@ async fn waf_disassociate_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetWebACLForResource", checksum = "d86ae5dc")]
+#[test_action("wafv2", "GetWebACLForResource", checksum = "ee84a23c")]
 #[tokio::test]
 async fn waf_get_web_acl_for_resource() {
     let server = TestServer::start().await;
@@ -481,7 +481,7 @@ async fn waf_get_web_acl_for_resource() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListResourcesForWebACL", checksum = "44de4a22")]
+#[test_action("wafv2", "ListResourcesForWebACL", checksum = "9ca5a0ca")]
 #[tokio::test]
 async fn waf_list_resources_for_web_acl() {
     let server = TestServer::start().await;
@@ -496,7 +496,7 @@ async fn waf_list_resources_for_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "PutLoggingConfiguration", checksum = "9e97815a")]
+#[test_action("wafv2", "PutLoggingConfiguration", checksum = "1263abf9")]
 #[tokio::test]
 async fn waf_put_logging_configuration() {
     let server = TestServer::start().await;
@@ -516,7 +516,7 @@ async fn waf_put_logging_configuration() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetLoggingConfiguration", checksum = "8ab7c720")]
+#[test_action("wafv2", "GetLoggingConfiguration", checksum = "d07e8a4f")]
 #[tokio::test]
 async fn waf_get_logging_configuration() {
     let server = TestServer::start().await;
@@ -539,7 +539,7 @@ async fn waf_get_logging_configuration() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteLoggingConfiguration", checksum = "9121b448")]
+#[test_action("wafv2", "DeleteLoggingConfiguration", checksum = "024b64c4")]
 #[tokio::test]
 async fn waf_delete_logging_configuration() {
     let server = TestServer::start().await;
@@ -562,7 +562,7 @@ async fn waf_delete_logging_configuration() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListLoggingConfigurations", checksum = "7acf0ce5")]
+#[test_action("wafv2", "ListLoggingConfigurations", checksum = "5f04b431")]
 #[tokio::test]
 async fn waf_list_logging_configurations() {
     let server = TestServer::start().await;
@@ -576,7 +576,7 @@ async fn waf_list_logging_configurations() {
         .unwrap();
 }
 
-#[test_action("wafv2", "PutPermissionPolicy", checksum = "851acec6")]
+#[test_action("wafv2", "PutPermissionPolicy", checksum = "e0d7d7f9")]
 #[tokio::test]
 async fn waf_put_permission_policy() {
     let server = TestServer::start().await;
@@ -592,7 +592,7 @@ async fn waf_put_permission_policy() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetPermissionPolicy", checksum = "a6035ead")]
+#[test_action("wafv2", "GetPermissionPolicy", checksum = "27467c52")]
 #[tokio::test]
 async fn waf_get_permission_policy() {
     let server = TestServer::start().await;
@@ -611,7 +611,7 @@ async fn waf_get_permission_policy() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeletePermissionPolicy", checksum = "e8d938e4")]
+#[test_action("wafv2", "DeletePermissionPolicy", checksum = "a4fa83ae")]
 #[tokio::test]
 async fn waf_delete_permission_policy() {
     let server = TestServer::start().await;
@@ -626,7 +626,7 @@ async fn waf_delete_permission_policy() {
         .unwrap();
 }
 
-#[test_action("wafv2", "TagResource", checksum = "b399af60")]
+#[test_action("wafv2", "TagResource", checksum = "81f3fa19")]
 #[tokio::test]
 async fn waf_tag_resource() {
     let server = TestServer::start().await;
@@ -648,7 +648,7 @@ async fn waf_tag_resource() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UntagResource", checksum = "19c2ce84")]
+#[test_action("wafv2", "UntagResource", checksum = "f7360971")]
 #[tokio::test]
 async fn waf_untag_resource() {
     let server = TestServer::start().await;
@@ -674,7 +674,7 @@ async fn waf_untag_resource() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListTagsForResource", checksum = "798d8b38")]
+#[test_action("wafv2", "ListTagsForResource", checksum = "117b8ef9")]
 #[tokio::test]
 async fn waf_list_tags_for_resource() {
     let server = TestServer::start().await;
@@ -689,7 +689,7 @@ async fn waf_list_tags_for_resource() {
         .unwrap();
 }
 
-#[test_action("wafv2", "CreateAPIKey", checksum = "31d11c32")]
+#[test_action("wafv2", "CreateAPIKey", checksum = "e67a9d35")]
 #[tokio::test]
 async fn waf_create_api_key() {
     let server = TestServer::start().await;
@@ -704,7 +704,7 @@ async fn waf_create_api_key() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteAPIKey", checksum = "d3b04698")]
+#[test_action("wafv2", "DeleteAPIKey", checksum = "8386ffe9")]
 #[tokio::test]
 async fn waf_delete_api_key() {
     let server = TestServer::start().await;
@@ -727,7 +727,7 @@ async fn waf_delete_api_key() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetDecryptedAPIKey", checksum = "a5368b0d")]
+#[test_action("wafv2", "GetDecryptedAPIKey", checksum = "196117ea")]
 #[tokio::test]
 async fn waf_get_decrypted_api_key() {
     let server = TestServer::start().await;
@@ -750,7 +750,7 @@ async fn waf_get_decrypted_api_key() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListAPIKeys", checksum = "3de087c7")]
+#[test_action("wafv2", "ListAPIKeys", checksum = "78b7765f")]
 #[tokio::test]
 async fn waf_list_api_keys() {
     let server = TestServer::start().await;
@@ -764,7 +764,7 @@ async fn waf_list_api_keys() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DescribeAllManagedProducts", checksum = "443d3285")]
+#[test_action("wafv2", "DescribeAllManagedProducts", checksum = "4135a2db")]
 #[tokio::test]
 async fn waf_describe_all_managed_products() {
     let server = TestServer::start().await;
@@ -778,7 +778,7 @@ async fn waf_describe_all_managed_products() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DescribeManagedProductsByVendor", checksum = "a6d6b78d")]
+#[test_action("wafv2", "DescribeManagedProductsByVendor", checksum = "fb8c879c")]
 #[tokio::test]
 async fn waf_describe_managed_products_by_vendor() {
     let server = TestServer::start().await;
@@ -793,7 +793,7 @@ async fn waf_describe_managed_products_by_vendor() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DescribeManagedRuleGroup", checksum = "c14725c2")]
+#[test_action("wafv2", "DescribeManagedRuleGroup", checksum = "806b50e2")]
 #[tokio::test]
 async fn waf_describe_managed_rule_group() {
     let server = TestServer::start().await;
@@ -809,7 +809,7 @@ async fn waf_describe_managed_rule_group() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetManagedRuleSet", checksum = "fc23659e")]
+#[test_action("wafv2", "GetManagedRuleSet", checksum = "f89c433b")]
 #[tokio::test]
 async fn waf_get_managed_rule_set() {
     let server = TestServer::start().await;
@@ -825,7 +825,7 @@ async fn waf_get_managed_rule_set() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListAvailableManagedRuleGroups", checksum = "55721f18")]
+#[test_action("wafv2", "ListAvailableManagedRuleGroups", checksum = "bb50b60f")]
 #[tokio::test]
 async fn waf_list_available_managed_rule_groups() {
     let server = TestServer::start().await;
@@ -842,7 +842,7 @@ async fn waf_list_available_managed_rule_groups() {
 #[test_action(
     "wafv2",
     "ListAvailableManagedRuleGroupVersions",
-    checksum = "0f649f8f"
+    checksum = "503d6feb"
 )]
 #[tokio::test]
 async fn waf_list_available_managed_rule_group_versions() {
@@ -859,7 +859,7 @@ async fn waf_list_available_managed_rule_group_versions() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListManagedRuleSets", checksum = "624d6f3e")]
+#[test_action("wafv2", "ListManagedRuleSets", checksum = "4f9075df")]
 #[tokio::test]
 async fn waf_list_managed_rule_sets() {
     let server = TestServer::start().await;
@@ -873,7 +873,7 @@ async fn waf_list_managed_rule_sets() {
         .unwrap();
 }
 
-#[test_action("wafv2", "PutManagedRuleSetVersions", checksum = "349824fd")]
+#[test_action("wafv2", "PutManagedRuleSetVersions", checksum = "7d7f6ac1")]
 #[tokio::test]
 async fn waf_put_managed_rule_set_versions() {
     let server = TestServer::start().await;
@@ -893,7 +893,7 @@ async fn waf_put_managed_rule_set_versions() {
 #[test_action(
     "wafv2",
     "UpdateManagedRuleSetVersionExpiryDate",
-    checksum = "0b8d7217"
+    checksum = "79443e36"
 )]
 #[tokio::test]
 async fn waf_update_managed_rule_set_version_expiry_date() {
@@ -915,7 +915,7 @@ async fn waf_update_managed_rule_set_version_expiry_date() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GenerateMobileSdkReleaseUrl", checksum = "9cca727a")]
+#[test_action("wafv2", "GenerateMobileSdkReleaseUrl", checksum = "b8040e00")]
 #[tokio::test]
 async fn waf_generate_mobile_sdk_release_url() {
     let server = TestServer::start().await;
@@ -930,7 +930,7 @@ async fn waf_generate_mobile_sdk_release_url() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetMobileSdkRelease", checksum = "fe05a8a6")]
+#[test_action("wafv2", "GetMobileSdkRelease", checksum = "a1a9a714")]
 #[tokio::test]
 async fn waf_get_mobile_sdk_release() {
     let server = TestServer::start().await;
@@ -945,7 +945,7 @@ async fn waf_get_mobile_sdk_release() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListMobileSdkReleases", checksum = "a0b6122f")]
+#[test_action("wafv2", "ListMobileSdkReleases", checksum = "697f62ea")]
 #[tokio::test]
 async fn waf_list_mobile_sdk_releases() {
     let server = TestServer::start().await;
@@ -959,7 +959,7 @@ async fn waf_list_mobile_sdk_releases() {
         .unwrap();
 }
 
-#[test_action("wafv2", "CheckCapacity", checksum = "c5d54ce7")]
+#[test_action("wafv2", "CheckCapacity", checksum = "b7f86716")]
 #[tokio::test]
 async fn waf_check_capacity() {
     let server = TestServer::start().await;
@@ -995,7 +995,7 @@ async fn waf_check_capacity() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetSampledRequests", checksum = "53b81368")]
+#[test_action("wafv2", "GetSampledRequests", checksum = "b0b0052d")]
 #[tokio::test]
 async fn waf_get_sampled_requests() {
     let server = TestServer::start().await;
@@ -1021,7 +1021,7 @@ async fn waf_get_sampled_requests() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetTopPathStatisticsByTraffic", checksum = "23e643cd")]
+#[test_action("wafv2", "GetTopPathStatisticsByTraffic", checksum = "e7d662bf")]
 #[tokio::test]
 async fn waf_get_top_path_statistics_by_traffic() {
     let server = TestServer::start().await;
@@ -1049,7 +1049,7 @@ async fn waf_get_top_path_statistics_by_traffic() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetRateBasedStatementManagedKeys", checksum = "fa0bc9fb")]
+#[test_action("wafv2", "GetRateBasedStatementManagedKeys", checksum = "6bee916c")]
 #[tokio::test]
 async fn waf_get_rate_based_statement_managed_keys() {
     let server = TestServer::start().await;
@@ -1066,7 +1066,7 @@ async fn waf_get_rate_based_statement_managed_keys() {
         .unwrap();
 }
 
-#[test_action("wafv2", "DeleteFirewallManagerRuleGroups", checksum = "9c54e147")]
+#[test_action("wafv2", "DeleteFirewallManagerRuleGroups", checksum = "9a7f466f")]
 #[tokio::test]
 async fn waf_delete_firewall_manager_rule_groups() {
     let server = TestServer::start().await;

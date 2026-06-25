@@ -77,7 +77,7 @@ async fn logs_log_stream_lifecycle() {
 
 #[test_action("logs", "PutLogEvents", checksum = "73acad9c")]
 #[test_action("logs", "GetLogEvents", checksum = "a8cec2f4")]
-#[test_action("logs", "FilterLogEvents", checksum = "3316f933")]
+#[test_action("logs", "FilterLogEvents", checksum = "3bcc08b5")]
 #[tokio::test]
 async fn logs_put_get_filter_events() {
     let server = TestServer::start().await;
@@ -1322,12 +1322,12 @@ async fn logs_lookup_tables() {
 
 // -- Scheduled queries --
 
-#[test_action("logs", "CreateScheduledQuery", checksum = "2d0d1ab7")]
-#[test_action("logs", "GetScheduledQuery", checksum = "b1e56420")]
-#[test_action("logs", "GetScheduledQueryHistory", checksum = "72b1e1b1")]
-#[test_action("logs", "ListScheduledQueries", checksum = "a7e75680")]
-#[test_action("logs", "UpdateScheduledQuery", checksum = "7173fef9")]
-#[test_action("logs", "DeleteScheduledQuery", checksum = "9ebf1375")]
+#[test_action("logs", "CreateScheduledQuery", checksum = "1c813961")]
+#[test_action("logs", "GetScheduledQuery", checksum = "58a944f5")]
+#[test_action("logs", "GetScheduledQueryHistory", checksum = "01f0a893")]
+#[test_action("logs", "ListScheduledQueries", checksum = "e55e8bd9")]
+#[test_action("logs", "UpdateScheduledQuery", checksum = "a2754f6e")]
+#[test_action("logs", "DeleteScheduledQuery", checksum = "401121a8")]
 #[tokio::test]
 async fn logs_scheduled_queries() {
     let server = TestServer::start().await;

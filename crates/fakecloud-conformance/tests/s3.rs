@@ -104,7 +104,7 @@ async fn s3_object_crud() {
 
 // -- CopyObject --
 
-#[test_action("s3", "CopyObject", checksum = "66cd7130")]
+#[test_action("s3", "CopyObject", checksum = "5b7c1bf6")]
 #[tokio::test]
 async fn s3_copy_object() {
     let server = TestServer::start().await;
@@ -698,8 +698,8 @@ async fn s3_bucket_cors() {
 
 // -- Bucket notification configuration --
 
-#[test_action("s3", "PutBucketNotificationConfiguration", checksum = "6defd1ec")]
-#[test_action("s3", "GetBucketNotificationConfiguration", checksum = "c6a077b9")]
+#[test_action("s3", "PutBucketNotificationConfiguration", checksum = "7df12619")]
+#[test_action("s3", "GetBucketNotificationConfiguration", checksum = "7ce92d6d")]
 #[tokio::test]
 async fn s3_bucket_notification() {
     let server = TestServer::start().await;
@@ -1821,8 +1821,8 @@ async fn raw_delete(server: &TestServer, path: &str) {
     );
 }
 
-#[test_action("s3", "CreateBucketMetadataConfiguration", checksum = "55f9905d")]
-#[test_action("s3", "GetBucketMetadataConfiguration", checksum = "b35095ce")]
+#[test_action("s3", "CreateBucketMetadataConfiguration", checksum = "526d4327")]
+#[test_action("s3", "GetBucketMetadataConfiguration", checksum = "b57dc939")]
 #[test_action("s3", "DeleteBucketMetadataConfiguration", checksum = "00b73c78")]
 #[test_action(
     "s3",
