@@ -316,4 +316,5 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
         "AWS_ENDPOINT_URL_ELASTIC_LOAD_BALANCING_V2",
         "elasticloadbalancingv2",
     ),
+    ("AWS_ENDPOINT_URL_BEDROCK_AGENT", "bedrock-agent"),
 ];

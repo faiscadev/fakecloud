@@ -7838,10 +7838,22 @@ async fn main() {
                                 .map(|cs| cs.iter().map(|c| serde_json::json!({
                                     "collaboratorId": c.collaborator_id,
                                     "collaboratorName": c.collaborator_name,
-                                    "collaboratorAliasArn": c.collaborator_alias_arn,
+                                    "agentDescriptor": c.agent_descriptor,
+                                    "collaborationInstruction": c.collaboration_instruction,
                                     "relayConversationHistory": c.relay_conversation_history,
                                 })).collect())
                                 .unwrap_or_default();
+                            let action_groups: Vec<serde_json::Value> = state
+                                .agent_action_groups
+                                .values()
+                                .filter(|ag| ag.agent_id == *agent_id)
+                                .map(|ag| serde_json::json!({
+                                    "actionGroupId": ag.action_group_id,
+                                    "actionGroupName": ag.action_group_name,
+                                    "actionGroupState": ag.action_group_state,
+                                    "description": ag.description,
+                                }))
+                                .collect();
                             out.push(serde_json::json!({
                                 "agentId": agent.agent_id,
                                 "agentName": agent.agent_name,
@@ -7850,10 +7862,7 @@ async fn main() {
                                 "foundationModel": agent.foundation_model,
                                 "instruction": agent.instruction,
                                 "knowledgeBases": kbs,
-                                // Action groups are not persisted in state today
-                                // (CreateAgentActionGroup returns a stub id); the
-                                // field is exposed for forward compatibility.
-                                "actionGroups": Vec::<serde_json::Value>::new(),
+                                "actionGroups": action_groups,
                                 "collaborators": collaborators,
                                 "aliases": aliases,
                                 "versions": versions,

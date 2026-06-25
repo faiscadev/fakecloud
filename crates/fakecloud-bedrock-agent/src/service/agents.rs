@@ -29,6 +29,8 @@ impl BedrockAgentService {
             customer_encryption_key_arn: opt_str(&body, "customerEncryptionKeyArn"),
             prompt_override_configuration: opt_json(&body, "promptOverrideConfiguration"),
             guardrail_configuration: opt_json(&body, "guardrailConfiguration"),
+            agent_collaboration: opt_str(&body, "agentCollaboration")
+                .unwrap_or_else(|| "DISABLED".to_string()),
             agent_status: "NOT_PREPARED".to_string(),
             prepared_at: None,
             created_at: now_dt,
@@ -110,6 +112,9 @@ impl BedrockAgentService {
         if body.get("guardrailConfiguration").is_some() {
             a.guardrail_configuration = opt_json(&body, "guardrailConfiguration");
         }
+        if let Some(c) = opt_str(&body, "agentCollaboration") {
+            a.agent_collaboration = c;
+        }
         Ok(AwsResponse::ok_json(json!({ "agent": agent_json(a) })))
     }
 
@@ -125,6 +130,7 @@ impl BedrockAgentService {
         state.agent_versions.remove(&id);
         state.agent_knowledge_bases.remove(&id);
         state.agent_collaborators.remove(&id);
+        state.agent_action_groups.retain(|_, ag| ag.agent_id != id);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -140,11 +146,34 @@ impl BedrockAgentService {
         a.agent_status = "PREPARED".to_string();
         a.prepared_at = Some(now());
         a.updated_at = now();
+        let snapshot = a.clone();
+        // PrepareAgent cuts a new numbered agent version from the current DRAFT
+        // (real ECS-style: version 1 on first prepare, then incrementing). The
+        // versions are what ListAgentVersions / the versions data source read.
+        let versions = state.agent_versions.entry(id.clone()).or_default();
+        let next = versions
+            .iter()
+            .filter_map(|v| v.agent_version.parse::<u32>().ok())
+            .max()
+            .map(|n| n + 1)
+            .unwrap_or(1);
+        versions.push(AgentVersion {
+            agent_version: next.to_string(),
+            agent_id: id.clone(),
+            agent_name: snapshot.agent_name.clone(),
+            description: snapshot.description.clone(),
+            created_at: now(),
+            updated_at: now(),
+            instruction: snapshot.instruction.clone(),
+            foundation_model: snapshot.foundation_model.clone(),
+            guardrail_configuration: snapshot.guardrail_configuration.clone(),
+            prompt_override_configuration: snapshot.prompt_override_configuration.clone(),
+        });
         Ok(AwsResponse::ok_json(json!({
             "agentId": id,
             "agentStatus": "PREPARED",
             "agentVersion": "DRAFT",
-            "preparedAt": a.prepared_at.as_ref().unwrap().to_rfc3339(),
+            "preparedAt": snapshot.prepared_at.as_ref().unwrap().to_rfc3339(),
         })))
     }
 
@@ -162,12 +191,29 @@ impl BedrockAgentService {
         if !state.agents.contains_key(&agent_id) {
             return Err(not_found(format!("Agent {agent_id} not found")));
         }
+        // Creating an alias without an explicit routingConfiguration makes AWS
+        // cut a new agent version and route 100% of traffic to it, so the alias
+        // always reads back exactly one routing-configuration entry. Mirror that
+        // by defaulting to the latest prepared version (or "1").
+        let mut routing_configuration = opt_array(&body, "routingConfiguration");
+        if routing_configuration.is_empty() {
+            let version = state
+                .agent_versions
+                .get(&agent_id)
+                .and_then(|vs| {
+                    vs.iter()
+                        .filter_map(|v| v.agent_version.parse::<u32>().ok())
+                        .max()
+                })
+                .unwrap_or(1);
+            routing_configuration = vec![json!({ "agentVersion": version.to_string() })];
+        }
         let alias = AgentAlias {
             alias_id: alias_id.clone(),
             alias_name: name.clone(),
             agent_id: agent_id.clone(),
             agent_version: opt_str(&body, "agentVersion").unwrap_or_else(|| "DRAFT".to_string()),
-            routing_configuration: opt_array(&body, "routingConfiguration"),
+            routing_configuration,
             description: opt_str(&body, "description"),
             alias_arn: format!(
                 "arn:aws:bedrock:{}:{}:agent-alias/{}/{}",
@@ -472,9 +518,12 @@ impl BedrockAgentService {
         }
         let coll = AgentCollaborator {
             agent_id: agent_id.clone(),
+            agent_version: opt_str(&body, "agentVersion").unwrap_or_else(|| "DRAFT".to_string()),
             collaborator_id: collaborator_id.clone(),
             collaborator_name: req_str(&body, "collaboratorName")?,
-            collaborator_alias_arn: opt_str(&body, "collaboratorAliasArn").unwrap_or_default(),
+            agent_descriptor: opt_json(&body, "agentDescriptor"),
+            collaboration_instruction: opt_str(&body, "collaborationInstruction")
+                .unwrap_or_default(),
             relay_conversation_history: opt_str(&body, "relayConversationHistory")
                 .unwrap_or_else(|| "DISABLED".to_string()),
             created_at: now_dt,
@@ -485,13 +534,10 @@ impl BedrockAgentService {
             .entry(agent_id.clone())
             .or_default()
             .push(coll);
-        Ok(AwsResponse::ok_json(json!({
-            "agentCollaborator": {
-                "agentId": agent_id,
-                "collaboratorId": collaborator_id,
-                "createdAt": now_dt.to_rfc3339(),
-            }
-        })))
+        let coll = state.agent_collaborators[&agent_id].last().unwrap();
+        Ok(AwsResponse::ok_json(
+            json!({ "agentCollaborator": agent_collaborator_json(coll) }),
+        ))
     }
 
     pub(super) fn disassociate_agent_collaborator(
@@ -574,8 +620,11 @@ impl BedrockAgentService {
         if let Some(n) = opt_str(&body, "collaboratorName") {
             c.collaborator_name = n;
         }
-        if let Some(a) = opt_str(&body, "collaboratorAliasArn") {
-            c.collaborator_alias_arn = a;
+        if body.get("agentDescriptor").is_some() {
+            c.agent_descriptor = opt_json(&body, "agentDescriptor");
+        }
+        if let Some(i) = opt_str(&body, "collaborationInstruction") {
+            c.collaboration_instruction = i;
         }
         if let Some(r) = opt_str(&body, "relayConversationHistory") {
             c.relay_conversation_history = r;
@@ -598,14 +647,30 @@ impl BedrockAgentService {
         if !state.agents.contains_key(&agent_id) {
             return Err(not_found(format!("Agent {agent_id} not found")));
         }
-        Ok(AwsResponse::ok_json(json!({
-            "agentActionGroup": {
-                "actionGroupId": action_group_id,
-                "agentId": agent_id,
-                "actionGroupName": req_str(&body, "actionGroupName")?,
-                "createdAt": now_dt.to_rfc3339(),
-            }
-        })))
+        let ag = AgentActionGroup {
+            action_group_id: action_group_id.clone(),
+            agent_id: agent_id.clone(),
+            agent_version: opt_str(&body, "agentVersion").unwrap_or_else(|| "DRAFT".to_string()),
+            action_group_name: req_str(&body, "actionGroupName")?.to_string(),
+            description: opt_str(&body, "description"),
+            // AWS defaults a new action group to ENABLED when the caller omits
+            // actionGroupState.
+            action_group_state: opt_str(&body, "actionGroupState")
+                .unwrap_or_else(|| "ENABLED".to_string()),
+            action_group_executor: opt_json(&body, "actionGroupExecutor"),
+            api_schema: opt_json(&body, "apiSchema"),
+            function_schema: opt_json(&body, "functionSchema"),
+            parent_action_group_signature: opt_str(&body, "parentActionGroupSignature"),
+            created_at: now_dt,
+            updated_at: now_dt,
+        };
+        state
+            .agent_action_groups
+            .insert(action_group_id.clone(), ag);
+        let ag = state.agent_action_groups.get(&action_group_id).unwrap();
+        Ok(AwsResponse::ok_json(
+            json!({ "agentActionGroup": action_group_json(ag) }),
+        ))
     }
 
     pub(super) fn get_agent_action_group(
@@ -619,17 +684,14 @@ impl BedrockAgentService {
         let state = accts
             .get(&req.account_id)
             .ok_or_else(|| not_found(format!("Action group {action_group_id} not found")))?;
-        if !state.agents.contains_key(&agent_id) {
-            return Err(not_found(format!("Agent {agent_id} not found")));
-        }
-        Ok(AwsResponse::ok_json(json!({
-            "agentActionGroup": {
-                "actionGroupId": action_group_id,
-                "agentId": agent_id,
-                "actionGroupName": action_group_id,
-                "createdAt": now().to_rfc3339(),
-            }
-        })))
+        let ag = state
+            .agent_action_groups
+            .get(&action_group_id)
+            .filter(|ag| ag.agent_id == agent_id)
+            .ok_or_else(|| not_found(format!("Action group {action_group_id} not found")))?;
+        Ok(AwsResponse::ok_json(
+            json!({ "agentActionGroup": action_group_json(ag) }),
+        ))
     }
 
     pub(super) fn list_agent_action_groups(
@@ -645,7 +707,15 @@ impl BedrockAgentService {
         if !state.agents.contains_key(&agent_id) {
             return Err(not_found(format!("Agent {agent_id} not found")));
         }
-        Ok(AwsResponse::ok_json(json!({ "actionGroupSummaries": [] })))
+        let list: Vec<Value> = state
+            .agent_action_groups
+            .values()
+            .filter(|ag| ag.agent_id == agent_id)
+            .map(action_group_summary_json)
+            .collect();
+        Ok(AwsResponse::ok_json(
+            json!({ "actionGroupSummaries": list }),
+        ))
     }
 
     pub(super) fn update_agent_action_group(
@@ -657,16 +727,36 @@ impl BedrockAgentService {
         let action_group_id = req_str(&body, "actionGroupId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        if !state.agents.contains_key(&agent_id) {
-            return Err(not_found(format!("Agent {agent_id} not found")));
+        let ag = state
+            .agent_action_groups
+            .get_mut(&action_group_id)
+            .filter(|ag| ag.agent_id == agent_id)
+            .ok_or_else(|| not_found(format!("Action group {action_group_id} not found")))?;
+        if let Some(n) = opt_str(&body, "actionGroupName") {
+            ag.action_group_name = n;
         }
-        Ok(AwsResponse::ok_json(json!({
-            "agentActionGroup": {
-                "actionGroupId": action_group_id,
-                "agentId": agent_id,
-                "updatedAt": now().to_rfc3339(),
-            }
-        })))
+        if let Some(v) = opt_str(&body, "agentVersion") {
+            ag.agent_version = v;
+        }
+        if let Some(d) = opt_str(&body, "description") {
+            ag.description = Some(d);
+        }
+        if let Some(s) = opt_str(&body, "actionGroupState") {
+            ag.action_group_state = s;
+        }
+        if body.get("actionGroupExecutor").is_some() {
+            ag.action_group_executor = opt_json(&body, "actionGroupExecutor");
+        }
+        if body.get("apiSchema").is_some() {
+            ag.api_schema = opt_json(&body, "apiSchema");
+        }
+        if body.get("functionSchema").is_some() {
+            ag.function_schema = opt_json(&body, "functionSchema");
+        }
+        ag.updated_at = now();
+        Ok(AwsResponse::ok_json(
+            json!({ "agentActionGroup": action_group_json(ag) }),
+        ))
     }
 
     pub(super) fn delete_agent_action_group(
@@ -675,11 +765,18 @@ impl BedrockAgentService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let agent_id = req_str(&body, "agentId")?;
-        let _action_group_id = req_str(&body, "actionGroupId")?;
+        let action_group_id = req_str(&body, "actionGroupId")?;
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
-        if !state.agents.contains_key(&agent_id) {
-            return Err(not_found(format!("Agent {agent_id} not found")));
+        match state.agent_action_groups.get(&action_group_id) {
+            Some(ag) if ag.agent_id == agent_id => {
+                state.agent_action_groups.remove(&action_group_id);
+            }
+            _ => {
+                return Err(not_found(format!(
+                    "Action group {action_group_id} not found"
+                )))
+            }
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

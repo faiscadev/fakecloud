@@ -50,6 +50,8 @@ pub struct BedrockAgentState {
     pub agents: BTreeMap<String, Agent>,
     pub agent_aliases: BTreeMap<String, AgentAlias>,
     pub agent_versions: BTreeMap<String, Vec<AgentVersion>>,
+    #[serde(default)]
+    pub agent_action_groups: BTreeMap<String, AgentActionGroup>,
     pub knowledge_bases: BTreeMap<String, KnowledgeBase>,
     pub data_sources: BTreeMap<String, DataSource>,
     pub agent_knowledge_bases: BTreeMap<String, Vec<AgentKnowledgeBase>>,
@@ -71,6 +73,7 @@ impl BedrockAgentState {
             agents: BTreeMap::new(),
             agent_aliases: BTreeMap::new(),
             agent_versions: BTreeMap::new(),
+            agent_action_groups: BTreeMap::new(),
             knowledge_bases: BTreeMap::new(),
             data_sources: BTreeMap::new(),
             agent_knowledge_bases: BTreeMap::new(),
@@ -100,6 +103,9 @@ pub struct Agent {
     pub customer_encryption_key_arn: Option<String>,
     pub prompt_override_configuration: Option<serde_json::Value>,
     pub guardrail_configuration: Option<serde_json::Value>,
+    /// `DISABLED` | `SUPERVISOR` | `SUPERVISOR_ROUTER`. AWS always reports it.
+    #[serde(default)]
+    pub agent_collaboration: String,
     pub agent_status: String,
     pub prepared_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -119,6 +125,22 @@ pub struct AgentAlias {
     pub alias_arn: String,
     pub agent_alias_status: String,
     pub failure_reasons: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentActionGroup {
+    pub action_group_id: String,
+    pub agent_id: String,
+    pub agent_version: String,
+    pub action_group_name: String,
+    pub description: Option<String>,
+    pub action_group_state: String,
+    pub action_group_executor: Option<serde_json::Value>,
+    pub api_schema: Option<serde_json::Value>,
+    pub function_schema: Option<serde_json::Value>,
+    pub parent_action_group_signature: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -178,9 +200,16 @@ pub struct AgentKnowledgeBase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCollaborator {
     pub agent_id: String,
+    #[serde(default)]
+    pub agent_version: String,
     pub collaborator_id: String,
     pub collaborator_name: String,
-    pub collaborator_alias_arn: String,
+    /// The collaborator target, an `{ "aliasArn": ... }` object. AWS reads it
+    /// back as `agent_descriptor.0.alias_arn`.
+    #[serde(default)]
+    pub agent_descriptor: Option<serde_json::Value>,
+    #[serde(default)]
+    pub collaboration_instruction: String,
     pub relay_conversation_history: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

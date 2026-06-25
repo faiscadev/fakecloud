@@ -13,9 +13,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    Agent, AgentAlias, AgentCollaborator, AgentKnowledgeBase, AgentVersion, BedrockAgentAccounts,
-    BedrockAgentSnapshot, DataSource, Flow, FlowAlias, FlowVersion, IngestionJob, KnowledgeBase,
-    Prompt, PromptVersion, SharedBedrockAgentState, BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION,
+    Agent, AgentActionGroup, AgentAlias, AgentCollaborator, AgentKnowledgeBase, AgentVersion,
+    BedrockAgentAccounts, BedrockAgentSnapshot, DataSource, Flow, FlowAlias, FlowVersion,
+    IngestionJob, KnowledgeBase, Prompt, PromptVersion, SharedBedrockAgentState,
+    BEDROCK_AGENT_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Bedrock Agent read actions all start with `Get`, `List`, or `Validate`;
@@ -1054,14 +1055,90 @@ fn agent_json(a: &Agent) -> Value {
     if let Some(ref k) = a.customer_encryption_key_arn {
         o["customerEncryptionKeyArn"] = json!(k);
     }
-    if let Some(ref p) = a.prompt_override_configuration {
-        o["promptOverrideConfiguration"] = p.clone();
-    }
+    // AWS always returns a promptOverrideConfiguration: when the caller did
+    // not override any prompts it still reports the four default prompt
+    // configurations (promptCreationMode=DEFAULT). The terraform-provider-aws
+    // agent reader dereferences `PromptOverrideConfiguration.PromptConfigurations`
+    // unconditionally (removeDefaultPrompts), so the field must never be null.
+    o["promptOverrideConfiguration"] = a
+        .prompt_override_configuration
+        .clone()
+        .unwrap_or_else(default_prompt_override_configuration);
+    // AWS always reports agentCollaboration; default DISABLED when unset.
+    o["agentCollaboration"] = json!(if a.agent_collaboration.is_empty() {
+        "DISABLED"
+    } else {
+        a.agent_collaboration.as_str()
+    });
     if let Some(ref g) = a.guardrail_configuration {
         o["guardrailConfiguration"] = g.clone();
     }
     if let Some(ref p) = a.prepared_at {
         o["preparedAt"] = json!(p.to_rfc3339());
+    }
+    o
+}
+
+/// The default `promptOverrideConfiguration` AWS reports for an agent whose
+/// caller overrode no prompts: one entry per prompt type, each in DEFAULT
+/// creation mode. The terraform provider keeps only OVERRIDDEN entries, so
+/// these are filtered out client-side and produce no diff.
+fn default_prompt_override_configuration() -> Value {
+    let default_prompt = |prompt_type: &str, enabled: bool| {
+        json!({
+            "promptType": prompt_type,
+            "promptCreationMode": "DEFAULT",
+            "promptState": if enabled { "ENABLED" } else { "DISABLED" },
+            "parserMode": "DEFAULT",
+        })
+    };
+    json!({
+        "promptConfigurations": [
+            default_prompt("PRE_PROCESSING", true),
+            default_prompt("ORCHESTRATION", true),
+            default_prompt("KNOWLEDGE_BASE_RESPONSE_GENERATION", true),
+            default_prompt("POST_PROCESSING", false),
+        ],
+    })
+}
+
+fn action_group_json(ag: &AgentActionGroup) -> Value {
+    let mut o = json!({
+        "actionGroupId": ag.action_group_id,
+        "agentId": ag.agent_id,
+        "agentVersion": ag.agent_version,
+        "actionGroupName": ag.action_group_name,
+        "actionGroupState": ag.action_group_state,
+        "createdAt": ag.created_at.to_rfc3339(),
+        "updatedAt": ag.updated_at.to_rfc3339(),
+    });
+    if let Some(ref d) = ag.description {
+        o["description"] = json!(d);
+    }
+    if let Some(ref e) = ag.action_group_executor {
+        o["actionGroupExecutor"] = e.clone();
+    }
+    if let Some(ref s) = ag.api_schema {
+        o["apiSchema"] = s.clone();
+    }
+    if let Some(ref s) = ag.function_schema {
+        o["functionSchema"] = s.clone();
+    }
+    if let Some(ref s) = ag.parent_action_group_signature {
+        o["parentActionGroupSignature"] = json!(s);
+    }
+    o
+}
+
+fn action_group_summary_json(ag: &AgentActionGroup) -> Value {
+    let mut o = json!({
+        "actionGroupId": ag.action_group_id,
+        "actionGroupName": ag.action_group_name,
+        "actionGroupState": ag.action_group_state,
+        "updatedAt": ag.updated_at.to_rfc3339(),
+    });
+    if let Some(ref d) = ag.description {
+        o["description"] = json!(d);
     }
     o
 }
@@ -1335,15 +1412,20 @@ fn agent_kb_json(a: &AgentKnowledgeBase) -> Value {
 }
 
 fn agent_collaborator_json(c: &AgentCollaborator) -> Value {
-    json!({
+    let mut o = json!({
         "agentId": c.agent_id,
+        "agentVersion": if c.agent_version.is_empty() { "DRAFT" } else { c.agent_version.as_str() },
         "collaboratorId": c.collaborator_id,
         "collaboratorName": c.collaborator_name,
-        "collaboratorAliasArn": c.collaborator_alias_arn,
+        "collaborationInstruction": c.collaboration_instruction,
         "relayConversationHistory": c.relay_conversation_history,
         "createdAt": c.created_at.to_rfc3339(),
-        "updatedAt": c.updated_at.to_rfc3339(),
-    })
+        "lastUpdatedAt": c.updated_at.to_rfc3339(),
+    });
+    if let Some(ref d) = c.agent_descriptor {
+        o["agentDescriptor"] = d.clone();
+    }
+    o
 }
 
 impl BedrockAgentService {}
