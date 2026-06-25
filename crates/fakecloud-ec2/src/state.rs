@@ -598,6 +598,18 @@ pub struct FlowLog {
     pub log_group_name: Option<String>,
     /// Destination ARN for `s3` / `kinesis-data-firehose` deliveries.
     pub log_destination: Option<String>,
+    /// IAM role ARN used to deliver logs to CloudWatch Logs
+    /// (`iam_role_arn` on the Terraform resource).
+    #[serde(default)]
+    pub deliver_logs_permission_arn: Option<String>,
+    /// Max log aggregation interval in seconds. AWS accepts 60 or 600 and
+    /// defaults to 600 when unspecified.
+    #[serde(default = "default_max_aggregation_interval")]
+    pub max_aggregation_interval: i64,
+}
+
+fn default_max_aggregation_interval() -> i64 {
+    600
 }
 
 /// A launch template (versions tracked as monotonic counters).

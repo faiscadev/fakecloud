@@ -93,6 +93,11 @@ async fn ec2_acceptance() {
 }
 
 #[tokio::test]
+async fn ec2_vpc2_acceptance() {
+    run_shard("ec2-vpc2").await;
+}
+
+#[tokio::test]
 async fn elasticache_acceptance() {
     run_shard("elasticache").await;
 }

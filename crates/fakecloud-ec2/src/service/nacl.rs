@@ -387,17 +387,38 @@ pub(crate) fn replace_network_acl_association(
 // ---- VPC peering ----
 
 fn peering_xml(p: &VpcPeering, tags: &[Tag], owner: &str) -> String {
+    // `<peeringOptions>` carries the three modifiable cross-VPC flags AWS
+    // returns per side. The requester side is present from creation; the
+    // accepter side only materializes once the connection is `active`
+    // (before acceptance the accepter has not been able to set options).
+    let peering_options = |allow_dns: bool| {
+        format!(
+            "<peeringOptions>\
+             <allowDnsResolutionFromRemoteVpc>{allow_dns}</allowDnsResolutionFromRemoteVpc>\
+             <allowEgressFromLocalClassicLinkToRemoteVpc>false</allowEgressFromLocalClassicLinkToRemoteVpc>\
+             <allowEgressFromLocalVpcToRemoteClassicLink>false</allowEgressFromLocalVpcToRemoteClassicLink>\
+             </peeringOptions>"
+        )
+    };
+    let requester_opts = peering_options(p.requester_allow_dns);
+    let accepter_opts = if p.status == "active" {
+        peering_options(p.accepter_allow_dns)
+    } else {
+        String::new()
+    };
     format!(
         "{}<status><code>{}</code><message>{}</message></status>\
-         <requesterVpcInfo>{}{}</requesterVpcInfo>\
-         <accepterVpcInfo>{}{}</accepterVpcInfo>{}",
+         <requesterVpcInfo>{}{}{}</requesterVpcInfo>\
+         <accepterVpcInfo>{}{}{}</accepterVpcInfo>{}",
         ec2_elem("vpcPeeringConnectionId", &p.id),
         p.status,
         p.status,
         ec2_elem("vpcId", &p.requester_vpc_id),
         ec2_elem("ownerId", owner),
+        requester_opts,
         ec2_elem("vpcId", &p.accepter_vpc_id),
         ec2_elem("ownerId", owner),
+        accepter_opts,
         super::tags::tag_set_xml(tags),
     )
 }

@@ -518,13 +518,15 @@ pub(crate) fn describe_vpc_endpoint_associations(
 
 fn flow_log_xml(f: &FlowLog, tags: &[Tag]) -> String {
     format!(
-        "{}{}{}{}<flowLogStatus>ACTIVE</flowLogStatus><deliverLogsStatus>SUCCESS</deliverLogsStatus>{}{}{}{}",
+        "{}{}{}{}<flowLogStatus>ACTIVE</flowLogStatus><deliverLogsStatus>SUCCESS</deliverLogsStatus>{}{}{}{}{}{}",
         ec2_elem("flowLogId", &f.id),
         ec2_elem("resourceId", &f.resource_id),
         ec2_elem("trafficType", &f.traffic_type),
         ec2_elem("logDestinationType", &f.log_destination_type),
         f.log_group_name.as_ref().map(|n| ec2_elem("logGroupName", n)).unwrap_or_default(),
         f.log_destination.as_ref().map(|d| ec2_elem("logDestination", d)).unwrap_or_default(),
+        f.deliver_logs_permission_arn.as_ref().map(|a| ec2_elem("deliverLogsPermissionArn", a)).unwrap_or_default(),
+        ec2_elem("maxAggregationInterval", &f.max_aggregation_interval.to_string()),
         ec2_elem("creationTime", FIXED_TIME),
         super::tags::tag_set_xml(tags),
     )
@@ -569,6 +571,17 @@ pub(crate) fn create_flow_logs(
         .cloned()
         .unwrap_or_else(|| "cloud-watch-logs".to_string());
     let log_destination = req.query_params.get("LogDestination").cloned();
+    let deliver_logs_permission_arn = req
+        .query_params
+        .get("DeliverLogsPermissionArn")
+        .filter(|v| !v.is_empty())
+        .cloned();
+    // AWS accepts 60 or 600 and defaults to 600 when the field is omitted.
+    let max_aggregation_interval = req
+        .query_params
+        .get("MaxAggregationInterval")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(600);
     let mut ids = Vec::new();
     {
         let mut accounts = svc.state.write();
@@ -591,6 +604,8 @@ pub(crate) fn create_flow_logs(
                     log_destination_type: dest.clone(),
                     log_group_name: req.query_params.get("LogGroupName").cloned(),
                     log_destination: log_destination.clone(),
+                    deliver_logs_permission_arn: deliver_logs_permission_arn.clone(),
+                    max_aggregation_interval,
                 },
             );
             ids.push(id);
