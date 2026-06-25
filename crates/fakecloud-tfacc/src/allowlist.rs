@@ -549,10 +549,10 @@ pub const SERVICES: &[Service] = &[
         name: "rds",
         // RDS control-plane resources that need no DB engine container. The DB
         // subnet group reports `supported_network_types = [IPV4]` and a
-        // `Complete` status. DB and cluster parameter groups now round-trip
-        // correctly and run in the `rds-param-groups` shard below. Option
-        // groups remain deferred; DB instances/clusters need Docker and stay
-        // out.
+        // `Complete` status. DB/cluster parameter groups and option groups now
+        // round-trip correctly and run in the `rds-param-groups` /
+        // `rds-option-groups` shards below. DB instances/clusters need Docker
+        // and stay out.
         run_regex: "^TestAccRDSSubnetGroup_basic$",
         deny: &[],
     },
@@ -1068,6 +1068,15 @@ pub const SHARDS: &[Shard] = &[
         name: "rds-param-groups",
         service: "rds",
         run_regex: "^TestAccRDS(ParameterGroup|ClusterParameterGroup)_basic$",
+        extra_deny: &[],
+    },
+    // DB option groups. DescribeOptionGroups now emits the named
+    // <OptionGroup> member tag (not <member>) so the SDK reads it back, plus
+    // the OptionGroupDescription/VPC-membership fields the provider asserts.
+    Shard {
+        name: "rds-option-groups",
+        service: "rds",
+        run_regex: "^TestAccRDSOptionGroup_basic$",
         extra_deny: &[],
     },
     Shard {

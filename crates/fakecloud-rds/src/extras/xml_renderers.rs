@@ -323,11 +323,12 @@ pub(super) fn security_group_xml(v: &Value) -> String {
 
 pub(super) fn option_group_xml(v: &Value) -> String {
     format!(
-        "          <OptionGroupName>{}</OptionGroupName>\n          <OptionGroupArn>{}</OptionGroupArn>\n          <EngineName>{}</EngineName>\n          <MajorEngineVersion>{}</MajorEngineVersion>",
+        "          <OptionGroupName>{}</OptionGroupName>\n          <OptionGroupArn>{}</OptionGroupArn>\n          <EngineName>{}</EngineName>\n          <MajorEngineVersion>{}</MajorEngineVersion>\n          <OptionGroupDescription>{}</OptionGroupDescription>\n          <AllowsVpcAndNonVpcInstanceMemberships>true</AllowsVpcAndNonVpcInstanceMemberships>\n          <Options/>",
         xml_escape(v["OptionGroupName"].as_str().unwrap_or("")),
         xml_escape(v["OptionGroupArn"].as_str().unwrap_or("")),
         xml_escape(v["EngineName"].as_str().unwrap_or("")),
         xml_escape(v["MajorEngineVersion"].as_str().unwrap_or("")),
+        xml_escape(v["OptionGroupDescription"].as_str().unwrap_or("")),
     )
 }
 
