@@ -380,3 +380,55 @@ async fn associate_web_acl_accepts_listener_arn_against_load_balancer() {
         .unwrap();
     assert!(after.web_acl().is_none());
 }
+
+#[tokio::test]
+async fn http_target_group_reports_protocol_version_and_attr_defaults() {
+    // An HTTP target group reports its default ProtocolVersion (HTTP1), and
+    // DescribeTargetGroupAttributes returns the cross-zone + anomaly-mitigation
+    // defaults the aws_lb_target_group data source reads.
+    let server = TestServer::start().await;
+    let elbv2 = server.elbv2_client().await;
+
+    let tg = elbv2
+        .create_target_group()
+        .name("tg-pv")
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .vpc_id("vpc-12345678")
+        .target_type(aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum::Instance)
+        .send()
+        .await
+        .expect("create_target_group");
+    let arn = tg.target_groups()[0]
+        .target_group_arn()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        tg.target_groups()[0].protocol_version(),
+        Some("HTTP1"),
+        "HTTP target group must report HTTP1 protocol version"
+    );
+
+    let attrs = elbv2
+        .describe_target_group_attributes()
+        .target_group_arn(&arn)
+        .send()
+        .await
+        .expect("describe attributes");
+    let get = |k: &str| {
+        attrs
+            .attributes()
+            .iter()
+            .find(|a| a.key() == Some(k))
+            .and_then(|a| a.value())
+            .map(str::to_string)
+    };
+    assert_eq!(
+        get("load_balancing.cross_zone.enabled").as_deref(),
+        Some("use_load_balancer_configuration")
+    );
+    assert_eq!(
+        get("load_balancing.algorithm.anomaly_mitigation").as_deref(),
+        Some("off")
+    );
+}

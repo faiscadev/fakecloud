@@ -1134,6 +1134,19 @@ pub(crate) fn default_target_group_attributes() -> BTreeMap<String, String> {
         "load_balancing.algorithm.type".to_string(),
         "round_robin".to_string(),
     );
+    // AWS always reports cross-zone load balancing; an ALB target group inherits
+    // the load balancer's setting by default. The aws_lb_target_group data
+    // source reads `load_balancing_cross_zone_enabled` from this attribute.
+    m.insert(
+        "load_balancing.cross_zone.enabled".to_string(),
+        "use_load_balancer_configuration".to_string(),
+    );
+    // Anomaly mitigation defaults off; the data source reads it as
+    // `load_balancing_anomaly_mitigation`.
+    m.insert(
+        "load_balancing.algorithm.anomaly_mitigation".to_string(),
+        "off".to_string(),
+    );
     m.insert("slow_start.duration_seconds".to_string(), "0".to_string());
     m
 }

@@ -730,6 +730,25 @@ pub const SERVICES: &[Service] = &[
             "TestAccAPIGatewayVPCLinkDataSource_basic",
         ],
     },
+    Service {
+        name: "elbv2",
+        // ELBv2 (ALB/NLB) control plane: the `_basic` smoke for target groups
+        // (+ data source), listener rules / certificates / data source, trust
+        // stores (+ data source / revocation), hosted-zone-id and load-balancer
+        // data sources. Fixes: an HTTP/HTTPS target group reports its default
+        // ProtocolVersion (HTTP1), and DescribeTargetGroupAttributes returns the
+        // cross-zone (`use_load_balancer_configuration`) and anomaly-mitigation
+        // (`off`) defaults the data source reads. (DeleteLoadBalancer already
+        // returns its result node as of the prior fix.)
+        run_regex: "^TestAccELBV2[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: the target-group attachment registers a real EC2 instance
+            //     as a target; its pre-apply config resolves an EC2 data source
+            //     (AMI / instance) that returns no results without a populated
+            //     EC2 image catalogue, so the attachment cannot be planned. ---
+            "TestAccELBV2TargetGroupAttachment_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1066,6 +1085,12 @@ pub const SHARDS: &[Shard] = &[
         name: "apigateway",
         service: "apigateway",
         run_regex: "^TestAccAPIGateway[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "elbv2",
+        service: "elbv2",
+        run_regex: "^TestAccELBV2[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];

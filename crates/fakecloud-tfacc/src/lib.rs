@@ -312,4 +312,8 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_FIREHOSE", "firehose"),
     ("AWS_ENDPOINT_URL_CLOUDWATCH", "monitoring"),
     ("AWS_ENDPOINT_URL_API_GATEWAY", "apigateway"),
+    (
+        "AWS_ENDPOINT_URL_ELASTIC_LOAD_BALANCING_V2",
+        "elasticloadbalancingv2",
+    ),
 ];
