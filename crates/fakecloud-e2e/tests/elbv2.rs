@@ -7,8 +7,9 @@
 mod helpers;
 
 use aws_sdk_elasticloadbalancingv2::types::{
-    Action, ActionTypeEnum, FixedResponseActionConfig, LoadBalancerAttribute, LoadBalancerTypeEnum,
-    ProtocolEnum,
+    Action, ActionTypeEnum, FixedResponseActionConfig, HostHeaderConditionConfig,
+    LoadBalancerAttribute, LoadBalancerTypeEnum, PathPatternConditionConfig, ProtocolEnum,
+    RuleCondition,
 };
 use aws_sdk_wafv2::types::{DefaultAction, Scope, VisibilityConfig};
 use helpers::TestServer;
@@ -430,5 +431,130 @@ async fn http_target_group_reports_protocol_version_and_attr_defaults() {
     assert_eq!(
         get("load_balancing.algorithm.anomaly_mitigation").as_deref(),
         Some("off")
+    );
+}
+
+#[tokio::test]
+async fn listener_rule_conditions_echo_typed_config() {
+    // A listener rule created with typed condition configs (path-pattern,
+    // host-header) must echo those typed `*Config` sub-objects back on
+    // DescribeRules. AWS always returns them, and terraform-provider-aws
+    // nil-derefs `condition.PathPatternConfig.Values` in resourceListenerRuleRead
+    // if they are absent.
+    let server = TestServer::start().await;
+    let elbv2 = server.elbv2_client().await;
+
+    let lb = elbv2
+        .create_load_balancer()
+        .name("alb-rules")
+        .r#type(LoadBalancerTypeEnum::Application)
+        .send()
+        .await
+        .unwrap();
+    let lb_arn = lb.load_balancers()[0]
+        .load_balancer_arn()
+        .unwrap()
+        .to_string();
+    let tg = elbv2
+        .create_target_group()
+        .name("tg-rules")
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .vpc_id("vpc-12345678")
+        .send()
+        .await
+        .unwrap();
+    let tg_arn = tg.target_groups()[0]
+        .target_group_arn()
+        .unwrap()
+        .to_string();
+    let listener = elbv2
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener.listeners()[0].listener_arn().unwrap().to_string();
+
+    elbv2
+        .create_rule()
+        .listener_arn(&listener_arn)
+        .priority(100)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .path_pattern_config(
+                    PathPatternConditionConfig::builder()
+                        .values("/static/*")
+                        .build(),
+                )
+                .build(),
+        )
+        .conditions(
+            RuleCondition::builder()
+                .field("host-header")
+                .host_header_config(
+                    HostHeaderConditionConfig::builder()
+                        .values("example.com")
+                        .build(),
+                )
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_rule");
+
+    let rules = elbv2
+        .describe_rules()
+        .listener_arn(&listener_arn)
+        .send()
+        .await
+        .expect("describe_rules");
+    let rule = rules
+        .rules()
+        .iter()
+        .find(|r| r.priority() == Some("100"))
+        .expect("rule with priority 100");
+
+    let path_cond = rule
+        .conditions()
+        .iter()
+        .find(|c| c.field() == Some("path-pattern"))
+        .expect("path-pattern condition");
+    assert_eq!(
+        path_cond
+            .path_pattern_config()
+            .map(|c| c.values())
+            .unwrap_or_default(),
+        &["/static/*"],
+        "path-pattern condition must echo PathPatternConfig.Values"
+    );
+
+    let host_cond = rule
+        .conditions()
+        .iter()
+        .find(|c| c.field() == Some("host-header"))
+        .expect("host-header condition");
+    assert_eq!(
+        host_cond
+            .host_header_config()
+            .map(|c| c.values())
+            .unwrap_or_default(),
+        &["example.com"],
+        "host-header condition must echo HostHeaderConfig.Values"
     );
 }
