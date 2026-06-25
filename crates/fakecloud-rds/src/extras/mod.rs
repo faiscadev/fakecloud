@@ -793,7 +793,21 @@ impl RdsService {
                 }
                 Ok(xml_response("DescribeDBProxyTargetGroups", format!("    <TargetGroups>\n{members}    </TargetGroups>"), &rid))
             }
-            "DescribeDBProxyTargets" => Ok(xml_response("DescribeDBProxyTargets", "    <Targets/>".to_string(), &rid)),
+            "DescribeDBProxyTargets" => {
+                let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
+                let group = get_param(req, "TargetGroupName").unwrap_or_else(|| "default".to_string());
+                let key = format!("{proxy}/{group}");
+                let accounts = self.state_handle().read();
+                let targets: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("proxy_targets"))
+                    .and_then(|m| m.get(&key))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let members: String = targets.iter().map(db_proxy_target_xml).collect();
+                Ok(xml_response("DescribeDBProxyTargets", format!("    <Targets>{members}</Targets>"), &rid))
+            }
             "ModifyDBProxyTargetGroup" => {
                 let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
                 let group = get_param(req, "TargetGroupName").unwrap_or_else(|| "default".to_string());
@@ -824,8 +838,62 @@ impl RdsService {
                 store(&mut state.extras, "proxy_target_groups").insert(key, entry.clone());
                 Ok(xml_response("ModifyDBProxyTargetGroup", format!("    <DBProxyTargetGroup>\n      <DBProxyName>{}</DBProxyName>\n      <TargetGroupName>{}</TargetGroupName>\n    </DBProxyTargetGroup>", xml_escape(&proxy), xml_escape(&group)), &rid))
             }
-            "RegisterDBProxyTargets" => Ok(xml_response("RegisterDBProxyTargets", "    <DBProxyTargets/>".to_string(), &rid)),
-            "DeregisterDBProxyTargets" => xml_empty_action(&action, &rid),
+            "RegisterDBProxyTargets" => {
+                let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
+                let group = get_param(req, "TargetGroupName").unwrap_or_else(|| "default".to_string());
+                let key = format!("{proxy}/{group}");
+                let instances = parse_member_list(req, "DBInstanceIdentifiers");
+                let clusters = parse_member_list(req, "DBClusterIdentifiers");
+                let new_targets: Vec<Value> = instances
+                    .iter()
+                    .map(|id| json!({"RdsResourceId": id, "Type": "RDS_INSTANCE", "Port": 3306, "Endpoint": format!("{id}.{region}.rds.amazonaws.com")}))
+                    .chain(clusters.iter().map(|id| {
+                        json!({"RdsResourceId": id, "Type": "TRACKED_CLUSTER", "Port": 3306, "Endpoint": format!("{id}.cluster-{region}.rds.amazonaws.com")})
+                    }))
+                    .collect();
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let map = store(&mut state.extras, "proxy_targets");
+                    let existing = map.entry(key).or_insert_with(|| json!([]));
+                    if let Some(arr) = existing.as_array_mut() {
+                        for t in &new_targets {
+                            let rid_val = t["RdsResourceId"].as_str();
+                            arr.retain(|e| e["RdsResourceId"].as_str() != rid_val);
+                            arr.push(t.clone());
+                        }
+                    }
+                }
+                let members: String = new_targets.iter().map(db_proxy_target_xml).collect();
+                Ok(xml_response("RegisterDBProxyTargets", format!("    <DBProxyTargets>{members}</DBProxyTargets>"), &rid))
+            }
+            "DeregisterDBProxyTargets" => {
+                let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
+                let group = get_param(req, "TargetGroupName").unwrap_or_else(|| "default".to_string());
+                let key = format!("{proxy}/{group}");
+                let remove: Vec<String> = parse_member_list(req, "DBInstanceIdentifiers")
+                    .into_iter()
+                    .chain(parse_member_list(req, "DBClusterIdentifiers"))
+                    .collect();
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(arr) = state
+                        .extras
+                        .get_mut("proxy_targets")
+                        .and_then(|m| m.get_mut(&key))
+                        .and_then(|v| v.as_array_mut())
+                    {
+                        arr.retain(|e| {
+                            e["RdsResourceId"]
+                                .as_str()
+                                .map(|r| !remove.iter().any(|x| x == r))
+                                .unwrap_or(true)
+                        });
+                    }
+                }
+                xml_empty_action(&action, &rid)
+            }
 
             // ── Security groups (legacy) ──
             "CreateDBSecurityGroup" | "AuthorizeDBSecurityGroupIngress" | "RevokeDBSecurityGroupIngress" => {
@@ -874,12 +942,28 @@ impl RdsService {
                         )
                     })?;
                 if let Some(obj) = entry.as_object_mut() {
-                    if !to_include.is_empty() {
-                        obj.insert("OptionsToInclude".to_string(), json!(to_include));
+                    // Maintain the effective Options list so DescribeOptionGroups
+                    // reflects what was added/removed: upsert each included option
+                    // by OptionName, then drop any names in OptionsToRemove.
+                    let mut options = obj
+                        .get("Options")
+                        .and_then(|o| o.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    for inc in &to_include {
+                        let name = inc["OptionName"].as_str().unwrap_or_default().to_string();
+                        options.retain(|o| o["OptionName"].as_str() != Some(name.as_str()));
+                        options.push(inc.clone());
                     }
                     if !to_remove.is_empty() {
-                        obj.insert("OptionsToRemove".to_string(), json!(to_remove));
+                        options.retain(|o| {
+                            o["OptionName"]
+                                .as_str()
+                                .map(|n| !to_remove.iter().any(|r| r == n))
+                                .unwrap_or(true)
+                        });
                     }
+                    obj.insert("Options".to_string(), json!(options));
                 }
                 let updated = entry.clone();
                 Ok(xml_response("ModifyOptionGroup", format!("    <OptionGroup>\n{}\n    </OptionGroup>", option_group_xml(&updated)), &rid))
@@ -942,7 +1026,9 @@ impl RdsService {
             "CreateEventSubscription" => {
                 let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("es:{name}")).to_string();
-                let entry = json!({"CustSubscriptionId": name, "CustomerAwsId": aid, "EventSubscriptionArn": arn, "SnsTopicArn": get_param(req, "SnsTopicArn").unwrap_or_default(), "SourceType": get_param(req, "SourceType").unwrap_or_default(), "Status": "active", "Enabled": true});
+                let source_ids = parse_member_list(req, "SourceIds");
+                let event_categories = parse_member_list(req, "EventCategories");
+                let entry = json!({"CustSubscriptionId": name, "CustomerAwsId": aid, "EventSubscriptionArn": arn, "SnsTopicArn": get_param(req, "SnsTopicArn").unwrap_or_default(), "SourceType": get_param(req, "SourceType").unwrap_or_default(), "Status": "active", "Enabled": true, "SourceIdsList": source_ids, "EventCategoriesList": event_categories});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "event_subscriptions").insert(name.clone(), entry.clone());
@@ -988,7 +1074,37 @@ impl RdsService {
                 let wanted = get_param(req, "SubscriptionName");
                 list_extras_named_xml(self, &aid, "event_subscriptions", "EventSubscriptionsList", "EventSubscription", "DescribeEventSubscriptions", event_sub_xml, wanted.as_deref(), "CustSubscriptionId", "SubscriptionNotFound", &rid)
             }
-            "AddSourceIdentifierToSubscription" | "RemoveSourceIdentifierFromSubscription" => Ok(xml_response(action.as_str(), "    <EventSubscription/>".to_string(), &rid)),
+            "AddSourceIdentifierToSubscription" | "RemoveSourceIdentifierFromSubscription" => {
+                let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
+                let source_id = get_param(req, "SourceIdentifier");
+                let adding = action.as_str() == "AddSourceIdentifierToSubscription";
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("event_subscriptions")
+                    .and_then(|m| m.get_mut(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "SubscriptionNotFound",
+                            format!("Subscription {name} not found."),
+                        )
+                    })?;
+                if let (Some(obj), Some(sid)) = (entry.as_object_mut(), source_id) {
+                    let list = obj
+                        .entry("SourceIdsList".to_string())
+                        .or_insert_with(|| json!([]));
+                    if let Some(arr) = list.as_array_mut() {
+                        arr.retain(|v| v.as_str() != Some(sid.as_str()));
+                        if adding {
+                            arr.push(json!(sid));
+                        }
+                    }
+                }
+                let updated = entry.clone();
+                Ok(xml_response(action.as_str(), format!("    <EventSubscription>\n{}\n    </EventSubscription>", event_sub_xml(&updated)), &rid))
+            }
 
             // ── Global clusters ──
             "CreateGlobalCluster" => {
@@ -1012,7 +1128,58 @@ impl RdsService {
                 store(&mut state.extras, "global_clusters").insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateGlobalCluster", format!("    <GlobalCluster>\n{}\n    </GlobalCluster>", global_cluster_xml(&entry)), &rid))
             }
-            "ModifyGlobalCluster" | "FailoverGlobalCluster" | "SwitchoverGlobalCluster" | "RemoveFromGlobalCluster" => Ok(xml_response(action.as_str(), "    <GlobalCluster/>".to_string(), &rid)),
+            "ModifyGlobalCluster" | "FailoverGlobalCluster" | "SwitchoverGlobalCluster" | "RemoveFromGlobalCluster" => {
+                let id = get_param(req, "GlobalClusterIdentifier").ok_or_else(|| missing("GlobalClusterIdentifier"))?;
+                let new_id = get_param(req, "NewGlobalClusterIdentifier");
+                let deletion_protection = get_param(req, "DeletionProtection")
+                    .map(|v| v.eq_ignore_ascii_case("true"));
+                let engine_version = get_param(req, "EngineVersion");
+                let updated = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let map = state
+                        .extras
+                        .get_mut("global_clusters")
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "GlobalClusterNotFoundFault",
+                                format!("{id} not found."),
+                            )
+                        })?;
+                    let mut entry = map.get(&id).cloned().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "GlobalClusterNotFoundFault",
+                            format!("{id} not found."),
+                        )
+                    })?;
+                    if let Some(obj) = entry.as_object_mut() {
+                        if action.as_str() == "ModifyGlobalCluster" {
+                            if let Some(dp) = deletion_protection {
+                                obj.insert("DeletionProtection".to_string(), json!(dp));
+                            }
+                            if let Some(ev) = &engine_version {
+                                obj.insert("EngineVersion".to_string(), json!(ev));
+                            }
+                            if let Some(nid) = &new_id {
+                                obj.insert("GlobalClusterIdentifier".to_string(), json!(nid));
+                            }
+                        }
+                    }
+                    // A rename re-keys the stored map entry.
+                    if action.as_str() == "ModifyGlobalCluster" {
+                        if let Some(nid) = &new_id {
+                            map.remove(&id);
+                            map.insert(nid.clone(), entry.clone());
+                        } else {
+                            map.insert(id.clone(), entry.clone());
+                        }
+                    }
+                    entry
+                };
+                Ok(xml_response(action.as_str(), format!("    <GlobalCluster>\n{}\n    </GlobalCluster>", global_cluster_xml(&updated)), &rid))
+            }
             "DeleteGlobalCluster" => {
                 let id = get_param(req, "GlobalClusterIdentifier").ok_or_else(|| missing("GlobalClusterIdentifier"))?;
                 let mut accounts = write_state!();
@@ -1038,7 +1205,54 @@ impl RdsService {
                 store(&mut state.extras, "integrations").insert(name.clone(), entry.clone());
                 Ok(xml_response("CreateIntegration", integration_xml(&entry), &rid))
             }
-            "ModifyIntegration" => Ok(xml_response("ModifyIntegration", "    <Integration/>".to_string(), &rid)),
+            "ModifyIntegration" => {
+                let ident = get_param(req, "IntegrationIdentifier")
+                    .or_else(|| get_param(req, "IntegrationName"))
+                    .ok_or_else(|| missing("IntegrationIdentifier"))?;
+                let data_filter = get_param(req, "DataFilter");
+                let description = get_param(req, "Description");
+                let new_name = get_param(req, "IntegrationName");
+                let updated = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let map = state.extras.get_mut("integrations").ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "IntegrationNotFoundFault",
+                            format!("Integration {ident} not found."),
+                        )
+                    })?;
+                    // The identifier may be the integration name or its ARN.
+                    let key = map
+                        .iter()
+                        .find(|(k, v)| {
+                            k.as_str() == ident || v["IntegrationArn"].as_str() == Some(ident.as_str())
+                        })
+                        .map(|(k, _)| k.clone())
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "IntegrationNotFoundFault",
+                                format!("Integration {ident} not found."),
+                            )
+                        })?;
+                    let mut entry = map.get(&key).cloned().unwrap_or(json!({}));
+                    if let Some(obj) = entry.as_object_mut() {
+                        if let Some(v) = &data_filter {
+                            obj.insert("DataFilter".to_string(), json!(v));
+                        }
+                        if let Some(v) = &description {
+                            obj.insert("Description".to_string(), json!(v));
+                        }
+                        if let Some(v) = &new_name {
+                            obj.insert("IntegrationName".to_string(), json!(v));
+                        }
+                    }
+                    map.insert(key, entry.clone());
+                    entry
+                };
+                Ok(xml_response("ModifyIntegration", format!("    <Integration>\n{}\n    </Integration>", integration_xml(&updated)), &rid))
+            }
             "DeleteIntegration" => {
                 let name = get_param(req, "IntegrationIdentifier").or_else(|| get_param(req, "IntegrationName")).ok_or_else(|| missing("IntegrationIdentifier"))?;
                 let mut accounts = write_state!();

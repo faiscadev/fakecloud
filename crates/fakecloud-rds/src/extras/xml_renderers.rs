@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// Render a JSON string array as an AWS query `<Wrapper><member>..</member></Wrapper>`
+/// list, or a self-closing `<Wrapper/>` when empty/absent.
+pub(super) fn json_str_array_xml(v: &Value, wrapper: &str) -> String {
+    let members: Vec<&str> = v
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if members.is_empty() {
+        return format!("<{wrapper}/>");
+    }
+    let body: String = members
+        .iter()
+        .map(|m| format!("<member>{}</member>", xml_escape(m)))
+        .collect();
+    format!("<{wrapper}>{body}</{wrapper}>")
+}
+
 pub(super) fn db_cluster_member_xml(v: &Value) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -322,19 +339,52 @@ pub(super) fn security_group_xml(v: &Value) -> String {
 }
 
 pub(super) fn option_group_xml(v: &Value) -> String {
+    let options = v["Options"]
+        .as_array()
+        .map(|opts| {
+            opts.iter()
+                .map(|o| {
+                    let mut inner = format!(
+                        "<OptionName>{}</OptionName>",
+                        xml_escape(o["OptionName"].as_str().unwrap_or(""))
+                    );
+                    let port = o.get("Port").and_then(|p| {
+                        p.as_i64()
+                            .or_else(|| p.as_str().and_then(|s| s.parse().ok()))
+                    });
+                    if let Some(p) = port {
+                        inner.push_str(&format!("<Port>{p}</Port>"));
+                    }
+                    if let Some(ver) = o.get("OptionVersion").and_then(|x| x.as_str()) {
+                        inner.push_str(&format!(
+                            "<OptionVersion>{}</OptionVersion>",
+                            xml_escape(ver)
+                        ));
+                    }
+                    format!("<Option>{inner}</Option>")
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let options_xml = if options.is_empty() {
+        "<Options/>".to_string()
+    } else {
+        format!("<Options>{options}</Options>")
+    };
     format!(
-        "          <OptionGroupName>{}</OptionGroupName>\n          <OptionGroupArn>{}</OptionGroupArn>\n          <EngineName>{}</EngineName>\n          <MajorEngineVersion>{}</MajorEngineVersion>\n          <OptionGroupDescription>{}</OptionGroupDescription>\n          <AllowsVpcAndNonVpcInstanceMemberships>true</AllowsVpcAndNonVpcInstanceMemberships>\n          <Options/>",
+        "          <OptionGroupName>{}</OptionGroupName>\n          <OptionGroupArn>{}</OptionGroupArn>\n          <EngineName>{}</EngineName>\n          <MajorEngineVersion>{}</MajorEngineVersion>\n          <OptionGroupDescription>{}</OptionGroupDescription>\n          <AllowsVpcAndNonVpcInstanceMemberships>true</AllowsVpcAndNonVpcInstanceMemberships>\n          {}",
         xml_escape(v["OptionGroupName"].as_str().unwrap_or("")),
         xml_escape(v["OptionGroupArn"].as_str().unwrap_or("")),
         xml_escape(v["EngineName"].as_str().unwrap_or("")),
         xml_escape(v["MajorEngineVersion"].as_str().unwrap_or("")),
         xml_escape(v["OptionGroupDescription"].as_str().unwrap_or("")),
+        options_xml,
     )
 }
 
 pub(super) fn event_sub_xml(v: &Value) -> String {
     format!(
-        "          <CustSubscriptionId>{}</CustSubscriptionId>\n          <CustomerAwsId>{}</CustomerAwsId>\n          <EventSubscriptionArn>{}</EventSubscriptionArn>\n          <SnsTopicArn>{}</SnsTopicArn>\n          <SourceType>{}</SourceType>\n          <Status>{}</Status>\n          <Enabled>{}</Enabled>\n          <EventCategoriesList/>\n          <SourceIdsList/>",
+        "          <CustSubscriptionId>{}</CustSubscriptionId>\n          <CustomerAwsId>{}</CustomerAwsId>\n          <EventSubscriptionArn>{}</EventSubscriptionArn>\n          <SnsTopicArn>{}</SnsTopicArn>\n          <SourceType>{}</SourceType>\n          <Status>{}</Status>\n          <Enabled>{}</Enabled>\n          {}\n          {}",
         xml_escape(v["CustSubscriptionId"].as_str().unwrap_or("")),
         xml_escape(v["CustomerAwsId"].as_str().unwrap_or("")),
         xml_escape(v["EventSubscriptionArn"].as_str().unwrap_or("")),
@@ -342,6 +392,8 @@ pub(super) fn event_sub_xml(v: &Value) -> String {
         xml_escape(v["SourceType"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("active")),
         v["Enabled"].as_bool().unwrap_or(true),
+        json_str_array_xml(&v["EventCategoriesList"], "EventCategoriesList"),
+        json_str_array_xml(&v["SourceIdsList"], "SourceIdsList"),
     )
 }
 
@@ -359,6 +411,16 @@ pub(super) fn global_cluster_xml(v: &Value) -> String {
         xml_escape(v["DatabaseName"].as_str().unwrap_or("")),
         v["DeletionProtection"].as_bool().unwrap_or(false),
         v["StorageEncrypted"].as_bool().unwrap_or(false),
+    )
+}
+
+pub(super) fn db_proxy_target_xml(v: &Value) -> String {
+    format!(
+        "<member><RdsResourceId>{}</RdsResourceId><Type>{}</Type><Port>{}</Port><Endpoint>{}</Endpoint><TargetHealth><State>AVAILABLE</State></TargetHealth></member>",
+        xml_escape(v["RdsResourceId"].as_str().unwrap_or("")),
+        xml_escape(v["Type"].as_str().unwrap_or("RDS_INSTANCE")),
+        v["Port"].as_i64().unwrap_or(3306),
+        xml_escape(v["Endpoint"].as_str().unwrap_or("")),
     )
 }
 
