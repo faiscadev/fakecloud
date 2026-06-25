@@ -759,7 +759,7 @@ fn already_exists(msg: impl Into<String>) -> AwsServiceError {
     )
 }
 
-fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
+pub(crate) fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     if let Some(obj) = val.as_object() {
         for (k, v) in obj {
@@ -785,7 +785,7 @@ fn parse_columns(val: &Value) -> Vec<Column> {
         .collect()
 }
 
-fn parse_storage_descriptor(val: &Value) -> Option<StorageDescriptor> {
+pub(crate) fn parse_storage_descriptor(val: &Value) -> Option<StorageDescriptor> {
     if !val.is_object() {
         return None;
     }

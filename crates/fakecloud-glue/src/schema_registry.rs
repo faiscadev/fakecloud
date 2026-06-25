@@ -27,6 +27,24 @@ fn registry_name(id: &Value) -> Option<String> {
 /// by `SchemaArn`. The ARN's resource path is `schema/<registry>/<schema>`, so
 /// both the registry and schema name must come out of the ARN — not just the
 /// trailing segment (otherwise a by-ARN lookup keys off the wrong registry).
+/// Parse a Glue `Versions` range string into the set of version numbers it
+/// covers. Accepts comma-separated tokens, each either a single number `N` or
+/// an inclusive range `N-M` (e.g. `"1-3,5"`).
+fn parse_version_range(spec: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    for token in spec.split(',') {
+        let token = token.trim();
+        if let Some((lo, hi)) = token.split_once('-') {
+            if let (Ok(lo), Ok(hi)) = (lo.trim().parse::<i64>(), hi.trim().parse::<i64>()) {
+                out.extend(lo..=hi);
+            }
+        } else if let Ok(n) = token.parse::<i64>() {
+            out.push(n);
+        }
+    }
+    out
+}
+
 fn schema_key(id: &Value) -> Option<String> {
     if let Some(name) = id.get("SchemaName").and_then(|v| v.as_str()) {
         let reg = id
@@ -436,7 +454,26 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_present(&body, "SchemaId")?;
-        req_str(&body, "Versions")?;
+        let versions = req_str(&body, "Versions")?.to_string();
+        // Resolve the schema's (registry, name) and the version numbers to
+        // delete, then actually remove the matching stored versions — the
+        // handler previously validated and returned no errors without deleting
+        // anything, so Get/List kept returning them (bug-hunt 2026-06-24, 1.13).
+        let key = schema_key(&body["SchemaId"])
+            .ok_or_else(|| invalid_input("SchemaId.SchemaName or SchemaId.SchemaArn required"))?;
+        let (reg, name) = key.split_once('\u{1f}').unwrap_or(("", ""));
+        let wanted = parse_version_range(&versions);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        st.schema_versions.retain(|_id, v| {
+            let same_schema = (v["RegistryName"].as_str() == Some(reg)
+                && v["SchemaName"].as_str() == Some(name))
+                || v["SchemaArn"]
+                    .as_str()
+                    .is_some_and(|a| a.ends_with(&format!("/{reg}/{name}")));
+            let vnum = v["VersionNumber"].as_i64().unwrap_or(0);
+            !(same_schema && wanted.contains(&vnum))
+        });
         Ok(AwsResponse::ok_json(json!({ "SchemaVersionErrors": [] })))
     }
 
