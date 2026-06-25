@@ -746,6 +746,11 @@ impl SsmService {
         if let Some(p) = body["Priority"].as_i64() {
             task.priority = p;
         }
+        // Previously dropped, so the old service role persisted (bug-hunt
+        // 2026-06-24, 1.13).
+        if let Some(role) = body["ServiceRoleArn"].as_str() {
+            task.service_role_arn = Some(role.to_string());
+        }
 
         let mut resp = json!({
             "WindowId": window_id,
@@ -766,6 +771,9 @@ impl SsmService {
         }
         if let Some(ref me) = task.max_errors {
             resp["MaxErrors"] = json!(me);
+        }
+        if let Some(ref sra) = task.service_role_arn {
+            resp["ServiceRoleArn"] = json!(sra);
         }
 
         Ok(AwsResponse::ok_json(resp))

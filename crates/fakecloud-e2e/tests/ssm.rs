@@ -921,12 +921,17 @@ async fn ssm_ops_item_crud() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
+    let planned_start = aws_sdk_ssm::primitives::DateTime::from_secs(1_700_000_000);
+    let planned_end = aws_sdk_ssm::primitives::DateTime::from_secs(1_700_003_600);
+
     // Create
     let create_resp = client
         .create_ops_item()
         .title("E2E Test OpsItem")
         .source("e2e-test")
         .description("A test ops item for E2E tests")
+        .planned_start_time(planned_start)
+        .planned_end_time(planned_end)
         .send()
         .await
         .unwrap();
@@ -945,13 +950,18 @@ async fn ssm_ops_item_crud() {
         item.status(),
         Some(&aws_sdk_ssm::types::OpsItemStatus::Open)
     );
+    // Planned timestamps set on create must round-trip, not be dropped.
+    assert_eq!(item.planned_start_time(), Some(&planned_start));
+    assert_eq!(item.planned_end_time(), Some(&planned_end));
 
     // Update
+    let actual_start = aws_sdk_ssm::primitives::DateTime::from_secs(1_700_001_000);
     client
         .update_ops_item()
         .ops_item_id(&ops_item_id)
         .title("Updated OpsItem")
         .status(aws_sdk_ssm::types::OpsItemStatus::Resolved)
+        .actual_start_time(actual_start)
         .send()
         .await
         .unwrap();
@@ -965,6 +975,9 @@ async fn ssm_ops_item_crud() {
         .unwrap();
     let item = get_resp.ops_item().unwrap();
     assert_eq!(item.title().unwrap(), "Updated OpsItem");
+    assert_eq!(item.actual_start_time(), Some(&actual_start));
+    // Planned times persist across the update that didn't touch them.
+    assert_eq!(item.planned_start_time(), Some(&planned_start));
 
     // Describe
     let desc = client.describe_ops_items().send().await.unwrap();
@@ -1280,10 +1293,16 @@ async fn ssm_maintenance_window_execution() {
         .window_id(&window_id)
         .window_task_id(&task_id)
         .name("updated-task")
+        .service_role_arn("arn:aws:iam::123456789012:role/MaintenanceWindowRole")
         .send()
         .await
         .unwrap();
     assert_eq!(resp.name().unwrap(), "updated-task");
+    // ServiceRoleArn set on update must round-trip, not be dropped.
+    assert_eq!(
+        resp.service_role_arn().unwrap(),
+        "arn:aws:iam::123456789012:role/MaintenanceWindowRole"
+    );
 
     // DescribeMaintenanceWindowExecutions (empty initially)
     let resp = client
@@ -1971,13 +1990,14 @@ async fn ssm_document_permissions() {
         .await
         .unwrap();
 
-    // Add permissions
+    // Add permissions, sharing a specific document version (not the default).
     client
         .modify_document_permission()
         .name("e2e-perm-doc")
         .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
         .account_ids_to_add("111111111111")
         .account_ids_to_add("222222222222")
+        .shared_document_version("$LATEST")
         .send()
         .await
         .unwrap();
@@ -1991,6 +2011,14 @@ async fn ssm_document_permissions() {
         .await
         .unwrap();
     assert_eq!(resp.account_ids().len(), 2);
+    // The shared version set on modify must round-trip, not a hardcoded default.
+    assert!(
+        resp.account_sharing_info_list()
+            .iter()
+            .all(|i| i.shared_document_version() == Some("$LATEST")),
+        "shared version should reflect what was set: {:?}",
+        resp.account_sharing_info_list()
+    );
 
     // Remove one
     client
