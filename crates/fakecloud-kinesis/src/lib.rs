@@ -1,4 +1,5 @@
 pub mod delivery;
+pub(crate) mod eventstream;
 pub(crate) mod service;
 pub(crate) mod state;
 

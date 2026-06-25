@@ -3840,6 +3840,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "crc32fast",
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-persistence",
