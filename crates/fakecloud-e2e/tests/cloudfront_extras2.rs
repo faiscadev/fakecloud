@@ -233,11 +233,7 @@ async fn update_distribution_with_staging_config_swaps_etag() {
         .send()
         .await
         .expect("get prod");
-    let cfg = got
-        .distribution()
-        .unwrap()
-        .distribution_config()
-        .unwrap();
+    let cfg = got.distribution().unwrap().distribution_config().unwrap();
     assert_eq!(cfg.comment(), "promoted-staging-config");
     assert_eq!(cfg.staging(), Some(false));
 }
