@@ -548,12 +548,11 @@ pub const SERVICES: &[Service] = &[
     Service {
         name: "rds",
         // RDS control-plane resources that need no DB engine container. The DB
-        // subnet group now reports `supported_network_types = [IPV4]` and a
-        // `Complete` status. Parameter/option/cluster-parameter groups are
-        // deferred: their go-acceptance Modify-then-Describe round-trip returns
-        // empty parameters/groups even though the same calls succeed via the
-        // AWS CLI (a request-handling discrepancy still under investigation).
-        // DB instances/clusters need Docker and stay out.
+        // subnet group reports `supported_network_types = [IPV4]` and a
+        // `Complete` status. DB and cluster parameter groups now round-trip
+        // correctly and run in the `rds-param-groups` shard below. Option
+        // groups remain deferred; DB instances/clusters need Docker and stay
+        // out.
         run_regex: "^TestAccRDSSubnetGroup_basic$",
         deny: &[],
     },
@@ -1058,6 +1057,17 @@ pub const SHARDS: &[Shard] = &[
         name: "rds",
         service: "rds",
         run_regex: "^TestAccRDSSubnetGroup_basic$",
+        extra_deny: &[],
+    },
+    // DB and DB-cluster parameter groups. Both need no engine container:
+    // the create/modify/reset/describe round-trip now preserves each
+    // parameter's ApplyMethod, resets cleanly back to engine-default, and
+    // (for cluster groups) emits the named member tag + Description that
+    // the provider reads back.
+    Shard {
+        name: "rds-param-groups",
+        service: "rds",
+        run_regex: "^TestAccRDS(ParameterGroup|ClusterParameterGroup)_basic$",
         extra_deny: &[],
     },
     Shard {
