@@ -690,6 +690,46 @@ pub const SERVICES: &[Service] = &[
             "TestAccSESReceiptRuleSet_basic",
         ],
     },
+    Service {
+        name: "apigateway",
+        // API Gateway v1 (REST APIs): the `_basic` smoke across ~40 resources and
+        // data sources — REST API, resources, methods, deployments, stages,
+        // models, gateway responses, base-path mappings, documentation, usage
+        // plans, VPC links, and more. Fixes: GetSdk / GetExport set the
+        // Content-Disposition header the SDK/export data sources read as
+        // `content_disposition`; UpdateRequestValidator coerces the JSON-Patch
+        // string flags back to booleans (validateRequestBody /
+        // validateRequestParameters) so GetRequestValidator returns the boolean
+        // type the SDK expects.
+        run_regex: "^TestAccAPIGateway[A-Za-z0-9]+_basic$",
+        deny: &[
+            // --- gap: the api-key / usage-plan-key resources expect their
+            //     generated `value` / `name` surfaced on read in a way the
+            //     resource captures; the create+get responses carry them but the
+            //     attribute still reads empty, which needs a closer look. ---
+            "TestAccAPIGatewayAPIKey_basic",
+            "TestAccAPIGatewayUsagePlanKey_basic",
+            // --- gap: update semantics — the method-response model/parameter
+            //     update, the integration request_templates replacement, and the
+            //     authorizer result-ttl update don't fully apply, leaving drift. ---
+            "TestAccAPIGatewayMethodResponse_basic",
+            "TestAccAPIGatewayIntegration_basic",
+            "TestAccAPIGatewayAuthorizer_basic",
+            // --- gap: the REST API resource policy round-trip mangles the policy
+            //     JSON (a parse error on apply). ---
+            "TestAccAPIGatewayRestAPIPolicy_basic",
+            // --- gap: custom domain names need a certificate upload date and the
+            //     domain-name access-association resource, which are not modelled. ---
+            "TestAccAPIGatewayDomainNameDataSource_basic",
+            "TestAccAPIGatewayDomainNameAccessAssociation_basic",
+            // --- gap: VPC links provision an NLB; the ELBv2 DeleteLoadBalancer
+            //     response omits its result node, so the test's destroy of the
+            //     load balancer fails to deserialize (an ELBv2-fidelity gap, not
+            //     an API Gateway one). ---
+            "TestAccAPIGatewayVPCLink_basic",
+            "TestAccAPIGatewayVPCLinkDataSource_basic",
+        ],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1020,6 +1060,12 @@ pub const SHARDS: &[Shard] = &[
         name: "ses",
         service: "ses",
         run_regex: "^TestAccSES[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "apigateway",
+        service: "apigateway",
+        run_regex: "^TestAccAPIGateway[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
 ];
