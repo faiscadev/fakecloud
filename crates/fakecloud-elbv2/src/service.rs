@@ -932,7 +932,15 @@ impl Elbv2Service {
         let vpc_id = optional_query_param(req, "VpcId");
         let ip_address_type =
             optional_query_param(req, "IpAddressType").unwrap_or_else(|| "ipv4".into());
-        let protocol_version = optional_query_param(req, "ProtocolVersion");
+        // AWS defaults ProtocolVersion to HTTP1 for HTTP/HTTPS target groups and
+        // always reports it; TCP/UDP/TLS/GENEVE groups have no protocol version.
+        // The aws_lb_target_group resource reads `protocol_version` for
+        // application-protocol groups, so it must be present.
+        let protocol_version =
+            optional_query_param(req, "ProtocolVersion").or_else(|| match protocol.as_deref() {
+                Some("HTTP") | Some("HTTPS") => Some("HTTP1".to_string()),
+                _ => None,
+            });
         let health_check_protocol =
             optional_query_param(req, "HealthCheckProtocol").or_else(|| protocol.clone());
         let health_check_port =

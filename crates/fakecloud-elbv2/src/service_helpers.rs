@@ -901,17 +901,7 @@ pub(crate) fn render_rule_xml(r: &crate::state::Rule) -> String {
     let conditions_xml = r
         .conditions
         .iter()
-        .map(|c| {
-            let values = c
-                .values
-                .iter()
-                .map(|v| format!("<member>{}</member>", xml_escape(v)))
-                .collect::<String>();
-            format!(
-                "<member><Field>{}</Field><Values>{values}</Values></member>",
-                xml_escape(&c.field)
-            )
-        })
+        .map(render_rule_condition_xml)
         .collect::<String>();
     let actions_xml = r.actions.iter().map(render_action_xml).collect::<String>();
     format!(
@@ -924,6 +914,94 @@ pub(crate) fn render_rule_xml(r: &crate::state::Rule) -> String {
         priority = xml_escape(&r.priority),
         is_default = r.is_default,
     )
+}
+
+/// Render a single rule condition. AWS returns each condition's typed
+/// `*Config` sub-object (the modern shape the SDK/Terraform read), and for
+/// `host-header`/`path-pattern` also echoes the deprecated top-level
+/// `Values`. Emitting only `<Field>`/`<Values>` makes terraform-provider-aws
+/// nil-deref on `condition.PathPatternConfig.Values` (etc.) in
+/// `resourceListenerRuleRead`, so the typed config must always be present.
+fn render_rule_condition_xml(c: &crate::state::RuleCondition) -> String {
+    let members = |vals: &[String]| {
+        vals.iter()
+            .map(|v| format!("<member>{}</member>", xml_escape(v)))
+            .collect::<String>()
+    };
+    // Typed configs created via the modern `*Config.Values` land in the
+    // type-specific vec; legacy `Values`-only creates land in `c.values`.
+    let typed_or_legacy = |primary: &[String]| -> Vec<String> {
+        if primary.is_empty() {
+            c.values.clone()
+        } else {
+            primary.to_vec()
+        }
+    };
+    let field = xml_escape(&c.field);
+    let config_xml = match c.field.as_str() {
+        "host-header" => {
+            let vals = typed_or_legacy(&c.host_header_values);
+            format!(
+                "<HostHeaderConfig><Values>{}</Values></HostHeaderConfig>",
+                members(&vals)
+            )
+        }
+        "path-pattern" => {
+            let vals = typed_or_legacy(&c.path_pattern_values);
+            format!(
+                "<PathPatternConfig><Values>{}</Values></PathPatternConfig>",
+                members(&vals)
+            )
+        }
+        "http-header" => {
+            let name = c
+                .http_header_name
+                .as_deref()
+                .map(|n| format!("<HttpHeaderName>{}</HttpHeaderName>", xml_escape(n)))
+                .unwrap_or_default();
+            format!(
+                "<HttpHeaderConfig>{name}<Values>{}</Values></HttpHeaderConfig>",
+                members(&c.http_header_values)
+            )
+        }
+        "http-request-method" => format!(
+            "<HttpRequestMethodConfig><Values>{}</Values></HttpRequestMethodConfig>",
+            members(&c.http_request_method_values)
+        ),
+        "source-ip" => format!(
+            "<SourceIpConfig><Values>{}</Values></SourceIpConfig>",
+            members(&c.source_ip_values)
+        ),
+        "query-string" => {
+            let pairs = c
+                .query_string_values
+                .iter()
+                .map(|kv| {
+                    let key = kv
+                        .key
+                        .as_deref()
+                        .map(|k| format!("<Key>{}</Key>", xml_escape(k)))
+                        .unwrap_or_default();
+                    let value = kv
+                        .value
+                        .as_deref()
+                        .map(|v| format!("<Value>{}</Value>", xml_escape(v)))
+                        .unwrap_or_default();
+                    format!("<member>{key}{value}</member>")
+                })
+                .collect::<String>();
+            format!("<QueryStringConfig><Values>{pairs}</Values></QueryStringConfig>")
+        }
+        _ => String::new(),
+    };
+    // AWS echoes the deprecated top-level Values only for host-header and
+    // path-pattern; other fields return it empty.
+    let legacy_values = match c.field.as_str() {
+        "host-header" => members(&typed_or_legacy(&c.host_header_values)),
+        "path-pattern" => members(&typed_or_legacy(&c.path_pattern_values)),
+        _ => String::new(),
+    };
+    format!("<member><Field>{field}</Field><Values>{legacy_values}</Values>{config_xml}</member>")
 }
 
 pub(crate) fn validate_tg_name(name: &str) -> Result<(), AwsServiceError> {
@@ -1133,6 +1211,19 @@ pub(crate) fn default_target_group_attributes() -> BTreeMap<String, String> {
     m.insert(
         "load_balancing.algorithm.type".to_string(),
         "round_robin".to_string(),
+    );
+    // AWS always reports cross-zone load balancing; an ALB target group inherits
+    // the load balancer's setting by default. The aws_lb_target_group data
+    // source reads `load_balancing_cross_zone_enabled` from this attribute.
+    m.insert(
+        "load_balancing.cross_zone.enabled".to_string(),
+        "use_load_balancer_configuration".to_string(),
+    );
+    // Anomaly mitigation defaults off; the data source reads it as
+    // `load_balancing_anomaly_mitigation`.
+    m.insert(
+        "load_balancing.algorithm.anomaly_mitigation".to_string(),
+        "off".to_string(),
     );
     m.insert("slow_start.duration_seconds".to_string(), "0".to_string());
     m

@@ -203,6 +203,11 @@ async fn apigateway_acceptance() {
 }
 
 #[tokio::test]
+async fn elbv2_acceptance() {
+    run_shard("elbv2").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }
