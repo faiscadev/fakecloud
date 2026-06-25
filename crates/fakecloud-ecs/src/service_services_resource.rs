@@ -914,7 +914,15 @@ impl EcsService {
                     ts.service_name != service_name || ts.cluster_name != cluster_name
                 });
             }
-            state.services.remove(&key);
+            // AWS does NOT drop a deleted service immediately: it transitions
+            // to DRAINING while its tasks stop, then to INACTIVE, and an
+            // INACTIVE service stays describable (DescribeServices) for ~hours
+            // before garbage collection. The terraform-provider-aws delete
+            // waiter polls DescribeServices until it sees status=INACTIVE, so
+            // removing the record here makes that waiter fail with "couldn't
+            // find resource". Keep the service at DRAINING; `describe_services`
+            // flips it to INACTIVE once its tasks have all stopped. It is
+            // excluded from ListServices (only ACTIVE services are listed).
             state.push_event(crate::state::LifecycleEvent {
                 at: Utc::now(),
                 event_type: "ServiceDeleted".into(),
@@ -976,10 +984,13 @@ impl EcsService {
             .collect();
 
         let account = request.account_id.clone();
-        let accounts = self.state.read();
+        // Write lock: a service left at DRAINING by DeleteService transitions to
+        // INACTIVE here once its tasks have all stopped, and we persist that so
+        // the status is stable across subsequent describes and ListServices.
+        let mut accounts = self.state.write();
         let mut found = Vec::new();
         let mut failures = Vec::new();
-        let Some(state) = accounts.get(&account) else {
+        let Some(state) = accounts.get_mut(&account) else {
             for r in &refs {
                 failures.push(json!({"arn": r, "reason": "MISSING"}));
             }
@@ -990,6 +1001,16 @@ impl EcsService {
         for r in &refs {
             let name = service_name_from_ref(r);
             let key = EcsState::service_key(&cluster_name, &name);
+            // A DRAINING (deleted) service whose tasks have all stopped has
+            // reached INACTIVE — flip and persist before serializing so the
+            // delete waiter observes the terminal status.
+            if state.services.get(&key).map(|s| s.status.as_str()) == Some("DRAINING")
+                && !service_has_live_tasks(state, &name, &cluster_name)
+            {
+                if let Some(svc) = state.services.get_mut(&key) {
+                    svc.status = "INACTIVE".into();
+                }
+            }
             match state.services.get(&key) {
                 Some(svc) => {
                     let mut v = service_to_json(svc);
@@ -1037,6 +1058,10 @@ impl EcsService {
             Some(state) => state
                 .services
                 .values()
+                // ListServices returns only live (ACTIVE) services; AWS hides
+                // DRAINING (being deleted) and INACTIVE (deleted) services here,
+                // though they remain visible via DescribeServices.
+                .filter(|s| s.status == "ACTIVE")
                 .filter(|s| s.cluster_name == cluster_name)
                 .filter(|s| launch_type.is_none_or(|lt| s.launch_type == lt))
                 .filter(|s| scheduling.is_none_or(|sc| s.scheduling_strategy == sc))
@@ -1074,6 +1099,7 @@ impl EcsService {
             Some(state) => state
                 .services
                 .values()
+                .filter(|s| s.status == "ACTIVE")
                 .filter(|s| {
                     s.service_registries.iter().any(|r| {
                         r.get("registryArn")

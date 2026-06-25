@@ -1004,6 +1004,13 @@ async fn delete_service_requires_zero_desired_unless_force() {
         .expect("force delete");
     assert_eq!(forced.service().unwrap().service_name(), Some("web"));
 
+    // AWS does NOT drop a deleted service immediately: it stays describable
+    // (DRAINING while tasks stop, then INACTIVE) instead of returning MISSING.
+    // It is excluded from ListServices either way. (The exact DRAINING vs
+    // INACTIVE status depends on whether the drained tasks have stopped yet,
+    // which is non-deterministic when a real container runtime is present;
+    // `deleted_service_with_no_tasks_becomes_inactive` covers the terminal
+    // transition deterministically.)
     let after = client
         .describe_services()
         .cluster("del-cluster")
@@ -1011,9 +1018,78 @@ async fn delete_service_requires_zero_desired_unless_force() {
         .send()
         .await
         .unwrap();
-    assert!(after.services().is_empty());
-    assert_eq!(after.failures().len(), 1);
-    assert_eq!(after.failures()[0].reason(), Some("MISSING"));
+    assert_eq!(after.services().len(), 1);
+    assert!(
+        matches!(
+            after.services()[0].status(),
+            Some("DRAINING") | Some("INACTIVE")
+        ),
+        "deleted service must remain describable as DRAINING/INACTIVE, got {:?}",
+        after.services()[0].status()
+    );
+    assert!(after.failures().is_empty());
+
+    let listed = client
+        .list_services()
+        .cluster("del-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        listed.service_arns().is_empty(),
+        "deleted service must not appear in ListServices"
+    );
+}
+
+#[tokio::test]
+async fn deleted_service_with_no_tasks_becomes_inactive() {
+    // A service with no running tasks (desiredCount=0) deletes cleanly: AWS
+    // keeps it describable as INACTIVE (the terraform-provider-aws delete
+    // waiter polls DescribeServices until it observes INACTIVE), and excludes
+    // it from ListServices.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "drain-cluster", "drain-td").await;
+    client
+        .create_service()
+        .cluster("drain-cluster")
+        .service_name("idle")
+        .task_definition("drain-td")
+        .desired_count(0)
+        .send()
+        .await
+        .unwrap();
+
+    let deleted = client
+        .delete_service()
+        .cluster("drain-cluster")
+        .service("idle")
+        .send()
+        .await
+        .expect("delete idle service");
+    assert_eq!(deleted.service().unwrap().service_name(), Some("idle"));
+
+    let after = client
+        .describe_services()
+        .cluster("drain-cluster")
+        .services("idle")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.services().len(), 1);
+    assert_eq!(after.services()[0].status(), Some("INACTIVE"));
+    assert!(after.failures().is_empty());
+
+    let listed = client
+        .list_services()
+        .cluster("drain-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        listed.service_arns().is_empty(),
+        "INACTIVE service must not appear in ListServices"
+    );
 }
 
 // -- Phase O1: multi-container task launch --------------------------

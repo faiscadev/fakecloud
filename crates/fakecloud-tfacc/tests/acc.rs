@@ -213,6 +213,11 @@ async fn bedrockagent_acceptance() {
 }
 
 #[tokio::test]
+async fn appautoscaling_acceptance() {
+    run_shard("appautoscaling").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }
