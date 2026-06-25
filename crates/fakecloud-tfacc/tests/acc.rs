@@ -113,6 +113,11 @@ async fn rds_param_groups_acceptance() {
 }
 
 #[tokio::test]
+async fn rds_option_groups_acceptance() {
+    run_shard("rds-option-groups").await;
+}
+
+#[tokio::test]
 async fn cloudfront_acceptance() {
     run_shard("cloudfront").await;
 }

@@ -850,7 +850,7 @@ impl RdsService {
                 let name = get_param(req, "OptionGroupName").or_else(|| get_param(req, "TargetOptionGroupIdentifier"))
                     .ok_or_else(|| missing("OptionGroupName"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("og:{name}")).to_string();
-                let entry = json!({"OptionGroupName": name, "OptionGroupArn": arn, "EngineName": get_param(req, "EngineName").unwrap_or_else(|| "mysql".to_string()), "MajorEngineVersion": get_param(req, "MajorEngineVersion").unwrap_or_else(|| "8.0".to_string())});
+                let entry = json!({"OptionGroupName": name, "OptionGroupArn": arn, "EngineName": get_param(req, "EngineName").unwrap_or_else(|| "mysql".to_string()), "MajorEngineVersion": get_param(req, "MajorEngineVersion").unwrap_or_else(|| "8.0".to_string()), "OptionGroupDescription": get_param(req, "OptionGroupDescription").unwrap_or_default()});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "option_groups").insert(name.clone(), entry.clone());
@@ -891,7 +891,51 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("option_groups") { m.remove(&name); }
                 xml_empty_action(&action, &rid)
             }
-            "DescribeOptionGroups" => list_extras_xml(self, &aid, "option_groups", "OptionGroupsList", "DescribeOptionGroups", option_group_xml, &rid),
+            "DescribeOptionGroups" => {
+                // RDS wraps each list element in its named member tag
+                // (`<OptionGroup>`), not the generic `<member>`; the SDK
+                // unmarshals an empty list otherwise. AWS also filters by name
+                // and raises OptionGroupNotFoundFault for an unknown group.
+                let wanted = get_param(req, "OptionGroupName");
+                let accounts = self.state_handle().read();
+                let groups: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("option_groups"))
+                    .map(|m| m.values().cloned().collect())
+                    .unwrap_or_default();
+                if let Some(name) = &wanted {
+                    let found = groups
+                        .iter()
+                        .any(|g| g["OptionGroupName"].as_str() == Some(name.as_str()));
+                    if !found {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "OptionGroupNotFoundFault",
+                            format!("Specified OptionGroup: {name} not found."),
+                        ));
+                    }
+                }
+                let members = groups
+                    .iter()
+                    .filter(|g| {
+                        wanted
+                            .as_deref()
+                            .is_none_or(|n| g["OptionGroupName"].as_str() == Some(n))
+                    })
+                    .map(|g| {
+                        format!(
+                            "        <OptionGroup>\n{}\n        </OptionGroup>",
+                            option_group_xml(g)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(xml_response(
+                    "DescribeOptionGroups",
+                    format!("    <OptionGroupsList>\n{members}\n    </OptionGroupsList>"),
+                    &rid,
+                ))
+            }
             "DescribeOptionGroupOptions" => Ok(xml_response("DescribeOptionGroupOptions", "    <OptionGroupOptions/>".to_string(), &rid)),
 
             // ── Event subscriptions ──
