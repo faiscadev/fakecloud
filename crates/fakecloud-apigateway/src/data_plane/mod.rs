@@ -2332,6 +2332,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn http_integration_times_out_on_hung_backend() {
+        use tokio::net::TcpListener;
+        // A backend that accepts the connection but never responds.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    held.push(stream); // hold open, never write a response
+                }
+            }
+        });
+        let integration = Integration {
+            rest_api_id: "api1".to_string(),
+            resource_id: "res1".to_string(),
+            http_method: "GET".to_string(),
+            integration_type: "HTTP_PROXY".to_string(),
+            integration_http_method: Some("GET".to_string()),
+            uri: Some(format!("http://{addr}/items")),
+            credentials: None,
+            request_parameters: BTreeMap::new(),
+            request_templates: BTreeMap::new(),
+            passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+            timeout_in_millis: Some(150),
+            cache_namespace: None,
+            cache_key_parameters: vec![],
+            content_handling: None,
+            connection_type: None,
+            connection_id: None,
+            tls_config: None,
+        };
+        let req = make_request(HeaderMap::new());
+        let err = match http_proxy(&req, &integration, None).await {
+            Err(e) => e,
+            Ok(_) => panic!("hung backend must time out, not return a response"),
+        };
+        // AWS returns 504 (not 502) when the integration exceeds its timeout.
+        assert_eq!(err.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
     // ── AWS direct integration tests ──
 
     /// Build an `AWS` (non-proxy) integration with the given

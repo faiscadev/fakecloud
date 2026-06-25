@@ -10,6 +10,16 @@ pub(super) fn bad_gateway(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_GATEWAY, "BadGatewayException", msg.into())
 }
 
+/// API Gateway returns 504 when a backend integration exceeds its timeout
+/// (default 29s for REST APIs).
+pub(super) fn gateway_timeout(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::GATEWAY_TIMEOUT,
+        "IntegrationTimeoutException",
+        msg.into(),
+    )
+}
+
 pub(super) fn unauthorized(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::UNAUTHORIZED,
