@@ -80,6 +80,13 @@ pub struct DeliveryStream {
     pub tags: BTreeMap<String, String>,
     #[serde(default)]
     pub encryption: Option<EncryptionConfig>,
+    /// Non-S3 destination descriptions (Redshift, OpenSearch, Splunk, HTTP
+    /// endpoint, Snowflake, Iceberg, ...) keyed by their `*DestinationDescription`
+    /// field name. Stored as raw JSON so DescribeDeliveryStream round-trips a
+    /// destination type fakecloud doesn't model field-by-field, instead of
+    /// silently dropping it.
+    #[serde(default)]
+    pub extra_destinations: BTreeMap<String, serde_json::Value>,
 }
 
 /// Server-side encryption (SSE) configuration persisted on a delivery stream.
