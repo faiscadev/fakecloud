@@ -666,7 +666,7 @@ async fn bootstrap_external_service_fixtures(
         .unwrap();
 }
 
-#[test_action("ecs", "CreateService", checksum = "2f5d1dd4")]
+#[test_action("ecs", "CreateService", checksum = "f6c99856")]
 #[tokio::test]
 async fn ecs_create_service() {
     let server = TestServer::start().await;
@@ -745,7 +745,7 @@ async fn ecs_list_services_by_namespace() {
     resp.service_arns();
 }
 
-#[test_action("ecs", "UpdateService", checksum = "54dc7f2f")]
+#[test_action("ecs", "UpdateService", checksum = "10122d82")]
 #[tokio::test]
 async fn ecs_update_service() {
     let server = TestServer::start().await;
@@ -1735,7 +1735,7 @@ async fn ecs_continue_service_deployment_rollback_and_errors() {
     assert!(!resp.status().is_success());
 }
 
-#[test_action("ecs", "DescribeServiceRevisions", checksum = "324b5e93")]
+#[test_action("ecs", "DescribeServiceRevisions", checksum = "ae62cb22")]
 #[tokio::test]
 async fn ecs_describe_service_revisions() {
     let server = TestServer::start().await;
@@ -1980,7 +1980,7 @@ fn primary_eg_container() -> aws_sdk_ecs::types::ExpressGatewayContainer {
         .unwrap()
 }
 
-#[test_action("ecs", "CreateExpressGatewayService", checksum = "af2d07b8")]
+#[test_action("ecs", "CreateExpressGatewayService", checksum = "7b4cdec8")]
 #[tokio::test]
 async fn ecs_create_express_gateway_service() {
     let server = TestServer::start().await;
@@ -1998,7 +1998,7 @@ async fn ecs_create_express_gateway_service() {
     assert!(resp.service().is_some());
 }
 
-#[test_action("ecs", "DescribeExpressGatewayService", checksum = "a9f14d47")]
+#[test_action("ecs", "DescribeExpressGatewayService", checksum = "9aa55c32")]
 #[tokio::test]
 async fn ecs_describe_express_gateway_service() {
     let server = TestServer::start().await;
@@ -2028,7 +2028,7 @@ async fn ecs_describe_express_gateway_service() {
     assert!(resp.service().is_some());
 }
 
-#[test_action("ecs", "UpdateExpressGatewayService", checksum = "e7d45f06")]
+#[test_action("ecs", "UpdateExpressGatewayService", checksum = "a141e8d8")]
 #[tokio::test]
 async fn ecs_update_express_gateway_service() {
     let server = TestServer::start().await;
@@ -2059,7 +2059,7 @@ async fn ecs_update_express_gateway_service() {
     assert!(resp.service().is_some());
 }
 
-#[test_action("ecs", "DeleteExpressGatewayService", checksum = "d9132bdf")]
+#[test_action("ecs", "DeleteExpressGatewayService", checksum = "04d162c4")]
 #[tokio::test]
 async fn ecs_delete_express_gateway_service() {
     let server = TestServer::start().await;

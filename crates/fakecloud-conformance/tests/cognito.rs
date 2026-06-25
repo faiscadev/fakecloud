@@ -2634,8 +2634,8 @@ async fn cognito_list_resource_servers() {
     assert_eq!(resp.resource_servers().len(), 2);
 }
 
-#[test_action("cognito-idp", "CreateUserPoolDomain", checksum = "938b663d")]
-#[test_action("cognito-idp", "DescribeUserPoolDomain", checksum = "e48aafb2")]
+#[test_action("cognito-idp", "CreateUserPoolDomain", checksum = "b27a6e07")]
+#[test_action("cognito-idp", "DescribeUserPoolDomain", checksum = "ed6075dd")]
 #[tokio::test]
 async fn cognito_create_describe_domain() {
     let server = TestServer::start().await;
@@ -2668,7 +2668,7 @@ async fn cognito_create_describe_domain() {
     assert_eq!(desc.user_pool_id().unwrap(), pool_id);
 }
 
-#[test_action("cognito-idp", "UpdateUserPoolDomain", checksum = "3e6f181d")]
+#[test_action("cognito-idp", "UpdateUserPoolDomain", checksum = "b854857c")]
 #[test_action("cognito-idp", "DeleteUserPoolDomain", checksum = "e2680fa9")]
 #[tokio::test]
 async fn cognito_update_delete_domain() {

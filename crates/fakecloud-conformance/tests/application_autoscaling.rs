@@ -103,7 +103,7 @@ async fn aas_deregister_scalable_target() {
         .unwrap();
 }
 
-#[test_action("application-autoscaling", "PutScalingPolicy", checksum = "b5dfc010")]
+#[test_action("application-autoscaling", "PutScalingPolicy", checksum = "484f4d2f")]
 #[tokio::test]
 async fn aas_put_scaling_policy() {
     let server = TestServer::start().await;
@@ -138,7 +138,7 @@ async fn aas_put_scaling_policy() {
 #[test_action(
     "application-autoscaling",
     "DescribeScalingPolicies",
-    checksum = "4935ccb1"
+    checksum = "3858be0e"
 )]
 #[tokio::test]
 async fn aas_describe_scaling_policies() {

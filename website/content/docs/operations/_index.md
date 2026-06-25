@@ -37,6 +37,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteBucketTagging`
 - `DeleteBucketWebsite`
 - `DeleteObject`
+- `DeleteObjectAnnotation`
 - `DeleteObjectTagging`
 - `DeleteObjects`
 - `DeletePublicAccessBlock`
@@ -65,6 +66,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetBucketWebsite`
 - `GetObject`
 - `GetObjectAcl`
+- `GetObjectAnnotation`
 - `GetObjectAttributes`
 - `GetObjectLegalHold`
 - `GetObjectLockConfiguration`
@@ -81,6 +83,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListBuckets`
 - `ListDirectoryBuckets`
 - `ListMultipartUploads`
+- `ListObjectAnnotations`
 - `ListObjectVersions`
 - `ListObjects`
 - `ListObjectsV2`
@@ -106,6 +109,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutBucketWebsite`
 - `PutObject`
 - `PutObjectAcl`
+- `PutObjectAnnotation`
 - `PutObjectLegalHold`
 - `PutObjectLockConfiguration`
 - `PutObjectRetention`
@@ -114,6 +118,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `RenameObject`
 - `RestoreObject`
 - `SelectObjectContent`
+- `UpdateBucketMetadataAnnotationTableConfiguration`
 - `UpdateBucketMetadataInventoryTableConfiguration`
 - `UpdateBucketMetadataJournalTableConfiguration`
 - `UpdateObjectEncryption`
@@ -1996,6 +2001,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ConverseStream`
 - `CountTokens`
 - `GetAsyncInvoke`
+- `InvokeGuardrailChecks`
 - `InvokeModel`
 - `InvokeModelWithBidirectionalStream`
 - `InvokeModelWithResponseStream`
@@ -2580,6 +2586,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetPermissionPolicy`
 - `GetRateBasedStatementManagedKeys`
 - `GetRegexPatternSet`
+- `GetRevenueStatistics`
+- `GetRevenueStatisticsSummary`
+- `GetRevenueStatisticsTimeSeries`
 - `GetRuleGroup`
 - `GetSampledRequests`
 - `GetTopPathStatisticsByTraffic`
@@ -2595,6 +2604,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListRegexPatternSets`
 - `ListResourcesForWebACL`
 - `ListRuleGroups`
+- `ListSettlementRecords`
 - `ListTagsForResource`
 - `ListWebACLs`
 - `PutLoggingConfiguration`
@@ -2787,6 +2797,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [Glue](@/docs/services/glue.md)
 
+- `AssociateGlossaryTerms`
 - `BatchCreatePartition`
 - `BatchDeleteConnection`
 - `BatchDeletePartition`
@@ -2797,6 +2808,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `BatchGetCustomEntityTypes`
 - `BatchGetDataQualityResult`
 - `BatchGetDevEndpoints`
+- `BatchGetIterableForms`
 - `BatchGetJobs`
 - `BatchGetPartition`
 - `BatchGetTableOptimizer`
@@ -2820,6 +2832,8 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateDataQualityRuleset`
 - `CreateDatabase`
 - `CreateDevEndpoint`
+- `CreateGlossary`
+- `CreateGlossaryTerm`
 - `CreateGlueIdentityCenterConfiguration`
 - `CreateIntegration`
 - `CreateIntegrationResourceProperty`
@@ -2839,6 +2853,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateUsageProfile`
 - `CreateUserDefinedFunction`
 - `CreateWorkflow`
+- `DeleteAsset`
+- `DeleteAssetType`
+- `DeleteAttachment`
 - `DeleteBlueprint`
 - `DeleteCatalog`
 - `DeleteClassifier`
@@ -2852,6 +2869,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteDataQualityRuleset`
 - `DeleteDatabase`
 - `DeleteDevEndpoint`
+- `DeleteFormType`
+- `DeleteGlossary`
+- `DeleteGlossaryTerm`
 - `DeleteGlueIdentityCenterConfiguration`
 - `DeleteIntegration`
 - `DeleteIntegrationResourceProperty`
@@ -2877,6 +2897,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeEntity`
 - `DescribeInboundIntegrations`
 - `DescribeIntegrations`
+- `DisassociateGlossaryTerms`
+- `GetAsset`
+- `GetAssetType`
 - `GetBlueprint`
 - `GetBlueprintRun`
 - `GetBlueprintRuns`
@@ -2910,6 +2933,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetDevEndpoint`
 - `GetDevEndpoints`
 - `GetEntityRecords`
+- `GetFormType`
+- `GetGlossary`
+- `GetGlossaryTerm`
 - `GetGlueIdentityCenterConfiguration`
 - `GetIntegrationResourceProperty`
 - `GetIntegrationTableProperties`
@@ -2959,6 +2985,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetWorkflowRunProperties`
 - `GetWorkflowRuns`
 - `ImportCatalogToGlue`
+- `ListAssetTypes`
 - `ListBlueprints`
 - `ListColumnStatisticsTaskRuns`
 - `ListConnectionTypes`
@@ -2973,7 +3000,11 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListDataQualityStatistics`
 - `ListDevEndpoints`
 - `ListEntities`
+- `ListFormTypes`
+- `ListGlossaries`
+- `ListGlossaryTerms`
 - `ListIntegrationResourceProperties`
+- `ListIterableForms`
 - `ListJobs`
 - `ListMLTransforms`
 - `ListMaterializedViewRefreshTaskRuns`
@@ -2987,8 +3018,12 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListUsageProfiles`
 - `ListWorkflows`
 - `ModifyIntegration`
+- `PutAsset`
+- `PutAssetType`
+- `PutAttachment`
 - `PutDataCatalogEncryptionSettings`
 - `PutDataQualityProfileAnnotation`
+- `PutFormType`
 - `PutResourcePolicy`
 - `PutSchemaVersionMetadata`
 - `PutWorkflowRunProperties`
@@ -2999,6 +3034,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ResetJobBookmark`
 - `ResumeWorkflowRun`
 - `RunStatement`
+- `SearchAssets`
 - `SearchTables`
 - `StartBlueprintRun`
 - `StartColumnStatisticsTaskRun`
@@ -3038,6 +3074,8 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateDataQualityRuleset`
 - `UpdateDatabase`
 - `UpdateDevEndpoint`
+- `UpdateGlossary`
+- `UpdateGlossaryTerm`
 - `UpdateGlueIdentityCenterConfiguration`
 - `UpdateIntegrationResourceProperty`
 - `UpdateIntegrationTableProperties`
