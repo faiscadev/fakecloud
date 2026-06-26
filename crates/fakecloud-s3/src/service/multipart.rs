@@ -237,6 +237,7 @@ impl S3Service {
         let spooled = fakecloud_core::service::spool_request_stream(
             stream,
             self.store.spool_dir().as_deref(),
+            fakecloud_core::service::is_aws_chunked(&req.headers),
         )
         .await?;
         let part_size = spooled.size;
