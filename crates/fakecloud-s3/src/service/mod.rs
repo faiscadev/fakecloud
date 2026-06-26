@@ -1681,28 +1681,32 @@ pub(crate) fn check_get_conditionals(
         }
     }
 
-    // If-Unmodified-Since
-    if let Some(since) = req
-        .headers
-        .get("if-unmodified-since")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(dt) = parse_http_date(since) {
-            if obj_time > dt {
-                return Err(precondition_failed("If-Unmodified-Since"));
+    // If-Unmodified-Since — RFC 7232 §3.4: ignored when If-Match is present.
+    if req.headers.get("if-match").is_none() {
+        if let Some(since) = req
+            .headers
+            .get("if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(dt) = parse_http_date(since) {
+                if obj_time > dt {
+                    return Err(precondition_failed("If-Unmodified-Since"));
+                }
             }
         }
     }
 
-    // If-Modified-Since
-    if let Some(since) = req
-        .headers
-        .get("if-modified-since")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(dt) = parse_http_date(since) {
-            if obj_time <= dt {
-                return Err(not_modified());
+    // If-Modified-Since — RFC 7232 §3.3: ignored when If-None-Match is present.
+    if req.headers.get("if-none-match").is_none() {
+        if let Some(since) = req
+            .headers
+            .get("if-modified-since")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(dt) = parse_http_date(since) {
+                if obj_time <= dt {
+                    return Err(not_modified());
+                }
             }
         }
     }
@@ -1739,32 +1743,36 @@ pub(crate) fn check_head_conditionals(
         }
     }
 
-    // If-Unmodified-Since
-    if let Some(since) = req
-        .headers
-        .get("if-unmodified-since")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(dt) = parse_http_date(since) {
-            if obj_time > dt {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::PRECONDITION_FAILED,
-                    "412",
-                    "Precondition Failed",
-                ));
+    // If-Unmodified-Since — RFC 7232 §3.4: ignored when If-Match is present.
+    if req.headers.get("if-match").is_none() {
+        if let Some(since) = req
+            .headers
+            .get("if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(dt) = parse_http_date(since) {
+                if obj_time > dt {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::PRECONDITION_FAILED,
+                        "412",
+                        "Precondition Failed",
+                    ));
+                }
             }
         }
     }
 
-    // If-Modified-Since
-    if let Some(since) = req
-        .headers
-        .get("if-modified-since")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(dt) = parse_http_date(since) {
-            if obj_time <= dt {
-                return Err(not_modified());
+    // If-Modified-Since — RFC 7232 §3.3: ignored when If-None-Match is present.
+    if req.headers.get("if-none-match").is_none() {
+        if let Some(since) = req
+            .headers
+            .get("if-modified-since")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(dt) = parse_http_date(since) {
+                if obj_time <= dt {
+                    return Err(not_modified());
+                }
             }
         }
     }

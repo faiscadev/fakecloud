@@ -527,6 +527,19 @@ impl S3Service {
             None
         };
 
+        // encoding-type=url: AWS url-encodes the key-type fields (Key, Prefix,
+        // KeyMarker, NextKeyMarker, Delimiter, CommonPrefixes.Prefix) so keys
+        // with XML-illegal control characters are still parseable. Unlike
+        // ListObjectsV1/V2, this op previously ignored the parameter.
+        let use_url = req.query_params.get("encoding-type").map(|s| s.as_str()) == Some("url");
+        let enc = |s: &str| {
+            if use_url {
+                url_encode_s3_key(s)
+            } else {
+                xml_escape(s)
+            }
+        };
+
         // Build XML
         let mut versions_xml = String::new();
         for (key, obj, is_latest) in &truncated_entries {
@@ -539,7 +552,7 @@ impl S3Service {
                      <LastModified>{}</LastModified>\
                      <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
                      </DeleteMarker>",
-                    xml_escape(key),
+                    enc(key),
                     obj.version_id.as_deref().unwrap_or("null"),
                     is_latest,
                     obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
@@ -556,7 +569,7 @@ impl S3Service {
                      <Owner><ID>{owner_id}</ID><DisplayName>{owner_id}</DisplayName></Owner>\
                      <StorageClass>{}</StorageClass>\
                      </Version>",
-                    xml_escape(key),
+                    enc(key),
                     obj.version_id.as_deref().unwrap_or("null"),
                     is_latest,
                     obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
@@ -572,7 +585,7 @@ impl S3Service {
         for cp in &common_prefixes {
             cp_xml.push_str(&format!(
                 "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-                xml_escape(cp),
+                enc(cp),
             ));
         }
 
@@ -581,7 +594,7 @@ impl S3Service {
             format!(
                 "<NextKeyMarker>{}</NextKeyMarker>\
                  <NextVersionIdMarker>{}</NextVersionIdMarker>",
-                xml_escape(nk),
+                enc(nk),
                 xml_escape(nv),
             )
         } else {
@@ -590,8 +603,13 @@ impl S3Service {
 
         let delimiter_xml = delimiter
             .as_ref()
-            .map(|d| format!("<Delimiter>{}</Delimiter>", xml_escape(d)))
+            .map(|d| format!("<Delimiter>{}</Delimiter>", enc(d)))
             .unwrap_or_default();
+        let encoding_xml = if use_url {
+            "<EncodingType>url</EncodingType>"
+        } else {
+            ""
+        };
 
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -601,14 +619,15 @@ impl S3Service {
              <KeyMarker>{km}</KeyMarker>\
              {delimiter_xml}\
              <MaxKeys>{max_keys}</MaxKeys>\
+             {encoding_xml}\
              <IsTruncated>{is_truncated}</IsTruncated>\
              {marker_xml}\
              {versions_xml}\
              {cp_xml}\
              </ListVersionsResult>",
             name = xml_escape(bucket),
-            pfx = xml_escape(&prefix),
-            km = xml_escape(&key_marker),
+            pfx = enc(&prefix),
+            km = enc(&key_marker),
         );
         Ok(s3_xml(StatusCode::OK, body))
     }
