@@ -277,9 +277,20 @@ pub(crate) fn key_cond_simple_comparison(
         let actual = actual_owned.as_ref();
         let expected = expr_attr_values.get(right);
 
+        // A comparison whose left attribute path does not resolve is false for
+        // EVERY operator in DynamoDB (use attribute_exists/attribute_not_exists
+        // to test presence). Previously `<>`/`<`/`<=` against a missing
+        // attribute wrongly matched (bug-audit 2026-06-26, 1.5): `attr <> :v`
+        // gave `None != Some(v)` -> true and `attr < :v` gave Less -> true, so
+        // "not in terminal state" filters and `version <> :v` write guards
+        // silently passed.
+        if actual.is_none() {
+            return false;
+        }
+
         return match *op {
-            "=" => actual == expected,
-            "<>" => actual != expected,
+            "=" => values_equal(actual, expected),
+            "<>" => !values_equal(actual, expected),
             "<" => compare_attribute_values(actual, expected) == std::cmp::Ordering::Less,
             ">" => compare_attribute_values(actual, expected) == std::cmp::Ordering::Greater,
             "<=" => {

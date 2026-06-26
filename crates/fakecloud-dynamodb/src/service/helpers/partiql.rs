@@ -128,6 +128,28 @@ pub(crate) fn compare_attribute_values(a: Option<&Value>, b: Option<&Value>) -> 
     }
 }
 
+/// Equality for `=` / `<>` that is numeric-aware: two N values are equal when
+/// they are the same decimal regardless of formatting (`3.10` == `3.1`), while
+/// every other type falls back to exact JSON equality (so Maps/Lists/Bool/sets
+/// keep strict equality). Plain `a == b` on the raw JSON wrongly treated
+/// decimally-equal numbers as unequal (bug-audit 2026-06-26, 1.16).
+pub(crate) fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (Some(av), Some(bv)) => {
+            if let (Some(("N", an)), Some(("N", bn))) =
+                (attribute_type_and_value(av), attribute_type_and_value(bv))
+            {
+                compare_number_strings(an.as_str().unwrap_or("0"), bn.as_str().unwrap_or("0"))
+                    == std::cmp::Ordering::Equal
+            } else {
+                av == bv
+            }
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn execute_partiql_in_state(
     state: &mut crate::state::DynamoDbState,
     statement: &str,

@@ -1881,9 +1881,10 @@ fn test_evaluate_condition_no_existing_item() {
 
     assert!(evaluate_condition("attribute_not_exists(#s)", None, &names, &values).is_ok());
     assert!(evaluate_condition("attribute_exists(#s)", None, &names, &values).is_err());
-    // Comparison against missing item: None != Some(val) => true for <>
-    assert!(evaluate_condition("#s <> :v", None, &names, &values).is_ok());
-    // None == Some(val) => false for =
+    // A comparison against a missing attribute is false for EVERY operator in
+    // DynamoDB (presence is tested with attribute_exists/not_exists), so both
+    // `<>` and `=` fail the condition here (bug-audit 2026-06-26, 1.5).
+    assert!(evaluate_condition("#s <> :v", None, &names, &values).is_err());
     assert!(evaluate_condition("#s = :v", None, &names, &values).is_err());
 }
 
@@ -5238,4 +5239,64 @@ fn update_table_prunes_attributes_orphaned_by_gsi_delete() {
         .filter_map(|a| a["AttributeName"].as_str())
         .collect();
     assert_eq!(attrs, ["pk"], "orphaned gsiKey attribute should be pruned");
+}
+
+#[test]
+fn filter_comparison_missing_attribute_is_false() {
+    // An item without the `status` attribute. AWS: every comparison against a
+    // missing attribute is false (1.5).
+    let item: HashMap<String, AttributeValue> = [("pk".to_string(), json!({"S": "a"}))]
+        .into_iter()
+        .collect();
+    let names: HashMap<String, String> = HashMap::new();
+    let values: HashMap<String, Value> = [(":s".to_string(), json!({"S": "done"}))]
+        .into_iter()
+        .collect();
+
+    for op in ["status <> :s", "status < :s", "status <= :s", "status = :s"] {
+        assert!(
+            !evaluate_filter_expression(op, &item, &names, &values),
+            "`{op}` must be false when `status` is missing"
+        );
+    }
+}
+
+#[test]
+fn filter_equality_is_numeric_aware() {
+    // 3.10 and 3.1 are the same DynamoDB number; `=` must match and `<>` must
+    // not (1.16).
+    let item: HashMap<String, AttributeValue> = [("n".to_string(), json!({"N": "3.10"}))]
+        .into_iter()
+        .collect();
+    let names: HashMap<String, String> = HashMap::new();
+    let values: HashMap<String, Value> = [(":v".to_string(), json!({"N": "3.1"}))]
+        .into_iter()
+        .collect();
+
+    assert!(evaluate_filter_expression("n = :v", &item, &names, &values));
+    assert!(!evaluate_filter_expression(
+        "n <> :v", &item, &names, &values
+    ));
+}
+
+#[test]
+fn set_arithmetic_on_missing_operand_errors() {
+    // `a = b + :v` where `b` does not exist: AWS rejects with ValidationException
+    // rather than treating the missing operand as 0 (1.10).
+    let item: HashMap<String, AttributeValue> =
+        [("a".to_string(), json!({"N": "1"}))].into_iter().collect();
+    let names: HashMap<String, String> = HashMap::new();
+    let values: HashMap<String, Value> = [(":v".to_string(), json!({"N": "5"}))]
+        .into_iter()
+        .collect();
+
+    let res = evaluate_arithmetic_rhs("b", ":v", true, &item, &names, &values);
+    assert!(
+        res.is_err(),
+        "missing SET operand must error, not zero-default"
+    );
+
+    // Existing operand still works.
+    let ok = evaluate_arithmetic_rhs("a", ":v", true, &item, &names, &values);
+    assert!(ok.is_ok());
 }
