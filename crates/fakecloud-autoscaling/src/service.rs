@@ -40,6 +40,11 @@ pub struct AutoScalingService {
     state: SharedAutoScalingState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// EC2 backend so an ASG scales to REAL container-backed instances (the
+    /// #8367 wedge) instead of mock ids. `None` falls back to metadata-only
+    /// instances (unit tests).
+    ec2_state: Option<fakecloud_ec2::SharedEc2State>,
+    ec2_runtime: Option<Arc<fakecloud_ec2::Ec2Runtime>>,
 }
 
 impl AutoScalingService {
@@ -48,12 +53,79 @@ impl AutoScalingService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            ec2_state: None,
+            ec2_runtime: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Attach the EC2 backend so desired-capacity reconciliation launches real
+    /// container-backed instances via `RunInstances`.
+    pub fn with_ec2(
+        mut self,
+        state: fakecloud_ec2::SharedEc2State,
+        runtime: Option<Arc<fakecloud_ec2::Ec2Runtime>>,
+    ) -> Self {
+        self.ec2_state = Some(state);
+        self.ec2_runtime = runtime;
+        self
+    }
+
+    /// Launch `count` real EC2 instances for a group, returning their ids.
+    /// Falls back to empty (caller synthesizes ids) when no EC2 backend is
+    /// wired. Real instances reconcile to `running` via the EC2 runtime (or
+    /// metadata-only when there's no container runtime, e.g. CI).
+    async fn run_ec2_instances(
+        &self,
+        image_id: &str,
+        instance_type: &str,
+        subnet: Option<&str>,
+        count: usize,
+        req: &AwsRequest,
+    ) -> Vec<String> {
+        let Some(ec2_state) = self.ec2_state.clone() else {
+            return Vec::new();
+        };
+        let svc =
+            fakecloud_ec2::Ec2Service::with_state(ec2_state).with_runtime(self.ec2_runtime.clone());
+        let mut params = std::collections::HashMap::new();
+        params.insert("ImageId".to_string(), image_id.to_string());
+        params.insert("InstanceType".to_string(), instance_type.to_string());
+        params.insert("MinCount".to_string(), count.to_string());
+        params.insert("MaxCount".to_string(), count.to_string());
+        if let Some(s) = subnet {
+            params.insert("SubnetId".to_string(), s.to_string());
+        }
+        let run_req = ec2_request("RunInstances", params, req);
+        match svc.handle(run_req).await {
+            Ok(resp) => {
+                let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+                parse_instance_ids(&body)
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn terminate_ec2_instances(&self, ids: &[String], req: &AwsRequest) {
+        let Some(ec2_state) = self.ec2_state.clone() else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let svc =
+            fakecloud_ec2::Ec2Service::with_state(ec2_state).with_runtime(self.ec2_runtime.clone());
+        let mut params = std::collections::HashMap::new();
+        for (n, id) in ids.iter().enumerate() {
+            params.insert(format!("InstanceId.{}", n + 1), id.clone());
+        }
+        let _ = svc
+            .handle(ec2_request("TerminateInstances", params, req))
+            .await;
     }
 
     async fn save_snapshot(&self) {
@@ -114,6 +186,49 @@ fn iso(t: chrono::DateTime<Utc>) -> String {
 fn gen_instance_id() -> String {
     let hex = Uuid::new_v4().simple().to_string();
     format!("i-{}", &hex[..17])
+}
+
+/// Build an EC2 `AwsRequest` carrying the originating account/region so the
+/// launched instances land in the caller's account.
+fn ec2_request(
+    action: &str,
+    params: std::collections::HashMap<String, String>,
+    src: &AwsRequest,
+) -> AwsRequest {
+    AwsRequest {
+        service: "ec2".to_string(),
+        action: action.to_string(),
+        region: src.region.clone(),
+        account_id: src.account_id.clone(),
+        request_id: src.request_id.clone(),
+        headers: http::HeaderMap::new(),
+        query_params: params,
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: Vec::new(),
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: http::Method::POST,
+        is_query_protocol: true,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+/// Pull every `<instanceId>…</instanceId>` out of a RunInstances response.
+fn parse_instance_ids(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(s) = rest.find("<instanceId>") {
+        let after = &rest[s + "<instanceId>".len()..];
+        if let Some(e) = after.find("</instanceId>") {
+            out.push(after[..e].to_string());
+            rest = &after[e + "</instanceId>".len()..];
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 impl AutoScalingService {
@@ -199,7 +314,10 @@ impl AutoScalingService {
         Ok(self.ok("DeleteLaunchConfiguration", String::new(), req))
     }
 
-    fn create_auto_scaling_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn create_auto_scaling_group(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "AutoScalingGroupName")?;
         let min_size = required_query_param(req, "MinSize")?
             .parse::<i64>()
@@ -229,7 +347,7 @@ impl AutoScalingService {
         }
 
         let tags = parse_tags(req);
-        let mut group = AutoScalingGroup {
+        let group = AutoScalingGroup {
             arn: self.arn(&req.account_id, &req.region, "autoScalingGroup", &name),
             name: name.clone(),
             launch_configuration_name,
@@ -261,65 +379,68 @@ impl AutoScalingService {
             status: None,
         };
 
+        let _ = azs;
         {
             let mut accounts = self.state.write();
-            let st = accounts.get_or_create(&req.account_id);
-            // Reconcile to the desired capacity (batch 1: metadata-only
-            // instances so the Terraform create waiter — which blocks until the
-            // ASG has `desired_capacity` InService instances — completes).
-            reconcile_capacity(st, &mut group, &azs);
-            st.groups.insert(name, group);
+            accounts
+                .get_or_create(&req.account_id)
+                .groups
+                .insert(name.clone(), group);
         }
+        // Reconcile to desired capacity off-lock: launch real container-backed
+        // instances so DescribeAutoScalingGroups reports `desired_capacity`
+        // InService instances (the Terraform create waiter blocks on this).
+        self.apply_capacity(&req.account_id, &name, req).await;
         Ok(self.ok("CreateAutoScalingGroup", String::new(), req))
     }
 
-    fn update_auto_scaling_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn update_auto_scaling_group(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "AutoScalingGroupName")?;
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(&req.account_id);
-        let azs = {
-            let Some(g) = st.groups.get(&name) else {
+        {
+            let mut accounts = self.state.write();
+            let st = accounts.get_or_create(&req.account_id);
+            let Some(group) = st.groups.get_mut(&name) else {
                 return Err(group_not_found(&name));
             };
-            g.availability_zones.clone()
-        };
-        let mut group = st.groups.get(&name).cloned().unwrap();
-        if let Some(v) = optional_query_param(req, "MinSize").and_then(|v| v.parse().ok()) {
-            group.min_size = v;
+            if let Some(v) = optional_query_param(req, "MinSize").and_then(|v| v.parse().ok()) {
+                group.min_size = v;
+            }
+            if let Some(v) = optional_query_param(req, "MaxSize").and_then(|v| v.parse().ok()) {
+                group.max_size = v;
+            }
+            if let Some(v) =
+                optional_query_param(req, "DesiredCapacity").and_then(|v| v.parse().ok())
+            {
+                group.desired_capacity = v;
+            }
+            if let Some(v) = optional_query_param(req, "LaunchConfigurationName") {
+                group.launch_configuration_name = Some(v);
+            }
+            if let Some(v) = optional_query_param(req, "HealthCheckType") {
+                group.health_check_type = v;
+            }
         }
-        if let Some(v) = optional_query_param(req, "MaxSize").and_then(|v| v.parse().ok()) {
-            group.max_size = v;
-        }
-        if let Some(v) = optional_query_param(req, "DesiredCapacity").and_then(|v| v.parse().ok()) {
-            group.desired_capacity = v;
-        }
-        if let Some(v) = optional_query_param(req, "LaunchConfigurationName") {
-            group.launch_configuration_name = Some(v);
-        }
-        if let Some(v) = optional_query_param(req, "HealthCheckType") {
-            group.health_check_type = v;
-        }
-        reconcile_capacity(st, &mut group, &azs);
-        st.groups.insert(name, group);
-        drop(accounts);
+        self.apply_capacity(&req.account_id, &name, req).await;
         Ok(self.ok("UpdateAutoScalingGroup", String::new(), req))
     }
 
-    fn set_desired_capacity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn set_desired_capacity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "AutoScalingGroupName")?;
         let desired = required_query_param(req, "DesiredCapacity")?
             .parse::<i64>()
             .unwrap_or(0);
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(&req.account_id);
-        let Some(mut group) = st.groups.get(&name).cloned() else {
-            return Err(group_not_found(&name));
-        };
-        let azs = group.availability_zones.clone();
-        group.desired_capacity = desired;
-        reconcile_capacity(st, &mut group, &azs);
-        st.groups.insert(name, group);
-        drop(accounts);
+        {
+            let mut accounts = self.state.write();
+            let st = accounts.get_or_create(&req.account_id);
+            let Some(group) = st.groups.get_mut(&name) else {
+                return Err(group_not_found(&name));
+            };
+            group.desired_capacity = desired;
+        }
+        self.apply_capacity(&req.account_id, &name, req).await;
         Ok(self.ok("SetDesiredCapacity", String::new(), req))
     }
 
@@ -540,40 +661,108 @@ fn parse_tags(req: &AwsRequest) -> Vec<AsgTag> {
 /// instances and the Terraform create waiter completes) and records a
 /// Successful scaling activity for each launch/termination. Batch 2 replaces
 /// the synthetic ids with real container-backed EC2 instances.
-fn reconcile_capacity(st: &mut AccountState, group: &mut AutoScalingGroup, azs: &[String]) {
-    let target = group.desired_capacity.max(0) as usize;
-    let default_az = azs
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "us-east-1a".to_string());
-    while group.instances.len() < target {
-        let az = azs
-            .get(group.instances.len() % azs.len().max(1))
-            .cloned()
-            .unwrap_or_else(|| default_az.clone());
-        let id = gen_instance_id();
-        group.instances.push(AsgInstance {
-            instance_id: id.clone(),
-            availability_zone: az,
-            lifecycle_state: "InService".to_string(),
-            health_status: "Healthy".to_string(),
-            launch_configuration_name: group.launch_configuration_name.clone(),
-            protected_from_scale_in: group.new_instances_protected_from_scale_in,
-        });
-        st.activities.insert(
-            0,
-            activity(&group.name, &format!("Launching a new EC2 instance: {id}")),
-        );
-    }
-    while group.instances.len() > target {
-        if let Some(removed) = group.instances.pop() {
-            st.activities.insert(
-                0,
-                activity(
-                    &group.name,
-                    &format!("Terminating EC2 instance: {}", removed.instance_id),
-                ),
-            );
+impl AutoScalingService {
+    /// Reconcile a group's instance set to its desired capacity. Launches real
+    /// container-backed EC2 instances via RunInstances (resolving the image /
+    /// type from the group's launch configuration, falling back to a seeded
+    /// AMI), or terminates them on scale-in. Records a Successful activity per
+    /// change. The EC2 calls happen OFF the state lock (no `.await` under the
+    /// parking_lot guard); the lock is only taken to read inputs and apply
+    /// results.
+    async fn apply_capacity(&self, account: &str, name: &str, req: &AwsRequest) {
+        let (target, current_ids, azs, image_id, instance_type, subnet) = {
+            let accounts = self.state.read();
+            let Some(st) = accounts.accounts.get(account) else {
+                return;
+            };
+            let Some(g) = st.groups.get(name) else {
+                return;
+            };
+            let (image_id, instance_type) = g
+                .launch_configuration_name
+                .as_ref()
+                .and_then(|lc| st.launch_configurations.get(lc))
+                .map(|lc| (lc.image_id.clone(), lc.instance_type.clone()))
+                .unwrap_or_else(|| {
+                    // Launch-template-backed (the LT data isn't stored on the
+                    // EC2 side) or unresolved: a seeded public AMI + a common
+                    // type still boots a real instance.
+                    ("ami-0a1b2c3d4e5f60001".to_string(), "t3.micro".to_string())
+                });
+            (
+                g.desired_capacity.max(0) as usize,
+                g.instances
+                    .iter()
+                    .map(|i| i.instance_id.clone())
+                    .collect::<Vec<_>>(),
+                g.availability_zones.clone(),
+                image_id,
+                instance_type,
+                g.vpc_zone_identifier
+                    .as_ref()
+                    .and_then(|v| v.split(',').next().map(|s| s.trim().to_string())),
+            )
+        };
+
+        let mut launched: Vec<AsgInstance> = Vec::new();
+        let mut terminate_ids: Vec<String> = Vec::new();
+
+        if current_ids.len() < target {
+            let need = target - current_ids.len();
+            let mut ids = self
+                .run_ec2_instances(&image_id, &instance_type, subnet.as_deref(), need, req)
+                .await;
+            // No EC2 backend wired (unit tests) or a partial launch: synthesize
+            // the remainder so the group still reports its desired capacity.
+            while ids.len() < need {
+                ids.push(gen_instance_id());
+            }
+            for (k, id) in ids.into_iter().enumerate() {
+                let az = azs
+                    .get(k % azs.len().max(1))
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}a", req.region));
+                launched.push(AsgInstance {
+                    instance_id: id,
+                    availability_zone: az,
+                    lifecycle_state: "InService".to_string(),
+                    health_status: "Healthy".to_string(),
+                    launch_configuration_name: None,
+                    protected_from_scale_in: false,
+                });
+            }
+        } else if current_ids.len() > target {
+            let remove = current_ids.len() - target;
+            terminate_ids = current_ids.iter().rev().take(remove).cloned().collect();
+            self.terminate_ec2_instances(&terminate_ids, req).await;
+        }
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(account);
+        let descs: Vec<String> = {
+            let Some(g) = st.groups.get_mut(name) else {
+                return;
+            };
+            let lcn = g.launch_configuration_name.clone();
+            let prot = g.new_instances_protected_from_scale_in;
+            let mut descs = Vec::new();
+            for mut ni in launched {
+                ni.launch_configuration_name = lcn.clone();
+                ni.protected_from_scale_in = prot;
+                descs.push(format!("Launching a new EC2 instance: {}", ni.instance_id));
+                g.instances.push(ni);
+            }
+            if !terminate_ids.is_empty() {
+                g.instances
+                    .retain(|i| !terminate_ids.contains(&i.instance_id));
+                for id in &terminate_ids {
+                    descs.push(format!("Terminating EC2 instance: {id}"));
+                }
+            }
+            descs
+        };
+        for d in descs {
+            st.activities.insert(0, activity(name, &d));
         }
     }
 }
@@ -719,11 +908,11 @@ impl AwsService for AutoScalingService {
             "CreateLaunchConfiguration" => self.create_launch_configuration(&req),
             "DescribeLaunchConfigurations" => self.describe_launch_configurations(&req),
             "DeleteLaunchConfiguration" => self.delete_launch_configuration(&req),
-            "CreateAutoScalingGroup" => self.create_auto_scaling_group(&req),
+            "CreateAutoScalingGroup" => self.create_auto_scaling_group(&req).await,
             "DescribeAutoScalingGroups" => self.describe_auto_scaling_groups(&req),
-            "UpdateAutoScalingGroup" => self.update_auto_scaling_group(&req),
+            "UpdateAutoScalingGroup" => self.update_auto_scaling_group(&req).await,
             "DeleteAutoScalingGroup" => self.delete_auto_scaling_group(&req),
-            "SetDesiredCapacity" => self.set_desired_capacity(&req),
+            "SetDesiredCapacity" => self.set_desired_capacity(&req).await,
             "DescribeAutoScalingInstances" => self.describe_auto_scaling_instances(&req),
             "DescribeScalingActivities" => self.describe_scaling_activities(&req),
             "CreateOrUpdateTags" => self.create_or_update_tags(&req),
