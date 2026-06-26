@@ -96,7 +96,7 @@ impl Route53Service {
 
     pub(super) fn list_resource_record_sets(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = require_id(route)?;
@@ -108,16 +108,81 @@ impl Route53Service {
             .and_then(|a| a.hosted_zones.get(&id).cloned())
             .ok_or_else(|| no_such_hosted_zone(&id))?;
         drop(state);
+
+        // Route 53 returns record sets ordered by (name, type) and paginates
+        // with maxitems + the StartRecordName/Type/Identifier cursor. Names,
+        // record types, and set identifiers are XML-safe DNS/enum values.
+        let max_items = req
+            .query_params
+            .get("maxitems")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let start_name = req.query_params.get("name").map(|s| s.to_ascii_lowercase());
+        let start_type = req.query_params.get("type").cloned();
+        let start_ident = req.query_params.get("identifier").cloned();
+
+        let mut sorted: Vec<&crate::model::ResourceRecordSet> =
+            zone.resource_record_sets.iter().collect();
+        sorted.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+                .then(a.record_type.cmp(&b.record_type))
+                .then(a.set_identifier.cmp(&b.set_identifier))
+        });
+
+        let start_idx = match &start_name {
+            None => 0,
+            Some(sn) => sorted
+                .iter()
+                .position(|r| match r.name.to_ascii_lowercase().cmp(sn) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => match &start_type {
+                        None => true,
+                        Some(st) => match r.record_type.cmp(st) {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Less => false,
+                            std::cmp::Ordering::Equal => start_ident
+                                .as_deref()
+                                .is_none_or(|si| r.set_identifier.as_deref().unwrap_or("") >= si),
+                        },
+                    },
+                })
+                .unwrap_or(sorted.len()),
+        };
+
+        let page: Vec<&crate::model::ResourceRecordSet> = sorted
+            .iter()
+            .skip(start_idx)
+            .take(max_items)
+            .copied()
+            .collect();
+        let next = sorted.get(start_idx + page.len()).copied();
+
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListResourceRecordSetsResponse xmlns=\"{NS}\">"));
         body.push_str("<ResourceRecordSets>");
-        for r in &zone.resource_record_sets {
+        for r in &page {
             push_rrset(&mut body, r);
         }
         body.push_str("</ResourceRecordSets>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
-        body.push_str("<MaxItems>100</MaxItems>");
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", next.is_some()));
+        if let Some(n) = next {
+            body.push_str(&format!("<NextRecordName>{}</NextRecordName>", n.name));
+            body.push_str(&format!(
+                "<NextRecordType>{}</NextRecordType>",
+                n.record_type
+            ));
+            if let Some(si) = &n.set_identifier {
+                body.push_str(&format!(
+                    "<NextRecordIdentifier>{si}</NextRecordIdentifier>"
+                ));
+            }
+        }
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
         body.push_str("</ListResourceRecordSetsResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }

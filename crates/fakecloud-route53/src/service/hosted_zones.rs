@@ -225,16 +225,39 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         zones.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // Paginate on marker (the next zone id) + maxitems.
+        let max_items = req
+            .query_params
+            .get("maxitems")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let start_idx = match req.query_params.get("marker") {
+            Some(m) if !m.is_empty() => {
+                zones.iter().position(|z| &z.id == m).unwrap_or(zones.len())
+            }
+            _ => 0,
+        };
+        let page: Vec<&StoredHostedZone> = zones.iter().skip(start_idx).take(max_items).collect();
+        let next_marker = zones.get(start_idx + page.len()).map(|z| z.id.clone());
+
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListHostedZonesResponse xmlns=\"{NS}\">"));
         body.push_str("<HostedZones>");
-        for z in &zones {
+        for z in &page {
             push_hosted_zone(&mut body, z);
         }
         body.push_str("</HostedZones>");
-        body.push_str("<MaxItems>100</MaxItems>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+        body.push_str(&format!(
+            "<IsTruncated>{}</IsTruncated>",
+            next_marker.is_some()
+        ));
+        if let Some(m) = next_marker {
+            body.push_str(&format!("<NextMarker>{m}</NextMarker>"));
+        }
         body.push_str("</ListHostedZonesResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
