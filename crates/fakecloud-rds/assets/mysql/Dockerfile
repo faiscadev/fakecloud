@@ -45,8 +45,15 @@ RUN set -eux; \
 # vendored inline in fakecloud_udf.c (the upstream mysql:8.0 image
 # strips its community release repo so `mysql-community-devel` is not
 # installable, and adding it back hard-codes a brittle URL).
+#
+# `microdnf update` patches the Oracle Linux base packages (krb5-libs,
+# libcap, ...) to their latest el9 builds, mirroring the `apt-get
+# upgrade` the Debian branch already runs. Without it the Trivy scan in
+# docker-rds-images.yml fails on fixed-status HIGH OS CVEs that ship in
+# the pinned mysql:8.0 base layer.
 RUN set -eux; \
     if command -v microdnf >/dev/null 2>&1; then \
+        microdnf update -y; \
         microdnf install -y \
             gcc make libcurl-devel glibc-devel; \
         microdnf clean all; \
