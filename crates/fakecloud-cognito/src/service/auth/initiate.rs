@@ -281,7 +281,28 @@ impl CognitoService {
             return self.build_srp_challenge(pool_id, client_id, username, srp_a, req);
         }
 
-        // No preferred challenge resolvable inline: present the menu.
+        // No preferred challenge resolvable inline: present the menu, filtered
+        // to the factors this app client actually enables. PASSWORD_SRP needs
+        // ALLOW_USER_SRP_AUTH, PASSWORD needs ALLOW_USER_PASSWORD_AUTH. A client
+        // that only opts into ALLOW_USER_AUTH (no specific factor flag) gets
+        // both, matching the permissive default real Cognito applies.
+        let mut available: Vec<&str> = Vec::new();
+        if explicit_auth_flows
+            .iter()
+            .any(|f| f == "ALLOW_USER_SRP_AUTH")
+        {
+            available.push("PASSWORD_SRP");
+        }
+        if explicit_auth_flows
+            .iter()
+            .any(|f| f == "ALLOW_USER_PASSWORD_AUTH")
+        {
+            available.push("PASSWORD");
+        }
+        if available.is_empty() {
+            available = vec!["PASSWORD_SRP", "PASSWORD"];
+        }
+
         let session = Uuid::new_v4().to_string();
         {
             let mut accounts = self.state.write();
@@ -301,7 +322,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({
             "ChallengeName": "SELECT_CHALLENGE",
             "Session": session,
-            "AvailableChallenges": ["PASSWORD_SRP", "PASSWORD"],
+            "AvailableChallenges": available,
             "ChallengeParameters": { "USERNAME": username },
         })))
     }
@@ -320,6 +341,18 @@ impl CognitoService {
     ) -> Result<AwsResponse, AwsServiceError> {
         use base64::Engine;
         use rand::RngCore;
+
+        // Reject an oversized SRP_A before stashing it / running modpow: a
+        // legitimate public value is <= the 3072-bit modulus, and an
+        // attacker-sized hex string would only burn CPU on the executor thread
+        // during RespondToAuthChallenge verification (DoS guard).
+        if srp_a.len() > crate::srp::MAX_PUBLIC_HEX_LEN {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "SRP_A is malformed.",
+            ));
+        }
 
         let password = {
             let accounts = self.state.read();
