@@ -739,14 +739,12 @@ pub const SERVICES: &[Service] = &[
         // cross-zone (`use_load_balancer_configuration`) and anomaly-mitigation
         // (`off`) defaults the data source reads. (DeleteLoadBalancer already
         // returns its result node as of the prior fix.)
+        // TargetGroupAttachment now runs: its config launches a real EC2
+        // instance from `ConfigLatestAmazonLinux2HVMEBSX8664AMI()`, which the
+        // seeded public AMI catalogue (named to match that helper's
+        // `amzn2-ami-minimal-hvm-*` + `root-device-type = ebs` filter) resolves.
         run_regex: "^TestAccELBV2[A-Za-z0-9]+_basic$",
-        deny: &[
-            // --- gap: the target-group attachment registers a real EC2 instance
-            //     as a target; its pre-apply config resolves an EC2 data source
-            //     (AMI / instance) that returns no results without a populated
-            //     EC2 image catalogue, so the attachment cannot be planned. ---
-            "TestAccELBV2TargetGroupAttachment_basic",
-        ],
+        deny: &[],
     },
     Service {
         name: "bedrockagent",

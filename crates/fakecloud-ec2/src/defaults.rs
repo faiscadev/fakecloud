@@ -126,11 +126,29 @@ pub(crate) fn seed_public_images(state: &mut Ec2State) {
     const CANONICAL: &str = "099720109477";
     const AMAZON_WINDOWS: &str = "801119661308";
     let seeds: &[AmiSeed] = &[
+        // Amazon Linux 2 (x86_64 + arm64). The `amzn2-ami-minimal-hvm-*` name +
+        // `root-device-type = ebs` shape is exactly what the standard
+        // terraform-provider-aws acctest helper
+        // `ConfigLatestAmazonLinux2HVMEBSX8664AMI()` / `…ARM64AMI()` filters on,
+        // so every acceptance test that launches an instance via that helper
+        // (aws_instance, the ELBv2 target-group attachment, autoscaling, …)
+        // resolves a real AMI from this catalogue.
         (
             "ami-0a1b2c3d4e5f60001",
-            "amzn2-ami-hvm-2.0.20240306.2-x86_64-gp2",
-            "Amazon Linux 2 AMI 2.0.20240306.2 x86_64 HVM gp2",
+            "amzn2-ami-minimal-hvm-2.0.20240306.2-x86_64-ebs",
+            "Amazon Linux 2 AMI 2.0.20240306.2 x86_64 Minimal HVM ebs",
             "x86_64",
+            AMAZON,
+            Some("amazon"),
+            "2024-03-06T12:00:00.000Z",
+            "/dev/xvda",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60007",
+            "amzn2-ami-minimal-hvm-2.0.20240306.2-arm64-ebs",
+            "Amazon Linux 2 AMI 2.0.20240306.2 arm64 Minimal HVM ebs",
+            "arm64",
             AMAZON,
             Some("amazon"),
             "2024-03-06T12:00:00.000Z",
@@ -178,6 +196,20 @@ pub(crate) fn seed_public_images(state: &mut Ec2State) {
             CANONICAL,
             None,
             "2024-04-23T06:00:00.000Z",
+            "/dev/sda1",
+            None,
+        ),
+        // Canonical instance-store Ubuntu (the `ubuntu/images/hvm-instance/*`
+        // shape the `aws_ami_ids` acctest filters on, distinct from the EBS
+        // `hvm-ssd*` images above).
+        (
+            "ami-0a1b2c3d4e5f60008",
+            "ubuntu/images/hvm-instance/ubuntu-jammy-22.04-amd64-server-20240319",
+            "Canonical, Ubuntu, 22.04 LTS, amd64 jammy instance-store image build on 2024-03-19",
+            "x86_64",
+            CANONICAL,
+            None,
+            "2024-03-19T05:00:00.000Z",
             "/dev/sda1",
             None,
         ),
