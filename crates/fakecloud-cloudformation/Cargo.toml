@@ -29,8 +29,10 @@ fakecloud-elbv2 = { workspace = true }
 fakecloud-organizations = { workspace = true }
 fakecloud-cognito = { workspace = true }
 fakecloud-rds = { workspace = true }
+fakecloud-ec2 = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-acm = { workspace = true }
+bytes = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-route53 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }

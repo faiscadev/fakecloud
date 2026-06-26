@@ -47,6 +47,11 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::KMS::Key" => &["Arn", "KeyId"],
         "AWS::SecretsManager::Secret" => &["Arn", "Id"],
         "AWS::CloudFront::Distribution" => &["DomainName", "Id"],
+        "AWS::EC2::VPC" => &["VpcId", "CidrBlock"],
+        "AWS::EC2::Subnet" => &["SubnetId", "AvailabilityZone"],
+        "AWS::EC2::SecurityGroup" => &["GroupId", "VpcId"],
+        "AWS::EC2::InternetGateway" => &["InternetGatewayId"],
+        "AWS::EC2::RouteTable" => &["RouteTableId"],
         _ => &[],
     }
 }
@@ -282,6 +287,7 @@ pub struct CloudFormationDeps {
     pub organizations: fakecloud_organizations::SharedOrganizationsState,
     pub cognito: fakecloud_cognito::SharedCognitoState,
     pub rds: fakecloud_rds::SharedRdsState,
+    pub ec2: fakecloud_ec2::SharedEc2State,
     pub ecs: fakecloud_ecs::SharedEcsState,
     pub acm: fakecloud_acm::SharedAcmState,
     pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
@@ -426,6 +432,7 @@ impl CloudFormationService {
             organizations_state: self.deps.organizations.clone(),
             cognito_state: self.deps.cognito.clone(),
             rds_state: self.deps.rds.clone(),
+            ec2_state: self.deps.ec2.clone(),
             ecs_state: self.deps.ecs.clone(),
             acm_state: self.deps.acm.clone(),
             elasticache_state: self.deps.elasticache.clone(),
@@ -2418,6 +2425,13 @@ mod tests {
                 ),
             )),
             rds: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            ec2: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

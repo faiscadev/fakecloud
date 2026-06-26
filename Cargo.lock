@@ -3287,6 +3287,7 @@ dependencies = [
  "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dynamodb",
+ "fakecloud-ec2",
  "fakecloud-ecr",
  "fakecloud-ecs",
  "fakecloud-elasticache",

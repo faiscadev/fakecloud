@@ -916,6 +916,7 @@ async fn main() {
             organizations: organizations_state.clone(),
             cognito: cognito_state.clone(),
             rds: rds_state.clone(),
+            ec2: ec2_state.clone(),
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
             elasticache: elasticache_state.clone(),
