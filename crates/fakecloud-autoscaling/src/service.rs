@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
-use fakecloud_persistence::SnapshotStore;
+use fakecloud_persistence::{SnapshotHook, SnapshotStore};
 
 use crate::state::{
     AccountState, AsgInstance, AsgTag, AutoScalingGroup, AutoScalingSnapshot, LaunchConfiguration,
@@ -141,6 +141,32 @@ impl AutoScalingService {
             serde_json::to_vec(&snap).unwrap_or_default()
         };
         let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+    }
+
+    /// CloudFormation write-through hook. The CFN provisioner mutates
+    /// `autoscaling_state` directly (not through this service's handlers), so
+    /// without this hook a CFN-provisioned ASG / launch configuration would
+    /// never hit the snapshot and would vanish on restart (#1766 class).
+    pub fn snapshot_hook(&self) -> Option<SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let store = store.clone();
+            let state = state.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                let _guard = lock.lock().await;
+                let bytes = {
+                    let snap = AutoScalingSnapshot {
+                        schema_version: AUTOSCALING_SNAPSHOT_SCHEMA_VERSION,
+                        accounts: Some(state.read().clone()),
+                    };
+                    serde_json::to_vec(&snap).unwrap_or_default()
+                };
+                let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+            })
+        }))
     }
 }
 

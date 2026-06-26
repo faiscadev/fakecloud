@@ -237,6 +237,7 @@ version = "0.25.0"
 
 [workspace.dependencies.fakecloud-application-autoscaling]
 path = "crates/fakecloud-application-autoscaling"
+version = "0.25.0"
 
 [workspace.dependencies.fakecloud-autoscaling]
 path = "crates/fakecloud-autoscaling"

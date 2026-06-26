@@ -3060,6 +3060,9 @@ async fn main() {
     if let Some(store) = autoscaling_snapshot_store.clone() {
         autoscaling_service = autoscaling_service.with_snapshot_store(store);
     }
+    if let Some(h) = autoscaling_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("autoscaling", h);
+    }
     registry.register(Arc::new(autoscaling_service));
     let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
