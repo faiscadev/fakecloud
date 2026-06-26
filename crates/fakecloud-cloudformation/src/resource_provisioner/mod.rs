@@ -880,6 +880,7 @@ pub struct ResourceProvisioner {
     pub cognito_state: SharedCognitoState,
     pub rds_state: SharedRdsState,
     pub ec2_state: fakecloud_ec2::SharedEc2State,
+    pub autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub elasticache_state: SharedElastiCacheState,
@@ -914,6 +915,7 @@ mod acm;
 mod apigw;
 mod apigwv2;
 mod athena;
+mod autoscaling;
 mod cloudformation;
 mod cloudwatch;
 mod cognito;
@@ -1045,6 +1047,10 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
             "AWS::RDS::DBInstance" => self.create_rds_db_instance(resource),
             "AWS::RDS::DBCluster" => self.create_rds_db_cluster(resource),
+            "AWS::AutoScaling::LaunchConfiguration" => {
+                self.create_autoscaling_launch_configuration(resource)
+            }
+            "AWS::AutoScaling::AutoScalingGroup" => self.create_autoscaling_group(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
             "AWS::EC2::SecurityGroup" => self.create_ec2_security_group(resource),
@@ -1619,6 +1625,10 @@ impl ResourceProvisioner {
             | "AWS::EC2::InternetGateway"
             | "AWS::EC2::RouteTable" => {
                 self.delete_ec2_resource(&resource.resource_type, &resource.physical_id)
+            }
+            "AWS::AutoScaling::LaunchConfiguration" | "AWS::AutoScaling::AutoScalingGroup" => {
+                self.delete_autoscaling(&resource.resource_type, &resource.physical_id);
+                Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
             "AWS::ECS::TaskDefinition" => self.delete_ecs_task_definition(&resource.physical_id),
@@ -6031,6 +6041,9 @@ mod tests {
             )),
             ec2_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            autoscaling_state: Arc::new(RwLock::new(
+                fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),
             ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),

@@ -90,6 +90,7 @@ impl ResourceProvisioner {
             cognito_state: self.cognito_state.clone(),
             rds_state: self.rds_state.clone(),
             ec2_state: self.ec2_state.clone(),
+            autoscaling_state: self.autoscaling_state.clone(),
             ecs_state: self.ecs_state.clone(),
             acm_state: self.acm_state.clone(),
             elasticache_state: self.elasticache_state.clone(),
