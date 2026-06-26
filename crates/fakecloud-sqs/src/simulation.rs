@@ -152,6 +152,7 @@ mod tests {
             message_attributes: BTreeMap::new(),
             visible_at: None,
             receive_count,
+            first_received_at: None,
             message_group_id: None,
             message_dedup_id: None,
             created_at: Utc::now() - Duration::seconds(age_seconds),

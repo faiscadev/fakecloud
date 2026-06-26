@@ -286,6 +286,7 @@ impl SqsService {
                 message_attributes,
                 visible_at,
                 receive_count: 0,
+                first_received_at: None,
                 message_group_id,
                 message_dedup_id: effective_dedup_id.clone(),
                 created_at: now,
@@ -597,6 +598,9 @@ impl SqsService {
 
                 if received.len() < max_messages {
                     msg.receive_count += 1;
+                    if msg.first_received_at.is_none() {
+                        msg.first_received_at = Some(chrono::Utc::now().timestamp_millis());
+                    }
                     if let Some(ref rp) = redrive_policy {
                         if msg.receive_count > rp.max_receive_count {
                             dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));
@@ -661,6 +665,9 @@ impl SqsService {
             for mut msg in visible {
                 if received.len() < max_messages {
                     msg.receive_count += 1;
+                    if msg.first_received_at.is_none() {
+                        msg.first_received_at = Some(chrono::Utc::now().timestamp_millis());
+                    }
                     if let Some(ref rp) = redrive_policy {
                         if msg.receive_count > rp.max_receive_count {
                             dlq_messages.push((rp.dead_letter_target_arn.clone(), msg));

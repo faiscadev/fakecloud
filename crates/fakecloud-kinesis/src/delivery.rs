@@ -4,7 +4,7 @@ use std::sync::Arc;
 use base64::Engine;
 use fakecloud_core::delivery::KinesisDelivery;
 
-use crate::service::append_record;
+use crate::service::{append_record, select_shard_mut};
 use crate::state::SharedKinesisState;
 
 /// Kinesis delivery implementation for cross-service integrations.
@@ -60,30 +60,35 @@ impl KinesisDelivery for KinesisDeliveryImpl {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(target_account);
         if let Some(stream) = state.streams.get_mut(stream_name) {
-            // Find the shard to write to based on partition key
-            // For simplicity, hash the partition key and mod by shard count
-            let shard_idx = if stream.shards.is_empty() {
-                0
-            } else {
-                partition_key
-                    .bytes()
-                    .fold(0u64, |acc, b| acc.wrapping_add(b as u64))
-                    % stream.shards.len() as u64
-            };
+            // Route by the MD5 hash-key range over OPEN shards, exactly like the
+            // direct PutRecord path. The old hand-rolled `sum(bytes) % len`
+            // included CLOSED parent shards (post-split/merge) and ignored hash
+            // ranges, so a fanned-in record could land on a drained closed shard
+            // whose iterator is null -> the record was silently lost.
+            if !stream.shards.is_empty() {
+                match select_shard_mut(stream, partition_key, None) {
+                    Ok(shard) => {
+                        let data_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .unwrap_or_else(|_| data.as_bytes().to_vec());
+                        let sequence_number = append_record(shard, partition_key, data_bytes);
 
-            if let Some(shard) = stream.shards.get_mut(shard_idx as usize) {
-                let data_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .unwrap_or_else(|_| data.as_bytes().to_vec());
-                let sequence_number = append_record(shard, partition_key, data_bytes);
-
-                tracing::debug!(
-                    stream_name = %stream_name,
-                    partition_key = %partition_key,
-                    sequence_number = %sequence_number,
-                    "Delivered record to Kinesis stream"
-                );
-                delivered = true;
+                        tracing::debug!(
+                            stream_name = %stream_name,
+                            partition_key = %partition_key,
+                            sequence_number = %sequence_number,
+                            "Delivered record to Kinesis stream"
+                        );
+                        delivered = true;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            stream_name = %stream_name,
+                            ?err,
+                            "Kinesis delivery shard selection failed"
+                        );
+                    }
+                }
             }
         } else {
             tracing::warn!(
@@ -278,6 +283,37 @@ mod tests {
                 .data,
             b"ddb-change"
         );
+    }
+
+    // bug-audit 2026-06-26, 4.1: after a split/merge the modulo router could
+    // land a fanned-in record on a CLOSED parent shard (drained, null iterator)
+    // -> silent loss. Delivery must route by hash range over OPEN shards only.
+    #[test]
+    fn delivery_skips_closed_shards() {
+        let mut stream = make_stream("split", 2);
+        // shard 0 closed (the drained parent), shard 1 open (the child) and
+        // owning the entire hash range.
+        stream.shards[0].is_open = false;
+        stream.shards[0].ending_hash_key = "0".to_string();
+        stream.shards[1].is_open = true;
+        stream.shards[1].starting_hash_key = "0".to_string();
+        stream.shards[1].ending_hash_key = "340282366920938463463374607431768211455".to_string();
+        let arn = stream.stream_arn.clone();
+        let state = make_state(stream);
+        let delivery = KinesisDeliveryImpl::new(state.clone());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"x");
+        // Try several partition keys; none may land on the closed shard.
+        for pk in ["a", "b", "c", "d", "e"] {
+            delivery.put_record(&arn, &encoded, pk);
+        }
+        let mas = state.read();
+        let s = mas.default_ref().streams.get("split").unwrap().clone();
+        assert_eq!(
+            s.shards[0].records.len(),
+            0,
+            "closed shard must get nothing"
+        );
+        assert_eq!(s.shards[1].records.len(), 5, "open shard gets all records");
     }
 
     #[test]

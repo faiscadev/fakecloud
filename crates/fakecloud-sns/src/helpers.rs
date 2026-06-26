@@ -861,6 +861,29 @@ pub(crate) fn matches_filter_policy_nested(filter: &HashMap<String, Value>, body
     };
 
     for (key, filter_value) in filter {
+        // `$or`: the body matches when ANY branch (itself a full sub-policy)
+        // matches. AWS supports this in the MessageBody scope; the body-scope
+        // matcher previously treated "$or" as a literal field name, found it
+        // absent, and dropped the subscriber.
+        if key == "$or" {
+            if let Some(branches) = filter_value.as_array() {
+                let any = branches.iter().any(|branch| {
+                    branch
+                        .as_object()
+                        .map(|o| {
+                            let sub: HashMap<String, Value> =
+                                o.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            matches_filter_policy_nested(&sub, body)
+                        })
+                        .unwrap_or(false)
+                });
+                if !any {
+                    return false;
+                }
+                continue;
+            }
+        }
+
         let body_value = match body_obj.get(key) {
             Some(v) => v,
             None => {
@@ -1470,5 +1493,30 @@ mod confirmation_envelope_tests {
         // Two calls should differ.
         let t2 = generate_confirmation_token();
         assert_ne!(t, t2);
+    }
+
+    #[test]
+    fn body_scope_filter_supports_or() {
+        use std::collections::HashMap;
+        let policy: HashMap<String, Value> = serde_json::from_str(
+            r#"{"$or":[{"price":[{"numeric":[">",100]}]},{"category":["urgent"]}]}"#,
+        )
+        .unwrap();
+
+        // Matches the second branch.
+        assert!(super::matches_filter_policy_body(
+            &policy,
+            r#"{"category":"urgent"}"#
+        ));
+        // Matches the first branch.
+        assert!(super::matches_filter_policy_body(
+            &policy,
+            r#"{"price":150}"#
+        ));
+        // Matches neither branch.
+        assert!(!super::matches_filter_policy_body(
+            &policy,
+            r#"{"category":"normal","price":10}"#
+        ));
     }
 }

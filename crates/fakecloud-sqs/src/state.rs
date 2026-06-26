@@ -34,6 +34,11 @@ pub struct SqsMessage {
     /// When this message becomes visible again (after ReceiveMessage)
     pub visible_at: Option<DateTime<Utc>>,
     pub receive_count: u32,
+    /// Epoch millis of the FIRST receipt; AWS pins
+    /// ApproximateFirstReceiveTimestamp to this and keeps it constant across
+    /// redeliveries. `None` until first received.
+    #[serde(default)]
+    pub first_received_at: Option<i64>,
     /// For FIFO: message group ID
     pub message_group_id: Option<String>,
     /// For FIFO: dedup ID

@@ -220,6 +220,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             message_attributes: sqs_attrs,
             visible_at: None,
             receive_count: 0,
+            first_received_at: None,
             message_group_id: message_group_id.map(|s| s.to_string()),
             message_dedup_id: effective_dedup_id,
             created_at: now,

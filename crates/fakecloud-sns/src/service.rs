@@ -1368,6 +1368,20 @@ impl SnsService {
             validate_filter_policy(&attr_value)?;
         }
 
+        // Validate DeliveryPolicy JSON. AWS rejects malformed JSON at set time;
+        // previously it was stored unchecked and silently fell back to the
+        // default at delivery, discarding the user's intended policy.
+        if attr_name == "DeliveryPolicy"
+            && !attr_value.is_empty()
+            && serde_json::from_str::<serde_json::Value>(&attr_value).is_err()
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                "Invalid parameter: DeliveryPolicy: failed to parse JSON".to_string(),
+            ));
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let sub = state
