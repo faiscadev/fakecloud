@@ -176,6 +176,7 @@ impl S3Service {
         let spooled = fakecloud_core::service::spool_request_stream(
             stream,
             self.store.spool_dir().as_deref(),
+            fakecloud_core::service::is_aws_chunked(&req.headers),
         )
         .await?;
         let data_size: u64 = spooled.size;
@@ -211,11 +212,11 @@ impl S3Service {
         } else {
             None
         };
-        let content_encoding = req
-            .headers
-            .get("content-encoding")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        let content_encoding = fakecloud_core::service::strip_aws_chunked_encoding(
+            req.headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+        );
         let storage_class = req
             .headers
             .get("x-amz-storage-class")

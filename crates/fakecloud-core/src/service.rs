@@ -149,6 +149,144 @@ pub struct SpooledBody {
     pub md5_hex: String,
 }
 
+/// Incremental decoder for the `aws-chunked` content-encoding that modern AWS
+/// S3 clients (aws-cli, boto3 >= 1.36, aws-crt) apply by default to PutObject /
+/// UploadPart bodies when they send `x-amz-content-sha256:
+/// STREAMING-AWS4-HMAC-SHA256-PAYLOAD` (or `STREAMING-UNSIGNED-PAYLOAD-TRAILER`).
+///
+/// The wire format wraps the real payload in application-layer frames:
+/// `<hex-size>[;chunk-signature=<hex>]\r\n<data>\r\n` repeated, terminated by a
+/// `0`-size chunk, then optional `x-amz-trailer` lines, then a final `\r\n`.
+/// hyper only strips HTTP `Transfer-Encoding: chunked`, NOT this
+/// `Content-Encoding: aws-chunked` framing — so without decoding, the size /
+/// signature lines and trailers get stored as the object's bytes (silent
+/// corruption + a wrong ETag). This fed-incrementally because network frames do
+/// not align to chunk boundaries; trailer checksums are consumed but not
+/// re-validated (fakecloud computes its own checksums over the decoded bytes).
+#[derive(Default)]
+pub struct AwsChunkedDecoder {
+    state: ChunkState,
+    line: Vec<u8>,
+    remaining: usize,
+    done: bool,
+}
+
+#[derive(Default, PartialEq)]
+enum ChunkState {
+    #[default]
+    Header,
+    Data,
+    AfterData,
+    Trailer,
+}
+
+/// A malformed `aws-chunked` chunk-size line (non-hex length).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformedChunk;
+
+impl AwsChunkedDecoder {
+    /// Feed a network frame; returns the decoded payload bytes it yielded.
+    /// Errors only on a malformed chunk-size line.
+    pub fn feed(&mut self, input: &[u8]) -> Result<Vec<u8>, MalformedChunk> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < input.len() && !self.done {
+            match self.state {
+                ChunkState::Data => {
+                    let take = self.remaining.min(input.len() - i);
+                    out.extend_from_slice(&input[i..i + take]);
+                    i += take;
+                    self.remaining -= take;
+                    if self.remaining == 0 {
+                        self.state = ChunkState::AfterData;
+                    }
+                }
+                ChunkState::AfterData => {
+                    // Consume the inter-chunk CRLF; next byte after \n is a header.
+                    while i < input.len() {
+                        let b = input[i];
+                        i += 1;
+                        if b == b'\n' {
+                            self.state = ChunkState::Header;
+                            break;
+                        }
+                    }
+                }
+                ChunkState::Header | ChunkState::Trailer => {
+                    let is_header = self.state == ChunkState::Header;
+                    while i < input.len() {
+                        let b = input[i];
+                        i += 1;
+                        if b == b'\n' {
+                            let line = std::mem::take(&mut self.line);
+                            if is_header {
+                                // size is the hex up to a `;` extension or EOL.
+                                let hex_part: &[u8] =
+                                    line.split(|&c| c == b';').next().unwrap_or(&[]);
+                                let hex = std::str::from_utf8(hex_part)
+                                    .map_err(|_| MalformedChunk)?
+                                    .trim();
+                                let size =
+                                    usize::from_str_radix(hex, 16).map_err(|_| MalformedChunk)?;
+                                if size == 0 {
+                                    self.state = ChunkState::Trailer;
+                                } else {
+                                    self.remaining = size;
+                                    self.state = ChunkState::Data;
+                                }
+                            } else if line.is_empty() {
+                                // Blank line ends the trailer section.
+                                self.done = true;
+                            }
+                            // (a non-empty trailer line is consumed and ignored)
+                            break;
+                        } else if b != b'\r' {
+                            self.line.push(b);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Whether a request body carries the `aws-chunked` content-encoding (so the
+/// spool path must decode the framing). True when `Content-Encoding` lists
+/// `aws-chunked`, or `x-amz-content-sha256` is a `STREAMING-…` marker — both of
+/// which default modern S3 clients (aws-cli, boto3 >= 1.36, aws-crt) set.
+pub fn is_aws_chunked(headers: &http::HeaderMap) -> bool {
+    headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("aws-chunked"))
+        })
+        || headers
+            .get("x-amz-content-sha256")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("STREAMING-"))
+}
+
+/// Strip the `aws-chunked` token from a client `Content-Encoding` so the stored
+/// object metadata reflects what AWS keeps (it consumes `aws-chunked` as a
+/// transfer detail; any remaining real encoding such as `gzip` is preserved).
+/// Returns `None` when nothing meaningful remains.
+pub fn strip_aws_chunked_encoding(content_encoding: Option<&str>) -> Option<String> {
+    let ce = content_encoding?;
+    let kept: Vec<&str> = ce
+        .split(',')
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("aws-chunked"))
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(", "))
+    }
+}
+
 /// Stream a request body to a tempfile on disk while computing its MD5
 /// and length on the fly. The body is **never** materialized into a
 /// single `Bytes` buffer; chunks flow from hyper -> Tokio file in
@@ -160,9 +298,16 @@ pub struct SpooledBody {
 /// path stays on the same filesystem and is a metadata-only move.
 /// Memory-mode callers can pass `None` for the system temp dir; the
 /// memory store reads the file back into bytes and unlinks it.
+///
+/// `aws_chunked` decodes the `Content-Encoding: aws-chunked` application-layer
+/// framing that default modern S3 clients apply (see [`AwsChunkedDecoder`]), so
+/// the spooled bytes, MD5/ETag, and size reflect the real payload — not the
+/// chunk-size/signature framing. Non-S3 callers (and raw `UNSIGNED-PAYLOAD`
+/// uploads) pass `false` and stream verbatim.
 pub async fn spool_request_stream(
     stream: RequestBodyStream,
     dir: Option<&std::path::Path>,
+    aws_chunked: bool,
 ) -> Result<SpooledBody, AwsServiceError> {
     use http_body_util::BodyExt;
     use tokio::io::AsyncWriteExt;
@@ -204,6 +349,7 @@ pub async fn spool_request_stream(
     let mut hasher = Md5::new();
     let mut size: u64 = 0;
     let mut body = stream;
+    let mut decoder = aws_chunked.then(AwsChunkedDecoder::default);
 
     // Cleanup helper: drop the file handle before unlinking so
     // platforms that disallow removing an open file (Windows) still
@@ -217,21 +363,40 @@ pub async fn spool_request_stream(
     loop {
         match body.frame().await {
             Some(Ok(frame)) => {
-                if let Ok(chunk) = frame.into_data() {
-                    if !chunk.is_empty() {
-                        hasher.update(&chunk);
-                        size += chunk.len() as u64;
-                        if let Err(e) = file.write_all(&chunk).await {
-                            cleanup(file, &path).await;
-                            return Err(AwsServiceError::aws_error(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "InternalError",
-                                format!("failed to spool request body: {e}"),
-                            ));
+                if let Ok(raw) = frame.into_data() {
+                    if !raw.is_empty() {
+                        // Decode aws-chunked framing into the real payload when
+                        // the client used it; otherwise the frame IS the payload.
+                        let payload = match decoder.as_mut() {
+                            Some(d) => match d.feed(&raw) {
+                                Ok(decoded) => decoded,
+                                Err(_) => {
+                                    cleanup(file, &path).await;
+                                    return Err(AwsServiceError::aws_error(
+                                        StatusCode::BAD_REQUEST,
+                                        "InvalidChunkSizeError",
+                                        "Malformed aws-chunked request body",
+                                    ));
+                                }
+                            },
+                            None => raw.to_vec(),
+                        };
+                        if !payload.is_empty() {
+                            hasher.update(&payload);
+                            size += payload.len() as u64;
+                            if let Err(e) = file.write_all(&payload).await {
+                                cleanup(file, &path).await;
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "InternalError",
+                                    format!("failed to spool request body: {e}"),
+                                ));
+                            }
                         }
                     }
                 }
-                // Trailers are ignored — not meaningful for raw payloads.
+                // HTTP trailers are ignored; aws-chunked trailers are consumed
+                // inside the decoder.
             }
             Some(Err(e)) => {
                 cleanup(file, &path).await;
@@ -626,6 +791,92 @@ mod tests {
     use super::*;
     use crate::auth::IamAction;
     use async_trait::async_trait;
+
+    /// Build a signed aws-chunked body for `payload`, split into chunks of
+    /// `chunk_size`, terminated by a 0-chunk + a trailer + final CRLF.
+    fn aws_chunked_body(payload: &[u8], chunk_size: usize, with_trailer: bool) -> Vec<u8> {
+        let sig = "0".repeat(64);
+        let mut out = Vec::new();
+        for c in payload.chunks(chunk_size.max(1)) {
+            out.extend_from_slice(format!("{:x};chunk-signature={sig}\r\n", c.len()).as_bytes());
+            out.extend_from_slice(c);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("0;chunk-signature={sig}\r\n").as_bytes());
+        if with_trailer {
+            out.extend_from_slice(b"x-amz-checksum-crc32:AAAAAA==\r\n");
+        }
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    fn decode_all(body: &[u8], feed_size: usize) -> Vec<u8> {
+        let mut d = AwsChunkedDecoder::default();
+        let mut out = Vec::new();
+        for frame in body.chunks(feed_size.max(1)) {
+            out.extend(d.feed(frame).expect("valid chunked body"));
+        }
+        out
+    }
+
+    #[test]
+    fn aws_chunked_decoder_roundtrips_across_frame_boundaries() {
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        // Chunked with 1 KiB data chunks; with and without a trailer.
+        for with_trailer in [false, true] {
+            let body = aws_chunked_body(&payload, 1024, with_trailer);
+            // Network frames don't align to chunk boundaries: try several sizes,
+            // including 1 byte at a time and a single whole-body frame.
+            for feed in [1usize, 7, 64, 1000, body.len()] {
+                let decoded = decode_all(&body, feed);
+                assert_eq!(decoded, payload, "feed={feed} trailer={with_trailer}");
+            }
+        }
+    }
+
+    #[test]
+    fn aws_chunked_decoder_handles_empty_payload() {
+        let body = aws_chunked_body(b"", 1024, false);
+        assert_eq!(decode_all(&body, 3), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn aws_chunked_decoder_rejects_bad_size_line() {
+        let mut d = AwsChunkedDecoder::default();
+        assert!(d.feed(b"zz;chunk-signature=x\r\n").is_err());
+    }
+
+    #[test]
+    fn is_aws_chunked_detects_streaming_markers() {
+        let mut h = http::HeaderMap::new();
+        assert!(!is_aws_chunked(&h));
+        h.insert("content-encoding", "aws-chunked".parse().unwrap());
+        assert!(is_aws_chunked(&h));
+        let mut h2 = http::HeaderMap::new();
+        h2.insert(
+            "x-amz-content-sha256",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".parse().unwrap(),
+        );
+        assert!(is_aws_chunked(&h2));
+        // gzip without aws-chunked must NOT trigger decoding.
+        let mut h3 = http::HeaderMap::new();
+        h3.insert("content-encoding", "gzip".parse().unwrap());
+        assert!(!is_aws_chunked(&h3));
+    }
+
+    #[test]
+    fn strip_aws_chunked_keeps_real_encoding() {
+        assert_eq!(strip_aws_chunked_encoding(Some("aws-chunked")), None);
+        assert_eq!(
+            strip_aws_chunked_encoding(Some("aws-chunked, gzip")).as_deref(),
+            Some("gzip")
+        );
+        assert_eq!(
+            strip_aws_chunked_encoding(Some("gzip")).as_deref(),
+            Some("gzip")
+        );
+        assert_eq!(strip_aws_chunked_encoding(None), None);
+    }
 
     struct DefaultService;
 
