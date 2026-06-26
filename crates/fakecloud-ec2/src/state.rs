@@ -496,6 +496,29 @@ pub struct Image {
     /// the default `uefi`; settable via `ModifyImageAttribute`.
     #[serde(default)]
     pub boot_mode: Option<String>,
+    /// `imageOwnerId` — the AWS account that owns the AMI. `None` reports the
+    /// requesting account (a user-registered AMI is owned by its creator); the
+    /// seeded public AMIs set this to the real Amazon/Canonical/etc. owner so
+    /// `aws_ami` data sources filtering by `owners`/`owner-id` resolve them.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+    /// `imageOwnerAlias` — `amazon` | `aws-marketplace` | `self` etc. Set on the
+    /// seeded public AMIs so `owner-alias` filters and `owners = ["amazon"]`
+    /// resolve them; `None` for user-registered AMIs.
+    #[serde(default)]
+    pub owner_alias: Option<String>,
+    /// `creationDate`. `None` reports the fixed fallback; the seeded catalogue
+    /// sets distinct dates so Terraform's `most_recent = true` ordering is
+    /// deterministic.
+    #[serde(default)]
+    pub creation_date: Option<String>,
+    /// `rootDeviceName` (e.g. `/dev/xvda` for Linux, `/dev/sda1` for Windows).
+    /// `None` reports the Linux default.
+    #[serde(default)]
+    pub root_device_name: Option<String>,
+    /// `platformDetails` / Windows `platform`. `None` = Linux/UNIX.
+    #[serde(default)]
+    pub platform: Option<String>,
 }
 
 /// A network ACL entry (rule).
@@ -1278,6 +1301,10 @@ impl Ec2State {
         // isolatable network. Ids are deterministic, so the throwaway empty
         // states the read paths build report the same ids as this one.
         crate::defaults::bootstrap_default_network(&mut state);
+        // Seed the public AMI catalogue (Amazon Linux, Ubuntu, Windows) so
+        // `aws_ami` data sources resolve, matching how every real account sees
+        // Amazon/Canonical-owned public images.
+        crate::defaults::seed_public_images(&mut state);
         state
     }
 
