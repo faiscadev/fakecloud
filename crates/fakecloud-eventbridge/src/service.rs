@@ -631,6 +631,12 @@ impl EventBridgeService {
             256,
         )?;
         validate_optional_string_length_value("EventPattern", &body["EventPattern"], 0, 4096)?;
+        // Reject a syntactically invalid EventPattern at PutRule time, like AWS.
+        // Previously only the length was checked, so an invalid pattern was
+        // stored and PutEvents silently never matched it.
+        if let Some(pattern) = body["EventPattern"].as_str().filter(|s| !s.is_empty()) {
+            validate_event_pattern(pattern)?;
+        }
         validate_optional_enum_value(
             "State",
             &body["State"],

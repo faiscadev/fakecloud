@@ -2702,6 +2702,29 @@ fn put_rule_rejects_unknown_state() {
     assert!(svc.put_rule(&req).is_err());
 }
 
+#[test]
+fn put_rule_rejects_invalid_event_pattern() {
+    // An EventPattern that isn't valid JSON must be rejected at PutRule time,
+    // not stored and silently never matched.
+    let svc = make_service();
+    let req = make_request(
+        "PutRule",
+        json!({"Name": "r1", "EventPattern": "{not valid json"}),
+    );
+    let err = match svc.put_rule(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("invalid pattern must error"),
+    };
+    assert_eq!(err.code(), "InvalidEventPatternException");
+
+    // A valid pattern still succeeds.
+    let ok = make_request(
+        "PutRule",
+        json!({"Name": "r2", "EventPattern": r#"{"source":["aws.ec2"]}"#}),
+    );
+    assert!(svc.put_rule(&ok).is_ok());
+}
+
 // ── create_connection variants ──
 
 #[test]
