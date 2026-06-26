@@ -29,6 +29,74 @@ fn prop_str<'a>(props: &'a Value, key: &str) -> Option<&'a str> {
     props.get(key).and_then(|v| v.as_str())
 }
 
+/// A CloudFormation boolean property may arrive as a JSON bool or as the
+/// string `"true"`/`"false"` (templates often quote them).
+fn prop_bool(props: &Value, key: &str) -> Option<bool> {
+    match props.get(key) {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::String(s)) => match s.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A CFN numeric property may be a JSON number or a quoted string.
+fn num_str(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Translate a CFN inline `SecurityGroupIngress` / `SecurityGroupEgress` array
+/// into `IpPermissions.N.*` query params for
+/// `AuthorizeSecurityGroup{Ingress,Egress}`.
+fn sg_rule_params(group_id: &str, rules: &[Value]) -> HashMap<String, String> {
+    let mut p = HashMap::new();
+    p.insert("GroupId".to_string(), group_id.to_string());
+    for (i, r) in rules.iter().enumerate() {
+        let n = i + 1;
+        let proto = prop_str(r, "IpProtocol").unwrap_or("-1");
+        p.insert(format!("IpPermissions.{n}.IpProtocol"), proto.to_string());
+        if let Some(from) = r.get("FromPort").and_then(num_str) {
+            p.insert(format!("IpPermissions.{n}.FromPort"), from);
+        }
+        if let Some(to) = r.get("ToPort").and_then(num_str) {
+            p.insert(format!("IpPermissions.{n}.ToPort"), to);
+        }
+        if let Some(cidr) = prop_str(r, "CidrIp") {
+            p.insert(
+                format!("IpPermissions.{n}.IpRanges.1.CidrIp"),
+                cidr.to_string(),
+            );
+        }
+        if let Some(cidr6) = prop_str(r, "CidrIpv6") {
+            p.insert(
+                format!("IpPermissions.{n}.Ipv6Ranges.1.CidrIpv6"),
+                cidr6.to_string(),
+            );
+        }
+        if let Some(g) = prop_str(r, "SourceSecurityGroupId")
+            .or_else(|| prop_str(r, "DestinationSecurityGroupId"))
+        {
+            p.insert(format!("IpPermissions.{n}.Groups.1.GroupId"), g.to_string());
+        }
+        if let Some(pl) =
+            prop_str(r, "SourcePrefixListId").or_else(|| prop_str(r, "DestinationPrefixListId"))
+        {
+            p.insert(
+                format!("IpPermissions.{n}.PrefixListIds.1.PrefixListId"),
+                pl.to_string(),
+            );
+        }
+    }
+    p
+}
+
 impl ResourceProvisioner {
     fn ec2_request(&self, action: &str, params: HashMap<String, String>) -> AwsRequest {
         AwsRequest {
@@ -109,6 +177,22 @@ impl ResourceProvisioner {
         let body = self.ec2_dispatch("CreateVpc", params)?;
         let id = xml_elem(&body, "vpcId").ok_or("CreateVpc returned no vpcId")?;
         let cidr = xml_elem(&body, "cidrBlock").unwrap_or_default();
+
+        // Apply DNS attributes the template requested (CreateVpc ignores them).
+        let dns_support = prop_bool(props, "EnableDnsSupport");
+        let dns_hostnames = prop_bool(props, "EnableDnsHostnames");
+        if dns_support.is_some() || dns_hostnames.is_some() {
+            let mut mp = HashMap::new();
+            mp.insert("VpcId".to_string(), id.clone());
+            if let Some(v) = dns_support {
+                mp.insert("EnableDnsSupport.Value".to_string(), v.to_string());
+            }
+            if let Some(v) = dns_hostnames {
+                mp.insert("EnableDnsHostnames.Value".to_string(), v.to_string());
+            }
+            self.ec2_dispatch("ModifyVpcAttribute", mp)?;
+        }
+
         Ok(ProvisionResult::new(id.clone())
             .with("VpcId", id)
             .with("CidrBlock", cidr))
@@ -132,9 +216,26 @@ impl ResourceProvisioner {
         let body = self.ec2_dispatch("CreateSubnet", params)?;
         let id = xml_elem(&body, "subnetId").ok_or("CreateSubnet returned no subnetId")?;
         let az = xml_elem(&body, "availabilityZone").unwrap_or_default();
+        let cidr = xml_elem(&body, "cidrBlock")
+            .or_else(|| prop_str(props, "CidrBlock").map(str::to_string))
+            .unwrap_or_default();
+
+        // Apply MapPublicIpOnLaunch the template requested (CreateSubnet
+        // ignores it).
+        if let Some(v) = prop_bool(props, "MapPublicIpOnLaunch") {
+            let mut mp = HashMap::new();
+            mp.insert("SubnetId".to_string(), id.clone());
+            mp.insert("MapPublicIpOnLaunch.Value".to_string(), v.to_string());
+            self.ec2_dispatch("ModifySubnetAttribute", mp)?;
+        }
+
+        // Capture VpcId + CidrBlock so Fn::GetAtt on the subnet resolves them
+        // (real AWS exposes both), not just SubnetId / AvailabilityZone.
         Ok(ProvisionResult::new(id.clone())
             .with("SubnetId", id)
-            .with("AvailabilityZone", az))
+            .with("AvailabilityZone", az)
+            .with("VpcId", vpc_id.to_string())
+            .with("CidrBlock", cidr))
     }
 
     pub(super) fn create_ec2_security_group(
@@ -153,6 +254,21 @@ impl ResourceProvisioner {
         self.ec2_tag_params(props, "security-group", &mut params);
         let body = self.ec2_dispatch("CreateSecurityGroup", params)?;
         let id = xml_elem(&body, "groupId").ok_or("CreateSecurityGroup returned no groupId")?;
+
+        // Apply inline ingress/egress rules (CreateSecurityGroup only creates
+        // the empty group; without this the template's rules are silently
+        // dropped and the SG denies everything).
+        if let Some(rules) = props.get("SecurityGroupIngress").and_then(|v| v.as_array()) {
+            if !rules.is_empty() {
+                self.ec2_dispatch("AuthorizeSecurityGroupIngress", sg_rule_params(&id, rules))?;
+            }
+        }
+        if let Some(rules) = props.get("SecurityGroupEgress").and_then(|v| v.as_array()) {
+            if !rules.is_empty() {
+                self.ec2_dispatch("AuthorizeSecurityGroupEgress", sg_rule_params(&id, rules))?;
+            }
+        }
+
         Ok(ProvisionResult::new(id.clone())
             .with("GroupId", id)
             .with("VpcId", prop_str(props, "VpcId").unwrap_or("").to_string()))

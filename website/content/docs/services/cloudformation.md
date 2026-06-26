@@ -70,6 +70,7 @@ Resources of these types create real backing state in the corresponding fakeclou
 - **CloudWatch** — `Alarm`, `Dashboard`
 - **Cognito** — `UserPool`, `UserPoolClient`, `UserPoolDomain`, `IdentityPool`, `IdentityPoolRoleAttachment`
 - **DynamoDB** — `Table`
+- **EC2** — `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress` / `SecurityGroupEgress` rules), `InternetGateway`, `RouteTable`. VPC `EnableDnsSupport` / `EnableDnsHostnames` and subnet `MapPublicIpOnLaunch` are applied; `Fn::GetAtt` on a subnet resolves `VpcId` / `CidrBlock`
 - **ECR** — `Repository`, `RepositoryPolicy`, `LifecyclePolicy`, `PullThroughCacheRule`, `RegistryPolicy`, `RegistryScanningConfiguration`, `ReplicationConfiguration`
 - **ECS** — `Cluster`, `Service`, `TaskDefinition`, `CapacityProvider`
 - **ElastiCache** — `CacheCluster`, `ReplicationGroup`, `ParameterGroup`, `SubnetGroup`, `SecurityGroup`, `User`, `UserGroup`
@@ -143,7 +144,7 @@ aws --endpoint-url http://localhost:4566 cloudformation list-exports
 
 ## Gotchas
 
-- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (most `AWS::EC2::*`, `AWS::AutoScaling::*`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
+- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (the remaining `AWS::EC2::*` types such as `Instance` / `NatGateway` / `Route`, `AWS::AutoScaling::*`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
 - **Drift always reports IN_SYNC.** fakecloud is the source of truth for backing state, so real drift never occurs. The drift API still round-trips IDs and statuses for tooling that polls them.
 - **SAM expansion runs at create time.** A re-uploaded template still requires `Capabilities=[CAPABILITY_AUTO_EXPAND]` on operations that touch transforms.
 

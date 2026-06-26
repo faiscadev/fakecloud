@@ -930,6 +930,14 @@ impl Ec2Service {
             "DeleteRouteTable" => routing::delete_route_table(self, request),
             "CreateInternetGateway" => routing::create_internet_gateway(self, request),
             "DeleteInternetGateway" => routing::delete_internet_gateway(self, request),
+            // Attribute / rule application the CloudFormation provisioner issues
+            // after a Create so VPC DNS attributes, subnet MapPublicIpOnLaunch,
+            // and inline SecurityGroup ingress/egress rules from a template are
+            // actually applied (not silently dropped).
+            "ModifyVpcAttribute" => vpc::modify_vpc_attribute(self, request),
+            "ModifySubnetAttribute" => subnet::modify_subnet_attribute(self, request),
+            "AuthorizeSecurityGroupIngress" => sg::authorize_security_group_ingress(self, request),
+            "AuthorizeSecurityGroupEgress" => sg::authorize_security_group_egress(self, request),
             other => Err(AwsServiceError::action_not_implemented("ec2", other)),
         }
     }
