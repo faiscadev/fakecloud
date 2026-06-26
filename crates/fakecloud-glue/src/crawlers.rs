@@ -234,12 +234,31 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let name = req_str(&body, "CrawlerName")?.to_string();
+        let schedule = body
+            .get("Schedule")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        state
+        let crawler = state
             .crawlers
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| entity_not_found(format!("Crawler {name} not found")))?;
+        // The Schedule cron expression was previously dropped on the floor, so
+        // GetCrawler kept showing the old/empty schedule.
+        if let Some(obj) = crawler.as_object_mut() {
+            match schedule {
+                Some(expr) => {
+                    obj.insert(
+                        "Schedule".into(),
+                        json!({"ScheduleExpression": expr, "State": "SCHEDULED"}),
+                    );
+                }
+                None => {
+                    obj.insert("Schedule".into(), json!({"State": "NOT_SCHEDULED"}));
+                }
+            }
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 

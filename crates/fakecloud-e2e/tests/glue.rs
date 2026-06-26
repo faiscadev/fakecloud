@@ -1040,3 +1040,41 @@ async fn delete_schema_versions_actually_deletes() {
         "version 2 must be gone after delete_schema_versions"
     );
 }
+
+#[tokio::test]
+async fn update_crawler_schedule_persists_expression() {
+    use aws_sdk_glue::types::{CrawlerTargets, S3Target};
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_crawler()
+        .name("sched-crawler")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .database_name("analytics")
+        .targets(
+            CrawlerTargets::builder()
+                .s3_targets(S3Target::builder().path("s3://b/a").build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create crawler");
+
+    // The Schedule cron expression was previously dropped; GetCrawler must
+    // reflect it after UpdateCrawlerSchedule.
+    glue.update_crawler_schedule()
+        .crawler_name("sched-crawler")
+        .schedule("cron(0 12 * * ? *)")
+        .send()
+        .await
+        .expect("update schedule");
+
+    let got = glue
+        .get_crawler()
+        .name("sched-crawler")
+        .send()
+        .await
+        .expect("get crawler");
+    let sched = got.crawler().and_then(|c| c.schedule()).expect("schedule");
+    assert_eq!(sched.schedule_expression(), Some("cron(0 12 * * ? *)"));
+}

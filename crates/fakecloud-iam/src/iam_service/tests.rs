@@ -445,6 +445,30 @@ fn login_profile_lifecycle() {
 }
 
 #[test]
+fn update_login_profile_rotates_password() {
+    let svc = make_service();
+    svc.handle_sync("CreateUser", vec![("UserName", "rotuser")]);
+    svc.handle_sync(
+        "CreateLoginProfile",
+        vec![("UserName", "rotuser"), ("Password", "OldP@ss1")],
+    );
+    svc.handle_sync(
+        "UpdateLoginProfile",
+        vec![("UserName", "rotuser"), ("Password", "NewP@ss2")],
+    );
+    // The Password param must actually update the stored profile (previously
+    // dropped, so a rotate silently kept the old password).
+    let accounts = svc.state.read();
+    let stored = accounts
+        .get("123456789012")
+        .unwrap()
+        .login_profiles
+        .get("rotuser")
+        .unwrap();
+    assert_eq!(stored.password, "NewP@ss2");
+}
+
+#[test]
 fn create_login_profile_duplicate_fails() {
     let svc = make_service();
     svc.handle_sync("CreateUser", vec![("UserName", "dupuser")]);
