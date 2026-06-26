@@ -556,9 +556,10 @@ pub(crate) fn evaluate_list_append_rhs(
     Some(json!({ "L": merged }))
 }
 
-/// `<arith_left> +/- <arith_right>` — both operands must resolve to N values
-/// (or the LHS may be missing, in which case it's treated as 0). Anything
-/// else is rejected with the same `ValidationException` AWS returns.
+/// `<arith_left> +/- <arith_right>` — both operands must resolve to N values.
+/// A missing operand is rejected with the same `ValidationException` AWS
+/// returns (SET arithmetic does NOT zero-default a missing attribute — that's
+/// what `if_not_exists` is for; the ADD action has its own zero-default path).
 pub(crate) fn evaluate_arithmetic_rhs(
     arith_left: &str,
     arith_right: &str,
@@ -571,17 +572,13 @@ pub(crate) fn evaluate_arithmetic_rhs(
     let right_val =
         resolve_ref_or_path(arith_right.trim(), item, expr_attr_names, expr_attr_values);
 
-    let left_num = match extract_number(&left_val) {
-        Some(n) => n,
-        None if left_val.is_some() => {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "An operand in the update expression has an incorrect data type",
-            ));
-        }
-        None => 0.0,
-    };
+    let left_num = extract_number(&left_val).ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "An operand in the update expression has an incorrect data type",
+        )
+    })?;
     let right_num = extract_number(&right_val).ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
