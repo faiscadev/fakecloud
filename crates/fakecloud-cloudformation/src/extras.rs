@@ -2534,6 +2534,9 @@ mod tests {
             cognito: shared::<fakecloud_cognito::CognitoState>(),
             rds: shared::<fakecloud_rds::RdsState>(),
             ec2: shared::<fakecloud_ec2::Ec2State>(),
+            autoscaling: Arc::new(parking_lot::RwLock::new(
+                fakecloud_autoscaling::AutoScalingAccounts::new(),
+            )),
             ecs: shared::<fakecloud_ecs::EcsState>(),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             elasticache: shared::<fakecloud_elasticache::ElastiCacheState>(),

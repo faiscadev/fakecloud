@@ -3327,6 +3327,7 @@ dependencies = [
  "fakecloud-apigatewayv2",
  "fakecloud-application-autoscaling",
  "fakecloud-athena",
+ "fakecloud-autoscaling",
  "fakecloud-aws",
  "fakecloud-cloudfront",
  "fakecloud-cloudwatch",

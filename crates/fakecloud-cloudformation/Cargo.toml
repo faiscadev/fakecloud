@@ -42,6 +42,7 @@ fakecloud-apigateway = { workspace = true }
 fakecloud-apigatewayv2 = { workspace = true }
 fakecloud-ses = { workspace = true }
 fakecloud-application-autoscaling = { workspace = true }
+fakecloud-autoscaling = { workspace = true }
 fakecloud-athena = { workspace = true }
 fakecloud-firehose = { workspace = true }
 fakecloud-glue = { workspace = true }
