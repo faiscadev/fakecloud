@@ -107,6 +107,7 @@ impl CognitoService {
                 self.respond_new_password_required(client_id, session, body, req)
             }
             "PASSWORD_VERIFIER" => self.respond_password_verifier(client_id, session, body, req),
+            "SELECT_CHALLENGE" => self.respond_select_challenge(client_id, session, body, req),
             "CUSTOM_CHALLENGE" => {
                 self.respond_custom_challenge(client_id, session, body, req)
                     .await
@@ -249,6 +250,118 @@ impl CognitoService {
         }
 
         self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+    }
+
+    /// `RespondToAuthChallenge(ChallengeName=SELECT_CHALLENGE)` for the
+    /// `USER_AUTH` flow: the client's `ANSWER` picks a challenge. `PASSWORD_SRP`
+    /// kicks off the SRP handshake (reusing the shared builder); `PASSWORD`
+    /// verifies the password directly and mints tokens.
+    pub(super) fn respond_select_challenge(
+        &self,
+        client_id: &str,
+        session: &str,
+        body: &Value,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let bad_creds = || {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Incorrect username or password.",
+            )
+        };
+        let responses = body["ChallengeResponses"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ChallengeResponses is required",
+            )
+        })?;
+        let answer = responses
+            .get("ANSWER")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "ANSWER is required in ChallengeResponses",
+                )
+            })?;
+
+        let (pool_id, username, region) = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let sess = state.sessions.get(session).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session for the user, session is expired.",
+                )
+            })?;
+            if sess.challenge_name != "SELECT_CHALLENGE" {
+                return Err(bad_creds());
+            }
+            (
+                sess.user_pool_id.clone(),
+                sess.username.clone(),
+                state.region.clone(),
+            )
+        };
+        // The SELECT_CHALLENGE session is single-use.
+        {
+            let mut accounts = self.state.write();
+            accounts
+                .get_or_create(&req.account_id)
+                .sessions
+                .remove(session);
+        }
+
+        match answer {
+            "PASSWORD_SRP" => {
+                let srp_a = responses
+                    .get("SRP_A")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            "SRP_A is required for the PASSWORD_SRP challenge",
+                        )
+                    })?;
+                self.build_srp_challenge(&pool_id, client_id, &username, srp_a, req)
+            }
+            "PASSWORD" => {
+                let password = responses
+                    .get("PASSWORD")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(bad_creds)?;
+                let ok = {
+                    let accounts = self.state.read();
+                    let empty = CognitoState::new(&req.account_id, &req.region);
+                    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+                    state
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(&username))
+                        .filter(|u| u.enabled)
+                        .map(|u| {
+                            u.password.as_deref() == Some(password)
+                                || u.temporary_password.as_deref() == Some(password)
+                        })
+                        .unwrap_or(false)
+                };
+                if !ok {
+                    return Err(bad_creds());
+                }
+                self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+            }
+            other => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("Unsupported challenge answer: {other}"),
+            )),
+        }
     }
 
     pub(super) fn respond_new_password_required(

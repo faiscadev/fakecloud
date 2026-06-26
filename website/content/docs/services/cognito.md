@@ -18,7 +18,7 @@ fakecloud implements **126 of 126** Cognito User Pools operations at 100% Smithy
 - **Resource servers** — CRUD, custom scopes
 - **Domains** — user pool domains
 - **Multi-region replicas** — `CreateUserPoolReplica` / `DeleteUserPoolReplica` / `ListUserPoolReplicas` / `UpdateUserPoolReplica`. The pool's own region is reported as the `PRIMARY` replica; secondary regions are recorded as control-plane entries (region + status) — fakecloud is single-region, so a replica is a record rather than a real second directory copy
-- **Authentication flows** — USER_PASSWORD_AUTH, USER_SRP_AUTH, REFRESH_TOKEN_AUTH, CUSTOM_AUTH, ADMIN_USER_PASSWORD_AUTH
+- **Authentication flows** — USER_PASSWORD_AUTH, USER_SRP_AUTH (real SRP6a, works with Amplify / amazon-cognito-identity-js), USER_AUTH (choice-based SELECT_CHALLENGE), REFRESH_TOKEN_AUTH, CUSTOM_AUTH, ADMIN_USER_PASSWORD_AUTH
 - **Password management** — ChangePassword, ForgotPassword, ConfirmForgotPassword
 - **Confirmation codes** — email/SMS confirmation flows
 - **Devices** — Confirm, update, forget, track

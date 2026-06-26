@@ -124,6 +124,9 @@ impl CognitoService {
             "USER_SRP_AUTH" => {
                 self.initiate_user_srp_auth(&body, client_id, &pool_id, &explicit_auth_flows, req)
             }
+            "USER_AUTH" => {
+                self.initiate_user_auth(&body, client_id, &pool_id, &explicit_auth_flows, req)
+            }
             "CUSTOM_AUTH" => {
                 self.initiate_custom_auth(&body, client_id, &pool_id, &explicit_auth_flows, req)
                     .await
@@ -181,9 +184,6 @@ impl CognitoService {
         explicit_auth_flows: &[String],
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        use base64::Engine;
-        use rand::RngCore;
-
         if !explicit_auth_flows
             .iter()
             .any(|f| f == "ALLOW_USER_SRP_AUTH")
@@ -223,6 +223,103 @@ impl CognitoService {
                 )
             })?;
         self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+        self.build_srp_challenge(pool_id, client_id, username, srp_a, req)
+    }
+
+    /// `InitiateAuth(AuthFlow=USER_AUTH)` — the choice-based flow Amplify Gen2
+    /// uses. With a supported `PREFERRED_CHALLENGE` we go straight to it;
+    /// otherwise we return a `SELECT_CHALLENGE` listing the available
+    /// challenges, which the client picks via `RespondToAuthChallenge`.
+    pub(super) fn initiate_user_auth(
+        &self,
+        body: &Value,
+        client_id: &str,
+        pool_id: &str,
+        explicit_auth_flows: &[String],
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        if !explicit_auth_flows.iter().any(|f| f == "ALLOW_USER_AUTH") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "USER_AUTH flow is not enabled for this client.",
+            ));
+        }
+        let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AuthParameters is required",
+            )
+        })?;
+        let username = auth_params
+            .get("USERNAME")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "USERNAME is required in AuthParameters",
+                )
+            })?;
+        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+
+        let preferred = auth_params
+            .get("PREFERRED_CHALLENGE")
+            .and_then(|v| v.as_str());
+        if preferred == Some("PASSWORD_SRP") {
+            let srp_a = auth_params
+                .get("SRP_A")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "SRP_A is required for the PASSWORD_SRP challenge",
+                    )
+                })?;
+            return self.build_srp_challenge(pool_id, client_id, username, srp_a, req);
+        }
+
+        // No preferred challenge resolvable inline: present the menu.
+        let session = Uuid::new_v4().to_string();
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            state.sessions.insert(
+                session.clone(),
+                SessionData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    challenge_name: "SELECT_CHALLENGE".to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: None,
+                },
+            );
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "ChallengeName": "SELECT_CHALLENGE",
+            "Session": session,
+            "AvailableChallenges": ["PASSWORD_SRP", "PASSWORD"],
+            "ChallengeParameters": { "USERNAME": username },
+        })))
+    }
+
+    /// Build the `PASSWORD_VERIFIER` challenge for an SRP handshake: derive the
+    /// user's verifier, pick the server keys, and stash the handshake in the
+    /// session. Shared by `USER_SRP_AUTH` and the `USER_AUTH` `PASSWORD_SRP`
+    /// path. Does not check the auth flow (callers gate that).
+    pub(super) fn build_srp_challenge(
+        &self,
+        pool_id: &str,
+        client_id: &str,
+        username: &str,
+        srp_a: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use base64::Engine;
+        use rand::RngCore;
 
         let password = {
             let accounts = self.state.read();
