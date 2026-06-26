@@ -1117,6 +1117,11 @@ pub struct Ec2State {
     /// Account-level allowed-images settings state.
     #[serde(default)]
     pub allowed_images_settings: String,
+    /// Allowed-images `imageCriterionSet`: each criterion is its list of
+    /// `ImageProvider`s, persisted by ReplaceImageCriteriaInAllowedImagesSettings
+    /// and reported by GetAllowedImagesSettings.
+    #[serde(default)]
+    pub allowed_image_criteria: Vec<Vec<String>>,
     #[serde(default)]
     pub network_acls: BTreeMap<String, NetworkAcl>,
     #[serde(default)]
@@ -1306,6 +1311,15 @@ impl Ec2State {
         // Amazon/Canonical-owned public images.
         crate::defaults::seed_public_images(&mut state);
         state
+    }
+
+    /// Idempotently (re)seed the public AMI catalogue into this account. Used on
+    /// snapshot restore so accounts persisted by a binary that predated the
+    /// catalogue (#1964) still get it after an upgrade+restart — without it,
+    /// `aws_ami { owners=["amazon"] }` returns empty for legacy accounts. Seeds
+    /// have deterministic ids, so re-seeding an already-seeded account is a no-op.
+    pub fn ensure_public_images_seeded(&mut self) {
+        crate::defaults::seed_public_images(self);
     }
 
     /// Replace the tag set for `resource_id` with `tags` merged over any

@@ -175,6 +175,22 @@ pub(crate) fn register_image(
     ))
 }
 
+/// An AMI the caller does not own. The seeded public catalogue is owned by
+/// amazon/Canonical (`owner_id` set to a foreign account); a user-registered
+/// AMI has `owner_id == None` (owned by the requesting account). AWS rejects
+/// DeregisterImage / ModifyImageAttribute on an AMI you don't own.
+fn owned_by_other(img: &Image, account: &str) -> bool {
+    img.owner_id.as_deref().is_some_and(|o| o != account)
+}
+
+fn ami_auth_failure(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "AuthFailure",
+        format!("Not authorized for image: {id}"),
+    )
+}
+
 pub(crate) fn deregister_image(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -182,6 +198,14 @@ pub(crate) fn deregister_image(
     let id = require(&req.query_params, "ImageId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
+    // Reject deregistering a public AMI owned by amazon/Canonical (the seeded
+    // catalogue) — AWS returns AuthFailure, and removing a seed would silently
+    // break `data.aws_ami { owners=["amazon"] }` for this account.
+    if let Some(img) = state.images.get(&id) {
+        if owned_by_other(img, &req.account_id) {
+            return Err(ami_auth_failure(&id));
+        }
+    }
     state.images.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -205,8 +229,17 @@ pub(crate) fn describe_images(
     // resolve the seeded public catalogue instead of every image in the account.
     let owners = indexed_list(&req.query_params, "Owner");
     let accounts = svc.state.read();
-    let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    // Lazily build the seeded fallback ONLY for a not-yet-created account, so
+    // the common existing-account path doesn't construct-and-discard a fresh
+    // (default-network + AMI-catalogue) state on every DescribeImages.
+    let empty;
+    let state = match accounts.get(&req.account_id) {
+        Some(s) => s,
+        None => {
+            empty = Ec2State::new(&req.account_id, &req.region);
+            &empty
+        }
+    };
     let mut items: Vec<String> = state
         .images
         .values()
@@ -477,6 +510,12 @@ pub(crate) fn modify_image_attribute(
         .images
         .get_mut(&id)
         .ok_or_else(|| crate::service_helpers::not_found("InvalidAMIID.NotFound", &id))?;
+
+    // AWS rejects modifying an AMI you don't own (the seeded amazon/Canonical
+    // public catalogue) with AuthFailure.
+    if owned_by_other(img, &req.account_id) {
+        return Err(ami_auth_failure(&id));
+    }
 
     // The `Attribute` form (Attribute + Value + OperationType) and the
     // structured `LaunchPermission`/`Description` forms are mutually
@@ -843,10 +882,24 @@ pub(crate) fn get_allowed_images_settings(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "disabled".to_string())
     };
+    let criteria = {
+        let accounts = svc.state.read();
+        accounts
+            .get(&req.account_id)
+            .map(|s| s.allowed_image_criteria.clone())
+            .unwrap_or_default()
+    };
+    let criterion_items: Vec<String> = criteria
+        .iter()
+        // `ec2_list` wraps each element in `<item>`, which is the
+        // ImageProviderList member name the SDK reads — so pass the raw
+        // provider strings, not pre-wrapped elements.
+        .map(|providers| ec2_list("imageProviderSet", providers))
+        .collect();
     let body = format!(
         "{}{}",
         ec2_elem("state", &st),
-        ec2_list("imageCriterionSet", &[])
+        ec2_list("imageCriterionSet", &criterion_items)
     );
     Ok(Ec2Service::respond(
         "GetAllowedImagesSettings",
@@ -856,9 +909,36 @@ pub(crate) fn get_allowed_images_settings(
 }
 
 pub(crate) fn replace_image_criteria_in_allowed_images_settings(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Parse `ImageCriterion.N.ImageProvider.M` into a list-of-provider-lists and
+    // persist it so GetAllowedImagesSettings round-trips (was a no-op stub).
+    let mut criteria: Vec<Vec<String>> = Vec::new();
+    let mut n = 1;
+    loop {
+        let providers = indexed_list(
+            &req.query_params,
+            &format!("ImageCriterion.{n}.ImageProvider"),
+        );
+        // A criterion with no ImageProvider.M still counts if its prefix exists.
+        let has_criterion = providers.is_empty()
+            && req
+                .query_params
+                .keys()
+                .any(|k| k.starts_with(&format!("ImageCriterion.{n}.")));
+        if providers.is_empty() && !has_criterion {
+            break;
+        }
+        criteria.push(providers);
+        n += 1;
+    }
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .allowed_image_criteria = criteria;
+    }
     Ok(Ec2Service::respond(
         "ReplaceImageCriteriaInAllowedImagesSettings",
         &req.request_id,

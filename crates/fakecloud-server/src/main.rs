@@ -1726,6 +1726,17 @@ async fn main() {
                             if let Some(accounts) = snapshot.accounts {
                                 let account_count = accounts.account_count();
                                 *ec2_state.write() = accounts;
+                                // Backfill the public AMI catalogue into any
+                                // restored account that predates it (legacy
+                                // snapshot from before #1964). Idempotent —
+                                // seeds have deterministic ids, so already-seeded
+                                // accounts are unchanged.
+                                {
+                                    let mut guard = ec2_state.write();
+                                    for (_, st) in guard.iter_mut() {
+                                        st.ensure_public_images_seeded();
+                                    }
+                                }
                                 tracing::info!(
                                     accounts = account_count,
                                     "loaded ec2 persistence snapshot"
