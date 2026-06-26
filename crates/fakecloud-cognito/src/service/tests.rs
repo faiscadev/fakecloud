@@ -2340,6 +2340,141 @@ fn secret_hash_enforced_for_clients_with_secret() {
     block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string()))).unwrap();
 }
 
+/// USER_SRP_AUTH end to end: InitiateAuth returns a PASSWORD_VERIFIER
+/// challenge, and a faithful client SRP proof passes RespondToAuthChallenge and
+/// mints tokens. A wrong password's proof is rejected.
+#[test]
+fn user_srp_auth_full_flow() {
+    use base64::Engine;
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "srp-client",
+        "ExplicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let client_id = resp_json(&resp)["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let password = "S3cretP@ss!";
+    block_on(svc.sign_up(&make_req(
+        "SignUp",
+        &json!({"ClientId": client_id, "Username": "srpuser", "Password": password}).to_string(),
+    )))
+    .unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "srpuser", "Password": password, "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    // InitiateAuth(USER_SRP_AUTH) with a real client A.
+    let (a_priv, a_pub) = crate::srp::test_client_keypair();
+    let ia = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "srpuser", "SRP_A": crate::srp::to_hex(&a_pub)},
+    });
+    let challenge = resp_json(
+        &block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string()))).unwrap(),
+    );
+    assert_eq!(challenge["ChallengeName"], "PASSWORD_VERIFIER");
+    let session = challenge["Session"].as_str().unwrap().to_string();
+    let cp = &challenge["ChallengeParameters"];
+    let salt = crate::srp::parse_hex(cp["SALT"].as_str().unwrap()).unwrap();
+    let server_b = crate::srp::parse_hex(cp["SRP_B"].as_str().unwrap()).unwrap();
+    let secret_block_b64 = cp["SECRET_BLOCK"].as_str().unwrap().to_string();
+    let user_id = cp["USER_ID_FOR_SRP"].as_str().unwrap().to_string();
+    let pool_name = crate::srp::pool_short_name(&pool_id).to_string();
+    let secret_block = base64::engine::general_purpose::STANDARD
+        .decode(&secret_block_b64)
+        .unwrap();
+    let timestamp = "Wed Mar 6 12:34:56 UTC 2024";
+
+    // Correct password -> tokens.
+    let sig = crate::srp::test_client_signature(
+        &pool_name,
+        &user_id,
+        password,
+        &salt,
+        &server_b,
+        &a_priv,
+        &secret_block,
+        timestamp,
+    );
+    let rc = json!({
+        "ClientId": client_id,
+        "ChallengeName": "PASSWORD_VERIFIER",
+        "Session": session,
+        "ChallengeResponses": {
+            "USERNAME": "srpuser",
+            "PASSWORD_CLAIM_SIGNATURE": sig,
+            "PASSWORD_CLAIM_SECRET_BLOCK": secret_block_b64,
+            "TIMESTAMP": timestamp,
+        },
+    });
+    let auth = resp_json(
+        &block_on(
+            svc.respond_to_auth_challenge(&make_req("RespondToAuthChallenge", &rc.to_string())),
+        )
+        .unwrap(),
+    );
+    assert!(auth["AuthenticationResult"]["AccessToken"]
+        .as_str()
+        .is_some());
+    assert!(auth["AuthenticationResult"]["IdToken"].as_str().is_some());
+
+    // Wrong password's proof must be rejected (fresh handshake).
+    let (a2, a2_pub) = crate::srp::test_client_keypair();
+    let ia2 = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "srpuser", "SRP_A": crate::srp::to_hex(&a2_pub)},
+    });
+    let ch2 = resp_json(
+        &block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia2.to_string()))).unwrap(),
+    );
+    let cp2 = &ch2["ChallengeParameters"];
+    let salt2 = crate::srp::parse_hex(cp2["SALT"].as_str().unwrap()).unwrap();
+    let sb2 = crate::srp::parse_hex(cp2["SRP_B"].as_str().unwrap()).unwrap();
+    let block2 = base64::engine::general_purpose::STANDARD
+        .decode(cp2["SECRET_BLOCK"].as_str().unwrap())
+        .unwrap();
+    let bad_sig = crate::srp::test_client_signature(
+        &pool_name,
+        &user_id,
+        "WrongPassword!",
+        &salt2,
+        &sb2,
+        &a2,
+        &block2,
+        timestamp,
+    );
+    let rc2 = json!({
+        "ClientId": client_id,
+        "ChallengeName": "PASSWORD_VERIFIER",
+        "Session": ch2["Session"].as_str().unwrap(),
+        "ChallengeResponses": {
+            "USERNAME": "srpuser",
+            "PASSWORD_CLAIM_SIGNATURE": bad_sig,
+            "PASSWORD_CLAIM_SECRET_BLOCK": cp2["SECRET_BLOCK"].as_str().unwrap(),
+            "TIMESTAMP": timestamp,
+        },
+    });
+    let err = block_on(
+        svc.respond_to_auth_challenge(&make_req("RespondToAuthChallenge", &rc2.to_string())),
+    )
+    .err()
+    .expect("wrong password rejected");
+    assert_eq!(err.code(), "NotAuthorizedException");
+}
+
 /// 1.27: a client WITHOUT a secret must not require SECRET_HASH.
 #[test]
 fn secret_hash_not_required_for_clients_without_secret() {

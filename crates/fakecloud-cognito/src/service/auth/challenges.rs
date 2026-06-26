@@ -106,6 +106,7 @@ impl CognitoService {
             "NEW_PASSWORD_REQUIRED" => {
                 self.respond_new_password_required(client_id, session, body, req)
             }
+            "PASSWORD_VERIFIER" => self.respond_password_verifier(client_id, session, body, req),
             "CUSTOM_CHALLENGE" => {
                 self.respond_custom_challenge(client_id, session, body, req)
                     .await
@@ -116,6 +117,138 @@ impl CognitoService {
                 format!("Unsupported challenge: {challenge_name}"),
             )),
         }
+    }
+
+    /// `RespondToAuthChallenge(ChallengeName=PASSWORD_VERIFIER)`: verify the
+    /// client's SRP6a proof against the handshake stashed at InitiateAuth time
+    /// and, on success, mint real tokens. Reuses the shared token issuer.
+    pub(super) fn respond_password_verifier(
+        &self,
+        client_id: &str,
+        session: &str,
+        body: &Value,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use base64::Engine;
+
+        let bad_creds = || {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Incorrect username or password.",
+            )
+        };
+        let responses = body["ChallengeResponses"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ChallengeResponses is required",
+            )
+        })?;
+        let client_sig = responses
+            .get("PASSWORD_CLAIM_SIGNATURE")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad_creds)?;
+        let timestamp = responses
+            .get("TIMESTAMP")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad_creds)?;
+
+        let (pool_id, username, region, stash_json) = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let sess = state.sessions.get(session).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session for the user, session is expired.",
+                )
+            })?;
+            if sess.challenge_name != "PASSWORD_VERIFIER" {
+                return Err(bad_creds());
+            }
+            let stash = sess.challenge_metadata.clone().ok_or_else(bad_creds)?;
+            (
+                sess.user_pool_id.clone(),
+                sess.username.clone(),
+                state.region.clone(),
+                stash,
+            )
+        };
+
+        let stash: Value = serde_json::from_str(&stash_json).map_err(|_| bad_creds())?;
+        let get_hex = |k: &str| {
+            stash
+                .get(k)
+                .and_then(|v| v.as_str())
+                .and_then(crate::srp::parse_hex)
+                .ok_or_else(bad_creds)
+        };
+        let server_private_b = get_hex("b")?;
+        let server_public_b = get_hex("B")?;
+        let salt = get_hex("salt")?;
+        let verifier = get_hex("v")?;
+        let a_hex = stash
+            .get("A")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad_creds)?;
+        let pool_name = stash
+            .get("pool_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad_creds)?;
+        let user_id = stash
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(bad_creds)?;
+        let secret_block = stash
+            .get("secret_block")
+            .and_then(|v| v.as_str())
+            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+            .ok_or_else(bad_creds)?;
+
+        let handshake = crate::srp::ServerHandshake {
+            salt,
+            server_public_b,
+            server_private_b,
+        };
+        let expected = crate::srp::expected_signature(
+            &handshake,
+            &verifier,
+            a_hex,
+            pool_name,
+            user_id,
+            &secret_block,
+            timestamp,
+        )
+        .ok_or_else(bad_creds)?;
+
+        if expected.as_bytes() != client_sig.as_bytes() {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            state.auth_events.push(AuthEvent {
+                event_id: Uuid::new_v4().to_string(),
+                event_type: "SIGN_IN_FAILURE".to_string(),
+                username: username.clone(),
+                user_pool_id: pool_id.clone(),
+                client_id: Some(client_id.to_string()),
+                timestamp: Utc::now(),
+                success: false,
+                feedback_value: None,
+            });
+            return Err(bad_creds());
+        }
+
+        // Single-use session.
+        {
+            let mut accounts = self.state.write();
+            accounts
+                .get_or_create(&req.account_id)
+                .sessions
+                .remove(session);
+        }
+
+        self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
     }
 
     pub(super) fn respond_new_password_required(
