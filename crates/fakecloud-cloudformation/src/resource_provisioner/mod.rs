@@ -879,6 +879,7 @@ pub struct ResourceProvisioner {
     pub organizations_state: SharedOrganizationsState,
     pub cognito_state: SharedCognitoState,
     pub rds_state: SharedRdsState,
+    pub ec2_state: fakecloud_ec2::SharedEc2State,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub elasticache_state: SharedElastiCacheState,
@@ -917,6 +918,7 @@ mod cloudformation;
 mod cloudwatch;
 mod cognito;
 mod dynamodb;
+mod ec2;
 mod ecr;
 mod ecs;
 mod eventbridge;
@@ -1043,6 +1045,11 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
             "AWS::RDS::DBInstance" => self.create_rds_db_instance(resource),
             "AWS::RDS::DBCluster" => self.create_rds_db_cluster(resource),
+            "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
+            "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
+            "AWS::EC2::SecurityGroup" => self.create_ec2_security_group(resource),
+            "AWS::EC2::InternetGateway" => self.create_ec2_internet_gateway(resource),
+            "AWS::EC2::RouteTable" => self.create_ec2_route_table(resource),
             "AWS::ECS::Cluster" => self.create_ecs_cluster(resource),
             "AWS::ECS::TaskDefinition" => self.create_ecs_task_definition(resource),
             "AWS::ECS::Service" => self.create_ecs_service(resource),
@@ -1380,6 +1387,11 @@ impl ResourceProvisioner {
             }
             "AWS::ECS::Cluster" => self.get_att_ecs_cluster(&resource.physical_id, attribute),
             "AWS::ECS::Service" => self.get_att_ecs_service(&resource.physical_id, attribute),
+            "AWS::EC2::VPC"
+            | "AWS::EC2::Subnet"
+            | "AWS::EC2::SecurityGroup"
+            | "AWS::EC2::InternetGateway"
+            | "AWS::EC2::RouteTable" => self.get_att_ec2(resource, attribute),
             "AWS::ECS::CapacityProvider" => {
                 self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
             }
@@ -1601,6 +1613,13 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
             "AWS::RDS::DBInstance" => self.delete_rds_db_instance(&resource.physical_id),
             "AWS::RDS::DBCluster" => self.delete_rds_db_cluster(&resource.physical_id),
+            "AWS::EC2::VPC"
+            | "AWS::EC2::Subnet"
+            | "AWS::EC2::SecurityGroup"
+            | "AWS::EC2::InternetGateway"
+            | "AWS::EC2::RouteTable" => {
+                self.delete_ec2_resource(&resource.resource_type, &resource.physical_id)
+            }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
             "AWS::ECS::TaskDefinition" => self.delete_ecs_task_definition(&resource.physical_id),
             "AWS::ECS::Service" => self.delete_ecs_service(&resource.physical_id),
@@ -6010,6 +6029,9 @@ mod tests {
             rds_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
+            ec2_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
@@ -6233,6 +6255,58 @@ mod tests {
             topic.attributes.get("DisplayName").map(String::as_str),
             Some("after")
         );
+    }
+
+    #[test]
+    fn ec2_vpc_subnet_provision_through_real_handlers() {
+        let prov = make_provisioner();
+        let vpc = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::VPC",
+                "Vpc",
+                serde_json::json!({ "CidrBlock": "10.1.0.0/16" }),
+            ))
+            .expect("VPC provisions");
+        assert!(
+            vpc.physical_id.starts_with("vpc-"),
+            "got {}",
+            vpc.physical_id
+        );
+        // The real VPC handler ran: a VPC exists in EC2 state (with the default
+        // SG/route-table/NACL the handler creates), not a recorded no-op.
+        {
+            let ec2 = prov.ec2_state.read();
+            let acct = ec2.get("123456789012").unwrap();
+            assert!(acct.vpcs.contains_key(&vpc.physical_id));
+        }
+        // GetAtt VpcId/CidrBlock resolve; Ref is the vpc id.
+        assert_eq!(
+            prov.get_att(&vpc, "VpcId").as_deref(),
+            Some(vpc.physical_id.as_str())
+        );
+        assert_eq!(
+            prov.get_att(&vpc, "CidrBlock").as_deref(),
+            Some("10.1.0.0/16")
+        );
+
+        // A subnet referencing the VPC (Ref already resolved to the physical id).
+        let subnet = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::Subnet",
+                "Subnet",
+                serde_json::json!({ "VpcId": vpc.physical_id, "CidrBlock": "10.1.1.0/24" }),
+            ))
+            .expect("subnet provisions");
+        assert!(subnet.physical_id.starts_with("subnet-"));
+        {
+            let ec2 = prov.ec2_state.read();
+            let acct = ec2.get("123456789012").unwrap();
+            assert!(acct.subnets.contains_key(&subnet.physical_id));
+        }
+
+        // Delete routes through the real handler.
+        prov.delete_resource(&subnet).expect("subnet deletes");
+        prov.delete_resource(&vpc).expect("vpc deletes");
     }
 
     #[test]

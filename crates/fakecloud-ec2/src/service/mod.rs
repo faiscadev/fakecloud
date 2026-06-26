@@ -912,6 +912,28 @@ impl Ec2Service {
         }
     }
 
+    /// Synchronous dispatch for the subset of EC2 control-plane actions the
+    /// CloudFormation provisioner needs (VPC/Subnet/SecurityGroup/RouteTable/
+    /// InternetGateway create + delete). Routing through the real handlers
+    /// keeps CFN-provisioned EC2 resources identical to API-created ones
+    /// (default SG/NACL/route-table, id formats, tags) instead of re-deriving
+    /// them. None of these actions need the container runtime.
+    pub fn provision_sync(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        match request.action.as_str() {
+            "CreateVpc" => vpc::create_vpc(self, request),
+            "DeleteVpc" => vpc::delete_vpc(self, request),
+            "CreateSubnet" => subnet::create_subnet(self, request),
+            "DeleteSubnet" => subnet::delete_subnet(self, request),
+            "CreateSecurityGroup" => sg::create_security_group(self, request),
+            "DeleteSecurityGroup" => sg::delete_security_group(self, request),
+            "CreateRouteTable" => routing::create_route_table(self, request),
+            "DeleteRouteTable" => routing::delete_route_table(self, request),
+            "CreateInternetGateway" => routing::create_internet_gateway(self, request),
+            "DeleteInternetGateway" => routing::delete_internet_gateway(self, request),
+            other => Err(AwsServiceError::action_not_implemented("ec2", other)),
+        }
+    }
+
     /// Attach a container runtime so `RunInstances` boots real containers.
     /// Passing `None` leaves the service in metadata-only mode.
     pub fn with_runtime(mut self, runtime: Option<Arc<Ec2Runtime>>) -> Self {
