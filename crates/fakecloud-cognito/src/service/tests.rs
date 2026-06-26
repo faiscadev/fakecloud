@@ -2475,6 +2475,134 @@ fn user_srp_auth_full_flow() {
     assert_eq!(err.code(), "NotAuthorizedException");
 }
 
+/// USER_AUTH choice-based flow: InitiateAuth returns SELECT_CHALLENGE; the
+/// client selects PASSWORD_SRP (-> SRP handshake -> tokens) or PASSWORD
+/// (-> direct verify -> tokens).
+#[test]
+fn user_auth_select_challenge_flow() {
+    use base64::Engine;
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "ua-client",
+        "ExplicitAuthFlows": ["ALLOW_USER_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let client_id = resp_json(
+        &svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap(),
+    )["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let password = "Ch0ice!Pass";
+    block_on(svc.sign_up(&make_req(
+        "SignUp",
+        &json!({"ClientId": client_id, "Username": "uauser", "Password": password}).to_string(),
+    )))
+    .unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "uauser", "Password": password, "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    // --- PASSWORD_SRP path ---
+    let select = resp_json(
+        &block_on(svc.initiate_auth(&make_req(
+            "InitiateAuth",
+            &json!({"ClientId": client_id, "AuthFlow": "USER_AUTH", "AuthParameters": {"USERNAME": "uauser"}}).to_string(),
+        )))
+        .unwrap(),
+    );
+    assert_eq!(select["ChallengeName"], "SELECT_CHALLENGE");
+    assert!(select["AvailableChallenges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "PASSWORD_SRP"));
+    let select_session = select["Session"].as_str().unwrap().to_string();
+
+    let (a_priv, a_pub) = crate::srp::test_client_keypair();
+    let pv = resp_json(
+        &block_on(svc.respond_to_auth_challenge(&make_req(
+            "RespondToAuthChallenge",
+            &json!({
+                "ClientId": client_id,
+                "ChallengeName": "SELECT_CHALLENGE",
+                "Session": select_session,
+                "ChallengeResponses": {"ANSWER": "PASSWORD_SRP", "USERNAME": "uauser", "SRP_A": crate::srp::to_hex(&a_pub)},
+            })
+            .to_string(),
+        )))
+        .unwrap(),
+    );
+    assert_eq!(pv["ChallengeName"], "PASSWORD_VERIFIER");
+    let cp = &pv["ChallengeParameters"];
+    let salt = crate::srp::parse_hex(cp["SALT"].as_str().unwrap()).unwrap();
+    let server_b = crate::srp::parse_hex(cp["SRP_B"].as_str().unwrap()).unwrap();
+    let secret_block_b64 = cp["SECRET_BLOCK"].as_str().unwrap().to_string();
+    let user_id = cp["USER_ID_FOR_SRP"].as_str().unwrap().to_string();
+    let pool_name = crate::srp::pool_short_name(&pool_id).to_string();
+    let secret_block = base64::engine::general_purpose::STANDARD
+        .decode(&secret_block_b64)
+        .unwrap();
+    let ts = "Wed Mar 6 12:34:56 UTC 2024";
+    let sig = crate::srp::test_client_signature(
+        &pool_name,
+        &user_id,
+        password,
+        &salt,
+        &server_b,
+        &a_priv,
+        &secret_block,
+        ts,
+    );
+    let auth = resp_json(
+        &block_on(svc.respond_to_auth_challenge(&make_req(
+            "RespondToAuthChallenge",
+            &json!({
+                "ClientId": client_id,
+                "ChallengeName": "PASSWORD_VERIFIER",
+                "Session": pv["Session"].as_str().unwrap(),
+                "ChallengeResponses": {"USERNAME": "uauser", "PASSWORD_CLAIM_SIGNATURE": sig, "PASSWORD_CLAIM_SECRET_BLOCK": secret_block_b64, "TIMESTAMP": ts},
+            })
+            .to_string(),
+        )))
+        .unwrap(),
+    );
+    assert!(auth["AuthenticationResult"]["AccessToken"]
+        .as_str()
+        .is_some());
+
+    // --- PASSWORD path ---
+    let select2 = resp_json(
+        &block_on(svc.initiate_auth(&make_req(
+            "InitiateAuth",
+            &json!({"ClientId": client_id, "AuthFlow": "USER_AUTH", "AuthParameters": {"USERNAME": "uauser"}}).to_string(),
+        )))
+        .unwrap(),
+    );
+    let pw_auth = resp_json(
+        &block_on(svc.respond_to_auth_challenge(&make_req(
+            "RespondToAuthChallenge",
+            &json!({
+                "ClientId": client_id,
+                "ChallengeName": "SELECT_CHALLENGE",
+                "Session": select2["Session"].as_str().unwrap(),
+                "ChallengeResponses": {"ANSWER": "PASSWORD", "USERNAME": "uauser", "PASSWORD": password},
+            })
+            .to_string(),
+        )))
+        .unwrap(),
+    );
+    assert!(pw_auth["AuthenticationResult"]["AccessToken"]
+        .as_str()
+        .is_some());
+}
+
 /// 1.27: a client WITHOUT a secret must not require SECRET_HASH.
 #[test]
 fn secret_hash_not_required_for_clients_without_secret() {
