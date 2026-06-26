@@ -241,6 +241,78 @@ fn ec2_request(
     }
 }
 
+/// Parse `Filters.member.N.{Name, Values.member.M}` into `(name, values)` pairs.
+fn parse_filters(req: &AwsRequest) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for n in 1..=50 {
+        let Some(name) = req
+            .query_params
+            .get(&format!("Filters.member.{n}.Name"))
+            .or_else(|| req.query_params.get(&format!("Filters.{n}.Name")))
+        else {
+            break;
+        };
+        let mut values = Vec::new();
+        for m in 1..=50 {
+            let v = req
+                .query_params
+                .get(&format!("Filters.member.{n}.Values.member.{m}"))
+                .or_else(|| req.query_params.get(&format!("Filters.{n}.Values.{m}")));
+            match v {
+                Some(val) => values.push(val.clone()),
+                None => break,
+            }
+        }
+        out.push((name.clone(), values));
+    }
+    out
+}
+
+/// True if the ASG satisfies every tag filter (AWS ANDs filters). Supports the
+/// documented `tag:<key>`, `tag-key`, `tag-value`, and `auto-scaling-group`
+/// filter names; unknown names are ignored (match-all), matching AWS leniency.
+fn group_matches_filters(g: &AutoScalingGroup, filters: &[(String, Vec<String>)]) -> bool {
+    filters.iter().all(|(name, values)| {
+        let hit = |b: bool| values.is_empty() || b;
+        if let Some(key) = name.strip_prefix("tag:") {
+            hit(g
+                .tags
+                .iter()
+                .any(|t| t.key == key && values.contains(&t.value)))
+        } else {
+            match name.as_str() {
+                "tag-key" => g.tags.iter().any(|t| values.contains(&t.key)),
+                "tag-value" => g.tags.iter().any(|t| values.contains(&t.value)),
+                "auto-scaling-group" => hit(values.contains(&g.name)),
+                _ => true,
+            }
+        }
+    })
+}
+
+/// Offset-based pagination over already-rendered `<member>` strings. AWS uses an
+/// opaque NextToken; an integer offset is a faithful-enough opaque token. Returns
+/// the page body plus the next offset when the result was truncated.
+fn paginate(
+    members: Vec<String>,
+    req: &AwsRequest,
+    default_max: usize,
+    max_cap: usize,
+) -> (String, Option<usize>) {
+    let start = optional_query_param(req, "NextToken")
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(members.len());
+    let max = optional_query_param(req, "MaxRecords")
+        .and_then(|m| m.parse::<usize>().ok())
+        .unwrap_or(default_max)
+        .clamp(1, max_cap);
+    let end = (start + max).min(members.len());
+    let page = members[start..end].concat();
+    let next = (end < members.len()).then_some(end);
+    (page, next)
+}
+
 /// Pull every `<instanceId>…</instanceId>` out of a RunInstances response.
 fn parse_instance_ids(xml: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -313,7 +385,7 @@ impl AutoScalingService {
         let accounts = self.state.read();
         let empty = AccountState::default();
         let st = accounts.accounts.get(&req.account_id).unwrap_or(&empty);
-        let items: String = st
+        let members: Vec<String> = st
             .launch_configurations
             .values()
             .filter(|lc| wanted.is_empty() || wanted.contains(&lc.name))
@@ -351,7 +423,11 @@ impl AutoScalingService {
                 )
             })
             .collect();
-        let inner = format!("<LaunchConfigurations>{items}</LaunchConfigurations>");
+        let (items, next) = paginate(members, req, 100, 100);
+        let token = next
+            .map(|n| el("NextToken", &n.to_string()))
+            .unwrap_or_default();
+        let inner = format!("<LaunchConfigurations>{items}</LaunchConfigurations>{token}");
         Ok(self.ok("DescribeLaunchConfigurations", inner, req))
     }
 
@@ -443,10 +519,18 @@ impl AutoScalingService {
         let _ = azs;
         {
             let mut accounts = self.state.write();
-            accounts
-                .get_or_create(&req.account_id)
-                .groups
-                .insert(name.clone(), group);
+            let st = accounts.get_or_create(&req.account_id);
+            // AWS rejects a duplicate-name create. Without this guard two
+            // concurrent same-name creates would each launch desired_capacity
+            // real instances and the second insert would orphan the first's.
+            if st.groups.contains_key(&name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AlreadyExists",
+                    format!("AutoScalingGroup by this name already exists - A group with the name {name} already exists"),
+                ));
+            }
+            st.groups.insert(name.clone(), group);
         }
         // Reconcile to desired capacity off-lock: launch real container-backed
         // instances so DescribeAutoScalingGroups reports `desired_capacity`
@@ -479,9 +563,45 @@ impl AutoScalingService {
             }
             if let Some(v) = optional_query_param(req, "LaunchConfigurationName") {
                 group.launch_configuration_name = Some(v);
+                group.launch_template = None;
+            }
+            if let Some(lt) = parse_launch_template(req) {
+                group.launch_template = Some(lt);
+                group.launch_configuration_name = None;
             }
             if let Some(v) = optional_query_param(req, "HealthCheckType") {
                 group.health_check_type = v;
+            }
+            // Terraform's aws_autoscaling_group update sends any of these on
+            // HasChange; persisting only Min/Max/Desired/LC/HealthCheckType left
+            // the rest as read-after-write drift -> perpetual diff. Apply every
+            // mutable field DescribeAutoScalingGroups echoes back.
+            if let Some(v) =
+                optional_query_param(req, "DefaultCooldown").and_then(|v| v.parse().ok())
+            {
+                group.default_cooldown = v;
+            }
+            if let Some(v) =
+                optional_query_param(req, "HealthCheckGracePeriod").and_then(|v| v.parse().ok())
+            {
+                group.health_check_grace_period = v;
+            }
+            if let Some(v) = optional_query_param(req, "VPCZoneIdentifier") {
+                group.vpc_zone_identifier = Some(v);
+            }
+            let azs = member_list(req, "AvailabilityZones");
+            if !azs.is_empty() {
+                group.availability_zones = azs;
+            }
+            if let Some(v) = optional_query_param(req, "NewInstancesProtectedFromScaleIn") {
+                group.new_instances_protected_from_scale_in = v == "true";
+            }
+            if let Some(v) = optional_query_param(req, "ServiceLinkedRoleARN") {
+                group.service_linked_role_arn = v;
+            }
+            let tgs = member_list(req, "TargetGroupARNs");
+            if !tgs.is_empty() {
+                group.target_group_arns = tgs;
             }
         }
         self.apply_capacity(&req.account_id, &name, req).await;
@@ -533,16 +653,22 @@ impl AutoScalingService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let wanted = member_list(req, "AutoScalingGroupNames");
+        let filters = parse_filters(req);
         let accounts = self.state.read();
         let empty = AccountState::default();
         let st = accounts.accounts.get(&req.account_id).unwrap_or(&empty);
-        let items: String = st
+        let members: Vec<String> = st
             .groups
             .values()
             .filter(|g| wanted.is_empty() || wanted.contains(&g.name))
+            .filter(|g| group_matches_filters(g, &filters))
             .map(group_xml)
             .collect();
-        let inner = format!("<AutoScalingGroups>{items}</AutoScalingGroups>");
+        let (items, next) = paginate(members, req, 100, 100);
+        let token = next
+            .map(|n| el("NextToken", &n.to_string()))
+            .unwrap_or_default();
+        let inner = format!("<AutoScalingGroups>{items}</AutoScalingGroups>{token}");
         Ok(self.ok("DescribeAutoScalingGroups", inner, req))
     }
 
@@ -554,14 +680,18 @@ impl AutoScalingService {
         let accounts = self.state.read();
         let empty = AccountState::default();
         let st = accounts.accounts.get(&req.account_id).unwrap_or(&empty);
-        let items: String = st
+        let members: Vec<String> = st
             .groups
             .values()
             .flat_map(|g| g.instances.iter().map(move |i| (g, i)))
             .filter(|(_, i)| wanted.is_empty() || wanted.contains(&i.instance_id))
             .map(|(g, i)| asg_instance_member(g, i, true))
             .collect();
-        let inner = format!("<AutoScalingInstances>{items}</AutoScalingInstances>");
+        let (items, next) = paginate(members, req, 50, 50);
+        let token = next
+            .map(|n| el("NextToken", &n.to_string()))
+            .unwrap_or_default();
+        let inner = format!("<AutoScalingInstances>{items}</AutoScalingInstances>{token}");
         Ok(self.ok("DescribeAutoScalingInstances", inner, req))
     }
 
@@ -573,7 +703,7 @@ impl AutoScalingService {
         let accounts = self.state.read();
         let empty = AccountState::default();
         let st = accounts.accounts.get(&req.account_id).unwrap_or(&empty);
-        let items: String = st
+        let members: Vec<String> = st
             .activities
             .iter()
             .filter(|a| {
@@ -584,7 +714,11 @@ impl AutoScalingService {
             })
             .map(activity_member)
             .collect();
-        let inner = format!("<Activities>{items}</Activities>");
+        let (items, next) = paginate(members, req, 100, 100);
+        let token = next
+            .map(|n| el("NextToken", &n.to_string()))
+            .unwrap_or_default();
+        let inner = format!("<Activities>{items}</Activities>{token}");
         Ok(self.ok("DescribeScalingActivities", inner, req))
     }
 
@@ -643,26 +777,50 @@ impl AutoScalingService {
     }
 
     fn describe_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
         let accounts = self.state.read();
         let empty = AccountState::default();
         let st = accounts.accounts.get(&req.account_id).unwrap_or(&empty);
-        let items: String = st
+        // AWS scopes DescribeTags by the documented Filters (auto-scaling-group,
+        // key, value, propagate-at-launch). Returning every group's tags caused
+        // tag bleed across resources for aws_autoscaling_group_tag.
+        let tag_ok = |group_name: &str, t: &AsgTag| {
+            filters.iter().all(|(name, values)| {
+                if values.is_empty() {
+                    return true;
+                }
+                match name.as_str() {
+                    "auto-scaling-group" => values.iter().any(|v| v == group_name),
+                    "key" => values.contains(&t.key),
+                    "value" => values.contains(&t.value),
+                    "propagate-at-launch" => values
+                        .iter()
+                        .any(|v| v == &t.propagate_at_launch.to_string()),
+                    _ => true,
+                }
+            })
+        };
+        let members: Vec<String> = st
             .groups
             .values()
-            .flat_map(|g| {
-                g.tags.iter().map(move |t| {
-                    format!(
-                        "<member>{}{}{}{}{}</member>",
-                        el("ResourceId", &g.name),
-                        el("ResourceType", "auto-scaling-group"),
-                        el("Key", &t.key),
-                        el("Value", &t.value),
-                        el("PropagateAtLaunch", &t.propagate_at_launch.to_string()),
-                    )
-                })
+            .flat_map(|g| g.tags.iter().map(move |t| (g, t)))
+            .filter(|(g, t)| tag_ok(&g.name, t))
+            .map(|(g, t)| {
+                format!(
+                    "<member>{}{}{}{}{}</member>",
+                    el("ResourceId", &g.name),
+                    el("ResourceType", "auto-scaling-group"),
+                    el("Key", &t.key),
+                    el("Value", &t.value),
+                    el("PropagateAtLaunch", &t.propagate_at_launch.to_string()),
+                )
             })
             .collect();
-        let inner = format!("<Tags>{items}</Tags>");
+        let (items, next) = paginate(members, req, 100, 100);
+        let token = next
+            .map(|n| el("NextToken", &n.to_string()))
+            .unwrap_or_default();
+        let inner = format!("<Tags>{items}</Tags>{token}");
         Ok(self.ok("DescribeTags", inner, req))
     }
 
@@ -1126,5 +1284,197 @@ mod tests {
             Ok(_) => panic!("expected ValidationError"),
         };
         assert_eq!(err.code(), "ValidationError");
+    }
+
+    fn create_basic_asg(s: &AutoScalingService, name: &str) {
+        body(
+            s,
+            "CreateLaunchConfiguration",
+            &[
+                ("LaunchConfigurationName", "lc"),
+                ("ImageId", "ami-1"),
+                ("InstanceType", "t3.micro"),
+            ],
+        );
+        body(
+            s,
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", name),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "0"),
+                ("MaxSize", "5"),
+                ("DesiredCapacity", "0"),
+                ("AvailabilityZones.member.1", "us-east-1a"),
+            ],
+        );
+    }
+
+    #[test]
+    fn update_persists_full_mutable_field_set() {
+        let s = svc();
+        create_basic_asg(&s, "asg1");
+        body(
+            &s,
+            "UpdateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "asg1"),
+                ("DefaultCooldown", "120"),
+                ("HealthCheckGracePeriod", "240"),
+                ("VPCZoneIdentifier", "subnet-abc,subnet-def"),
+                ("NewInstancesProtectedFromScaleIn", "true"),
+                ("HealthCheckType", "ELB"),
+            ],
+        );
+        let d = body(&s, "DescribeAutoScalingGroups", &[]);
+        assert!(d.contains("<DefaultCooldown>120</DefaultCooldown>"), "{d}");
+        assert!(d.contains("<HealthCheckGracePeriod>240</HealthCheckGracePeriod>"));
+        assert!(d.contains("<VPCZoneIdentifier>subnet-abc,subnet-def</VPCZoneIdentifier>"));
+        assert!(
+            d.contains("<NewInstancesProtectedFromScaleIn>true</NewInstancesProtectedFromScaleIn>")
+        );
+        assert!(d.contains("<HealthCheckType>ELB</HealthCheckType>"));
+    }
+
+    #[test]
+    fn duplicate_create_rejected() {
+        let s = svc();
+        create_basic_asg(&s, "dup");
+        let err = match futures_block(s.handle(req(
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "dup"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "0"),
+                ("MaxSize", "1"),
+            ],
+        ))) {
+            Err(e) => e,
+            Ok(_) => panic!("expected AlreadyExists"),
+        };
+        assert_eq!(err.code(), "AlreadyExists");
+    }
+
+    #[test]
+    fn describe_groups_filters_by_tag() {
+        let s = svc();
+        create_basic_asg(&s, "asg1");
+        body(
+            &s,
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "asg2"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "0"),
+                ("MaxSize", "1"),
+                ("AvailabilityZones.member.1", "us-east-1a"),
+            ],
+        );
+        body(
+            &s,
+            "CreateOrUpdateTags",
+            &[
+                ("Tags.member.1.ResourceId", "asg1"),
+                ("Tags.member.1.Key", "Env"),
+                ("Tags.member.1.Value", "prod"),
+                ("Tags.member.1.PropagateAtLaunch", "true"),
+            ],
+        );
+        let d = body(
+            &s,
+            "DescribeAutoScalingGroups",
+            &[
+                ("Filters.member.1.Name", "tag:Env"),
+                ("Filters.member.1.Values.member.1", "prod"),
+            ],
+        );
+        assert!(d.contains("<AutoScalingGroupName>asg1</AutoScalingGroupName>"));
+        assert!(
+            !d.contains("<AutoScalingGroupName>asg2</AutoScalingGroupName>"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn describe_tags_scoped_by_filter() {
+        let s = svc();
+        create_basic_asg(&s, "asg1");
+        body(
+            &s,
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "asg2"),
+                ("LaunchConfigurationName", "lc"),
+                ("MinSize", "0"),
+                ("MaxSize", "1"),
+                ("AvailabilityZones.member.1", "us-east-1a"),
+            ],
+        );
+        for (asg, val) in [("asg1", "a1"), ("asg2", "a2")] {
+            body(
+                &s,
+                "CreateOrUpdateTags",
+                &[
+                    ("Tags.member.1.ResourceId", asg),
+                    ("Tags.member.1.Key", "Name"),
+                    ("Tags.member.1.Value", val),
+                    ("Tags.member.1.PropagateAtLaunch", "true"),
+                ],
+            );
+        }
+        let d = body(
+            &s,
+            "DescribeTags",
+            &[
+                ("Filters.member.1.Name", "auto-scaling-group"),
+                ("Filters.member.1.Values.member.1", "asg1"),
+            ],
+        );
+        assert!(d.contains("<Value>a1</Value>"));
+        assert!(!d.contains("<Value>a2</Value>"), "tag bleed: {d}");
+    }
+
+    #[test]
+    fn describe_groups_paginates() {
+        let s = svc();
+        body(
+            &s,
+            "CreateLaunchConfiguration",
+            &[
+                ("LaunchConfigurationName", "lc"),
+                ("ImageId", "ami-1"),
+                ("InstanceType", "t3.micro"),
+            ],
+        );
+        for i in 0..5 {
+            body(
+                &s,
+                "CreateAutoScalingGroup",
+                &[
+                    ("AutoScalingGroupName", &format!("g{i}")),
+                    ("LaunchConfigurationName", "lc"),
+                    ("MinSize", "0"),
+                    ("MaxSize", "1"),
+                    ("AvailabilityZones.member.1", "us-east-1a"),
+                ],
+            );
+        }
+        let page1 = body(&s, "DescribeAutoScalingGroups", &[("MaxRecords", "2")]);
+        assert_eq!(
+            page1.matches("<AutoScalingGroupName>").count(),
+            2,
+            "page1 should hold 2"
+        );
+        assert!(page1.contains("<NextToken>2</NextToken>"), "{page1}");
+        let page3 = body(
+            &s,
+            "DescribeAutoScalingGroups",
+            &[("MaxRecords", "2"), ("NextToken", "4")],
+        );
+        assert_eq!(page3.matches("<AutoScalingGroupName>").count(), 1);
+        assert!(
+            !page3.contains("<NextToken>"),
+            "last page has no token: {page3}"
+        );
     }
 }
