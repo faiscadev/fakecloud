@@ -7,7 +7,7 @@ weight = 21
 fakecloud implements **216 of 216** Bedrock-family operations across four APIs:
 
 - **Bedrock** (control plane) — 103 operations *(this page)*
-- **Bedrock Runtime** (model invocation) — 10 operations *(this page)*
+- **Bedrock Runtime** (model invocation) — 11 operations *(this page)*
 - [**Bedrock Agent**](/docs/services/bedrock-agent/) (agents control plane) — 72 operations
 - [**Bedrock Agent Runtime**](/docs/services/bedrock-agent-runtime/) (agent invocation) — 31 operations
 
@@ -40,6 +40,7 @@ For a complete testing guide with code examples, see [Testing Bedrock](/docs/gui
 - **Converse** — with message history, tool use
 - **ConverseStream** — streaming variant
 - **ApplyGuardrail** — content evaluation against configured guardrails
+- **InvokeGuardrailChecks** — inline guardrail-tier checks (no pre-created guardrail): evaluates messages for `contentFilter` / `promptAttack` categories and `sensitiveInformation` entities, returning per-detection scores, PII match offsets, and per-check text-unit usage
 - **CountTokens** — token counting for Anthropic model bodies
 - **Async invoke** — StartAsyncInvoke, GetAsyncInvoke, ListAsyncInvokes
 
