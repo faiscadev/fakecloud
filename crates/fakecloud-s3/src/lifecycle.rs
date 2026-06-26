@@ -170,6 +170,38 @@ impl LifecycleProcessor {
                 }
             }
         }
+
+        // Abort multipart uploads older than DaysAfterInitiation. Without this
+        // sweep, abandoned uploads (started but never completed/aborted) leaked
+        // forever in memory + on disk, and configuring the rule had no effect.
+        if let Some(days) = rule.abort_incomplete_mpu_days {
+            let stale: Vec<String> = bucket
+                .multipart_uploads
+                .iter()
+                .filter(|(_, mpu)| {
+                    // The prefix filter (if any) scopes the rule to matching keys.
+                    rule.prefix
+                        .as_ref()
+                        .map(|p| p.is_empty() || mpu.key.starts_with(p))
+                        .unwrap_or(true)
+                        && today
+                            .signed_duration_since(mpu.initiated.date_naive())
+                            .num_days()
+                            >= days as i64
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if !stale.is_empty() {
+                tracing::info!(
+                    bucket = %bucket_name,
+                    count = stale.len(),
+                    "S3 lifecycle: aborting incomplete multipart uploads"
+                );
+                for id in &stale {
+                    bucket.multipart_uploads.remove(id);
+                }
+            }
+        }
     }
 }
 
@@ -181,6 +213,10 @@ struct LifecycleRule {
     expiration_days: Option<u32>,
     expiration_date: Option<NaiveDate>,
     transitions: Vec<Transition>,
+    /// `<AbortIncompleteMultipartUpload><DaysAfterInitiation>` — abort
+    /// multipart uploads older than this many days (the only AWS mechanism to
+    /// auto-clean abandoned MPUs).
+    abort_incomplete_mpu_days: Option<u32>,
 }
 
 struct TagFilter {
@@ -261,6 +297,10 @@ fn parse_lifecycle_rules(xml: &str) -> Option<Vec<LifecycleRule>> {
             }
         }
 
+        let abort_incomplete_mpu_days = extract_block(rule_body, "AbortIncompleteMultipartUpload")
+            .and_then(|b| extract_tag(b, "DaysAfterInitiation"))
+            .and_then(|s| s.parse::<u32>().ok());
+
         rules.push(LifecycleRule {
             status,
             prefix,
@@ -268,6 +308,7 @@ fn parse_lifecycle_rules(xml: &str) -> Option<Vec<LifecycleRule>> {
             expiration_days,
             expiration_date,
             transitions,
+            abort_incomplete_mpu_days,
         });
 
         remaining = &after[rule_end + 7..];
@@ -342,6 +383,21 @@ mod tests {
         assert_eq!(rules[0].status, "Enabled");
         assert_eq!(rules[0].prefix.as_deref(), Some("logs/"));
         assert_eq!(rules[0].expiration_days, Some(30));
+    }
+
+    #[test]
+    fn parse_abort_incomplete_mpu_rule() {
+        let xml = r#"<LifecycleConfiguration>
+            <Rule>
+                <Filter><Prefix>uploads/</Prefix></Filter>
+                <Status>Enabled</Status>
+                <AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation></AbortIncompleteMultipartUpload>
+            </Rule>
+        </LifecycleConfiguration>"#;
+
+        let rules = parse_lifecycle_rules(xml).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].abort_incomplete_mpu_days, Some(7));
     }
 
     #[test]
