@@ -120,8 +120,27 @@ impl S3Service {
         if let Some(vid) = &obj.version_id {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
         }
-        if let Some(ref enc) = obj.content_encoding {
-            headers.insert("content-encoding", enc.parse().unwrap());
+        // System metadata + response-header overrides. AWS stores these
+        // headers verbatim on PutObject and echoes them on GET; the
+        // `response-*` query params (presigned-download mechanism) take
+        // precedence over the stored value when present.
+        let q = |k: &str| req.query_params.get(k).map(|s| s.to_string());
+        if let Some(enc) = q("response-content-encoding").or_else(|| obj.content_encoding.clone()) {
+            insert_str_header(&mut headers, "content-encoding", &enc);
+        }
+        if let Some(cc) = q("response-cache-control").or_else(|| obj.cache_control.clone()) {
+            insert_str_header(&mut headers, "cache-control", &cc);
+        }
+        if let Some(cd) =
+            q("response-content-disposition").or_else(|| obj.content_disposition.clone())
+        {
+            insert_str_header(&mut headers, "content-disposition", &cd);
+        }
+        if let Some(cl) = q("response-content-language").or_else(|| obj.content_language.clone()) {
+            insert_str_header(&mut headers, "content-language", &cl);
+        }
+        if let Some(exp) = q("response-expires").or_else(|| obj.expires.clone()) {
+            insert_str_header(&mut headers, "expires", &exp);
         }
         for (k, v) in &obj.metadata {
             if let (Ok(name), Ok(val)) = (
@@ -331,7 +350,7 @@ impl S3Service {
         }
         Ok(AwsResponse {
             status: response_status,
-            content_type: obj.content_type.clone(),
+            content_type: q("response-content-type").unwrap_or_else(|| obj.content_type.clone()),
             body: response_body,
             headers,
         })
@@ -411,8 +430,24 @@ impl S3Service {
         );
         headers.insert("accept-ranges", "bytes".parse().unwrap());
         headers.insert("x-amz-storage-class", obj.storage_class.parse().unwrap());
-        if let Some(ref enc) = obj.content_encoding {
-            headers.insert("content-encoding", enc.parse().unwrap());
+        let hq = |k: &str| req.query_params.get(k).map(|s| s.to_string());
+        if let Some(enc) = hq("response-content-encoding").or_else(|| obj.content_encoding.clone())
+        {
+            insert_str_header(&mut headers, "content-encoding", &enc);
+        }
+        if let Some(cc) = hq("response-cache-control").or_else(|| obj.cache_control.clone()) {
+            insert_str_header(&mut headers, "cache-control", &cc);
+        }
+        if let Some(cd) =
+            hq("response-content-disposition").or_else(|| obj.content_disposition.clone())
+        {
+            insert_str_header(&mut headers, "content-disposition", &cd);
+        }
+        if let Some(cl) = hq("response-content-language").or_else(|| obj.content_language.clone()) {
+            insert_str_header(&mut headers, "content-language", &cl);
+        }
+        if let Some(exp) = hq("response-expires").or_else(|| obj.expires.clone()) {
+            insert_str_header(&mut headers, "expires", &exp);
         }
         if let Some(range_str) = req.headers.get("range").and_then(|v| v.to_str().ok()) {
             if let Some(range_result) = parse_range_header(range_str, total_size as usize) {
@@ -577,7 +612,7 @@ impl S3Service {
 
         Ok(AwsResponse {
             status: response_status,
-            content_type: obj.content_type.clone(),
+            content_type: hq("response-content-type").unwrap_or_else(|| obj.content_type.clone()),
             body: Bytes::new().into(),
             headers,
         })

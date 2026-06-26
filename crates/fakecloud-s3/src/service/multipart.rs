@@ -64,6 +64,16 @@ impl S3Service {
             .unwrap_or("application/octet-stream")
             .to_string();
         let metadata = extract_user_metadata(&req.headers);
+        let sys_header = |name: &str| {
+            req.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        };
+        let cache_control = sys_header("cache-control");
+        let content_disposition = sys_header("content-disposition");
+        let content_language = sys_header("content-language");
+        let expires = sys_header("expires");
         let storage_class = req
             .headers
             .get("x-amz-storage-class")
@@ -137,6 +147,10 @@ impl S3Service {
             tagging,
             acl_grants,
             checksum_algorithm,
+            cache_control,
+            content_disposition,
+            content_language,
+            expires,
         };
         // Store-first: persist the MPU init before touching memory so a disk
         // write failure short-circuits the handler cleanly without leaving an
@@ -658,6 +672,10 @@ impl S3Service {
             version_id: version_id.clone(),
             checksum_algorithm: upload.checksum_algorithm.clone(),
             checksum_value: checksum_value.clone(),
+            cache_control: upload.cache_control.clone(),
+            content_disposition: upload.content_disposition.clone(),
+            content_language: upload.content_language.clone(),
+            expires: upload.expires.clone(),
             ..Default::default()
         };
 

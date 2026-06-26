@@ -164,6 +164,14 @@ pub struct ObjectMeta {
     #[serde(default)]
     pub content_encoding: Option<String>,
     #[serde(default)]
+    pub cache_control: Option<String>,
+    #[serde(default)]
+    pub content_disposition: Option<String>,
+    #[serde(default)]
+    pub content_language: Option<String>,
+    #[serde(default)]
+    pub expires: Option<String>,
+    #[serde(default)]
     pub website_redirect_location: Option<String>,
 }
 
@@ -189,6 +197,14 @@ pub struct MpuInit {
     pub acl_grants: Vec<AclGrantSnapshot>,
     #[serde(default)]
     pub checksum_algorithm: Option<String>,
+    #[serde(default)]
+    pub cache_control: Option<String>,
+    #[serde(default)]
+    pub content_disposition: Option<String>,
+    #[serde(default)]
+    pub content_language: Option<String>,
+    #[serde(default)]
+    pub expires: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

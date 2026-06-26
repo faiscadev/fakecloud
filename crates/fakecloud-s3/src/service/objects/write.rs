@@ -236,6 +236,17 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let header_str = |name: &str| {
+            req.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        };
+        let cache_control = header_str("cache-control");
+        let content_disposition = header_str("content-disposition");
+        let content_language = header_str("content-language");
+        let expires = header_str("expires");
+
         let metadata = extract_user_metadata(&req.headers);
 
         // Extract checksum algorithm and value
@@ -461,6 +472,10 @@ impl S3Service {
             bucket_key_enabled,
             version_id: version_id.clone(),
             content_encoding,
+            cache_control,
+            content_disposition,
+            content_language,
+            expires,
             website_redirect_location,
             checksum_algorithm: checksum_algorithm.clone(),
             checksum_value: checksum_value.clone(),
@@ -851,6 +866,31 @@ impl S3Service {
 
         let new_storage_class = storage_class.unwrap_or_else(|| "STANDARD".to_string());
 
+        // System metadata follows the metadata-directive: REPLACE takes the
+        // request headers, COPY inherits from the source.
+        let (new_cache_control, new_content_disposition, new_content_language, new_expires) =
+            if metadata_directive == "REPLACE" {
+                let h = |name: &str| {
+                    req.headers
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                };
+                (
+                    h("cache-control"),
+                    h("content-disposition"),
+                    h("content-language"),
+                    h("expires"),
+                )
+            } else {
+                (
+                    src_obj.cache_control.clone(),
+                    src_obj.content_disposition.clone(),
+                    src_obj.content_language.clone(),
+                    src_obj.expires.clone(),
+                )
+            };
+
         let new_tags = if tagging_directive == "REPLACE" {
             let th = req
                 .headers
@@ -1011,6 +1051,10 @@ impl S3Service {
             bucket_key_enabled: new_bke,
             version_id: version_id.clone(),
             content_encoding: src_obj.content_encoding,
+            cache_control: new_cache_control,
+            content_disposition: new_content_disposition,
+            content_language: new_content_language,
+            expires: new_expires,
             website_redirect_location: new_redirect,
             checksum_algorithm: new_checksum_algo.clone(),
             checksum_value: new_checksum_val.clone(),
