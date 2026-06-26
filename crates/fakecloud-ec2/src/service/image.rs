@@ -22,23 +22,42 @@ fn validate_image_strings(req: &AwsRequest) -> Result<(), AwsServiceError> {
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
 fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
+    // Effective owner: the AMI's own owner_id when set (seeded public AMIs),
+    // else the requesting account (user-registered AMIs are owned by creator).
+    let owner_id = i.owner_id.as_deref().unwrap_or(owner);
+    let creation_date = i.creation_date.as_deref().unwrap_or(FIXED_TIME);
+    let root_device_name = i.root_device_name.as_deref().unwrap_or("/dev/xvda");
+    let platform_details = i.platform.as_deref().unwrap_or("Linux/UNIX");
+    let owner_alias_xml = i
+        .owner_alias
+        .as_deref()
+        .map(|a| ec2_elem("imageOwnerAlias", a))
+        .unwrap_or_default();
+    // Windows AMIs additionally report `<platform>windows</platform>`.
+    let platform_xml = if platform_details.eq_ignore_ascii_case("windows") {
+        ec2_elem("platform", "windows")
+    } else {
+        String::new()
+    };
     format!(
-        "{}{}<imageState>{}</imageState>{}{}<isPublic>{}</isPublic>{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}<imageState>{}</imageState>{}{}{}{}<isPublic>{}</isPublic>{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("imageId", &i.image_id),
-        ec2_elem("imageLocation", &format!("{owner}/{}", i.name)),
+        ec2_elem("imageLocation", &format!("{owner_id}/{}", i.name)),
         i.state,
-        ec2_elem("imageOwnerId", owner),
-        ec2_elem("creationDate", FIXED_TIME),
+        ec2_elem("imageOwnerId", owner_id),
+        owner_alias_xml,
+        ec2_elem("creationDate", creation_date),
+        platform_xml,
         i.public,
         ec2_elem("architecture", &i.architecture),
         ec2_elem("imageType", "machine"),
         ec2_elem("name", &i.name),
         ec2_elem("description", &i.description),
         ec2_elem("rootDeviceType", "ebs"),
-        ec2_elem("rootDeviceName", "/dev/xvda"),
+        ec2_elem("rootDeviceName", root_device_name),
         ec2_elem("virtualizationType", "hvm"),
         ec2_elem("hypervisor", "xen"),
-        ec2_elem("platformDetails", "Linux/UNIX"),
+        ec2_elem("platformDetails", platform_details),
         ec2_elem("bootMode", i.boot_mode.as_deref().unwrap_or("uefi")),
         format_args!(
             "<deregistrationProtection>{}</deregistrationProtection>",
@@ -69,6 +88,11 @@ fn build_image(name: String, description: String, source_instance_id: Option<Str
         launch_permission_users: Vec::new(),
         launch_permission_groups: Vec::new(),
         boot_mode: None,
+        owner_id: None,
+        owner_alias: None,
+        creation_date: None,
+        root_device_name: None,
+        platform: None,
     }
 }
 
@@ -174,6 +198,12 @@ pub(crate) fn describe_images(
     let filters = parse_filters(&req.query_params);
     let wanted = indexed_list(&req.query_params, "ImageId");
     let owner = req.account_id.clone();
+    // `Owner.N` request params (distinct from the `owner-*` filters): values are
+    // an account id, `self`, or an owner alias (`amazon` / `aws-marketplace`).
+    // When present, only images whose effective owner matches are returned —
+    // this is what lets `aws_ami` data sources with `owners = ["amazon"]`
+    // resolve the seeded public catalogue instead of every image in the account.
+    let owners = indexed_list(&req.query_params, "Owner");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -182,6 +212,7 @@ pub(crate) fn describe_images(
         .values()
         .filter(|i| !i.in_recycle_bin)
         .filter(|i| wanted.is_empty() || wanted.contains(&i.image_id))
+        .filter(|i| image_owner_match(i, &owner, &owners))
         .filter(|i| img_match(i, state.tags_for(&i.image_id), &filters))
         .map(|i| image_xml(i, state.tags_for(&i.image_id), &owner))
         .collect();
@@ -193,14 +224,75 @@ pub(crate) fn describe_images(
     ))
 }
 
+/// EC2 filter glob: values support `*` (any run) and `?` (one char). AMI `name`
+/// filters in real Terraform configs use a mid-string `*`
+/// (e.g. `amzn2-ami-hvm-*-x86_64-gp2`), so a trailing-only wildcard is not
+/// enough here.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return pattern == text;
+    }
+    // Classic two-pointer wildcard match with backtracking on `*`.
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Match an image against the `Owner.N` request params. Empty = no constraint.
+/// Each owner is an account id, `self`, or an alias (`amazon`/`aws-marketplace`).
+fn image_owner_match(i: &Image, account: &str, owners: &[String]) -> bool {
+    if owners.is_empty() {
+        return true;
+    }
+    let effective_owner = i.owner_id.as_deref().unwrap_or(account);
+    owners.iter().any(|o| match o.as_str() {
+        "self" => i.owner_id.is_none() || i.owner_id.as_deref() == Some(account),
+        other => other == effective_owner || Some(other) == i.owner_alias.as_deref(),
+    })
+}
+
 fn img_match(i: &Image, tags: &[Tag], filters: &[Filter]) -> bool {
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
             "image-id" => vec![i.image_id.clone()],
             "name" => vec![i.name.clone()],
+            "description" => vec![i.description.clone()],
             "state" => vec![i.state.clone()],
             "architecture" => vec![i.architecture.clone()],
             "is-public" => vec![i.public.to_string()],
+            "root-device-type" => vec!["ebs".to_string()],
+            "virtualization-type" => vec!["hvm".to_string()],
+            "hypervisor" => vec!["xen".to_string()],
+            "image-type" => vec!["machine".to_string()],
+            "owner-id" => vec![i.owner_id.clone().unwrap_or_default()],
+            "owner-alias" => vec![i.owner_alias.clone().unwrap_or_default()],
+            "platform" => i
+                .platform
+                .as_deref()
+                .filter(|p| p.eq_ignore_ascii_case("windows"))
+                .map(|_| vec!["windows".to_string()])
+                .unwrap_or_default(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -213,7 +305,9 @@ fn img_match(i: &Image, tags: &[Tag], filters: &[Filter]) -> bool {
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| glob_match(v, c)))
     })
 }
 
@@ -864,4 +958,121 @@ pub(crate) fn describe_fast_launch_images(
         &req.request_id,
         &ec2_list("fastLaunchImageSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{glob_match, image_owner_match};
+    use crate::state::{Ec2State, Image};
+
+    fn img(owner_id: Option<&str>, alias: Option<&str>) -> Image {
+        Image {
+            image_id: "ami-test".into(),
+            name: "n".into(),
+            description: "d".into(),
+            state: "available".into(),
+            architecture: "x86_64".into(),
+            public: true,
+            source_instance_id: None,
+            in_recycle_bin: false,
+            deprecation_time: None,
+            deregistration_protection: false,
+            launch_permission_users: vec![],
+            launch_permission_groups: vec![],
+            boot_mode: None,
+            owner_id: owner_id.map(str::to_string),
+            owner_alias: alias.map(str::to_string),
+            creation_date: None,
+            root_device_name: None,
+            platform: None,
+        }
+    }
+
+    #[test]
+    fn glob_matches_mid_string_wildcard() {
+        // The shape real Terraform aws_ami filters use.
+        assert!(glob_match(
+            "amzn2-ami-hvm-*-x86_64-gp2",
+            "amzn2-ami-hvm-2.0.20240306.2-x86_64-gp2"
+        ));
+        assert!(glob_match(
+            "al2023-ami-*-kernel-6.1-arm64",
+            "al2023-ami-2023.4.20240319.1-kernel-6.1-arm64"
+        ));
+        assert!(!glob_match(
+            "amzn2-ami-hvm-*-x86_64-gp2",
+            "ubuntu-noble-24.04"
+        ));
+        assert!(glob_match(
+            "ubuntu-*-24.04-*-server-*",
+            "ubuntu-noble-24.04-amd64-server-20240423"
+        ));
+        // exact + single-char
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "other"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        // trailing star
+        assert!(glob_match("pre*", "prefix-anything"));
+    }
+
+    #[test]
+    fn owner_filter_resolves_amazon_alias_and_self() {
+        let amazon = img(Some("137112412989"), Some("amazon"));
+        let user = img(None, None); // user-registered -> owned by caller
+        let acct = "123456789012";
+
+        // owners=["amazon"] matches the alias, not the user AMI.
+        assert!(image_owner_match(&amazon, acct, &["amazon".into()]));
+        assert!(!image_owner_match(&user, acct, &["amazon".into()]));
+        // owners=[<amazon owner id>] matches by id.
+        assert!(image_owner_match(&amazon, acct, &["137112412989".into()]));
+        // owners=["self"] matches the user AMI (None owner = caller), not amazon.
+        assert!(image_owner_match(&user, acct, &["self".into()]));
+        assert!(!image_owner_match(&amazon, acct, &["self".into()]));
+        // owners=[caller account] matches the user AMI.
+        assert!(image_owner_match(&user, acct, &[acct.into()]));
+        // empty owners = no constraint.
+        assert!(image_owner_match(&amazon, acct, &[]));
+    }
+
+    #[test]
+    fn seeded_catalogue_is_filterable_by_owner_and_name() {
+        let state = Ec2State::new("123456789012", "us-east-1");
+        // The seed catalogue is present and amazon-owned entries resolve.
+        let amazon_amis: Vec<&Image> = state
+            .images
+            .values()
+            .filter(|i| image_owner_match(i, "123456789012", &["amazon".into()]))
+            .collect();
+        assert!(
+            amazon_amis.len() >= 4,
+            "expected the amazon-owned seeds, got {}",
+            amazon_amis.len()
+        );
+        // The canonical Ubuntu name-wildcard a real aws_ami data source sends.
+        let ubuntu = state.images.values().find(|i| {
+            glob_match(
+                "ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*",
+                &i.name,
+            )
+        });
+        assert!(
+            ubuntu.is_some(),
+            "ubuntu 22.04 seed should match the TF name filter"
+        );
+        // most_recent ordering is well-defined: seeds carry distinct dates.
+        let mut dates: Vec<&str> = state
+            .images
+            .values()
+            .filter_map(|i| i.creation_date.as_deref())
+            .collect();
+        let n = dates.len();
+        dates.sort();
+        dates.dedup();
+        assert!(
+            dates.len() >= 5 && n >= 6,
+            "seeds need distinct creation dates for most_recent"
+        );
+    }
 }

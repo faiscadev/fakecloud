@@ -20,8 +20,8 @@
 //! a routable backing network; a subnet without one is private (`internal`).
 
 use crate::state::{
-    Ec2State, InternetGateway, NetworkAcl, NetworkAclAssoc, NetworkAclEntry, Route, RouteTable,
-    RouteTableAssociation, SecurityGroup, SecurityGroupRule, Subnet, Vpc,
+    Ec2State, Image, InternetGateway, NetworkAcl, NetworkAclAssoc, NetworkAclEntry, Route,
+    RouteTable, RouteTableAssociation, SecurityGroup, SecurityGroupRule, Subnet, Vpc,
 };
 
 /// CIDR of the default VPC, matching AWS.
@@ -93,6 +93,133 @@ pub(crate) fn default_security_group_id(account: &str) -> String {
 /// Populate `state` with the default VPC topology. Called once at state
 /// construction; idempotent in practice because the deterministic ids collide
 /// on re-entry.
+/// Seed a small catalogue of public AMIs the way every real AWS account sees
+/// them, so Terraform's `aws_ami` / `aws_ami_ids` data sources — which resolve
+/// an image via `owners = ["amazon"|"099720109477"|…]` + a `name` wildcard +
+/// `most_recent = true` — return a result instead of empty. Without this,
+/// `DescribeImages` only ever returned user-registered AMIs, so the common
+/// `data "aws_ami" "al2" { most_recent = true; owners = ["amazon"]; filter { … } }`
+/// pattern (and everything that chains off it, e.g. an `aws_instance` or an
+/// ELBv2 target-group attachment) could not be planned.
+///
+/// Ids and `creationDate`s are deterministic and version-stable; the distinct
+/// dates make `most_recent` ordering well-defined. These are public, read-only
+/// fixtures owned by Amazon/Canonical — not user data — and share the
+/// deterministic-id property of the default network so the throwaway empty
+/// states the read paths build report the same catalogue.
+/// One seeded public-AMI row: `(image_id, name, description, architecture,
+/// owner_id, owner_alias, creation_date, root_device_name, platform)`.
+type AmiSeed = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+);
+
+pub(crate) fn seed_public_images(state: &mut Ec2State) {
+    const AMAZON: &str = "137112412989";
+    const CANONICAL: &str = "099720109477";
+    const AMAZON_WINDOWS: &str = "801119661308";
+    let seeds: &[AmiSeed] = &[
+        (
+            "ami-0a1b2c3d4e5f60001",
+            "amzn2-ami-hvm-2.0.20240306.2-x86_64-gp2",
+            "Amazon Linux 2 AMI 2.0.20240306.2 x86_64 HVM gp2",
+            "x86_64",
+            AMAZON,
+            Some("amazon"),
+            "2024-03-06T12:00:00.000Z",
+            "/dev/xvda",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60002",
+            "al2023-ami-2023.4.20240319.1-kernel-6.1-x86_64",
+            "Amazon Linux 2023 AMI 2023.4.20240319.1 x86_64 HVM kernel-6.1",
+            "x86_64",
+            AMAZON,
+            Some("amazon"),
+            "2024-03-19T12:00:00.000Z",
+            "/dev/xvda",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60003",
+            "al2023-ami-2023.4.20240319.1-kernel-6.1-arm64",
+            "Amazon Linux 2023 AMI 2023.4.20240319.1 arm64 HVM kernel-6.1",
+            "arm64",
+            AMAZON,
+            Some("amazon"),
+            "2024-03-19T12:00:00.000Z",
+            "/dev/xvda",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60004",
+            "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20240319",
+            "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on 2024-03-19",
+            "x86_64",
+            CANONICAL,
+            None,
+            "2024-03-19T06:00:00.000Z",
+            "/dev/sda1",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60005",
+            "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20240423",
+            "Canonical, Ubuntu, 24.04 LTS, amd64 noble image build on 2024-04-23",
+            "x86_64",
+            CANONICAL,
+            None,
+            "2024-04-23T06:00:00.000Z",
+            "/dev/sda1",
+            None,
+        ),
+        (
+            "ami-0a1b2c3d4e5f60006",
+            "Windows_Server-2022-English-Full-Base-2024.03.13",
+            "Microsoft Windows Server 2022 Full Locale English AMI provided by Amazon",
+            "x86_64",
+            AMAZON_WINDOWS,
+            Some("amazon"),
+            "2024-03-13T12:00:00.000Z",
+            "/dev/sda1",
+            Some("windows"),
+        ),
+    ];
+    for (id, name, desc, arch, owner, alias, created, root_dev, platform) in seeds {
+        state.images.insert(
+            (*id).to_string(),
+            Image {
+                image_id: (*id).to_string(),
+                name: (*name).to_string(),
+                description: (*desc).to_string(),
+                state: "available".to_string(),
+                architecture: (*arch).to_string(),
+                public: true,
+                source_instance_id: None,
+                in_recycle_bin: false,
+                deprecation_time: None,
+                deregistration_protection: false,
+                launch_permission_users: Vec::new(),
+                launch_permission_groups: vec!["all".to_string()],
+                boot_mode: None,
+                owner_id: Some((*owner).to_string()),
+                owner_alias: alias.map(str::to_string),
+                creation_date: Some((*created).to_string()),
+                root_device_name: Some((*root_dev).to_string()),
+                platform: platform.map(str::to_string),
+            },
+        );
+    }
+}
+
 pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
     let account = state.account_id.clone();
     let region = if state.region.is_empty() {
