@@ -148,6 +148,80 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// Apply a CFN property update to an existing role in place: the
+    /// assume-role policy, description, session duration, and permissions
+    /// boundary, plus the inline `Policies` and attached `ManagedPolicyArns`
+    /// (replaced, not appended — the new template is authoritative). Without
+    /// this an UpdateStack that retunes a role's grants is a silent no-op, so a
+    /// workload assuming the role keeps the stale permissions under `--iam`.
+    pub(super) fn update_iam_role(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let role_name = state
+            .roles
+            .iter()
+            .find(|(_, r)| &r.arn == arn)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| format!("IAM role {arn} not yet provisioned"))?;
+
+        if let Some(role) = state.roles.get_mut(&role_name) {
+            if let Some(doc) = props.get("AssumeRolePolicyDocument") {
+                role.assume_role_policy_document = if doc.is_string() {
+                    doc.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(doc).unwrap_or_default()
+                };
+            }
+            if let Some(d) = props.get("Description").and_then(|v| v.as_str()) {
+                role.description = Some(d.to_string());
+            }
+            if let Some(m) = props.get("MaxSessionDuration").and_then(|v| v.as_i64()) {
+                role.max_session_duration = m as i32;
+            }
+            if let Some(pb) = props.get("PermissionsBoundary").and_then(|v| v.as_str()) {
+                role.permissions_boundary = Some(pb.to_string());
+            }
+        }
+
+        // Inline policies — replace the whole set with the template's.
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            let inline = state
+                .role_inline_policies
+                .entry(role_name.clone())
+                .or_default();
+            inline.clear();
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    inline.insert(n.to_string(), document);
+                }
+            }
+        }
+        // Attached managed policies — replace the set with the template's.
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            let attached: Vec<String> = arns
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
+            state.role_policies.insert(role_name.clone(), attached);
+        }
+
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn.clone()))
+    }
+
     // --- IAM Policy ---
 
     pub(super) fn create_iam_policy(
@@ -219,6 +293,58 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.policies.remove(physical_id);
         Ok(())
+    }
+
+    /// Apply a CFN property update to an existing customer-managed policy
+    /// (`AWS::IAM::Policy` / `AWS::IAM::ManagedPolicy`). A changed
+    /// `PolicyDocument` mints a new policy version and makes it the default —
+    /// exactly what real IAM does — so callers reading the policy see the new
+    /// statements instead of the stale create-time version. Description is also
+    /// refreshed. Previously a no-op (`_ => None`).
+    pub(super) fn update_iam_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let policy = state
+            .policies
+            .get_mut(arn)
+            .ok_or_else(|| format!("IAM policy {arn} not yet provisioned"))?;
+
+        if let Some(doc) = props.get("PolicyDocument") {
+            let document = if doc.is_string() {
+                doc.as_str().unwrap_or("").to_string()
+            } else {
+                serde_json::to_string(doc).unwrap_or_default()
+            };
+            let current = policy
+                .versions
+                .iter()
+                .find(|v| v.is_default)
+                .map(|v| v.document.clone());
+            if current.as_deref() != Some(document.as_str()) {
+                for v in policy.versions.iter_mut() {
+                    v.is_default = false;
+                }
+                let version_id = format!("v{}", policy.next_version_num);
+                policy.next_version_num += 1;
+                policy.default_version_id = version_id.clone();
+                policy.versions.push(PolicyVersion {
+                    version_id,
+                    document,
+                    is_default: true,
+                    created_at: policy.created_at,
+                });
+            }
+        }
+        if let Some(d) = props.get("Description").and_then(|v| v.as_str()) {
+            policy.description = d.to_string();
+        }
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn.clone()))
     }
 
     pub(super) fn create_iam_user(

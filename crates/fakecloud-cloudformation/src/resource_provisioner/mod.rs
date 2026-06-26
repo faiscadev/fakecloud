@@ -1222,6 +1222,9 @@ impl ResourceProvisioner {
             "AWS::Lambda::Url" => Some(self.update_lambda_url(existing, new_def)?),
             "AWS::Lambda::Alias" => Some(self.update_lambda_alias(existing, new_def)?),
             "AWS::Lambda::Version" => Some(self.update_lambda_version(existing, new_def)?),
+            "AWS::IAM::Role" => Some(self.update_iam_role(existing, new_def)?),
+            "AWS::IAM::Policy" => Some(self.update_iam_policy(existing, new_def)?),
+            "AWS::IAM::ManagedPolicy" => Some(self.update_iam_policy(existing, new_def)?),
             "AWS::ApiGateway::RestApi" => Some(self.update_apigw_rest_api(existing, new_def)?),
             "AWS::ApiGateway::Resource" => Some(self.update_apigw_resource(existing, new_def)?),
             "AWS::ApiGateway::Method" => Some(self.update_apigw_method(existing, new_def)?),
@@ -6079,6 +6082,89 @@ mod tests {
             resource_type: resource_type.to_string(),
             properties: props,
         }
+    }
+
+    #[test]
+    fn update_stack_reconciles_iam_role_policies() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::Role",
+                "R",
+                serde_json::json!({
+                    "RoleName": "r1",
+                    "AssumeRolePolicyDocument": {"Version": "2012-10-17"},
+                    "ManagedPolicyArns": ["arn:aws:iam::aws:policy/ReadOnlyAccess"],
+                }),
+            ))
+            .expect("role provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::IAM::Role",
+                "R",
+                serde_json::json!({
+                    "RoleName": "r1",
+                    "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                    "Description": "updated",
+                    "ManagedPolicyArns": ["arn:aws:iam::aws:policy/AdministratorAccess"],
+                    "Policies": [{"PolicyName": "inline1", "PolicyDocument": {"k": "v"}}],
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("IAM::Role is updatable");
+        let iam = prov.iam_state.read();
+        let acct = iam.get("123456789012").unwrap();
+        let role = acct.roles.get("r1").unwrap();
+        assert_eq!(role.description.as_deref(), Some("updated"));
+        assert!(role.assume_role_policy_document.contains("Statement"));
+        // Attached managed policies replaced, not appended.
+        let attached = acct.role_policies.get("r1").unwrap();
+        assert_eq!(
+            attached,
+            &vec!["arn:aws:iam::aws:policy/AdministratorAccess".to_string()]
+        );
+        assert!(acct
+            .role_inline_policies
+            .get("r1")
+            .unwrap()
+            .contains_key("inline1"));
+    }
+
+    #[test]
+    fn update_stack_bumps_managed_policy_version() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::ManagedPolicy",
+                "P",
+                serde_json::json!({
+                    "ManagedPolicyName": "p1",
+                    "PolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow"}]},
+                }),
+            ))
+            .expect("managed policy provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::IAM::ManagedPolicy",
+                "P",
+                serde_json::json!({
+                    "ManagedPolicyName": "p1",
+                    "PolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Deny"}]},
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("IAM::ManagedPolicy is updatable");
+        let iam = prov.iam_state.read();
+        let acct = iam.get("123456789012").unwrap();
+        let policy = acct.policies.get(&created.physical_id).unwrap();
+        assert_eq!(policy.versions.len(), 2);
+        assert_eq!(policy.default_version_id, "v2");
+        let default = policy.versions.iter().find(|v| v.is_default).unwrap();
+        assert!(default.document.contains("Deny"));
     }
 
     #[test]
