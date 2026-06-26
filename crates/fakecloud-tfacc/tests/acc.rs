@@ -238,6 +238,11 @@ async fn appautoscaling_acceptance() {
 }
 
 #[tokio::test]
+async fn autoscaling_acceptance() {
+    run_shard("autoscaling").await;
+}
+
+#[tokio::test]
 async fn scheduler_acceptance() {
     run_shard("scheduler").await;
 }

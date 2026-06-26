@@ -258,6 +258,15 @@ impl AutoScalingService {
             iam_instance_profile: optional_query_param(req, "IamInstanceProfile"),
             associate_public_ip_address: optional_query_param(req, "AssociatePublicIpAddress")
                 .map(|v| v == "true"),
+            // InstanceMonitoring.Enabled defaults to true (AWS + Terraform).
+            instance_monitoring: optional_query_param(req, "InstanceMonitoring.Enabled")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            ebs_optimized: optional_query_param(req, "EbsOptimized")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            spot_price: optional_query_param(req, "SpotPrice"),
+            placement_tenancy: optional_query_param(req, "PlacementTenancy"),
             created_time: Utc::now(),
         };
         {
@@ -283,16 +292,35 @@ impl AutoScalingService {
             .values()
             .filter(|lc| wanted.is_empty() || wanted.contains(&lc.name))
             .map(|lc| {
+                let sgs: String = lc
+                    .security_groups
+                    .iter()
+                    .map(|s| format!("<member>{}</member>", xesc(s)))
+                    .collect();
+                let monitoring = format!(
+                    "<InstanceMonitoring><Enabled>{}</Enabled></InstanceMonitoring>",
+                    lc.instance_monitoring
+                );
                 format!(
-                    "<member>{}{}{}{}{}{}</member>",
+                    "<member>{}{}{}{}{}{}{monitoring}{}{}{}<SecurityGroups>{sgs}</SecurityGroups>{}{}{}{}</member>",
                     el("LaunchConfigurationName", &lc.name),
                     el("LaunchConfigurationARN", &lc.arn),
                     el("ImageId", &lc.image_id),
                     el("InstanceType", &lc.instance_type),
-                    lc.key_name
+                    el("KeyName", lc.key_name.as_deref().unwrap_or("")),
+                    el("IamInstanceProfile", lc.iam_instance_profile.as_deref().unwrap_or("")),
+                    el("EbsOptimized", &lc.ebs_optimized.to_string()),
+                    el(
+                        "AssociatePublicIpAddress",
+                        &lc.associate_public_ip_address.unwrap_or(false).to_string(),
+                    ),
+                    el("SpotPrice", lc.spot_price.as_deref().unwrap_or("")),
+                    el("PlacementTenancy", lc.placement_tenancy.as_deref().unwrap_or("")),
+                    lc.user_data
                         .as_deref()
-                        .map(|k| el("KeyName", k))
+                        .map(|u| el("UserData", u))
                         .unwrap_or_default(),
+                    "<BlockDeviceMappings/>",
                     el("CreatedTime", &iso(lc.created_time)),
                 )
             })
@@ -377,6 +405,13 @@ impl AutoScalingService {
             instances: Vec::new(),
             tags,
             status: None,
+            service_linked_role_arn: optional_query_param(req, "ServiceLinkedRoleARN")
+                .unwrap_or_else(|| {
+                    format!(
+                        "arn:aws:iam::{}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+                        req.account_id
+                    )
+                }),
         };
 
         let _ = azs;
@@ -815,7 +850,7 @@ fn group_xml(g: &AutoScalingGroup) -> String {
     format!(
         "<member>{}{}{}{}{}{}{}{}{}{}{}<AvailabilityZones>{azs}</AvailabilityZones>\
          <Instances>{instances}</Instances><TargetGroupARNs>{tgs}</TargetGroupARNs>\
-         <Tags>{tags}</Tags>{}</member>",
+         <Tags>{tags}</Tags>{}{}{}</member>",
         el("AutoScalingGroupName", &g.name),
         el("AutoScalingGroupARN", &g.arn),
         g.launch_configuration_name
@@ -840,6 +875,8 @@ fn group_xml(g: &AutoScalingGroup) -> String {
             "NewInstancesProtectedFromScaleIn",
             &g.new_instances_protected_from_scale_in.to_string()
         ),
+        el("ServiceLinkedRoleARN", &g.service_linked_role_arn),
+        "<AvailabilityZoneDistribution><CapacityDistributionStrategy>balanced-best-effort</CapacityDistributionStrategy></AvailabilityZoneDistribution>",
     )
 }
 
