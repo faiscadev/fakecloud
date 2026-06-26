@@ -1323,7 +1323,9 @@ impl ResourceProvisioner {
             "AWS::StepFunctions::StateMachine" => {
                 Some(self.update_sfn_state_machine(existing, new_def)?)
             }
+            "AWS::SQS::Queue" => Some(self.update_sqs_queue(existing, new_def)?),
             "AWS::SQS::QueuePolicy" => Some(self.update_sqs_queue_policy(existing, new_def)?),
+            "AWS::SNS::Topic" => Some(self.update_sns_topic(existing, new_def)?),
             "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
             _ => None,
@@ -6079,6 +6081,72 @@ mod tests {
             resource_type: resource_type.to_string(),
             properties: props,
         }
+    }
+
+    #[test]
+    fn update_stack_applies_sqs_queue_property_change() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SQS::Queue",
+                "Q",
+                serde_json::json!({ "QueueName": "q1", "VisibilityTimeout": "30" }),
+            ))
+            .expect("queue provisions");
+        // UpdateStack changes a property; previously a no-op (`_ => None`).
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::SQS::Queue",
+                    "Q",
+                    serde_json::json!({ "QueueName": "q1", "VisibilityTimeout": "120" }),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("SQS::Queue is an updatable type");
+        assert_eq!(updated.physical_id, created.physical_id);
+        let sqs = prov.sqs_state.read();
+        let acct = sqs.get("123456789012").unwrap();
+        let queue = acct.queues.get(&created.physical_id).unwrap();
+        assert_eq!(
+            queue
+                .attributes
+                .get("VisibilityTimeout")
+                .map(String::as_str),
+            Some("120")
+        );
+    }
+
+    #[test]
+    fn update_stack_applies_sns_topic_property_change() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Topic",
+                "T",
+                serde_json::json!({ "TopicName": "t1", "DisplayName": "before" }),
+            ))
+            .expect("topic provisions");
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::SNS::Topic",
+                    "T",
+                    serde_json::json!({ "TopicName": "t1", "DisplayName": "after" }),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("SNS::Topic is an updatable type");
+        assert_eq!(updated.physical_id, created.physical_id);
+        let sns = prov.sns_state.read();
+        let acct = sns.get("123456789012").unwrap();
+        let topic = acct.topics.get(&created.physical_id).unwrap();
+        assert_eq!(
+            topic.attributes.get("DisplayName").map(String::as_str),
+            Some("after")
+        );
     }
 
     #[test]
