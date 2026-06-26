@@ -862,6 +862,12 @@ impl IamService {
             )
         })?;
 
+        // The Password parameter was previously ignored, so rotating a console
+        // password via UpdateLoginProfile returned 200 but silently kept the old
+        // password.
+        if let Some(password) = req.query_params.get("Password") {
+            profile.password = password.clone();
+        }
         if let Some(v) = req.query_params.get("PasswordResetRequired") {
             profile.password_reset_required = v == "true";
         }

@@ -331,10 +331,19 @@ pub(crate) fn modify_network_interface_attribute(
 }
 
 pub(crate) fn reset_network_interface_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "NetworkInterfaceId")?;
+    let eni_id = require(&req.query_params, "NetworkInterfaceId")?;
+    // The only resettable attribute is sourceDestCheck (back to the default
+    // true). Previously this validated then persisted nothing.
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
+            eni.source_dest_check = true;
+        }
+    }
     Ok(Ec2Service::respond(
         "ResetNetworkInterfaceAttribute",
         &req.request_id,
@@ -343,7 +352,7 @@ pub(crate) fn reset_network_interface_attribute(
 }
 
 pub(crate) fn describe_network_interface_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "NetworkInterfaceId")?;
@@ -363,14 +372,40 @@ pub(crate) fn describe_network_interface_attribute(
             "associatePublicIpAddress",
         ],
     )?;
+    // Read the real stored ENI so a Modify is reflected on read-back. Previously
+    // every attribute returned a hardcoded constant (description="eni", empty
+    // groupSet, sourceDestCheck=true) regardless of stored state.
+    let accounts = svc.state.read();
+    let eni = accounts
+        .get(&req.account_id)
+        .and_then(|a| a.network_interfaces.get(&id));
     let attr_xml = match attribute.as_str() {
-        "description" => "<description><value>eni</value></description>".to_string(),
-        "groupSet" => ec2_list("groupSet", &[]),
-        "attachment" => String::new(),
+        "description" => format!(
+            "<description><value>{}</value></description>",
+            eni.map(|e| e.description.as_str()).unwrap_or("")
+        ),
+        "groupSet" => {
+            let groups: Vec<String> = eni
+                .map(|e| {
+                    e.group_ids
+                        .iter()
+                        .map(|g| format!("{}{}", ec2_elem("groupId", g), ec2_elem("groupName", g)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ec2_list("groupSet", &groups)
+        }
+        "attachment" => eni
+            .and_then(|e| e.attachment.as_ref())
+            .map(|a| format!("<attachment>{}</attachment>", attachment_inner(a)))
+            .unwrap_or_default(),
         "associatePublicIpAddress" => {
             "<associatePublicIpAddress>false</associatePublicIpAddress>".to_string()
         }
-        _ => "<sourceDestCheck><value>true</value></sourceDestCheck>".to_string(),
+        _ => format!(
+            "<sourceDestCheck><value>{}</value></sourceDestCheck>",
+            eni.map(|e| e.source_dest_check).unwrap_or(true)
+        ),
     };
     let body = format!("{}{}", ec2_elem("networkInterfaceId", &id), attr_xml);
     Ok(Ec2Service::respond(
@@ -634,5 +669,79 @@ mod tests {
         assert!(!eni.source_dest_check, "SourceDestCheck must persist");
         assert_eq!(eni.description, "new-desc");
         assert_eq!(eni.group_ids, vec!["sg-a".to_string(), "sg-b".to_string()]);
+    }
+
+    fn seed_eni(svc: &Ec2Service) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        state.network_interfaces.insert(
+            "eni-1".to_string(),
+            NetworkInterface {
+                network_interface_id: "eni-1".into(),
+                subnet_id: "subnet-1".into(),
+                vpc_id: "vpc-1".into(),
+                availability_zone: "us-east-1a".into(),
+                description: "old".into(),
+                mac_address: "02:00:00:00:00:01".into(),
+                private_ip_address: "10.0.0.5".into(),
+                status: "available".into(),
+                interface_type: "interface".into(),
+                source_dest_check: true,
+                group_ids: vec!["sg-old".into()],
+                private_ips: vec![],
+                ipv6_addresses: vec![],
+                attachment: None,
+            },
+        );
+    }
+
+    fn describe_attr(svc: &Ec2Service, attr: &str) -> String {
+        let resp = describe_network_interface_attribute(
+            svc,
+            &req(&[("NetworkInterfaceId", "eni-1"), ("Attribute", attr)]),
+        )
+        .unwrap();
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn describe_network_interface_attribute_reads_state() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        modify_network_interface_attribute(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("SourceDestCheck.Value", "false"),
+                ("Description.Value", "new-desc"),
+                ("SecurityGroupId.1", "sg-a"),
+            ]),
+        )
+        .unwrap();
+
+        assert!(describe_attr(&svc, "sourceDestCheck")
+            .contains("<sourceDestCheck><value>false</value></sourceDestCheck>"));
+        assert!(describe_attr(&svc, "description")
+            .contains("<description><value>new-desc</value></description>"));
+        assert!(describe_attr(&svc, "groupSet").contains("<groupId>sg-a</groupId>"));
+    }
+
+    #[test]
+    fn reset_network_interface_attribute_resets_source_dest_check() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        modify_network_interface_attribute(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("SourceDestCheck.Value", "false"),
+            ]),
+        )
+        .unwrap();
+        reset_network_interface_attribute(&svc, &req(&[("NetworkInterfaceId", "eni-1")])).unwrap();
+        let accounts = svc.state.read();
+        assert!(
+            accounts.get("000000000000").unwrap().network_interfaces["eni-1"].source_dest_check
+        );
     }
 }
