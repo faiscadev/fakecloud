@@ -720,6 +720,11 @@ impl BedrockService {
                 ))
             }
 
+            // Runtime: InvokeGuardrailChecks — POST /guardrail-checks/invoke
+            (Method::POST, 2) if segs[0] == "guardrail-checks" && segs[1] == "invoke" => {
+                Some(("InvokeGuardrailChecks", None, None))
+            }
+
             // Runtime: model operations
             (Method::POST, 3) if segs[0] == "model" && segs[2] == "invoke" => {
                 Some(("InvokeModel", Some(decode(&segs[1])), None))
@@ -1066,6 +1071,9 @@ impl AwsService for BedrockService {
                 &extra_id.unwrap_or_default(),
                 &req.body,
             ),
+            "InvokeGuardrailChecks" => {
+                crate::guardrail_checks::invoke_guardrail_checks(&req, &body)
+            }
             // Custom models
             "CreateCustomModel" => {
                 crate::custom_models::create_custom_model(&self.state, &req, &body)

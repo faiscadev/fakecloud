@@ -12,6 +12,7 @@ pub mod enforced_guardrails;
 pub mod evaluation;
 pub mod faults;
 pub mod foundation_model_agreements;
+pub mod guardrail_checks;
 pub mod guardrails;
 pub mod inference_profiles;
 pub mod invocation_jobs;
