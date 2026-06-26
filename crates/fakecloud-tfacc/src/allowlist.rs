@@ -773,6 +773,18 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccAppAutoScaling[A-Za-z0-9]+_basic$",
         deny: &[],
     },
+    Service {
+        name: "autoscaling",
+        // EC2 Auto Scaling: the `_basic` smoke for an Auto Scaling Group
+        // (`aws_autoscaling_group`) and a Launch Configuration
+        // (`aws_launch_configuration`). The group launches real container-backed
+        // EC2 instances (resolving the launch config's AMI from the seeded
+        // catalogue); the launch configuration round-trips InstanceMonitoring /
+        // ebs_optimized / spot_price / placement_tenancy, and the group reports
+        // ServiceLinkedRoleARN + AvailabilityZoneDistribution the provider reads.
+        run_regex: "^TestAccAutoScaling(Group|LaunchConfiguration)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1174,6 +1186,12 @@ pub const SHARDS: &[Shard] = &[
         name: "appautoscaling",
         service: "appautoscaling",
         run_regex: "^TestAccAppAutoScaling[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "autoscaling",
+        service: "autoscaling",
+        run_regex: "^TestAccAutoScaling(Group|LaunchConfiguration)_basic$",
         extra_deny: &[],
     },
 ];

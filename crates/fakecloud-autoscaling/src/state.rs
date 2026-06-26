@@ -60,7 +60,20 @@ pub struct LaunchConfiguration {
     pub iam_instance_profile: Option<String>,
     #[serde(default)]
     pub associate_public_ip_address: Option<bool>,
+    /// `InstanceMonitoring.Enabled` — AWS/Terraform default is `true`.
+    #[serde(default = "default_true")]
+    pub instance_monitoring: bool,
+    #[serde(default)]
+    pub ebs_optimized: bool,
+    #[serde(default)]
+    pub spot_price: Option<String>,
+    #[serde(default)]
+    pub placement_tenancy: Option<String>,
     pub created_time: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +112,9 @@ pub struct AutoScalingGroup {
     /// Set during a DeleteAutoScalingGroup that is draining instances.
     #[serde(default)]
     pub status: Option<String>,
+    /// `ServiceLinkedRoleARN` — defaults to the AWSServiceRoleForAutoScaling SLR.
+    #[serde(default)]
+    pub service_linked_role_arn: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
