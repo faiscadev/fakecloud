@@ -199,7 +199,7 @@ pub(crate) fn provision_stack_resources(
             })?;
 
             match provisioner.create_resource(&resolved_def) {
-                Ok(stack_resource) => {
+                Ok(mut stack_resource) => {
                     physical_ids.insert(
                         stack_resource.logical_id.clone(),
                         stack_resource.physical_id.clone(),
@@ -217,7 +217,12 @@ pub(crate) fn provision_stack_resources(
                             attr_map.insert((*attr).to_string(), v);
                         }
                     }
-                    attributes.insert(stack_resource.logical_id.clone(), attr_map);
+                    attributes.insert(stack_resource.logical_id.clone(), attr_map.clone());
+                    // Persist the live-resolved attributes onto the stored
+                    // resource so later readers — notably resolve_template_outputs,
+                    // which reads StackResource.attributes directly without the
+                    // overlay — see the full GetAtt set, not just the eager subset.
+                    stack_resource.attributes = attr_map;
                     resources.push(stack_resource);
                     made_progress = true;
                 }
@@ -2670,6 +2675,56 @@ mod tests {
             .unwrap();
         assert_eq!(stack.resources.len(), 1);
         assert_eq!(stack.resources[0].resource_type, "Custom::Thing");
+    }
+
+    #[tokio::test]
+    async fn output_getatt_resolves_well_known_attribute() {
+        // An Output that GetAtts a well-known attribute the create handler does
+        // not eagerly capture (SQS QueueUrl) must resolve to the live value, not
+        // a `Queue.QueueUrl` placeholder. Regression for bug-hunt 2026-06-25 1.11:
+        // resolve_template_outputs reads StackResource.attributes, which now
+        // carries the live get_att overlay applied during provisioning.
+        let svc = make_service();
+        let template = r#"{
+            "Resources": {
+                "Queue": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "out-q" } }
+            },
+            "Outputs": {
+                "Url": { "Value": { "Fn::GetAtt": ["Queue", "QueueUrl"] } }
+            }
+        }"#;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "out-stack".to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        svc.create_stack(&make_request("CreateStack", params))
+            .await
+            .expect("create returns StackId");
+
+        let mut url = String::new();
+        for _ in 0..200 {
+            {
+                let accounts = svc.state.read();
+                if let Some(stack) = accounts
+                    .get("123456789012")
+                    .and_then(|s| s.stacks.get("out-stack"))
+                {
+                    if stack.status != "CREATE_IN_PROGRESS" {
+                        url = stack
+                            .outputs
+                            .iter()
+                            .find(|o| o.key == "Url")
+                            .map(|o| o.value.clone())
+                            .unwrap_or_default();
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            url.contains("out-q") && url != "Queue.QueueUrl",
+            "GetAtt QueueUrl output should resolve to the live url, got {url:?}"
+        );
     }
 
     // ── Service error paths ──
