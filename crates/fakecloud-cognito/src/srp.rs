@@ -17,6 +17,29 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Maximum accepted hex length for a client-supplied SRP public value (`SRP_A`).
+/// The 3072-bit modulus is 768 hex chars; a legitimate `A < N` never exceeds
+/// that (plus a small margin). Anything larger is malformed and would only
+/// serve to inflate the cost of the `num-bigint` modpow/multiply that verifies
+/// the proof, so we reject it up front (CPU-DoS guard against an attacker-sized
+/// `A` blocking the executor thread).
+pub const MAX_PUBLIC_HEX_LEN: usize = 1024;
+
+/// Constant-time equality for two equal-length byte slices, used for the SRP
+/// `PASSWORD_CLAIM_SIGNATURE` comparison so the check does not short-circuit on
+/// the first differing byte (no timing side-channel on the proof). The length
+/// branch is not secret: the signature is a fixed-width base64 HMAC-SHA256.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// The 3072-bit MODP group (RFC 5054) that AWS Cognito uses, g = 2.
 const N_HEX: &str = "\
 FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74\
@@ -153,6 +176,9 @@ pub fn expected_signature(
     timestamp: &str,
 ) -> Option<String> {
     use base64::Engine;
+    if client_a_hex.len() > MAX_PUBLIC_HEX_LEN {
+        return None;
+    }
     let n = modulus();
     let a = from_hex(client_a_hex)?;
     if (&a % &n) == BigUint::from(0u8) {

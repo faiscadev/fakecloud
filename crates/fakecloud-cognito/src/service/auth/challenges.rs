@@ -120,6 +120,54 @@ impl CognitoService {
         }
     }
 
+    /// If the user still owes a forced password reset, return a
+    /// `NEW_PASSWORD_REQUIRED` challenge instead of minting tokens. The SRP /
+    /// SELECT_CHALLENGE success path only proves the user's *current* (possibly
+    /// temporary) password; an admin-created user with a temporary password
+    /// must still set a permanent one, exactly as the `USER_PASSWORD_AUTH`
+    /// (initiate.rs) and `AdminInitiateAuth` (admin.rs) paths require. Returns
+    /// `Some(challenge)` when a reset is owed, `None` to proceed to tokens.
+    fn maybe_force_new_password(
+        &self,
+        pool_id: &str,
+        client_id: &str,
+        username: &str,
+        req: &AwsRequest,
+    ) -> Option<AwsResponse> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let needs_reset = state
+            .users
+            .get(pool_id)
+            .and_then(|users| users.get(username))
+            .map(|u| u.user_status == user_status::FORCE_CHANGE_PASSWORD)
+            .unwrap_or(false);
+        if !needs_reset {
+            return None;
+        }
+        let session = Uuid::new_v4().to_string();
+        state.sessions.insert(
+            session.clone(),
+            SessionData {
+                user_pool_id: pool_id.to_string(),
+                username: username.to_string(),
+                client_id: client_id.to_string(),
+                challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                challenge_results: vec![],
+                challenge_metadata: None,
+            },
+        );
+        Some(AwsResponse::ok_json(json!({
+            "ChallengeName": "NEW_PASSWORD_REQUIRED",
+            "Session": session,
+            "ChallengeParameters": {
+                "USER_ID_FOR_SRP": username,
+                "requiredAttributes": "[]",
+                "userAttributes": "{}"
+            }
+        })))
+    }
+
     /// `RespondToAuthChallenge(ChallengeName=PASSWORD_VERIFIER)`: verify the
     /// client's SRP6a proof against the handshake stashed at InitiateAuth time
     /// and, on success, mint real tokens. Reuses the shared token issuer.
@@ -166,7 +214,7 @@ impl CognitoService {
                     "Invalid session for the user, session is expired.",
                 )
             })?;
-            if sess.challenge_name != "PASSWORD_VERIFIER" {
+            if sess.challenge_name != "PASSWORD_VERIFIER" || sess.client_id != client_id {
                 return Err(bad_creds());
             }
             let stash = sess.challenge_metadata.clone().ok_or_else(bad_creds)?;
@@ -224,7 +272,7 @@ impl CognitoService {
         )
         .ok_or_else(bad_creds)?;
 
-        if expected.as_bytes() != client_sig.as_bytes() {
+        if !crate::srp::ct_eq(expected.as_bytes(), client_sig.as_bytes()) {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             state.auth_events.push(AuthEvent {
@@ -247,6 +295,11 @@ impl CognitoService {
                 .get_or_create(&req.account_id)
                 .sessions
                 .remove(session);
+        }
+
+        // A valid SRP proof of a *temporary* password still owes a reset.
+        if let Some(resp) = self.maybe_force_new_password(&pool_id, client_id, &username, req) {
+            return Ok(resp);
         }
 
         self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
@@ -299,7 +352,7 @@ impl CognitoService {
                     "Invalid session for the user, session is expired.",
                 )
             })?;
-            if sess.challenge_name != "SELECT_CHALLENGE" {
+            if sess.challenge_name != "SELECT_CHALLENGE" || sess.client_id != client_id {
                 return Err(bad_creds());
             }
             (
@@ -353,6 +406,12 @@ impl CognitoService {
                 };
                 if !ok {
                     return Err(bad_creds());
+                }
+                // A temporary password still owes a forced reset.
+                if let Some(resp) =
+                    self.maybe_force_new_password(&pool_id, client_id, &username, req)
+                {
+                    return Ok(resp);
                 }
                 self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
             }

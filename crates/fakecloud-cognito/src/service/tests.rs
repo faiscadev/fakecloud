@@ -2475,6 +2475,255 @@ fn user_srp_auth_full_flow() {
     assert_eq!(err.code(), "NotAuthorizedException");
 }
 
+/// A USER_SRP_AUTH login by an admin-created user whose status is still
+/// FORCE_CHANGE_PASSWORD must, after a valid SRP proof of the *temporary*
+/// password, return a NEW_PASSWORD_REQUIRED challenge rather than minting
+/// tokens (matching real Cognito and the USER_PASSWORD_AUTH path).
+#[test]
+fn user_srp_auth_force_change_password_returns_challenge() {
+    use base64::Engine;
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "srp-fcp-client",
+        "ExplicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let client_id = resp_json(
+        &svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap(),
+    )["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Admin-create the user with a temporary password -> FORCE_CHANGE_PASSWORD.
+    let temp_password = "TempP@ss1!";
+    block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "fcpuser", "TemporaryPassword": temp_password})
+            .to_string(),
+    )))
+    .unwrap();
+
+    // SRP handshake using the temporary password.
+    let (a_priv, a_pub) = crate::srp::test_client_keypair();
+    let challenge = resp_json(
+        &block_on(
+            svc.initiate_auth(&make_req(
+                "InitiateAuth",
+                &json!({
+                    "ClientId": client_id,
+                    "AuthFlow": "USER_SRP_AUTH",
+                    "AuthParameters": {"USERNAME": "fcpuser", "SRP_A": crate::srp::to_hex(&a_pub)},
+                })
+                .to_string(),
+            )),
+        )
+        .unwrap(),
+    );
+    assert_eq!(challenge["ChallengeName"], "PASSWORD_VERIFIER");
+    let session = challenge["Session"].as_str().unwrap().to_string();
+    let cp = &challenge["ChallengeParameters"];
+    let salt = crate::srp::parse_hex(cp["SALT"].as_str().unwrap()).unwrap();
+    let server_b = crate::srp::parse_hex(cp["SRP_B"].as_str().unwrap()).unwrap();
+    let secret_block_b64 = cp["SECRET_BLOCK"].as_str().unwrap().to_string();
+    let user_id = cp["USER_ID_FOR_SRP"].as_str().unwrap().to_string();
+    let pool_name = crate::srp::pool_short_name(&pool_id).to_string();
+    let secret_block = base64::engine::general_purpose::STANDARD
+        .decode(&secret_block_b64)
+        .unwrap();
+    let ts = "Wed Mar 6 12:34:56 UTC 2024";
+    let sig = crate::srp::test_client_signature(
+        &pool_name,
+        &user_id,
+        temp_password,
+        &salt,
+        &server_b,
+        &a_priv,
+        &secret_block,
+        ts,
+    );
+
+    // Valid proof of the temporary password -> NEW_PASSWORD_REQUIRED, no tokens.
+    let resp = resp_json(
+        &block_on(svc.respond_to_auth_challenge(&make_req(
+            "RespondToAuthChallenge",
+            &json!({
+                "ClientId": client_id,
+                "ChallengeName": "PASSWORD_VERIFIER",
+                "Session": session,
+                "ChallengeResponses": {"USERNAME": "fcpuser", "PASSWORD_CLAIM_SIGNATURE": sig, "PASSWORD_CLAIM_SECRET_BLOCK": secret_block_b64, "TIMESTAMP": ts},
+            })
+            .to_string(),
+        )))
+        .unwrap(),
+    );
+    assert_eq!(resp["ChallengeName"], "NEW_PASSWORD_REQUIRED");
+    assert!(resp["AuthenticationResult"].is_null());
+    let new_pw_session = resp["Session"].as_str().unwrap().to_string();
+
+    // Completing NEW_PASSWORD_REQUIRED then mints tokens.
+    let final_auth = resp_json(
+        &block_on(
+            svc.respond_to_auth_challenge(&make_req(
+                "RespondToAuthChallenge",
+                &json!({
+                    "ClientId": client_id,
+                    "ChallengeName": "NEW_PASSWORD_REQUIRED",
+                    "Session": new_pw_session,
+                    "ChallengeResponses": {"USERNAME": "fcpuser", "NEW_PASSWORD": "Perm@nent99!"},
+                })
+                .to_string(),
+            )),
+        )
+        .unwrap(),
+    );
+    assert!(final_auth["AuthenticationResult"]["AccessToken"]
+        .as_str()
+        .is_some());
+}
+
+/// A PASSWORD_VERIFIER challenge is bound to the app client that started the
+/// SRP handshake: responding with a different ClientId is rejected even with
+/// an otherwise-valid proof.
+#[test]
+fn user_srp_auth_wrong_client_id_rejected() {
+    use base64::Engine;
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let mk_client = |name: &str| {
+        resp_json(
+            &svc.create_user_pool_client(&make_req(
+                "CreateUserPoolClient",
+                &json!({
+                    "UserPoolId": pool_id,
+                    "ClientName": name,
+                    "ExplicitAuthFlows": ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let client_a = mk_client("srp-a");
+    let client_b = mk_client("srp-b");
+
+    let password = "S3cretP@ss!";
+    block_on(svc.sign_up(&make_req(
+        "SignUp",
+        &json!({"ClientId": client_a, "Username": "binduser", "Password": password}).to_string(),
+    )))
+    .unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "binduser", "Password": password, "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    let (a_priv, a_pub) = crate::srp::test_client_keypair();
+    let challenge = resp_json(
+        &block_on(
+            svc.initiate_auth(&make_req(
+                "InitiateAuth",
+                &json!({
+                    "ClientId": client_a,
+                    "AuthFlow": "USER_SRP_AUTH",
+                    "AuthParameters": {"USERNAME": "binduser", "SRP_A": crate::srp::to_hex(&a_pub)},
+                })
+                .to_string(),
+            )),
+        )
+        .unwrap(),
+    );
+    let session = challenge["Session"].as_str().unwrap().to_string();
+    let cp = &challenge["ChallengeParameters"];
+    let salt = crate::srp::parse_hex(cp["SALT"].as_str().unwrap()).unwrap();
+    let server_b = crate::srp::parse_hex(cp["SRP_B"].as_str().unwrap()).unwrap();
+    let secret_block_b64 = cp["SECRET_BLOCK"].as_str().unwrap().to_string();
+    let user_id = cp["USER_ID_FOR_SRP"].as_str().unwrap().to_string();
+    let pool_name = crate::srp::pool_short_name(&pool_id).to_string();
+    let secret_block = base64::engine::general_purpose::STANDARD
+        .decode(&secret_block_b64)
+        .unwrap();
+    let ts = "Wed Mar 6 12:34:56 UTC 2024";
+    let sig = crate::srp::test_client_signature(
+        &pool_name,
+        &user_id,
+        password,
+        &salt,
+        &server_b,
+        &a_priv,
+        &secret_block,
+        ts,
+    );
+
+    // Respond with a DIFFERENT client id -> rejected.
+    let err = block_on(svc.respond_to_auth_challenge(&make_req(
+        "RespondToAuthChallenge",
+        &json!({
+            "ClientId": client_b,
+            "ChallengeName": "PASSWORD_VERIFIER",
+            "Session": session,
+            "ChallengeResponses": {"USERNAME": "binduser", "PASSWORD_CLAIM_SIGNATURE": sig, "PASSWORD_CLAIM_SECRET_BLOCK": secret_block_b64, "TIMESTAMP": ts},
+        })
+        .to_string(),
+    )))
+    .err()
+    .expect("wrong client id rejected");
+    assert_eq!(err.code(), "NotAuthorizedException");
+}
+
+/// An oversized SRP_A is rejected up front rather than burning CPU on a
+/// modpow over an attacker-sized public value (DoS guard).
+#[test]
+fn user_srp_auth_rejects_oversized_srp_a() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let client_id = resp_json(
+        &svc.create_user_pool_client(&make_req(
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": pool_id,
+                "ClientName": "srp-big",
+                "ExplicitAuthFlows": ["ALLOW_USER_SRP_AUTH"]
+            })
+            .to_string(),
+        ))
+        .unwrap(),
+    )["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    block_on(
+        svc.sign_up(&make_req(
+            "SignUp",
+            &json!({"ClientId": client_id, "Username": "biguser", "Password": "S3cretP@ss!"})
+                .to_string(),
+        )),
+    )
+    .unwrap();
+
+    let huge = "f".repeat(crate::srp::MAX_PUBLIC_HEX_LEN + 1);
+    let err = block_on(
+        svc.initiate_auth(&make_req(
+            "InitiateAuth",
+            &json!({
+                "ClientId": client_id,
+                "AuthFlow": "USER_SRP_AUTH",
+                "AuthParameters": {"USERNAME": "biguser", "SRP_A": huge},
+            })
+            .to_string(),
+        )),
+    )
+    .err()
+    .expect("oversized SRP_A rejected");
+    assert_eq!(err.code(), "InvalidParameterException");
+}
+
 /// USER_AUTH choice-based flow: InitiateAuth returns SELECT_CHALLENGE; the
 /// client selects PASSWORD_SRP (-> SRP handshake -> tokens) or PASSWORD
 /// (-> direct verify -> tokens).
