@@ -3054,7 +3054,8 @@ async fn main() {
             None
         };
     let mut autoscaling_service =
-        fakecloud_autoscaling::AutoScalingService::new(autoscaling_state.clone());
+        fakecloud_autoscaling::AutoScalingService::new(autoscaling_state.clone())
+            .with_ec2(ec2_state.clone(), ec2_runtime.clone());
     if let Some(store) = autoscaling_snapshot_store.clone() {
         autoscaling_service = autoscaling_service.with_snapshot_store(store);
     }

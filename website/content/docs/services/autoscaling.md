@@ -18,7 +18,7 @@ launches *real* instances.
 
 - **Launch Configurations** — `CreateLaunchConfiguration`, `DescribeLaunchConfigurations`, `DeleteLaunchConfiguration`.
 - **Auto Scaling Groups** — `CreateAutoScalingGroup`, `DescribeAutoScalingGroups`, `UpdateAutoScalingGroup`, `DeleteAutoScalingGroup` (rejects delete with instances unless `ForceDelete`). Launch source is a Launch Configuration or an EC2 Launch Template.
-- **Capacity** — `SetDesiredCapacity` and the `DesiredCapacity` on create/update reconcile the group's instance set: launching/terminating instances to match, recording a `Successful` scaling activity for each.
+- **Capacity** — `SetDesiredCapacity` and the `DesiredCapacity` on create/update reconcile the group's instance set, launching **real container-backed EC2 instances** (via the EC2 runtime, resolving the launch configuration's AMI/type; a seeded AMI for launch-template-backed groups) or terminating them on scale-in, and recording a `Successful` scaling activity for each. The launched instances show up in EC2 `DescribeInstances` — unlike every free rival, whose ASG scales to a mock instance (LocalStack #8367).
 - **Activities** — `DescribeScalingActivities` returns the launch/terminate activities (this is the op Terraform's `aws_autoscaling_group` create blocks on, and the one MiniStack lacks — #331).
 - **Instances** — `DescribeAutoScalingInstances` reports each group's instances with `LifecycleState` / `HealthStatus`.
 - **Tags** — `CreateOrUpdateTags`, `DeleteTags`, `DescribeTags` (with `PropagateAtLaunch`).
@@ -30,5 +30,4 @@ XML response), endpoint `autoscaling.<region>.amazonaws.com`.
 
 ## Roadmap
 
-- **Real instances**: desired-capacity reconciliation launches real container-backed EC2 instances through the EC2 runtime (resolving the launch template/config AMI from the seeded catalogue), so `DescribeInstances` shows the ASG's fleet. *(in progress)*
 - Scaling policies (target-tracking / step), lifecycle hooks, instance refresh, and conformance-harness coverage.
