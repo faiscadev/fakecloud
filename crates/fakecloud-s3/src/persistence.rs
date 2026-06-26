@@ -61,6 +61,10 @@ pub fn object_meta_snapshot(o: &S3Object) -> ObjectMeta {
         lock_retain_until: o.lock_retain_until,
         lock_legal_hold: o.lock_legal_hold.clone(),
         content_encoding: o.content_encoding.clone(),
+        cache_control: o.cache_control.clone(),
+        content_disposition: o.content_disposition.clone(),
+        content_language: o.content_language.clone(),
+        expires: o.expires.clone(),
         website_redirect_location: o.website_redirect_location.clone(),
     }
 }
@@ -78,6 +82,10 @@ pub fn mpu_init_snapshot(m: &MultipartUpload) -> MpuInit {
         tagging: m.tagging.clone(),
         acl_grants: m.acl_grants.iter().map(AclGrantSnapshot::from).collect(),
         checksum_algorithm: m.checksum_algorithm.clone(),
+        cache_control: m.cache_control.clone(),
+        content_disposition: m.content_disposition.clone(),
+        content_language: m.content_language.clone(),
+        expires: m.expires.clone(),
     }
 }
 
@@ -126,6 +134,10 @@ pub fn s3_object_from_loaded(lo: LoadedObject) -> S3Object {
         version_id: meta.version_id,
         is_delete_marker: meta.is_delete_marker,
         content_encoding: meta.content_encoding,
+        cache_control: meta.cache_control,
+        content_disposition: meta.content_disposition,
+        content_language: meta.content_language,
+        expires: meta.expires,
         website_redirect_location: meta.website_redirect_location,
         restore_ongoing: meta.restore_ongoing,
         restore_expiry: meta.restore_expiry,
@@ -171,6 +183,10 @@ pub fn multipart_upload_from_loaded(lm: LoadedMpu) -> MultipartUpload {
             .map(acl_grant_from_snapshot)
             .collect(),
         checksum_algorithm: init.checksum_algorithm,
+        cache_control: init.cache_control,
+        content_disposition: init.content_disposition,
+        content_language: init.content_language,
+        expires: init.expires,
     }
 }
 
@@ -453,6 +469,10 @@ permission = "READ"
             tagging: None,
             acl_grants: Vec::new(),
             checksum_algorithm: None,
+            cache_control: None,
+            content_disposition: None,
+            content_language: None,
+            expires: None,
         };
         let snap = mpu_init_snapshot(&mpu);
         assert_eq!(snap.upload_id, "up-1");

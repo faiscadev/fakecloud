@@ -43,6 +43,11 @@ pub struct S3Object {
     pub version_id: Option<String>,
     pub is_delete_marker: bool,
     pub content_encoding: Option<String>,
+    /// System metadata headers AWS stores verbatim and echoes on GET/HEAD.
+    pub cache_control: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_language: Option<String>,
+    pub expires: Option<String>,
     pub website_redirect_location: Option<String>,
     /// Glacier restore: ongoing request status.
     pub restore_ongoing: Option<bool>,
@@ -87,6 +92,10 @@ pub struct MultipartUpload {
     pub tagging: Option<String>,
     pub acl_grants: Vec<AclGrant>,
     pub checksum_algorithm: Option<String>,
+    pub cache_control: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_language: Option<String>,
+    pub expires: Option<String>,
 }
 
 #[derive(Debug, Clone)]
