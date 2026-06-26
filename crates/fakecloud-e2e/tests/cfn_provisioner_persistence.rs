@@ -24,6 +24,10 @@ const CFN_TEMPLATE: &str = r#"{"Resources":{
     "Role":"arn:aws:iam::123456789012:role/r",
     "Code":{"ZipFile":"def handler(event, context):\n    return {}\n"}}},
   "Zone":{"Type":"AWS::Route53::HostedZone","Properties":{"Name":"cfn-zone.example.com."}},
+  "Vpc":{"Type":"AWS::EC2::VPC","Properties":{
+    "CidrBlock":"10.42.0.0/16","Tags":[{"Key":"Name","Value":"cfn-vpc"}]}},
+  "Sg":{"Type":"AWS::EC2::SecurityGroup","Properties":{
+    "GroupName":"cfn-sg","GroupDescription":"cfn sg","VpcId":{"Ref":"Vpc"}}},
   "GlueDb":{"Type":"AWS::Glue::Database","Properties":{
     "CatalogId":"123456789012",
     "DatabaseInput":{"Name":"cfn_glue_db"}}}}}"#;
@@ -106,6 +110,34 @@ async fn glue_database_names(server: &TestServer) -> Vec<String> {
         .database_list()
         .iter()
         .map(|d| d.name().to_string())
+        .collect()
+}
+
+async fn ec2_sg_names(server: &TestServer) -> Vec<String> {
+    server
+        .ec2_client()
+        .await
+        .describe_security_groups()
+        .send()
+        .await
+        .unwrap()
+        .security_groups()
+        .iter()
+        .map(|g| g.group_name().unwrap_or_default().to_string())
+        .collect()
+}
+
+async fn ec2_vpc_cidrs(server: &TestServer) -> Vec<String> {
+    server
+        .ec2_client()
+        .await
+        .describe_vpcs()
+        .send()
+        .await
+        .unwrap()
+        .vpcs()
+        .iter()
+        .map(|v| v.cidr_block().unwrap_or_default().to_string())
         .collect()
 }
 
@@ -252,6 +284,17 @@ async fn cfn_provisioned_resources_survive_restart() {
     assert!(
         glue_dbs.contains(&"cfn_glue_db".to_string()),
         "cfn_glue_db lost: {glue_dbs:?}"
+    );
+
+    // EC2 was wired into the provisioner (2026-06-25 #1957) but missing from
+    // `service_key_for_type`, so CFN-created VPC/SG state vanished on restart
+    // while direct-API EC2 resources persisted (#1766 class).
+    let sgs = ec2_sg_names(&server).await;
+    assert!(sgs.contains(&"cfn-sg".to_string()), "cfn-sg lost: {sgs:?}");
+    let cidrs = ec2_vpc_cidrs(&server).await;
+    assert!(
+        cidrs.contains(&"10.42.0.0/16".to_string()),
+        "cfn-vpc lost: {cidrs:?}"
     );
 }
 

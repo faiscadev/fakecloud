@@ -48,7 +48,7 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::SecretsManager::Secret" => &["Arn", "Id"],
         "AWS::CloudFront::Distribution" => &["DomainName", "Id"],
         "AWS::EC2::VPC" => &["VpcId", "CidrBlock"],
-        "AWS::EC2::Subnet" => &["SubnetId", "AvailabilityZone"],
+        "AWS::EC2::Subnet" => &["SubnetId", "AvailabilityZone", "VpcId", "CidrBlock"],
         "AWS::EC2::SecurityGroup" => &["GroupId", "VpcId"],
         "AWS::EC2::InternetGateway" => &["InternetGatewayId"],
         "AWS::EC2::RouteTable" => &["RouteTableId"],
@@ -115,6 +115,14 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "WAFv2" => "wafv2",
         "Athena" => "athena",
         "Organizations" => "organizations",
+        // EC2 and ApplicationAutoScaling were wired into the provisioner after
+        // this table was last audited (EC2: 2026-06-25 #1957;
+        // application-autoscaling: persistence sweep), so their CFN-created VPC
+        // / Subnet / SecurityGroup / scalable-target state mutated in memory and
+        // vanished on restart (#1766 class). Both have a registered snapshot
+        // hook in the server.
+        "EC2" => "ec2",
+        "ApplicationAutoScaling" => "application-autoscaling",
         _ => return None,
     })
 }
