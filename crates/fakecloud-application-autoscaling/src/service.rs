@@ -9,14 +9,18 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use tokio::sync::Mutex as AsyncMutex;
+
 use fakecloud_aws::arn::{partition_for, Arn};
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::{SnapshotHook, SnapshotStore};
 
 use crate::state::{
-    AccountState, ApplicationAutoScalingAccounts, NotScaledReason, ScalableTarget,
-    ScalableTargetAction, ScalingActivity, ScalingPolicy, ScheduledAction,
+    AccountState, ApplicationAutoScalingAccounts, ApplicationAutoScalingSnapshot, NotScaledReason,
+    ScalableTarget, ScalableTargetAction, ScalingActivity, ScalingPolicy, ScheduledAction,
     SharedApplicationAutoScalingState, SuspendedState,
+    APPLICATION_AUTOSCALING_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const SUPPORTED_ACTIONS: &[&str] = &[
@@ -38,15 +42,78 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct ApplicationAutoScalingService {
     state: SharedApplicationAutoScalingState,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl ApplicationAutoScalingService {
     pub fn new(state: SharedApplicationAutoScalingState) -> Self {
-        Self { state }
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn shared_state(&self) -> SharedApplicationAutoScalingState {
         Arc::clone(&self.state)
+    }
+
+    async fn save_snapshot(&self) {
+        save_application_autoscaling_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+
+    /// CloudFormation persist hook routing through the same serialize path.
+    pub fn snapshot_hook(&self) -> Option<SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_application_autoscaling_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+}
+
+/// Persist the current state as a snapshot; noop in memory mode. Offloads
+/// serde + the blocking file write to the Tokio blocking pool.
+pub async fn save_application_autoscaling_snapshot(
+    state: &SharedApplicationAutoScalingState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: &AsyncMutex<()>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = ApplicationAutoScalingSnapshot {
+        schema_version: APPLICATION_AUTOSCALING_SNAPSHOT_SCHEMA_VERSION,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write application-autoscaling snapshot"),
+        Err(err) => tracing::error!(%err, "application-autoscaling snapshot task panicked"),
     }
 }
 
@@ -67,7 +134,18 @@ impl AwsService for ApplicationAutoScalingService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        match req.action.as_str() {
+        let mutates = matches!(
+            req.action.as_str(),
+            "RegisterScalableTarget"
+                | "DeregisterScalableTarget"
+                | "PutScalingPolicy"
+                | "DeleteScalingPolicy"
+                | "PutScheduledAction"
+                | "DeleteScheduledAction"
+                | "TagResource"
+                | "UntagResource"
+        );
+        let result = match req.action.as_str() {
             "RegisterScalableTarget" => self.register_scalable_target(&req),
             "DescribeScalableTargets" => self.describe_scalable_targets(&req),
             "DeregisterScalableTarget" => self.deregister_scalable_target(&req),
@@ -86,7 +164,11 @@ impl AwsService for ApplicationAutoScalingService {
                 "application-autoscaling",
                 other,
             )),
+        };
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save_snapshot().await;
         }
+        result
     }
 }
 
@@ -1278,6 +1360,51 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    #[tokio::test]
+    async fn register_scalable_target_persists_to_snapshot() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct MemStore(Mutex<Option<Vec<u8>>>);
+        impl SnapshotStore for MemStore {
+            fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+                *self.0.lock().unwrap() = Some(bytes.to_vec());
+                Ok(())
+            }
+        }
+        let store = Arc::new(MemStore::default());
+        let svc = ApplicationAutoScalingService::new(Arc::new(RwLock::new(
+            ApplicationAutoScalingAccounts::new(),
+        )))
+        .with_snapshot_store(store.clone());
+        let req = make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 1,
+                "MaxCapacity": 5,
+            }),
+        );
+        svc.handle(req).await.unwrap();
+        // The mutating action wrote a snapshot; it round-trips the target.
+        let bytes = store
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("RegisterScalableTarget must persist a snapshot");
+        let snap: ApplicationAutoScalingSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snap.accounts.expect("snapshot carries accounts");
+        assert!(accounts
+            .accounts
+            .values()
+            .any(|a| !a.scalable_targets.is_empty()));
     }
 
     #[test]

@@ -2921,10 +2921,70 @@ async fn main() {
         cfn_snapshot_hooks.insert("cloudwatch", h);
     }
     registry.register(Arc::new(cloudwatch_service));
-    let app_autoscaling_service =
+    let app_autoscaling_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path
+                .join("application-autoscaling")
+                .join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<
+                        fakecloud_application_autoscaling::ApplicationAutoScalingSnapshot,
+                    >(&bytes)
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_application_autoscaling::APPLICATION_AUTOSCALING_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "application-autoscaling persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_application_autoscaling::APPLICATION_AUTOSCALING_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *app_autoscaling_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded application-autoscaling persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse application-autoscaling persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "no application-autoscaling persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read application-autoscaling persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut app_autoscaling_service =
         fakecloud_application_autoscaling::ApplicationAutoScalingService::new(
             app_autoscaling_state.clone(),
         );
+    if let Some(store) = app_autoscaling_snapshot_store.clone() {
+        app_autoscaling_service = app_autoscaling_service.with_snapshot_store(store);
+    }
+    if let Some(h) = app_autoscaling_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("application-autoscaling", h);
+    }
     registry.register(Arc::new(app_autoscaling_service));
     let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

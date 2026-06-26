@@ -16,7 +16,8 @@ services:
     environment:
       FAKECLOUD_LOG: info
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_fakecloud/health"]
+      # The slim published image ships no curl/wget; use the built-in probe.
+      test: ["CMD", "fakecloud", "healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 5

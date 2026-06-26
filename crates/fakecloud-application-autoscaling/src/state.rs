@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub type SharedApplicationAutoScalingState = Arc<RwLock<ApplicationAutoScalingAccounts>>;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ApplicationAutoScalingAccounts {
     pub accounts: BTreeMap<String, AccountState>,
 }
@@ -20,18 +20,59 @@ impl ApplicationAutoScalingAccounts {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// Versioned on-disk persistence snapshot for Application Auto Scaling.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApplicationAutoScalingSnapshot {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub accounts: Option<ApplicationAutoScalingAccounts>,
+}
+
+pub const APPLICATION_AUTOSCALING_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension).
+    #[serde(with = "map_as_pairs")]
     pub scalable_targets: BTreeMap<TargetKey, ScalableTarget>,
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension, PolicyName).
+    #[serde(with = "map_as_pairs")]
     pub scaling_policies: BTreeMap<PolicyKey, ScalingPolicy>,
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension, ScheduledActionName).
+    #[serde(with = "map_as_pairs")]
     pub scheduled_actions: BTreeMap<ScheduledKey, ScheduledAction>,
     /// Scaling activities, newest first.
     pub scaling_activities: Vec<ScalingActivity>,
     /// Tags keyed by ARN.
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Serialize a `BTreeMap` with a non-string (tuple) key as a sequence of
+/// `[key, value]` pairs. JSON object keys must be strings, so the tuple-keyed
+/// maps above can't serialize directly — this round-trips them via a list,
+/// which is what the persistence snapshot needs.
+mod map_as_pairs {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        K: Serialize + Ord,
+        V: Serialize,
+        S: Serializer,
+    {
+        ser.collect_seq(map.iter())
+    }
+
+    pub fn deserialize<'de, K, V, D>(de: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        let pairs: Vec<(K, V)> = Vec::deserialize(de)?;
+        Ok(pairs.into_iter().collect())
+    }
 }
 
 pub type TargetKey = (String, String, String);
