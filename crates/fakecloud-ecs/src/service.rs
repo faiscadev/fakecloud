@@ -315,7 +315,15 @@ impl EcsService {
                         "ecs scheduler: launching tasks to converge to desiredCount",
                     );
                     // Reflect the new PENDING tasks in the stored counts.
-                    if let Some(svc) = state.services.get_mut(&service.service_name) {
+                    // Services are keyed by "cluster/name", not the bare name —
+                    // looking up by service_name returned None, so these counts
+                    // were never updated (stale snapshot until DescribeServices
+                    // recomputed them).
+                    let svc_key = crate::state::EcsState::service_key(
+                        &service.cluster_name,
+                        &service.service_name,
+                    );
+                    if let Some(svc) = state.services.get_mut(&svc_key) {
                         svc.pending_count = svc.pending_count.saturating_add(ids.len() as i32);
                         for d in svc.deployments.iter_mut() {
                             if d.status == "PRIMARY" {

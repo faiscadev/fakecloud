@@ -2256,6 +2256,13 @@ async fn main() {
                                             "dropped stuck `creating` rds instances after persistence load",
                                         );
                                     }
+                                    // Clear any in-flight identifier reservations a
+                                    // restore/replica op left in the snapshot. The
+                                    // task that held them is dead, so a leftover
+                                    // reservation would otherwise brick that id with
+                                    // DBInstanceAlreadyExists forever (bug-audit
+                                    // 2026-06-26, 4.2).
+                                    state.in_progress_instance_ids.clear();
                                 }
                             }
                         }

@@ -319,7 +319,7 @@ impl ApplicationAutoScalingService {
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
-            .map(|n| n as usize)
+            .map(|n| (n as usize).clamp(1, 50))
             .unwrap_or(50);
         let next_token = body
             .get("NextToken")
@@ -484,8 +484,10 @@ impl ApplicationAutoScalingService {
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
-            .map(|n| n as usize)
-            .unwrap_or(50);
+            .map(|n| (n as usize).clamp(1, 10))
+            // DescribeScalingPolicies is uniquely capped at 1-10 (default 10),
+            // unlike the other Describe* ops (1-50). bug-audit 2026-06-26, 1.11.
+            .unwrap_or(10);
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
@@ -654,7 +656,7 @@ impl ApplicationAutoScalingService {
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
-            .map(|n| n as usize)
+            .map(|n| (n as usize).clamp(1, 50))
             .unwrap_or(50);
         let next_token = body
             .get("NextToken")
@@ -741,7 +743,7 @@ impl ApplicationAutoScalingService {
         let max_results = body
             .get("MaxResults")
             .and_then(Value::as_u64)
-            .map(|n| n as usize)
+            .map(|n| (n as usize).clamp(1, 50))
             .unwrap_or(50);
         let next_token = body
             .get("NextToken")
@@ -1437,6 +1439,57 @@ mod tests {
         assert_eq!(a.status_code, "Successful");
         assert!(a.description.contains("min capacity to 1"));
         assert!(a.description.contains("max capacity to 5"));
+    }
+
+    #[test]
+    fn describe_scaling_policies_caps_at_ten() {
+        let svc = ApplicationAutoScalingService::default();
+        svc.register_scalable_target(&make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 1,
+                "MaxCapacity": 5,
+            }),
+        ))
+        .unwrap();
+        for i in 0..11 {
+            svc.put_scaling_policy(&make_req(
+                "PutScalingPolicy",
+                json!({
+                    "PolicyName": format!("p{i}"),
+                    "ServiceNamespace": "ecs",
+                    "ResourceId": "service/cluster1/svc1",
+                    "ScalableDimension": "ecs:service:DesiredCount",
+                    "PolicyType": "StepScaling",
+                    "StepScalingPolicyConfiguration": {
+                        "AdjustmentType": "ChangeInCapacity",
+                        "StepAdjustments": [{"ScalingAdjustment": 1}],
+                    },
+                }),
+            ))
+            .unwrap();
+        }
+        // No MaxResults supplied: AWS defaults DescribeScalingPolicies to 10
+        // (unlike the other Describe* ops' 50) and returns a NextToken.
+        let resp = svc
+            .describe_scaling_policies(&make_req(
+                "DescribeScalingPolicies",
+                json!({"ServiceNamespace": "ecs"}),
+            ))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).expect("json body");
+        assert_eq!(
+            v["ScalingPolicies"].as_array().unwrap().len(),
+            10,
+            "default page must be 10"
+        );
+        assert!(
+            v.get("NextToken").and_then(Value::as_str).is_some(),
+            "truncated result must carry a NextToken"
+        );
     }
 
     #[test]
