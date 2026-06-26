@@ -1924,3 +1924,50 @@ async fn sqs_send_message_batch_fifo_content_dedup() {
         "content-based dedup must collapse batch duplicates"
     );
 }
+
+#[tokio::test]
+async fn approximate_first_receive_timestamp_is_constant() {
+    use aws_sdk_sqs::types::{MessageSystemAttributeName, QueueAttributeName};
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let url = sqs
+        .create_queue()
+        .queue_name("first-recv")
+        .attributes(QueueAttributeName::VisibilityTimeout, "0")
+        .send()
+        .await
+        .unwrap()
+        .queue_url
+        .unwrap();
+    sqs.send_message()
+        .queue_url(&url)
+        .message_body("m")
+        .send()
+        .await
+        .unwrap();
+
+    let recv = || async {
+        sqs.receive_message()
+            .queue_url(&url)
+            .message_system_attribute_names(MessageSystemAttributeName::All)
+            .send()
+            .await
+            .unwrap()
+            .messages
+            .unwrap()
+            .remove(0)
+            .attributes
+            .unwrap()
+            .get(&MessageSystemAttributeName::ApproximateFirstReceiveTimestamp)
+            .unwrap()
+            .clone()
+    };
+
+    let first = recv().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let second = recv().await;
+    assert_eq!(
+        first, second,
+        "ApproximateFirstReceiveTimestamp must stay pinned to the first receipt"
+    );
+}

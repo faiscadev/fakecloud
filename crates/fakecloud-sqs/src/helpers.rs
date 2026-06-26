@@ -321,6 +321,7 @@ pub(crate) fn process_batch_send_entry(
         message_attributes,
         visible_at,
         receive_count: 0,
+        first_received_at: None,
         message_group_id,
         message_dedup_id: effective_dedup_id.clone(),
         created_at: cfg.now,
@@ -897,9 +898,12 @@ pub(crate) fn format_receive_response(
                             .iter()
                             .any(|n| n == "ApproximateFirstReceiveTimestamp")
                     {
+                        // Pinned to the first receipt and constant across
+                        // redeliveries; fall back to now only if somehow unset.
+                        let first = m.first_received_at.unwrap_or(now_millis);
                         sys_attrs.insert(
                             "ApproximateFirstReceiveTimestamp".to_string(),
-                            json!(now_millis.to_string()),
+                            json!(first.to_string()),
                         );
                     }
                     if want_all || names.iter().any(|n| n == "SenderId") {
