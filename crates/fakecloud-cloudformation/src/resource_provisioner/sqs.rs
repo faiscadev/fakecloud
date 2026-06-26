@@ -20,6 +20,51 @@ impl ResourceProvisioner {
 
     // --- SQS ---
 
+    /// Apply a CFN property update to an existing queue in place, preserving
+    /// its enqueued messages. Re-applies the same property-to-attribute
+    /// mapping `create_sqs_queue` uses so a stack update isn't a no-op.
+    pub(super) fn update_sqs_queue(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let url = &existing.physical_id;
+        let mut __sqs_mas = self.sqs_state.write();
+        let state = __sqs_mas.get_or_create(&self.account_id);
+        let queue = state
+            .queues
+            .get_mut(url)
+            .ok_or_else(|| format!("Queue {url} not yet provisioned"))?;
+        if let Some(obj) = props.as_object() {
+            for (k, v) in obj {
+                if k == "QueueName" || k == "Tags" {
+                    continue;
+                }
+                let value = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        serde_json::to_string(v).unwrap_or_default()
+                    }
+                    serde_json::Value::Null => continue,
+                };
+                queue.attributes.insert(k.clone(), value);
+            }
+        }
+        if queue
+            .attributes
+            .get("KmsMasterKeyId")
+            .is_some_and(|k| !k.is_empty())
+        {
+            queue
+                .attributes
+                .insert("SqsManagedSseEnabled".to_string(), "false".to_string());
+        }
+        Ok(ProvisionResult::new(url.clone()))
+    }
+
     pub(super) fn create_sqs_queue(
         &self,
         resource: &ResourceDefinition,

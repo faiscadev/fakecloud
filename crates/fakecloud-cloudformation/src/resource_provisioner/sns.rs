@@ -19,6 +19,46 @@ impl ResourceProvisioner {
 
     // --- SNS ---
 
+    /// Apply a CFN property update to an existing SNS topic in place,
+    /// preserving its subscriptions/tags. Mirrors the attribute extraction in
+    /// `create_sns_topic` so a stack update re-applies DisplayName / KMS /
+    /// FIFO config instead of being silently dropped.
+    pub(super) fn update_sns_topic(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+        let mut __sns_mas = self.sns_state.write();
+        let state = __sns_mas.get_or_create(&self.account_id);
+        let topic = state
+            .topics
+            .get_mut(arn)
+            .ok_or_else(|| format!("SNS topic {arn} not yet provisioned"))?;
+        for key in [
+            "DisplayName",
+            "KmsMasterKeyId",
+            "SignatureVersion",
+            "TracingConfig",
+            "ArchivePolicy",
+            "FifoThroughputScope",
+        ] {
+            if let Some(s) = props.get(key).and_then(|v| v.as_str()) {
+                topic.attributes.insert(key.to_string(), s.to_string());
+            }
+        }
+        for key in ["FifoTopic", "ContentBasedDeduplication"] {
+            if let Some(b) = props
+                .get(key)
+                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+            {
+                topic.attributes.insert(key.to_string(), b.to_string());
+            }
+        }
+        Ok(ProvisionResult::new(arn.clone()))
+    }
+
     pub(super) fn create_sns_topic(
         &self,
         resource: &ResourceDefinition,
