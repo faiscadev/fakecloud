@@ -1,5 +1,6 @@
 pub mod jwt;
 pub(crate) mod service;
+pub mod srp;
 pub(crate) mod state;
 pub mod triggers;
 pub mod user_status;

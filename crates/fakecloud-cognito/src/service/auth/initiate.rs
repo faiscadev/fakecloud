@@ -121,6 +121,9 @@ impl CognitoService {
                 )
                 .await
             }
+            "USER_SRP_AUTH" => {
+                self.initiate_user_srp_auth(&body, client_id, &pool_id, &explicit_auth_flows, req)
+            }
             "CUSTOM_AUTH" => {
                 self.initiate_custom_auth(&body, client_id, &pool_id, &explicit_auth_flows, req)
                     .await
@@ -162,6 +165,148 @@ impl CognitoService {
             username,
             client_id,
         )
+    }
+
+    /// `InitiateAuth(AuthFlow=USER_SRP_AUTH)`: return the `PASSWORD_VERIFIER`
+    /// challenge with `SRP_B`, `SALT`, and an opaque `SECRET_BLOCK`. The
+    /// per-user verifier is derived from the stored password on demand (the
+    /// plaintext is never persisted as a verifier). Handshake state (`b`,
+    /// `salt`, `v`, client `A`, secret block) is stashed in the session for the
+    /// `RespondToAuthChallenge` verification step.
+    pub(super) fn initiate_user_srp_auth(
+        &self,
+        body: &Value,
+        client_id: &str,
+        pool_id: &str,
+        explicit_auth_flows: &[String],
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use base64::Engine;
+        use rand::RngCore;
+
+        if !explicit_auth_flows
+            .iter()
+            .any(|f| f == "ALLOW_USER_SRP_AUTH")
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "USER_SRP_AUTH flow is not enabled for this client.",
+            ));
+        }
+
+        let auth_params = body["AuthParameters"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "AuthParameters is required",
+            )
+        })?;
+        let username = auth_params
+            .get("USERNAME")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "USERNAME is required in AuthParameters",
+                )
+            })?;
+        let srp_a = auth_params
+            .get("SRP_A")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "SRP_A is required in AuthParameters",
+                )
+            })?;
+        self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+
+        let password = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let user = state
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Incorrect username or password.",
+                    )
+                })?;
+            if !user.enabled {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "User is disabled.",
+                ));
+            }
+            user.password
+                .clone()
+                .or_else(|| user.temporary_password.clone())
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Incorrect username or password.",
+                    )
+                })?
+        };
+
+        let pool_name = crate::srp::pool_short_name(pool_id).to_string();
+        let user_id = username.to_string();
+        let salt = crate::srp::random_salt();
+        let verifier = crate::srp::compute_verifier(&pool_name, &user_id, &password, &salt);
+        let hs = crate::srp::server_keys(&verifier, salt);
+
+        let mut sb = [0u8; 64];
+        rand::thread_rng().fill_bytes(&mut sb);
+        let secret_block_b64 = base64::engine::general_purpose::STANDARD.encode(sb);
+
+        let session = Uuid::new_v4().to_string();
+        let stash = json!({
+            "b": crate::srp::to_hex(&hs.server_private_b),
+            "B": crate::srp::to_hex(&hs.server_public_b),
+            "salt": crate::srp::to_hex(&hs.salt),
+            "v": crate::srp::to_hex(&verifier),
+            "A": srp_a,
+            "secret_block": secret_block_b64,
+            "pool_name": pool_name,
+            "user_id": user_id,
+        })
+        .to_string();
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            state.sessions.insert(
+                session.clone(),
+                SessionData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    challenge_name: "PASSWORD_VERIFIER".to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: Some(stash),
+                },
+            );
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "ChallengeName": "PASSWORD_VERIFIER",
+            "Session": session,
+            "ChallengeParameters": {
+                "SALT": crate::srp::to_hex(&hs.salt),
+                "SECRET_BLOCK": secret_block_b64,
+                "SRP_B": crate::srp::to_hex(&hs.server_public_b),
+                "USERNAME": username,
+                "USER_ID_FOR_SRP": user_id,
+            }
+        })))
     }
 
     pub(super) async fn initiate_user_password_auth(
