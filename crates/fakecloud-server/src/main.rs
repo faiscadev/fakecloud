@@ -399,6 +399,9 @@ async fn main() {
         Arc::new(parking_lot::RwLock::new(
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
         ));
+    let autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_autoscaling::AutoScalingAccounts::new()),
+    );
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
@@ -2998,6 +3001,64 @@ async fn main() {
         cfn_snapshot_hooks.insert("application-autoscaling", h);
     }
     registry.register(Arc::new(app_autoscaling_service));
+
+    // EC2 Auto Scaling (the `autoscaling` service — Auto Scaling Groups +
+    // Launch Configurations), distinct from Application Auto Scaling above.
+    let autoscaling_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("autoscaling").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_autoscaling::AutoScalingSnapshot>(
+                        &bytes,
+                    ) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_autoscaling::AUTOSCALING_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "autoscaling persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_autoscaling::AUTOSCALING_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *autoscaling_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded autoscaling persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse autoscaling persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no autoscaling persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read autoscaling persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut autoscaling_service =
+        fakecloud_autoscaling::AutoScalingService::new(autoscaling_state.clone());
+    if let Some(store) = autoscaling_snapshot_store.clone() {
+        autoscaling_service = autoscaling_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(autoscaling_service));
     let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
