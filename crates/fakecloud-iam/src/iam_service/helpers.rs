@@ -793,6 +793,45 @@ pub(crate) fn attached_policy_name(state: &crate::state::IamState, arn: &str) ->
         .unwrap_or_else(|| arn.rsplit('/').next().unwrap_or(arn).to_string())
 }
 
+/// Filter a list of inline-policy names by the IAM `Marker`/`MaxItems` triad
+/// (cursor = policy name, sorted) and render the `<member>` block. Shared by
+/// ListRolePolicies/ListUserPolicies/ListGroupPolicies, which all hardcoded
+/// IsTruncated=false and ignored pagination.
+pub(crate) fn paginate_policy_names(
+    mut names: Vec<String>,
+    req: &AwsRequest,
+) -> (String, bool, Option<String>) {
+    let max_items: usize = req
+        .query_params
+        .get("MaxItems")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let marker = req.query_params.get("Marker").cloned();
+    names.sort();
+    let start = marker
+        .as_ref()
+        .and_then(|m| names.iter().position(|n| n == m).map(|p| p + 1))
+        .unwrap_or(0);
+    let rest: Vec<String> = names.into_iter().skip(start).collect();
+    let is_truncated = rest.len() > max_items;
+    let page = if is_truncated {
+        &rest[..max_items]
+    } else {
+        &rest[..]
+    };
+    let next_marker = if is_truncated {
+        page.last().cloned()
+    } else {
+        None
+    };
+    let members = page
+        .iter()
+        .map(|n| format!("      <member>{n}</member>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (members, is_truncated, next_marker)
+}
+
 /// The IAM path embedded in a policy ARN: everything between `:policy` and the
 /// final `/` before the name, e.g. `…:policy/foo/bar/Name` -> `/foo/bar/`,
 /// `…:policy/Name` -> `/`. Used to filter ListAttached*Policies by `PathPrefix`.
