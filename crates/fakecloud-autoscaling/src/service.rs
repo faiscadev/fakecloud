@@ -619,6 +619,17 @@ impl AutoScalingService {
             let Some(group) = st.groups.get_mut(&name) else {
                 return Err(group_not_found(&name));
             };
+            // AWS rejects a desired capacity outside [MinSize, MaxSize].
+            if desired < group.min_size || desired > group.max_size {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "New SetDesiredCapacity value {desired} is not in between the MinSize {} and the MaxSize {} of the AutoScalingGroup.",
+                        group.min_size, group.max_size
+                    ),
+                ));
+            }
             group.desired_capacity = desired;
         }
         self.apply_capacity(&req.account_id, &name, req).await;
@@ -1285,6 +1296,13 @@ mod tests {
                 .count(),
             5
         );
+        // Scaling to 0 requires lowering MinSize to 0 first (AWS rejects a
+        // desired capacity below MinSize).
+        body(
+            &s,
+            "UpdateAutoScalingGroup",
+            &[("AutoScalingGroupName", "asg1"), ("MinSize", "0")],
+        );
         body(
             &s,
             "SetDesiredCapacity",
@@ -1296,6 +1314,15 @@ mod tests {
                 .count(),
             0
         );
+
+        // And a desired capacity outside [MinSize, MaxSize] is rejected.
+        match futures_block(s.handle(req(
+            "SetDesiredCapacity",
+            &[("AutoScalingGroupName", "asg1"), ("DesiredCapacity", "99")],
+        ))) {
+            Err(e) => assert!(format!("{e:?}").contains("ValidationError")),
+            Ok(_) => panic!("desired capacity above MaxSize must be rejected"),
+        }
     }
 
     #[test]

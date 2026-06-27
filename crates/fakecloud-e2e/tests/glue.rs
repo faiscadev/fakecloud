@@ -1080,6 +1080,41 @@ async fn update_crawler_schedule_persists_expression() {
 }
 
 #[tokio::test]
+async fn get_tables_filters_by_expression() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("db").build().unwrap())
+        .send()
+        .await
+        .expect("create db");
+    for t in ["orders", "order_items", "customers"] {
+        glue.create_table()
+            .database_name("db")
+            .table_input(table_input(t))
+            .send()
+            .await
+            .expect("create table");
+    }
+
+    // Expression is a regex on the table name.
+    let listed = glue
+        .get_tables()
+        .database_name("db")
+        .expression("^order")
+        .send()
+        .await
+        .expect("get tables");
+    let mut names: Vec<&str> = listed.table_list().iter().map(|t| t.name()).collect();
+    names.sort();
+    assert_eq!(names, vec!["order_items", "orders"]);
+
+    // No expression returns all three.
+    let all = glue.get_tables().database_name("db").send().await.unwrap();
+    assert_eq!(all.table_list().len(), 3);
+}
+
+#[tokio::test]
 async fn get_job_runs_orders_most_recent_first() {
     let server = TestServer::start().await;
     let glue = server.glue_client().await;
