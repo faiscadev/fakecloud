@@ -211,16 +211,37 @@ impl IamService {
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
-        // If no UserName specified, return current/default user
+        // If no UserName specified, GetUser returns the user that owns the
+        // calling credentials.
         let user_name = match req.query_params.get("UserName") {
             Some(name) => name.clone(),
             None => {
+                // Resolve the caller from their access key id and return that
+                // real, persisted user when it exists.
+                let access_key_id = req.access_key_id.as_deref().unwrap_or("");
+                let caller = state
+                    .access_keys
+                    .iter()
+                    .find_map(|(user, keys)| {
+                        keys.iter()
+                            .any(|k| k.access_key_id == access_key_id)
+                            .then(|| user.clone())
+                    })
+                    .and_then(|u| state.users.get(&u));
+                if let Some(user) = caller {
+                    let xml = xml_responses::get_user_response(user, &req.request_id);
+                    return Ok(AwsResponse::xml(StatusCode::OK, xml));
+                }
+                // Otherwise return a stable synthetic identity. A *deterministic*
+                // id/date (not a fresh random one per call) so repeated GetUser
+                // calls and follow-ups by the returned name are consistent.
                 let default_user = IamUser {
-                    user_id: format!("AIDA{}", generate_id()),
+                    user_id: format!("AIDA{}DEFLT", state.account_id),
                     arn: Arn::global("iam", &state.account_id, "user/default_user").to_string(),
                     user_name: "default_user".to_string(),
                     path: "/".to_string(),
-                    created_at: Utc::now(),
+                    created_at: chrono::DateTime::from_timestamp(1_577_836_800, 0)
+                        .unwrap_or_default(),
                     tags: Vec::new(),
                     permissions_boundary: None,
                 };

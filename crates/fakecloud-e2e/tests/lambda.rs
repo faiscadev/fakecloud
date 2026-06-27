@@ -1324,3 +1324,55 @@ async fn lambda_runtime_management_config_404s_after_function_delete() {
         .expect_err("must 404 after function delete");
     assert!(err.into_service_error().is_resource_not_found_exception());
 }
+
+// bug-audit 2026-06-27, T1.4: GetFunctionConcurrency on a function with no
+// reserved concurrency returns an empty body, not ReservedConcurrentExecutions:0
+// (0 means "throttle to zero" in Lambda, not "unset").
+#[tokio::test]
+async fn lambda_get_function_concurrency_unset_is_empty() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("conc-func")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let unset = client
+        .get_function_concurrency()
+        .function_name("conc-func")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unset.reserved_concurrent_executions(),
+        None,
+        "unset reserved concurrency is absent, not 0"
+    );
+
+    // After putting a real value, it round-trips.
+    client
+        .put_function_concurrency()
+        .function_name("conc-func")
+        .reserved_concurrent_executions(5)
+        .send()
+        .await
+        .unwrap();
+    let set = client
+        .get_function_concurrency()
+        .function_name("conc-func")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set.reserved_concurrent_executions(), Some(5));
+}
