@@ -641,3 +641,68 @@ async fn default_network_acl_cannot_be_deleted() {
         "got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn describe_instances_reports_ami_architecture() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    // arm64 AMI from the seeded catalogue (Graviton).
+    let arm = "ami-0a1b2c3d4e5f60007";
+    let resp = c
+        .run_instances()
+        .image_id(arm)
+        .min_count(1)
+        .max_count(1)
+        .send()
+        .await
+        .unwrap();
+    let id = resp.instances()[0].instance_id().unwrap().to_string();
+
+    let d = c
+        .describe_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    let inst = &d.reservations()[0].instances()[0];
+    assert_eq!(
+        inst.architecture().map(|a| a.as_str()),
+        Some("arm64"),
+        "instance should report its AMI's architecture, not hardcoded x86_64"
+    );
+
+    // The architecture filter uses the real value: arm64 matches, x86_64 doesn't.
+    let arm_hits = c
+        .describe_instances()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("architecture")
+                .values("arm64")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(arm_hits
+        .reservations()
+        .iter()
+        .flat_map(|r| r.instances())
+        .any(|i| i.instance_id() == Some(id.as_str())));
+
+    let x86_hits = c
+        .describe_instances()
+        .filters(
+            aws_sdk_ec2::types::Filter::builder()
+                .name("architecture")
+                .values("x86_64")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!x86_hits
+        .reservations()
+        .iter()
+        .flat_map(|r| r.instances())
+        .any(|i| i.instance_id() == Some(id.as_str())));
+}
