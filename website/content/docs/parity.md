@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **41 AWS services** with **3,717 operations**. **124,255/124,255 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **42 AWS services** with **3,723 operations**. **124,508/124,508 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -27,6 +27,7 @@ fakecloud implements **41 AWS services** with **3,717 operations**. **124,255/12
 | [Cognito Identity](@/docs/services/cognito.md) | 23 | JSON 1.1 | Full | Full | Identity pools, federated identities, developer identities, and real STS-style credential issuance are implemented. |
 | [Kinesis](@/docs/services/kinesis.md) | 39 | JSON 1.1 | Full | Full | — |
 | [RDS](@/docs/services/rds.md) | 163 | JSON 1.1 (Query) | Full | Full | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, and Db2 via Docker. PostgreSQL `aws_lambda` + `aws_s3` extensions and Aurora-compatible MySQL/MariaDB `mysql.lambda_async`/`mysql.lambda_sync` invoke fakecloud Lambda and import/export S3 objects from SQL. |
+| [RDS Data API](@/docs/services/rds-data.md) | 6 | REST-JSON | Full | Full | `ExecuteStatement` and `BatchExecuteStatement` run real SQL on the backing Postgres/MySQL container with typed parameters and results (including `bytea`/`BLOB`), and `BeginTransaction`/`CommitTransaction`/`RollbackTransaction` hold a real connection open across calls. Requires the `resourceArn` to resolve to a running RDS instance. The deprecated `ExecuteSql` (removed from the public API) returns `BadRequestException`. |
 | [ElastiCache](@/docs/services/elasticache.md) | 75 | JSON 1.1 (Query) | Full | Full | Real Redis, Valkey, and Memcached via Docker. `RestoreFromSnapshot` uses real RDB dump format. ACL `SETUSER` and `CONFIG SET` commands are supported. |
 | [Step Functions](@/docs/services/stepfunctions.md) | 37 | JSON 1.1 | Full | Full | Full ASL interpreter with `.sync` wait patterns, `waitForTaskToken`, and generic `aws-sdk:*` integrations. |
 | [API Gateway v1](@/docs/services/apigateway.md) | 124 | REST-JSON | Full | Full | Authorizer enforcement (TOKEN/REQUEST/COGNITO_USER_POOLS), request validators, VTL templates (MOCK and HTTP integrations), AWS direct service integrations, VPC_LINK integrations, and custom domain name + base path mapping routing are all implemented in the HTTP data plane. |
@@ -58,7 +59,7 @@ fakecloud implements **41 AWS services** with **3,717 operations**. **124,255/12
 
 ## What "100% conformance" means
 
-fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **124,255 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
+fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **124,508 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
 
