@@ -1,8 +1,11 @@
 //! RDS Data API (`rds-data`) restJson1 dispatch + real SQL execution.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde_json::{json, Map, Value};
+use tokio::sync::Mutex;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_rds::SharedRdsState;
@@ -27,13 +30,26 @@ struct DbConn {
     db_name: String,
 }
 
+/// A live connection held open across requests for the lifetime of a
+/// transaction, keyed by `transactionId`. Postgres drives its connection on a
+/// spawned task that lives as long as the `Client`; MySQL owns its socket.
+enum HeldConn {
+    Pg(tokio_postgres::Client),
+    MySql(mysql_async::Conn),
+}
+
 pub struct RdsDataService {
     rds_state: SharedRdsState,
+    /// Open transactions: `transactionId` -> the connection running its `BEGIN`.
+    transactions: Mutex<HashMap<String, HeldConn>>,
 }
 
 impl RdsDataService {
     pub fn new(rds_state: SharedRdsState) -> Self {
-        Self { rds_state }
+        Self {
+            rds_state,
+            transactions: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Map the restJson1 request (`POST /<Op>`) to its operation name.
@@ -77,21 +93,32 @@ impl RdsDataService {
         })
     }
 
-    async fn execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body = req.json_body();
+    /// Common front-matter for the credentialed ops: validate `secretArn` and
+    /// resolve the `resourceArn` to a connection.
+    fn require_conn(&self, req: &AwsRequest, body: &Value) -> Result<DbConn, AwsServiceError> {
         let resource_arn = body
             .get("resourceArn")
             .and_then(Value::as_str)
             .ok_or_else(|| bad_request("resourceArn is required"))?;
-        let sql = body
-            .get("sql")
-            .and_then(Value::as_str)
-            .ok_or_else(|| bad_request("sql is required"))?;
         // secretArn is required by AWS but fakecloud trusts the resourceArn for
         // credential resolution (the secret would carry the same master creds).
         if body.get("secretArn").and_then(Value::as_str).is_none() {
             return Err(bad_request("secretArn is required"));
         }
+        self.resolve_conn(&req.account_id, resource_arn)
+            .ok_or_else(|| {
+                bad_request(format!(
+                    "HttpEndpoint is not enabled for resource {resource_arn} (no such DB)"
+                ))
+            })
+    }
+
+    async fn execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let sql = body
+            .get("sql")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad_request("sql is required"))?;
         let include_metadata = body
             .get("includeResultMetadata")
             .and_then(Value::as_bool)
@@ -103,26 +130,165 @@ impl RdsDataService {
             .unwrap_or(false);
         let params = parse_parameters(body.get("parameters"));
 
-        let conn = self
-            .resolve_conn(&req.account_id, resource_arn)
-            .ok_or_else(|| {
-                bad_request(format!(
-                    "HttpEndpoint is not enabled for resource {resource_arn} (no such DB)"
-                ))
-            })?;
+        // Inside a transaction: run on the held connection so the statement
+        // shares the open transaction's visibility and is committed/rolled back
+        // atomically with the others.
+        if let Some(txid) = body.get("transactionId").and_then(Value::as_str) {
+            // Validate the resource still resolves (AWS still checks it), but the
+            // actual execution rides the held connection.
+            self.require_conn(req, &body)?;
+            let mut txns = self.transactions.lock().await;
+            let held = txns.get_mut(txid).ok_or_else(|| not_found_txn(txid))?;
+            let value = match held {
+                HeldConn::Pg(client) => {
+                    pg_run(client, sql, &params, include_metadata, format_json).await?
+                }
+                HeldConn::MySql(conn) => {
+                    my_run(conn, sql, &params, include_metadata, format_json).await?
+                }
+            };
+            return Ok(AwsResponse::ok_json(value));
+        }
 
+        let conn = self.require_conn(req, &body)?;
         let engine = conn.engine.to_lowercase();
-        let result = if engine.contains("postgres") {
-            pg_execute(&conn, sql, &params, include_metadata, format_json).await
-        } else if engine.contains("mysql") || engine.contains("maria") {
-            mysql_execute(&conn, sql, &params, include_metadata, format_json).await
+        let value = if engine.contains("postgres") {
+            let client = pg_connect(&conn).await?;
+            pg_run(&client, sql, &params, include_metadata, format_json).await?
+        } else if is_mysql(&engine) {
+            let mut c = my_connect(&conn).await?;
+            let v = my_run(&mut c, sql, &params, include_metadata, format_json).await;
+            let _ = c.disconnect().await;
+            v?
         } else {
-            return Err(bad_request(format!(
-                "RDS Data API is not supported for engine {}",
-                conn.engine
-            )));
+            return Err(unsupported_engine(&conn.engine));
         };
-        result.map(AwsResponse::ok_json)
+        Ok(AwsResponse::ok_json(value))
+    }
+
+    async fn begin_transaction(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let conn = self.require_conn(req, &body)?;
+        let engine = conn.engine.to_lowercase();
+
+        let held = if engine.contains("postgres") {
+            let client = pg_connect(&conn).await?;
+            client
+                .batch_execute("BEGIN")
+                .await
+                .map_err(|e| bad_request(format!("could not begin transaction: {e}")))?;
+            HeldConn::Pg(client)
+        } else if is_mysql(&engine) {
+            use mysql_async::prelude::Queryable;
+            let mut c = my_connect(&conn).await?;
+            c.query_drop("START TRANSACTION")
+                .await
+                .map_err(|e| bad_request(format!("could not begin transaction: {e}")))?;
+            HeldConn::MySql(c)
+        } else {
+            return Err(unsupported_engine(&conn.engine));
+        };
+
+        let txid = gen_transaction_id();
+        self.transactions.lock().await.insert(txid.clone(), held);
+        Ok(AwsResponse::ok_json(json!({ "transactionId": txid })))
+    }
+
+    /// Shared body for Commit/Rollback: pull the held connection out of the map
+    /// and run the terminal SQL on it.
+    async fn finish_transaction(
+        &self,
+        req: &AwsRequest,
+        sql_keyword: &str,
+        status: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let txid = body
+            .get("transactionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad_request("transactionId is required"))?;
+        let held = self
+            .transactions
+            .lock()
+            .await
+            .remove(txid)
+            .ok_or_else(|| not_found_txn(txid))?;
+        match held {
+            HeldConn::Pg(client) => {
+                client
+                    .batch_execute(sql_keyword)
+                    .await
+                    .map_err(|e| bad_request(format!("{e}")))?;
+            }
+            HeldConn::MySql(mut conn) => {
+                use mysql_async::prelude::Queryable;
+                conn.query_drop(sql_keyword)
+                    .await
+                    .map_err(|e| bad_request(format!("{e}")))?;
+                let _ = conn.disconnect().await;
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({ "transactionStatus": status })))
+    }
+
+    async fn batch_execute_statement(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let sql = body
+            .get("sql")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad_request("sql is required"))?;
+        let sets = parse_parameter_sets(body.get("parameterSets"));
+
+        // Run every parameter set on one connection so the whole batch shares a
+        // transaction when `transactionId` is given.
+        if let Some(txid) = body.get("transactionId").and_then(Value::as_str) {
+            self.require_conn(req, &body)?;
+            let mut txns = self.transactions.lock().await;
+            let held = txns.get_mut(txid).ok_or_else(|| not_found_txn(txid))?;
+            let mut results = Vec::with_capacity(sets.len().max(1));
+            match held {
+                HeldConn::Pg(client) => {
+                    for set in run_each(&sets) {
+                        pg_run(client, sql, set, false, false).await?;
+                        results.push(json!({ "generatedFields": [] }));
+                    }
+                }
+                HeldConn::MySql(conn) => {
+                    for set in run_each(&sets) {
+                        my_run(conn, sql, set, false, false).await?;
+                        results.push(json!({ "generatedFields": [] }));
+                    }
+                }
+            }
+            return Ok(AwsResponse::ok_json(json!({ "updateResults": results })));
+        }
+
+        let conn = self.require_conn(req, &body)?;
+        let engine = conn.engine.to_lowercase();
+        let mut results = Vec::with_capacity(sets.len().max(1));
+        if engine.contains("postgres") {
+            let client = pg_connect(&conn).await?;
+            for set in run_each(&sets) {
+                pg_run(&client, sql, set, false, false).await?;
+                results.push(json!({ "generatedFields": [] }));
+            }
+        } else if is_mysql(&engine) {
+            let mut c = my_connect(&conn).await?;
+            for set in run_each(&sets) {
+                if let Err(e) = my_run(&mut c, sql, set, false, false).await {
+                    let _ = c.disconnect().await;
+                    return Err(e);
+                }
+                results.push(json!({ "generatedFields": [] }));
+            }
+            let _ = c.disconnect().await;
+        } else {
+            return Err(unsupported_engine(&conn.engine));
+        }
+        Ok(AwsResponse::ok_json(json!({ "updateResults": results })))
     }
 }
 
@@ -146,12 +312,23 @@ impl AwsService for RdsDataService {
         };
         match action {
             "ExecuteStatement" => self.execute_statement(&req).await,
-            // Transactions + batch land in a later batch; return an honest
-            // not-implemented rather than a fake success.
+            "BatchExecuteStatement" => self.batch_execute_statement(&req).await,
+            "BeginTransaction" => self.begin_transaction(&req).await,
+            "CommitTransaction" => {
+                self.finish_transaction(&req, "COMMIT", "Transaction Committed")
+                    .await
+            }
+            "RollbackTransaction" => {
+                self.finish_transaction(&req, "ROLLBACK", "Rollback Complete")
+                    .await
+            }
+            // ExecuteSql is the deprecated, secret-less precursor to
+            // ExecuteStatement and was removed from the public API. Return an
+            // honest error rather than a fake success.
             other => Err(AwsServiceError::aws_error(
-                StatusCode::NOT_IMPLEMENTED,
+                StatusCode::BAD_REQUEST,
                 "BadRequestException",
-                format!("rds-data operation {other} is not yet implemented"),
+                format!("rds-data operation {other} is not supported"),
             )),
         }
     }
@@ -159,6 +336,30 @@ impl AwsService for RdsDataService {
 
 fn bad_request(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "BadRequestException", msg.into())
+}
+
+fn not_found_txn(txid: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "BadRequestException",
+        format!("Transaction {txid} is not found"),
+    )
+}
+
+fn unsupported_engine(engine: &str) -> AwsServiceError {
+    bad_request(format!("RDS Data API is not supported for engine {engine}"))
+}
+
+fn is_mysql(engine_lower: &str) -> bool {
+    engine_lower.contains("mysql") || engine_lower.contains("maria")
+}
+
+/// AWS transaction ids are long opaque base64-ish tokens; mirror the shape.
+fn gen_transaction_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 48];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    b64_encode(&bytes)
 }
 
 /// The host fakecloud's RDS containers are reachable at (sibling-container aware).
@@ -178,8 +379,10 @@ enum SqlValue {
     Blob(Vec<u8>),
 }
 
+type Params = Vec<(String, SqlValue)>;
+
 /// Parse `parameters[]` into `(name, value)` pairs in request order.
-fn parse_parameters(params: Option<&Value>) -> Vec<(String, SqlValue)> {
+fn parse_parameters(params: Option<&Value>) -> Params {
     let Some(arr) = params.and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -206,6 +409,24 @@ fn parse_parameters(params: Option<&Value>) -> Vec<(String, SqlValue)> {
             Some((name, sv))
         })
         .collect()
+}
+
+/// Parse `parameterSets` (a list of parameter lists) for BatchExecuteStatement.
+fn parse_parameter_sets(sets: Option<&Value>) -> Vec<Params> {
+    let Some(arr) = sets.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter().map(|s| parse_parameters(Some(s))).collect()
+}
+
+/// A batch with no parameter sets still runs the statement once (AWS treats an
+/// empty `parameterSets` as a single parameterless execution).
+fn run_each(sets: &[Params]) -> Vec<&[(String, SqlValue)]> {
+    if sets.is_empty() {
+        vec![&[]]
+    } else {
+        sets.iter().map(Vec::as_slice).collect()
+    }
 }
 
 /// Substitute AWS `:name` named placeholders with the SQL literal rendering of
@@ -296,15 +517,8 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-async fn pg_execute(
-    conn: &DbConn,
-    sql: &str,
-    params: &[(String, SqlValue)],
-    include_metadata: bool,
-    format_json: bool,
-) -> Result<Value, AwsServiceError> {
+async fn pg_connect(conn: &DbConn) -> Result<tokio_postgres::Client, AwsServiceError> {
     use tokio_postgres::NoTls;
-
     let cs = format!(
         "host={} port={} user={} password={} dbname={}",
         conn.host, conn.port, conn.user, conn.password, conn.db_name
@@ -315,7 +529,16 @@ async fn pg_execute(
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    Ok(client)
+}
 
+async fn pg_run(
+    client: &tokio_postgres::Client,
+    sql: &str,
+    params: &[(String, SqlValue)],
+    include_metadata: bool,
+    format_json: bool,
+) -> Result<Value, AwsServiceError> {
     let stmt = inline_params(sql, params, pg_literal);
     let no_params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[];
 
@@ -421,25 +644,28 @@ fn pg_field(row: &tokio_postgres::Row, i: usize, ty: &tokio_postgres::types::Typ
     }
 }
 
-async fn mysql_execute(
-    conn: &DbConn,
-    sql: &str,
-    params: &[(String, SqlValue)],
-    include_metadata: bool,
-    format_json: bool,
-) -> Result<Value, AwsServiceError> {
-    use mysql_async::prelude::*;
-    use mysql_async::{Column, OptsBuilder, Row};
-
+async fn my_connect(conn: &DbConn) -> Result<mysql_async::Conn, AwsServiceError> {
+    use mysql_async::OptsBuilder;
     let opts = OptsBuilder::default()
         .ip_or_hostname(conn.host.as_str())
         .tcp_port(conn.port)
         .user(Some(&conn.user))
         .pass(Some(&conn.password))
         .db_name(Some(&conn.db_name));
-    let mut c = mysql_async::Conn::new(opts)
+    mysql_async::Conn::new(opts)
         .await
-        .map_err(|e| bad_request(format!("could not connect to database: {e}")))?;
+        .map_err(|e| bad_request(format!("could not connect to database: {e}")))
+}
+
+async fn my_run(
+    c: &mut mysql_async::Conn,
+    sql: &str,
+    params: &[(String, SqlValue)],
+    include_metadata: bool,
+    format_json: bool,
+) -> Result<Value, AwsServiceError> {
+    use mysql_async::prelude::Queryable;
+    use mysql_async::{Column, Row};
 
     let stmt = inline_params(sql, params, mysql_literal);
     let rows: Vec<Row> = c
@@ -447,7 +673,6 @@ async fn mysql_execute(
         .await
         .map_err(|e| bad_request(format!("{e}")))?;
     let affected = c.affected_rows();
-    let _ = c.disconnect().await;
 
     let mut out = Map::new();
     if rows.is_empty() {

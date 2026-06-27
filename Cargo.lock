@@ -4157,6 +4157,7 @@ dependencies = [
  "fakecloud-rds",
  "http 1.4.0",
  "mysql_async",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "tokio",
