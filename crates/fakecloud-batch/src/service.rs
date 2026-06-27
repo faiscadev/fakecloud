@@ -287,7 +287,17 @@ impl BatchService {
         stored
             .entry("state".to_string())
             .or_insert_with(|| json!("ENABLED"));
-        stored.insert("uuid".into(), json!(Uuid::new_v4().to_string()));
+        let uuid = Uuid::new_v4().to_string();
+        // Managed compute environments are backed by a real ECS cluster; AWS
+        // returns its ARN and the provider (and ECS console) read it back.
+        stored.insert(
+            "ecsClusterArn".into(),
+            json!(format!(
+                "arn:aws:ecs:{}:{}:cluster/AWSBatch-{name}-{uuid}",
+                req.region, req.account_id
+            )),
+        );
+        stored.insert("uuid".into(), json!(uuid));
 
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -429,6 +439,24 @@ impl BatchService {
         stored.insert("jobDefinitionArn".into(), json!(arn));
         stored.insert("revision".into(), json!(revision));
         stored.insert("status".into(), json!("ACTIVE"));
+        // AWS defaults the optional list members of containerProperties to empty
+        // arrays and echoes them back on describe; clients (the terraform
+        // provider) read these back and expect them present.
+        if let Some(cp) = stored
+            .get_mut("containerProperties")
+            .and_then(Value::as_object_mut)
+        {
+            for key in [
+                "environment",
+                "mountPoints",
+                "resourceRequirements",
+                "secrets",
+                "ulimits",
+                "volumes",
+            ] {
+                cp.entry(key.to_string()).or_insert_with(|| json!([]));
+            }
+        }
         st.job_definitions
             .insert(format!("{name}:{revision}"), Value::Object(stored));
         Ok(AwsResponse::ok_json(json!({
