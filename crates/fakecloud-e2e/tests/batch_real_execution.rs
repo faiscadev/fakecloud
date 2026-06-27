@@ -277,3 +277,55 @@ async fn timeout_fails_an_overrunning_job() {
         .unwrap_or_default()
         .contains("timeout"));
 }
+
+#[tokio::test]
+async fn restart_fails_in_flight_job_instead_of_zombie() {
+    if !require_docker_or_skip("restart_fails_in_flight_job_instead_of_zombie") {
+        return;
+    }
+    // A long-running job is in flight when the server restarts. Its background
+    // driver and backing ECS task don't survive the restart, so without
+    // reconciliation it would hang at RUNNING forever. It must come back FAILED.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let batch = aws_sdk_batch::Client::new(&server.aws_config().await);
+    setup(&batch, "restart", vec!["sh", "-c", "sleep 120"]).await;
+    let job = batch
+        .submit_job()
+        .job_name("restart-job")
+        .job_queue("restart-q")
+        .job_definition("restart-jd")
+        .send()
+        .await
+        .expect("submit job");
+    let id = job.job_id().unwrap().to_string();
+
+    // Let it get genuinely in-flight before pulling the rug.
+    let mut in_flight = false;
+    for _ in 0..120 {
+        let st = batch.describe_jobs().jobs(&id).send().await.unwrap().jobs()[0]
+            .status()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if st == "RUNNING" || st == "STARTING" {
+            in_flight = true;
+            break;
+        }
+        assert!(st != "SUCCEEDED" && st != "FAILED", "job ended early: {st}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(in_flight, "job never became in-flight");
+
+    server.restart().await;
+    let batch = aws_sdk_batch::Client::new(&server.aws_config().await);
+    let d = batch.describe_jobs().jobs(&id).send().await.unwrap();
+    assert_eq!(
+        d.jobs()[0].status().map(|s| s.as_str()),
+        Some("FAILED"),
+        "in-flight job must be failed by restart reconcile, not left a zombie"
+    );
+    assert_eq!(
+        d.jobs()[0].status_reason(),
+        Some("Job interrupted by a fakecloud restart")
+    );
+}

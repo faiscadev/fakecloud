@@ -3126,6 +3126,9 @@ async fn main() {
     if let Some(store) = batch_snapshot_store.clone() {
         batch_service = batch_service.with_snapshot_store(store);
     }
+    // Fail any jobs left mid-flight by a restart (their drivers + ECS tasks are
+    // gone) so they don't hang forever.
+    batch_service.reconcile_persisted_jobs().await;
     if let Some(h) = batch_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("batch", h);
     }
