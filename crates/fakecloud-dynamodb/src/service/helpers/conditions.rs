@@ -8,6 +8,20 @@ pub(crate) fn evaluate_condition(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Result<(), AwsServiceError> {
+    evaluate_condition_with_return(condition, existing, expr_attr_names, expr_attr_values, None)
+}
+
+/// Like [`evaluate_condition`], but when the check fails and
+/// `return_values_on_failure == Some("ALL_OLD")`, attach the conflicting item
+/// to the `ConditionalCheckFailedException` (AWS returns it under `Item` so
+/// optimistic-locking clients can read current state without an extra GetItem).
+pub(crate) fn evaluate_condition_with_return(
+    condition: &str,
+    existing: Option<&HashMap<String, AttributeValue>>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+    return_values_on_failure: Option<&str>,
+) -> Result<(), AwsServiceError> {
     // ConditionExpression and FilterExpression share the same DynamoDB grammar,
     // so we delegate to evaluate_filter_expression. An empty map models "item
     // doesn't exist" correctly: attribute_exists → false, attribute_not_exists
@@ -15,14 +29,22 @@ pub(crate) fn evaluate_condition(
     let empty = HashMap::new();
     let item = existing.unwrap_or(&empty);
     if evaluate_filter_expression(condition, item, expr_attr_names, expr_attr_values) {
-        Ok(())
-    } else {
-        Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ConditionalCheckFailedException",
-            "The conditional request failed",
-        ))
+        return Ok(());
     }
+    let mut fields = Vec::new();
+    if return_values_on_failure == Some("ALL_OLD") {
+        if let Some(existing_item) = existing {
+            if let Ok(s) = serde_json::to_string(&json!(existing_item)) {
+                fields.push(("Item".to_string(), s));
+            }
+        }
+    }
+    Err(AwsServiceError::aws_error_with_fields(
+        StatusCode::BAD_REQUEST,
+        "ConditionalCheckFailedException",
+        "The conditional request failed",
+        fields,
+    ))
 }
 
 pub(crate) fn extract_function_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {

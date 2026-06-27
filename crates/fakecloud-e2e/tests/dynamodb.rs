@@ -4,9 +4,9 @@ use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, BillingMode, ContributorInsightsAction, Delete,
     DeleteRequest, Get, GlobalSecondaryIndex, KeySchemaElement, KeyType, OnDemandThroughput,
     PointInTimeRecoverySpecification, Projection, ProjectionType, ProvisionedThroughput, Put,
-    PutRequest, Replica, ScalarAttributeType, SseSpecification, SseType, StreamSpecification,
-    StreamViewType, TableClass, Tag, TimeToLiveSpecification, TransactGetItem, TransactWriteItem,
-    WriteRequest,
+    PutRequest, Replica, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
+    SseSpecification, SseType, StreamSpecification, StreamViewType, TableClass, Tag,
+    TimeToLiveSpecification, TransactGetItem, TransactWriteItem, WriteRequest,
 };
 use helpers::TestServer;
 use std::collections::HashMap;
@@ -5514,5 +5514,74 @@ async fn dynamodb_table_class_create_and_update() {
             .unwrap()
             .table_class(),
         Some(&TableClass::Standard)
+    );
+}
+
+#[tokio::test]
+async fn conditional_check_failure_returns_old_item() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    client
+        .create_table()
+        .table_name("Cond")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Seed an item with v=1.
+    let mut item = HashMap::new();
+    item.insert("pk".to_string(), AttributeValue::S("p1".into()));
+    item.insert("v".to_string(), AttributeValue::N("1".into()));
+    client
+        .put_item()
+        .table_name("Cond")
+        .set_item(Some(item))
+        .send()
+        .await
+        .unwrap();
+
+    // A conditional PutItem that fails, asking for the conflicting item back.
+    let mut item2 = HashMap::new();
+    item2.insert("pk".to_string(), AttributeValue::S("p1".into()));
+    item2.insert("v".to_string(), AttributeValue::N("2".into()));
+    let err = client
+        .put_item()
+        .table_name("Cond")
+        .set_item(Some(item2))
+        .condition_expression("attribute_not_exists(pk)")
+        .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+        .send()
+        .await
+        .expect_err("condition must fail");
+
+    let svc = err.into_service_error();
+    let cc = match svc {
+        aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(
+            cc,
+        ) => cc,
+        other => panic!("expected ConditionalCheckFailedException, got {other:?}"),
+    };
+    let returned = cc
+        .item()
+        .expect("ALL_OLD should return the conflicting item on the exception");
+    assert_eq!(
+        returned.get("v"),
+        Some(&AttributeValue::N("1".to_string())),
+        "the returned item should be the current (v=1) item"
     );
 }

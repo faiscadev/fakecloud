@@ -59,15 +59,32 @@ pub fn json_error_response(
     code: &str,
     message: &str,
 ) -> (StatusCode, String, Bytes) {
-    let body = serde_json::json!({
-        "__type": code,
-        "message": message,
-    });
+    json_error_response_with_fields(status, code, message, &[])
+}
+
+/// Build an AWS JSON error response carrying additional top-level members (e.g.
+/// DynamoDB's `ConditionalCheckFailedException.Item`). Each field value is
+/// parsed as JSON when possible (so an object/array is embedded as-is) and
+/// otherwise emitted as a JSON string.
+pub fn json_error_response_with_fields(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    extra_fields: &[(String, String)],
+) -> (StatusCode, String, Bytes) {
+    let mut body = serde_json::Map::new();
+    body.insert("__type".to_string(), serde_json::json!(code));
+    body.insert("message".to_string(), serde_json::json!(message));
+    for (key, value) in extra_fields {
+        let parsed = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+        body.insert(key.clone(), parsed);
+    }
 
     (
         status,
         "application/x-amz-json-1.1".to_string(),
-        Bytes::from(body.to_string()),
+        Bytes::from(serde_json::Value::Object(body).to_string()),
     )
 }
 

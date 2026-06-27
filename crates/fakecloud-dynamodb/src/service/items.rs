@@ -8,10 +8,10 @@ use fakecloud_core::validation::*;
 
 use super::{
     apply_update_expression, build_consumed_capacity, build_item_collection_metrics,
-    evaluate_condition, extract_key, get_table, get_table_mut, parse_expression_attribute_names,
-    parse_expression_attribute_values, project_item, require_object, require_str,
-    resolve_write_condition, return_consumed_mode, return_icm_mode, validate_key_attributes_in_key,
-    validate_key_in_item, AttributeValue, DynamoDbService,
+    evaluate_condition_with_return, extract_key, get_table, get_table_mut,
+    parse_expression_attribute_names, parse_expression_attribute_values, project_item,
+    require_object, require_str, resolve_write_condition, return_consumed_mode, return_icm_mode,
+    validate_key_attributes_in_key, validate_key_in_item, AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -25,6 +25,9 @@ impl DynamoDbService {
         let condition =
             resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE").to_string();
+        let return_values_on_failure = body["ReturnValuesOnConditionCheckFailure"]
+            .as_str()
+            .map(String::from);
         let return_consumed = return_consumed_mode(&body).to_string();
         let return_icm = return_icm_mode(&body).to_string();
 
@@ -43,7 +46,13 @@ impl DynamoDbService {
 
             if let Some(cond) = condition.as_deref() {
                 let existing = existing_idx.map(|i| &table.items[i]);
-                evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
+                evaluate_condition_with_return(
+                    cond,
+                    existing,
+                    &expr_attr_names,
+                    &expr_attr_values,
+                    return_values_on_failure.as_deref(),
+                )?;
             }
 
             let old_item_for_return = if return_values == "ALL_OLD" {
@@ -257,7 +266,13 @@ impl DynamoDbService {
 
             if let Some(cond) = condition.as_deref() {
                 let existing = existing_idx.map(|i| &table.items[i]);
-                evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
+                evaluate_condition_with_return(
+                    cond,
+                    existing,
+                    &expr_attr_names,
+                    &expr_attr_values,
+                    body["ReturnValuesOnConditionCheckFailure"].as_str(),
+                )?;
             }
 
             let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");
@@ -350,7 +365,13 @@ impl DynamoDbService {
 
         if let Some(cond) = condition.as_deref() {
             let existing = existing_idx.map(|i| &table.items[i]);
-            evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)?;
+            evaluate_condition_with_return(
+                cond,
+                existing,
+                &expr_attr_names,
+                &expr_attr_values,
+                body["ReturnValuesOnConditionCheckFailure"].as_str(),
+            )?;
         }
 
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE");

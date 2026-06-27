@@ -1045,7 +1045,12 @@ fn build_error_response_with_fields(
             extra_fields,
         ),
         AwsProtocol::Json | AwsProtocol::RestJson => {
-            fakecloud_aws::error::json_error_response(status, code, message)
+            fakecloud_aws::error::json_error_response_with_fields(
+                status,
+                code,
+                message,
+                extra_fields,
+            )
         }
     };
 
