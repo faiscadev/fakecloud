@@ -2537,6 +2537,9 @@ mod tests {
             autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),
+            batch: Arc::new(parking_lot::RwLock::new(
+                fakecloud_batch::BatchAccounts::new(),
+            )),
             ecs: shared::<fakecloud_ecs::EcsState>(),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             elasticache: shared::<fakecloud_elasticache::ElastiCacheState>(),

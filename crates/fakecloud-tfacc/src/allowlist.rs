@@ -785,6 +785,17 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccAutoScaling(Group|LaunchConfiguration)_basic$",
         deny: &[],
     },
+    Service {
+        name: "batch",
+        // AWS Batch: the `_basic` smoke for a compute environment
+        // (`aws_batch_compute_environment`), a job queue (`aws_batch_job_queue`),
+        // and a job definition (`aws_batch_job_definition`). The control plane
+        // round-trips the compute-environment status/state, the queue's
+        // compute-environment order + priority, and the revisioned job
+        // definition the provider reads back on refresh.
+        run_regex: "^TestAccBatch(ComputeEnvironment|JobQueue|JobDefinition)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1192,6 +1203,12 @@ pub const SHARDS: &[Shard] = &[
         name: "autoscaling",
         service: "autoscaling",
         run_regex: "^TestAccAutoScaling(Group|LaunchConfiguration)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "batch",
+        service: "batch",
+        run_regex: "^TestAccBatch(ComputeEnvironment|JobQueue|JobDefinition)_basic$",
         extra_deny: &[],
     },
 ];
