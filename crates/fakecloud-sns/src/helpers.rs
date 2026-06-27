@@ -363,6 +363,7 @@ pub(crate) fn generate_confirmation_token() -> String {
 pub(crate) fn build_sns_envelope(
     message_id: &str,
     topic_arn: &str,
+    subscription_arn: &str,
     subject: &Option<String>,
     message: &str,
     message_attributes: &serde_json::Map<String, Value>,
@@ -406,7 +407,7 @@ pub(crate) fn build_sns_envelope(
         "UnsubscribeURL".to_string(),
         Value::String(format!(
             "{}/?Action=Unsubscribe&SubscriptionArn={}",
-            endpoint, topic_arn
+            endpoint, subscription_arn
         )),
     );
     if !message_attributes.is_empty() {
@@ -463,7 +464,7 @@ pub(crate) fn collect_topic_subscribers(
                 .get("RawMessageDelivery")
                 .map(|v| v == "true")
                 .unwrap_or(false);
-            (s.endpoint.clone(), raw)
+            (s.endpoint.clone(), raw, s.subscription_arn.clone())
         })
         .collect();
 

@@ -722,11 +722,11 @@ pub(crate) fn fan_out_to_subscribers(
 
 pub(crate) fn deliver_to_sqs_subscribers(
     delivery: &Arc<DeliveryBus>,
-    subs: &[(String, bool)],
+    subs: &[(String, bool, String)],
     ctx: &TopicFanoutContext<'_>,
 ) {
     let sqs_message = ctx.body_for_protocol("sqs");
-    for (queue_arn, raw) in subs {
+    for (queue_arn, raw, subscription_arn) in subs {
         if *raw {
             let mut sqs_msg_attrs = HashMap::new();
             for (k, v) in ctx.message_attributes {
@@ -751,6 +751,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
             let envelope_str = build_sns_envelope(
                 ctx.msg_id,
                 ctx.topic_arn,
+                subscription_arn,
                 &ctx.subject.map(|s| s.to_string()),
                 &sqs_message,
                 ctx.envelope_attrs,
@@ -780,6 +781,7 @@ pub(crate) fn deliver_to_http_subscribers(
         let body = build_sns_envelope(
             ctx.msg_id,
             ctx.topic_arn,
+            &sub.subscription_arn,
             &ctx.subject.map(|s| s.to_string()),
             &protocol_body,
             ctx.envelope_attrs,

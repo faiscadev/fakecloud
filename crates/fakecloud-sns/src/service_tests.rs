@@ -66,11 +66,13 @@ fn build_sns_lambda_event_uses_real_subscription_arn() {
 fn build_sns_envelope_uses_configured_endpoint() {
     let endpoint = "http://myhost:5555";
     let topic_arn = "arn:aws:sns:us-east-1:123456789012:my-topic";
+    let subscription_arn = "arn:aws:sns:us-east-1:123456789012:my-topic:1a2b3c4d-uuid";
     let attrs = serde_json::Map::new();
 
     let envelope = build_sns_envelope(
         "msg-002",
         topic_arn,
+        subscription_arn,
         &None,
         "test message",
         &attrs,
@@ -83,9 +85,11 @@ fn build_sns_envelope_uses_configured_endpoint() {
         unsub_url.starts_with("http://myhost:5555/"),
         "UnsubscribeURL should use the configured endpoint, got: {unsub_url}"
     );
+    // AWS's UnsubscribeURL carries the SubscriptionArn, not the TopicArn —
+    // calling Unsubscribe with a TopicArn is rejected.
     assert!(
-        unsub_url.contains(topic_arn),
-        "UnsubscribeURL should contain topic ARN"
+        unsub_url.contains(subscription_arn),
+        "UnsubscribeURL should contain the subscription ARN, got: {unsub_url}"
     );
 }
 

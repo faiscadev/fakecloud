@@ -1786,8 +1786,8 @@ pub(crate) struct SnsLambdaEventInput<'a> {
 /// `collect_topic_subscribers` so the fan-out loop doesn't have to
 /// re-filter the subscriptions map five times inline.
 pub(crate) struct TopicSubscribers {
-    /// (queue_arn, raw_message_delivery)
-    pub(crate) sqs: Vec<(String, bool)>,
+    /// (queue_arn, raw_message_delivery, subscription_arn)
+    pub(crate) sqs: Vec<(String, bool, String)>,
     pub(crate) http: Vec<HttpSubscriber>,
     /// (function_arn, subscription_arn)
     pub(crate) lambda: Vec<(String, String)>,
