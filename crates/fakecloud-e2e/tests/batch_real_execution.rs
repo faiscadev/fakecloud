@@ -34,7 +34,9 @@ fn require_docker_or_skip(test: &str) -> bool {
 
 const IMAGE: &str = "public.ecr.aws/docker/library/alpine:3.20";
 
-async fn run_job(batch: &aws_sdk_batch::Client, name: &str, command: Vec<&str>) -> String {
+/// Create the CE / JQ / JD (`<name>-*`) with an alpine container running
+/// `command`; no job is submitted.
+async fn setup(batch: &aws_sdk_batch::Client, name: &str, command: Vec<&str>) {
     batch
         .create_compute_environment()
         .compute_environment_name(format!("{name}-ce"))
@@ -80,6 +82,10 @@ async fn run_job(batch: &aws_sdk_batch::Client, name: &str, command: Vec<&str>) 
         .send()
         .await
         .expect("register JD");
+}
+
+async fn run_job(batch: &aws_sdk_batch::Client, name: &str, command: Vec<&str>) -> String {
+    setup(batch, name, command).await;
     let job = batch
         .submit_job()
         .job_name(format!("{name}-job"))
@@ -205,4 +211,69 @@ async fn array_job_runs_every_child_and_parent_succeeds() {
         .and_then(|a| a.status_summary())
         .expect("array statusSummary");
     assert_eq!(summary.get("SUCCEEDED"), Some(&3));
+}
+
+#[tokio::test]
+async fn retry_strategy_reattempts_a_failing_job() {
+    if !require_docker_or_skip("retry_strategy_reattempts_a_failing_job") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let batch = aws_sdk_batch::Client::new(&s.aws_config().await);
+    setup(&batch, "retry", vec!["sh", "-c", "exit 4"]).await;
+    let job_id = batch
+        .submit_job()
+        .job_name("retry-job")
+        .job_queue("retry-q")
+        .job_definition("retry-jd")
+        .retry_strategy(
+            aws_sdk_batch::types::RetryStrategy::builder()
+                .attempts(2)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("submit")
+        .job_id()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(wait_terminal(&batch, &job_id).await, "FAILED");
+    // Two attempts were made: one recorded retry + the final.
+    let d = batch.describe_jobs().jobs(&job_id).send().await.unwrap();
+    assert_eq!(d.jobs()[0].attempts().len(), 1);
+    assert_eq!(d.jobs()[0].container().and_then(|c| c.exit_code()), Some(4));
+}
+
+#[tokio::test]
+async fn timeout_fails_an_overrunning_job() {
+    if !require_docker_or_skip("timeout_fails_an_overrunning_job") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let batch = aws_sdk_batch::Client::new(&s.aws_config().await);
+    setup(&batch, "tmo", vec!["sh", "-c", "sleep 60; exit 0"]).await;
+    let job_id = batch
+        .submit_job()
+        .job_name("tmo-job")
+        .job_queue("tmo-q")
+        .job_definition("tmo-jd")
+        .timeout(
+            aws_sdk_batch::types::JobTimeout::builder()
+                .attempt_duration_seconds(2)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("submit")
+        .job_id()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(wait_terminal(&batch, &job_id).await, "FAILED");
+    let d = batch.describe_jobs().jobs(&job_id).send().await.unwrap();
+    assert!(d.jobs()[0]
+        .status_reason()
+        .unwrap_or_default()
+        .contains("timeout"));
 }

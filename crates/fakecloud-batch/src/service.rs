@@ -1143,8 +1143,10 @@ async fn launch(
                 region.to_string(),
                 request_id.to_string(),
                 job_id.to_string(),
+                job_name.to_string(),
                 cluster,
                 task_arn,
+                container,
             );
         }
         Err(err) => {
@@ -1311,7 +1313,9 @@ async fn launch_ecs_task(
 
 /// Poll the ECS task in the background and map its real lifecycle + container
 /// exit code onto the Batch job status. NO auto-success: the job only reaches
-/// SUCCEEDED when the real container exits 0.
+/// SUCCEEDED when the real container exits 0. Honors the job's `retryStrategy`
+/// (re-launch a failed attempt up to `attempts` times) and `timeout`
+/// (`attemptDurationSeconds` caps each attempt).
 #[allow(clippy::too_many_arguments)]
 fn spawn_status_sync(
     ctx: &LaunchCtx,
@@ -1320,93 +1324,216 @@ fn spawn_status_sync(
     region: String,
     request_id: String,
     job_id: String,
+    job_name: String,
     cluster: String,
     task_arn: String,
+    container: Value,
 ) {
     let batch_state = ctx.batch_state.clone();
     let snapshot_store = ctx.snapshot_store.clone();
     let snapshot_lock = ctx.snapshot_lock.clone();
+    let ecs_runtime = ctx.ecs_runtime.clone();
     tokio::spawn(async move {
-        let ecs = fakecloud_ecs::EcsService::new(ecs_state);
+        let ecs = fakecloud_ecs::EcsService::new(ecs_state.clone());
         let src = bare_request(&account_id, &region, &request_id);
-        for _ in 0..900u32 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let resp = match ecs
-                .handle(ecs_request(
-                    "DescribeTasks",
-                    json!({ "cluster": cluster, "tasks": [task_arn] }),
-                    &src,
-                ))
-                .await
-            {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let body = parse_body(&resp);
-            let Some(task) = body.pointer("/tasks/0") else {
-                continue;
-            };
-            let last = task.get("lastStatus").and_then(Value::as_str).unwrap_or("");
-            let (new_status, exit_code, reason) = match last {
-                "RUNNING" => ("RUNNING", None, None),
-                "STOPPED" => {
-                    let code = task
-                        .pointer("/containers/0/exitCode")
-                        .and_then(Value::as_i64);
-                    let reason = task
-                        .get("stoppedReason")
-                        .and_then(Value::as_str)
-                        .map(String::from);
-                    if code == Some(0) {
-                        ("SUCCEEDED", code, reason)
-                    } else {
-                        (
-                            "FAILED",
-                            code,
-                            reason.or(Some("Essential container exited".into())),
-                        )
-                    }
-                }
-                _ => continue,
-            };
-            let terminal = matches!(new_status, "SUCCEEDED" | "FAILED");
-            {
-                let mut accounts = batch_state.write();
-                if let Some(j) = accounts
-                    .get_or_create(&account_id)
-                    .jobs
-                    .get_mut(&job_id)
-                    .and_then(|j| j.as_object_mut())
+        // retryStrategy.attempts (1-10) and timeout.attemptDurationSeconds.
+        let (max_attempts, timeout_secs) = {
+            let accounts = batch_state.read();
+            let j = accounts.get(&account_id).and_then(|s| s.jobs.get(&job_id));
+            let ma = j
+                .and_then(|j| j.pointer("/retryStrategy/attempts"))
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .clamp(1, 10);
+            let to = j
+                .and_then(|j| j.pointer("/timeout/attemptDurationSeconds"))
+                .and_then(Value::as_i64)
+                .filter(|t| *t > 0);
+            (ma, to)
+        };
+        let max_polls = timeout_secs.unwrap_or(900).min(900) as u32;
+        let mut task = task_arn;
+        let mut attempt: i64 = 1;
+        loop {
+            // Poll this attempt's task until it stops or the timeout elapses.
+            let mut outcome: Option<(Option<i64>, Option<String>)> = None; // (exitCode, reason)
+            let mut succeeded = false;
+            for _ in 0..max_polls {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let resp = match ecs
+                    .handle(ecs_request(
+                        "DescribeTasks",
+                        json!({ "cluster": cluster, "tasks": [task] }),
+                        &src,
+                    ))
+                    .await
                 {
-                    j.insert("status".into(), json!(new_status));
-                    if let Some(c) = exit_code {
-                        let container = j
-                            .entry("container".to_string())
-                            .or_insert_with(|| json!({}));
-                        if let Some(o) = container.as_object_mut() {
-                            o.insert("exitCode".into(), json!(c));
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let body = parse_body(&resp);
+                let Some(t) = body.pointer("/tasks/0") else {
+                    continue;
+                };
+                match t.get("lastStatus").and_then(Value::as_str).unwrap_or("") {
+                    "RUNNING" => {
+                        let mut accounts = batch_state.write();
+                        if let Some(j) = accounts
+                            .get_or_create(&account_id)
+                            .jobs
+                            .get_mut(&job_id)
+                            .and_then(|j| j.as_object_mut())
+                        {
+                            if j.get("status").and_then(Value::as_str) != Some("RUNNING") {
+                                j.insert("status".into(), json!("RUNNING"));
+                            }
                         }
                     }
-                    if let Some(r) = reason {
-                        j.insert("statusReason".into(), json!(r.clone()));
-                        if let Some(o) = j.get_mut("container").and_then(|v| v.as_object_mut()) {
-                            o.insert("reason".into(), json!(r));
+                    "STOPPED" => {
+                        let code = t.pointer("/containers/0/exitCode").and_then(Value::as_i64);
+                        let reason = t
+                            .get("stoppedReason")
+                            .and_then(Value::as_str)
+                            .map(String::from);
+                        if code == Some(0) {
+                            succeeded = true;
+                        } else {
+                            outcome =
+                                Some((code, reason.or(Some("Essential container exited".into()))));
                         }
+                        break;
                     }
-                    if terminal {
-                        j.insert(
-                            "stoppedAt".into(),
-                            json!(chrono::Utc::now().timestamp_millis()),
-                        );
-                    }
+                    _ => continue,
                 }
             }
-            save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
-            if terminal {
+
+            if succeeded {
+                set_job_terminal(
+                    &batch_state,
+                    &account_id,
+                    &job_id,
+                    "SUCCEEDED",
+                    Some(0),
+                    None,
+                );
+                save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
+                break;
+            }
+
+            // Failure (or timeout when `outcome` is None).
+            let (exit_code, reason) =
+                outcome.unwrap_or((None, Some("Job attempt duration exceeded timeout".into())));
+            if attempt < max_attempts {
+                // Record the failed attempt and re-launch a fresh task.
+                {
+                    let mut accounts = batch_state.write();
+                    if let Some(j) = accounts
+                        .get_or_create(&account_id)
+                        .jobs
+                        .get_mut(&job_id)
+                        .and_then(|j| j.as_object_mut())
+                    {
+                        let attempts = j.entry("attempts".to_string()).or_insert_with(|| json!([]));
+                        if let Some(a) = attempts.as_array_mut() {
+                            a.push(json!({
+                                "exitCode": exit_code,
+                                "statusReason": reason,
+                            }));
+                        }
+                        j.insert("status".into(), json!("RUNNABLE"));
+                    }
+                }
+                save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
+                match launch_ecs_task(
+                    &ecs_state,
+                    &ecs_runtime,
+                    &src,
+                    &job_id,
+                    &job_name,
+                    &container,
+                )
+                .await
+                {
+                    Ok((_, new_task)) => {
+                        task = new_task;
+                        attempt += 1;
+                        let mut accounts = batch_state.write();
+                        if let Some(j) = accounts
+                            .get_or_create(&account_id)
+                            .jobs
+                            .get_mut(&job_id)
+                            .and_then(|j| j.as_object_mut())
+                        {
+                            j.insert("status".into(), json!("STARTING"));
+                            j.insert("ecsTaskArn".into(), json!(task));
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        set_job_terminal(
+                            &batch_state,
+                            &account_id,
+                            &job_id,
+                            "FAILED",
+                            exit_code,
+                            reason,
+                        );
+                        save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
+                        break;
+                    }
+                }
+            } else {
+                set_job_terminal(
+                    &batch_state,
+                    &account_id,
+                    &job_id,
+                    "FAILED",
+                    exit_code,
+                    reason,
+                );
+                save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
                 break;
             }
         }
     });
+}
+
+/// Write a job's terminal status + `container.exitCode`/reason + `stoppedAt`.
+fn set_job_terminal(
+    batch_state: &SharedBatchState,
+    account_id: &str,
+    job_id: &str,
+    status: &str,
+    exit_code: Option<i64>,
+    reason: Option<String>,
+) {
+    let mut accounts = batch_state.write();
+    if let Some(j) = accounts
+        .get_or_create(account_id)
+        .jobs
+        .get_mut(job_id)
+        .and_then(|j| j.as_object_mut())
+    {
+        j.insert("status".into(), json!(status));
+        if let Some(c) = exit_code {
+            let container = j
+                .entry("container".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(o) = container.as_object_mut() {
+                o.insert("exitCode".into(), json!(c));
+            }
+        }
+        if let Some(r) = reason {
+            j.insert("statusReason".into(), json!(r.clone()));
+            if let Some(o) = j.get_mut("container").and_then(|v| v.as_object_mut()) {
+                o.insert("reason".into(), json!(r));
+            }
+        }
+        j.insert(
+            "stoppedAt".into(),
+            json!(chrono::Utc::now().timestamp_millis()),
+        );
+    }
 }
 
 /// Build an ECS `AwsRequest` (awsJson1.1) carrying the originating
