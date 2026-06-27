@@ -64,13 +64,19 @@ async fn cfn_provisions_batch_resources() {
         "CREATE_COMPLETE"
     );
 
-    // The compute environment exists in the batch service.
+    // The compute environment exists in the batch service, and (like an
+    // API-created one) reports its backing ECS cluster ARN.
     let ces = batch.describe_compute_environments().send().await.unwrap();
+    let ce = ces
+        .compute_environments()
+        .iter()
+        .find(|c| c.compute_environment_name() == Some("cfn-ce"))
+        .expect("CFN compute environment should exist");
     assert!(
-        ces.compute_environments()
-            .iter()
-            .any(|c| c.compute_environment_name() == Some("cfn-ce")),
-        "CFN compute environment should exist"
+        ce.ecs_cluster_arn()
+            .is_some_and(|a| a.contains(":cluster/")),
+        "CFN compute environment should report ecsClusterArn, got {:?}",
+        ce.ecs_cluster_arn()
     );
 
     // The job queue exists.
@@ -109,5 +115,96 @@ async fn cfn_provisions_batch_resources() {
             .iter()
             .all(|c| c.compute_environment_name() != Some("cfn-ce")),
         "stack delete should remove the compute environment"
+    );
+}
+
+const GETATT_TEMPLATE: &str = r#"{
+  "Resources": {
+    "SP": {
+      "Type": "AWS::Batch::SchedulingPolicy",
+      "Properties": { "Name": "cfn-sp" }
+    },
+    "CE": {
+      "Type": "AWS::Batch::ComputeEnvironment",
+      "Properties": { "ComputeEnvironmentName": "getatt-ce", "Type": "MANAGED" }
+    },
+    "JQ": {
+      "Type": "AWS::Batch::JobQueue",
+      "Properties": {
+        "JobQueueName": "getatt-q",
+        "Priority": 1,
+        "SchedulingPolicyArn": { "Ref": "SP" },
+        "ComputeEnvironmentOrder": [
+          { "Order": 1, "ComputeEnvironment": { "Ref": "CE" } }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "CeArn": { "Value": { "Fn::GetAtt": ["CE", "ComputeEnvironmentArn"] } },
+    "QArn": { "Value": { "Fn::GetAtt": ["JQ", "JobQueueArn"] } },
+    "SpArn": { "Value": { "Ref": "SP" } }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_batch_getatt_and_scheduling_policy_resolve() {
+    let s = TestServer::start().await;
+    let cfn = s.cloudformation_client().await;
+    let batch = aws_sdk_batch::Client::new(&s.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("getatt-stack")
+        .template_body(GETATT_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("getatt-stack")
+        .send()
+        .await
+        .unwrap();
+    let outputs = described.stacks()[0].outputs();
+    let out = |key: &str| {
+        outputs
+            .iter()
+            .find(|o| o.output_key() == Some(key))
+            .and_then(|o| o.output_value())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Fn::GetAtt resolves to the real ARNs, not the "Logical.Attr" placeholder.
+    let ce_arn = out("CeArn");
+    assert!(
+        ce_arn.starts_with("arn:aws:batch:") && ce_arn.contains(":compute-environment/"),
+        "CE GetAtt should resolve to the ARN, got {ce_arn:?}"
+    );
+    let q_arn = out("QArn");
+    assert!(
+        q_arn.starts_with("arn:aws:batch:") && q_arn.contains(":job-queue/"),
+        "JobQueue GetAtt should resolve to the ARN, got {q_arn:?}"
+    );
+
+    // The scheduling policy was provisioned (its own resource type), and the
+    // JobQueue's SchedulingPolicyArn Ref resolved to its real ARN.
+    let sp_arn = out("SpArn");
+    assert!(
+        sp_arn.contains(":scheduling-policy/"),
+        "SchedulingPolicy Ref should resolve to the ARN, got {sp_arn:?}"
+    );
+    let sps = batch
+        .describe_scheduling_policies()
+        .arns(sp_arn.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        sps.scheduling_policies()
+            .iter()
+            .any(|p| p.arn() == Some(sp_arn.as_str())),
+        "CFN-provisioned scheduling policy should exist in the batch service"
     );
 }

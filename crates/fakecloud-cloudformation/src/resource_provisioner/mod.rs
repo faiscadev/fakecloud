@@ -1056,6 +1056,7 @@ impl ResourceProvisioner {
             "AWS::Batch::ComputeEnvironment" => self.create_batch_compute_environment(resource),
             "AWS::Batch::JobQueue" => self.create_batch_job_queue(resource),
             "AWS::Batch::JobDefinition" => self.create_batch_job_definition(resource),
+            "AWS::Batch::SchedulingPolicy" => self.create_batch_scheduling_policy(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
             "AWS::EC2::SecurityGroup" => self.create_ec2_security_group(resource),
@@ -1637,7 +1638,8 @@ impl ResourceProvisioner {
             }
             "AWS::Batch::ComputeEnvironment"
             | "AWS::Batch::JobQueue"
-            | "AWS::Batch::JobDefinition" => {
+            | "AWS::Batch::JobDefinition"
+            | "AWS::Batch::SchedulingPolicy" => {
                 self.delete_batch(&resource.resource_type, &resource.physical_id);
                 Ok(())
             }
