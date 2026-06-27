@@ -881,6 +881,7 @@ pub struct ResourceProvisioner {
     pub rds_state: SharedRdsState,
     pub ec2_state: fakecloud_ec2::SharedEc2State,
     pub autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState,
+    pub batch_state: fakecloud_batch::SharedBatchState,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub elasticache_state: SharedElastiCacheState,
@@ -916,6 +917,7 @@ mod apigw;
 mod apigwv2;
 mod athena;
 mod autoscaling;
+mod batch;
 mod cloudformation;
 mod cloudwatch;
 mod cognito;
@@ -1051,6 +1053,9 @@ impl ResourceProvisioner {
                 self.create_autoscaling_launch_configuration(resource)
             }
             "AWS::AutoScaling::AutoScalingGroup" => self.create_autoscaling_group(resource),
+            "AWS::Batch::ComputeEnvironment" => self.create_batch_compute_environment(resource),
+            "AWS::Batch::JobQueue" => self.create_batch_job_queue(resource),
+            "AWS::Batch::JobDefinition" => self.create_batch_job_definition(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
             "AWS::EC2::SecurityGroup" => self.create_ec2_security_group(resource),
@@ -1628,6 +1633,12 @@ impl ResourceProvisioner {
             }
             "AWS::AutoScaling::LaunchConfiguration" | "AWS::AutoScaling::AutoScalingGroup" => {
                 self.delete_autoscaling(&resource.resource_type, &resource.physical_id);
+                Ok(())
+            }
+            "AWS::Batch::ComputeEnvironment"
+            | "AWS::Batch::JobQueue"
+            | "AWS::Batch::JobDefinition" => {
+                self.delete_batch(&resource.resource_type, &resource.physical_id);
                 Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
@@ -6045,6 +6056,7 @@ mod tests {
             autoscaling_state: Arc::new(RwLock::new(
                 fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),
+            batch_state: Arc::new(RwLock::new(fakecloud_batch::BatchAccounts::new())),
             ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),

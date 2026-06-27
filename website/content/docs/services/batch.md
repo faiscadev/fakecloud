@@ -25,14 +25,13 @@ containers, and Batch is built to run real jobs on that same engine.
 - **Job dependencies** — `SubmitJob` with `dependsOn` parks the job at `PENDING` and launches it only once every dependency has `SUCCEEDED`; if any dependency `FAILED`, the dependent job fails with "Dependent job failed". The wait never blocks the `SubmitJob` call.
 - **Retry + timeout** — `retryStrategy.attempts` re-launches a failed container up to that many times (each prior attempt recorded under `attempts[]`); `timeout.attemptDurationSeconds` caps each attempt and fails the job with "Job attempt duration exceeded timeout" if the container overruns.
 - **Tags** — `TagResource`, `UntagResource`, `ListTagsForResource`.
+- **CloudFormation** — `AWS::Batch::ComputeEnvironment`, `AWS::Batch::JobQueue`, and `AWS::Batch::JobDefinition` are provisioned into the Batch control plane when a stack is created (and removed on stack delete). The provisioned resources persist across a restart in persistent mode.
 
 Terraform / CloudFormation can provision a full Batch stack
 (`aws_batch_compute_environment`, `aws_batch_job_queue`,
 `aws_batch_job_definition`, `aws_batch_scheduling_policy`) and an SDK client can
 submit jobs (single, array, dependency-chained, retried, or timed-out) that run
-real containers and report their real exit codes.
-
-## Coming next
-
-A CloudFormation provisioner for `AWS::Batch::*` resources + Terraform
-acceptance-test coverage.
+real containers and report their real exit codes. The
+`terraform-provider-aws` Batch acceptance suite
+(`TestAccBatchComputeEnvironment_basic`, `TestAccBatchJobQueue_basic`,
+`TestAccBatchJobDefinition_basic`) runs against fakecloud.

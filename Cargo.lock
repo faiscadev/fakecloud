@@ -3373,6 +3373,7 @@ dependencies = [
  "fakecloud-athena",
  "fakecloud-autoscaling",
  "fakecloud-aws",
+ "fakecloud-batch",
  "fakecloud-cloudfront",
  "fakecloud-cloudwatch",
  "fakecloud-cognito",

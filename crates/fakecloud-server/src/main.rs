@@ -924,6 +924,7 @@ async fn main() {
             rds: rds_state.clone(),
             ec2: ec2_state.clone(),
             autoscaling: autoscaling_state.clone(),
+            batch: batch_state.clone(),
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
             elasticache: elasticache_state.clone(),
@@ -3124,6 +3125,9 @@ async fn main() {
         .with_ecs(ecs_state.clone(), ecs_runtime.clone());
     if let Some(store) = batch_snapshot_store.clone() {
         batch_service = batch_service.with_snapshot_store(store);
+    }
+    if let Some(h) = batch_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("batch", h);
     }
     registry.register(Arc::new(batch_service));
 
