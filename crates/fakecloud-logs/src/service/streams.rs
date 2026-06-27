@@ -224,19 +224,37 @@ impl LogsService {
             )
         })?;
 
+        let descending = body["descending"].as_bool().unwrap_or(false);
         let mut streams: Vec<&LogStream> = group
             .log_streams
             .values()
             .filter(|s| prefix.is_empty() || s.name.starts_with(prefix))
             .collect();
-        streams.sort_by(|a, b| a.name.cmp(&b.name));
+        // orderBy=LastEventTime is the canonical "find the newest stream" query;
+        // streams with no events sort first (None < Some), as AWS does. Default
+        // ascending; `descending` flips it.
+        if order_by == "LastEventTime" {
+            streams.sort_by(|a, b| {
+                a.last_event_timestamp
+                    .cmp(&b.last_event_timestamp)
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        } else {
+            streams.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        if descending {
+            streams.reverse();
+        }
 
-        // Handle pagination with token format: logGroupName@lastStreamName
+        // Handle pagination with token format: logGroupName@lastStreamName.
+        // Resume after the named stream in whatever sorted order is in effect
+        // (positional, so LastEventTime ordering paginates correctly too).
         let start_idx = if let Some(token) = next_token {
             if let Some((_group, last_stream)) = token.split_once('@') {
                 streams
                     .iter()
-                    .position(|s| s.name.as_str() > last_stream)
+                    .position(|s| s.name.as_str() == last_stream)
+                    .map(|p| p + 1)
                     .unwrap_or(streams.len())
             } else {
                 streams.len() // invalid token -> empty results

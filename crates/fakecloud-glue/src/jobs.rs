@@ -291,11 +291,16 @@ impl GlueService {
         let runs: Vec<Value> = accounts
             .get(&req.account_id)
             .map(|s| {
-                s.job_runs
+                // AWS returns job runs most-recent-first; clients read
+                // JobRuns[0] as the latest run. The state map is UUID-keyed
+                // (random order), so sort by StartedOn descending.
+                let mut matching: Vec<_> = s
+                    .job_runs
                     .values()
                     .filter(|r| r.job_name == job_name)
-                    .map(job_run_to_json)
-                    .collect()
+                    .collect();
+                matching.sort_by_key(|r| std::cmp::Reverse(r.started_on));
+                matching.into_iter().map(job_run_to_json).collect()
             })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "JobRuns": runs })))

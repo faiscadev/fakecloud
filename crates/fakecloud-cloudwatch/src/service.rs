@@ -832,6 +832,15 @@ impl CloudWatchService {
             .map_err(|_| invalid_param("EndTime must be ISO 8601"))?
             .with_timezone(&Utc);
 
+        // Default ScanBy is TimestampDescending (newest first); callers read
+        // Values[0] as the latest datapoint. The bucket map is ascending, so
+        // reverse unless the caller asked for TimestampAscending.
+        let descending = req
+            .query_params
+            .get("ScanBy")
+            .map(|s| s != "TimestampAscending")
+            .unwrap_or(true);
+
         // GetMetricData declares only InvalidNextToken, so it never rejects an
         // empty / malformed query list with a 4xx — it returns empty results.
         let queries = collect_indexed(req, "MetricDataQueries");
@@ -892,6 +901,10 @@ impl CloudWatchService {
                                 timestamps
                                     .push(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
                                 values.push(v);
+                            }
+                            if descending {
+                                timestamps.reverse();
+                                values.reverse();
                             }
                         }
                     }
