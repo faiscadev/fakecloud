@@ -382,3 +382,83 @@ async fn ddb_partiql_delete_emits_stream_record() {
         "REMOVE",
     );
 }
+
+// bug-audit 2026-06-27, T1.2: positional `?` parameters bind in textual order.
+// In `UPDATE t SET x=? WHERE y=?`, SET must consume parameters[0] and WHERE
+// parameters[1]; they were previously swapped.
+#[tokio::test]
+async fn ddb_partiql_update_positional_param_order() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    create_streamed_table(&ddb, "ParamOrder").await;
+    put_row(&ddb, "ParamOrder", "r1", 1, "orig").await;
+
+    ddb.execute_statement()
+        .statement("UPDATE \"ParamOrder\" SET s=? WHERE pk=?")
+        .parameters(AttributeValue::S("updated".into()))
+        .parameters(AttributeValue::S("r1".into()))
+        .send()
+        .await
+        .expect("parameterized update");
+
+    let got = ddb
+        .get_item()
+        .table_name("ParamOrder")
+        .key("pk", AttributeValue::S("r1".into()))
+        .send()
+        .await
+        .unwrap();
+    let item = got.item().expect("row exists");
+    assert_eq!(
+        item.get("s")
+            .and_then(|v| v.as_s().ok())
+            .map(String::as_str),
+        Some("updated"),
+        "SET bound parameters[0] and WHERE matched on parameters[1]"
+    );
+}
+
+// bug-audit 2026-06-27, T1.3: REMOVE of a nested map path must delete the
+// nested attribute, not a literal top-level key (which was a silent no-op).
+#[tokio::test]
+async fn ddb_update_remove_nested_path() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    create_streamed_table(&ddb, "NestedRemove").await;
+
+    ddb.put_item()
+        .table_name("NestedRemove")
+        .item("pk", AttributeValue::S("r1".into()))
+        .item(
+            "profile",
+            AttributeValue::M(
+                [
+                    ("first".to_string(), AttributeValue::S("a".into())),
+                    ("middle".to_string(), AttributeValue::S("b".into())),
+                ]
+                .into(),
+            ),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    ddb.update_item()
+        .table_name("NestedRemove")
+        .key("pk", AttributeValue::S("r1".into()))
+        .update_expression("REMOVE profile.middle")
+        .send()
+        .await
+        .expect("remove nested");
+
+    let got = ddb
+        .get_item()
+        .table_name("NestedRemove")
+        .key("pk", AttributeValue::S("r1".into()))
+        .send()
+        .await
+        .unwrap();
+    let profile = got.item().unwrap().get("profile").unwrap().as_m().unwrap();
+    assert!(!profile.contains_key("middle"), "nested key removed");
+    assert!(profile.contains_key("first"), "sibling key kept");
+}

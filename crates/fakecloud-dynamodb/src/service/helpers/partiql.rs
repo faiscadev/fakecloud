@@ -246,19 +246,27 @@ pub(crate) fn execute_partiql_in_state(
             (after_set, "")
         };
         let table = get_table_mut(&mut state.tables, &table_name)?;
+        // Positional `?` parameters bind in textual order: the SET clause comes
+        // before WHERE, so SET consumes parameters[0..set_count] and WHERE the
+        // rest. Evaluate WHERE against the parameters that follow the SET ones.
+        let set_param_count = count_params_in_str(set_clause);
         let matched_indices = if !where_clause.is_empty() {
-            find_partiql_where_indices(table, where_clause, parameters)?
+            let where_params: &[Value] = if set_param_count <= parameters.len() {
+                &parameters[set_param_count..]
+            } else {
+                &[]
+            };
+            find_partiql_where_indices(table, where_clause, where_params)?
         } else {
             (0..table.items.len()).collect()
         };
-        let param_offset = count_params_in_str(where_clause);
         let assignments: Vec<&str> = set_clause.split(',').collect();
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         let mut last_old: Option<HashMap<String, AttributeValue>> = None;
         let mut last_new: Option<HashMap<String, AttributeValue>> = None;
         for idx in &matched_indices {
             last_old = Some(table.items[*idx].clone());
-            let mut local_offset = param_offset;
+            let mut local_offset = 0;
             for assignment in &assignments {
                 let assignment = assignment.trim();
                 if let Some((attr, val_str)) = assignment.split_once('=') {
@@ -979,7 +987,10 @@ fn split_two_args(
 /// - `BETWEEN x AND y` — the inner AND must not split the clause
 /// - `IN (a, b, c)` — internal commas/ANDs are inside parens, never matched
 pub(crate) fn split_partiql_and_clauses(where_clause: &str) -> Vec<&str> {
-    let upper = where_clause.to_uppercase();
+    // ASCII-only uppercasing so `upper` stays byte-for-byte aligned with
+    // `where_clause`; Unicode `to_uppercase()` can change byte length and make
+    // the `upper.as_bytes()[i..i+5]` slices below run past the end (panic).
+    let upper = where_clause.to_ascii_uppercase();
     if !upper.contains(" AND ") {
         return vec![where_clause.trim()];
     }
@@ -1167,5 +1178,25 @@ mod number_compare_tests {
         // Both negative: larger magnitude is the smaller value.
         assert_eq!(compare_number_strings("-100", "-1"), Ordering::Less);
         assert_eq!(compare_number_strings("-1", "-100"), Ordering::Greater);
+    }
+}
+
+#[cfg(test)]
+mod split_and_clause_tests {
+    use super::*;
+
+    // bug-audit 2026-06-27, T2.1: a length-shrinking non-ASCII char in the WHERE
+    // clause must not panic. Unicode `to_uppercase()` could make the uppercased
+    // buffer shorter than the original, so byte-index slices ran past its end.
+    #[test]
+    fn non_ascii_where_clause_does_not_panic() {
+        // 'ﬀ' (U+FB00) is 3 bytes and uppercases to "FF" (2 bytes) under Unicode
+        // folding — the exact shrink that triggered the original panic.
+        let _ = split_partiql_and_clauses("ﬀ AND a = 1");
+        let _ = split_partiql_and_clauses("name = 'café' AND id = 1");
+        let _ = split_partiql_and_clauses("日本 BETWEEN 1 AND 10 AND x = 2");
+        // Sanity: ASCII splitting still works.
+        let parts = split_partiql_and_clauses("a = 1 AND b = 2");
+        assert_eq!(parts.len(), 2);
     }
 }
