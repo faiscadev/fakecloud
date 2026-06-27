@@ -41,6 +41,52 @@ async fn put_and_list_metrics() {
     assert_eq!(metrics[0].namespace(), Some("MyApp"));
 }
 
+// bug-audit 2026-06-27, T1.5: PutMetricData must accept the Values/Counts
+// value-distribution publish path (previously 400'd), and the distribution must
+// aggregate into the statistics.
+#[tokio::test]
+async fn put_metric_data_accepts_values_and_counts() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    cw.put_metric_data()
+        .namespace("Dist")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Latency")
+                .values(10.0)
+                .values(20.0)
+                .counts(2.0)
+                .counts(3.0)
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put values/counts distribution");
+
+    let stats = cw
+        .get_metric_statistics()
+        .namespace("Dist")
+        .metric_name("Latency")
+        .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+        .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+        .period(60)
+        .statistics(Statistic::Sum)
+        .statistics(Statistic::SampleCount)
+        .statistics(Statistic::Maximum)
+        .send()
+        .await
+        .expect("stats");
+
+    let dp = &stats.datapoints()[0];
+    // sum = 10*2 + 20*3 = 80, sample_count = 5, max = 20.
+    assert!((dp.sum().unwrap() - 80.0).abs() < 1e-6);
+    assert_eq!(dp.sample_count().unwrap(), 5.0);
+    assert!((dp.maximum().unwrap() - 20.0).abs() < 1e-6);
+}
+
 #[tokio::test]
 async fn get_metric_statistics_aggregates_by_period() {
     let server = TestServer::start().await;

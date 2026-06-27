@@ -3003,3 +3003,56 @@ async fn describe_log_streams_orders_by_last_event_time() {
         "LastEventTime descending must put the newest-event stream first"
     );
 }
+
+// bug-audit 2026-06-27, T1.14: FilterLogEvents endTime is inclusive — an event
+// whose timestamp equals endTime must be returned (it was dropped by `>= end`).
+#[tokio::test]
+async fn logs_filter_log_events_end_time_inclusive() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/filter/end")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/filter/end")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+
+    let base = chrono::Utc::now().timestamp_millis();
+    client
+        .put_log_events()
+        .log_group_name("/filter/end")
+        .log_stream_name("s1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(base)
+                .message("at-boundary")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // endTime exactly at the event's timestamp must still include it.
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter/end")
+        .start_time(base)
+        .end_time(base)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.events().len(),
+        1,
+        "event at endTime is returned (endTime inclusive)"
+    );
+}
