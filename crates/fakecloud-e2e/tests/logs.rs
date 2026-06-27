@@ -2933,3 +2933,73 @@ async fn logs_delivery_destination_reports_type_and_tags() {
         Some("obs")
     );
 }
+
+#[tokio::test]
+async fn describe_log_streams_orders_by_last_event_time() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+    client
+        .create_log_group()
+        .log_group_name("/order/test")
+        .send()
+        .await
+        .unwrap();
+    for name in ["alpha", "bravo"] {
+        client
+            .create_log_stream()
+            .log_group_name("/order/test")
+            .log_stream_name(name)
+            .send()
+            .await
+            .unwrap();
+    }
+    // "alpha" gets the OLDER event; "bravo" the NEWER one. By name alpha sorts
+    // first; by LastEventTime bravo is newest.
+    client
+        .put_log_events()
+        .log_group_name("/order/test")
+        .log_stream_name("alpha")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(1_000_000)
+                .message("old")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_log_events()
+        .log_group_name("/order/test")
+        .log_stream_name("bravo")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(9_000_000)
+                .message("new")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_log_streams()
+        .log_group_name("/order/test")
+        .order_by(aws_sdk_cloudwatchlogs::types::OrderBy::LastEventTime)
+        .descending(true)
+        .send()
+        .await
+        .unwrap();
+    let names: Vec<&str> = resp
+        .log_streams()
+        .iter()
+        .filter_map(|s| s.log_stream_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["bravo", "alpha"],
+        "LastEventTime descending must put the newest-event stream first"
+    );
+}

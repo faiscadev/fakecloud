@@ -145,6 +145,68 @@ async fn get_metric_data_returns_per_query_results() {
 }
 
 #[tokio::test]
+async fn get_metric_data_honors_scan_by() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    // Two datapoints, two periods apart -> two buckets: older=1.0, newer=2.0.
+    for (offset, v) in [(-120i64, 1.0_f64), (0, 2.0)] {
+        cw.put_metric_data()
+            .namespace("Scan")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name("M")
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp() + offset))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let query = |scan: Option<aws_sdk_cloudwatch::types::ScanBy>| {
+        let mut b = cw
+            .get_metric_data()
+            .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+            .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+            .metric_data_queries(
+                MetricDataQuery::builder()
+                    .id("q1")
+                    .metric_stat(
+                        MetricStat::builder()
+                            .metric(
+                                CwMetric::builder()
+                                    .namespace("Scan")
+                                    .metric_name("M")
+                                    .build(),
+                            )
+                            .period(60)
+                            .stat("Sum")
+                            .build(),
+                    )
+                    .build(),
+            );
+        if let Some(s) = scan {
+            b = b.scan_by(s);
+        }
+        b
+    };
+
+    // Default is TimestampDescending -> newest (2.0) first.
+    let desc = query(None).send().await.unwrap();
+    assert_eq!(desc.metric_data_results()[0].values(), &[2.0, 1.0]);
+
+    // TimestampAscending -> oldest (1.0) first.
+    let asc = query(Some(aws_sdk_cloudwatch::types::ScanBy::TimestampAscending))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(asc.metric_data_results()[0].values(), &[1.0, 2.0]);
+}
+
+#[tokio::test]
 async fn alarm_lifecycle_and_set_state() {
     let server = TestServer::start().await;
     let cw = server.cloudwatch_client().await;
