@@ -793,6 +793,74 @@ pub(crate) fn attached_policy_name(state: &crate::state::IamState, arn: &str) ->
         .unwrap_or_else(|| arn.rsplit('/').next().unwrap_or(arn).to_string())
 }
 
+/// The IAM path embedded in a policy ARN: everything between `:policy` and the
+/// final `/` before the name, e.g. `…:policy/foo/bar/Name` -> `/foo/bar/`,
+/// `…:policy/Name` -> `/`. Used to filter ListAttached*Policies by `PathPrefix`.
+pub(crate) fn policy_path_from_arn(arn: &str) -> String {
+    arn.split(":policy")
+        .nth(1)
+        .and_then(|rest| rest.rfind('/').map(|i| rest[..=i].to_string()))
+        .unwrap_or_else(|| "/".to_string())
+}
+
+/// Filter a list of attached-policy ARNs by `PathPrefix` and paginate with the
+/// IAM `Marker`/`MaxItems` triad (cursor = policy ARN). Returns the rendered
+/// `<member>` block, the truncation flag, and the next marker. Shared by
+/// ListAttached{Role,User,Group}Policies, which all hardcoded IsTruncated=false
+/// and ignored PathPrefix.
+pub(crate) fn paginate_attached_policies(
+    state: &crate::state::IamState,
+    arns: &[String],
+    req: &AwsRequest,
+) -> (String, bool, Option<String>) {
+    let path_prefix = req.query_params.get("PathPrefix").cloned();
+    let max_items: usize = req
+        .query_params
+        .get("MaxItems")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let marker = req.query_params.get("Marker").cloned();
+
+    let mut items: Vec<(String, String)> = arns
+        .iter()
+        .filter(|arn| {
+            path_prefix
+                .as_ref()
+                .is_none_or(|p| policy_path_from_arn(arn).starts_with(p))
+        })
+        .map(|arn| (attached_policy_name(state, arn), arn.clone()))
+        .collect();
+    items.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let start = marker
+        .as_ref()
+        .and_then(|m| items.iter().position(|(_, a)| a == m).map(|p| p + 1))
+        .unwrap_or(0);
+    let rest: Vec<(String, String)> = items.into_iter().skip(start).collect();
+    let is_truncated = rest.len() > max_items;
+    let page = if is_truncated {
+        &rest[..max_items]
+    } else {
+        &rest[..]
+    };
+    let next_marker = if is_truncated {
+        page.last().map(|(_, a)| a.clone())
+    } else {
+        None
+    };
+
+    let members = page
+        .iter()
+        .map(|(name, arn)| {
+            format!(
+                "      <member>\n        <PolicyName>{name}</PolicyName>\n        <PolicyArn>{arn}</PolicyArn>\n      </member>"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (members, is_truncated, next_marker)
+}
+
 /// Extract a required query parameter, returning the supplied IAM-specific
 /// wire error code when missing. The shared `required_param` helper hard-codes
 /// `MissingParameter`, which isn't in any IAM operation's Smithy error list.
