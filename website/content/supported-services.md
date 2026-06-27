@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,717 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,723 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,717 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,723 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 41
 - **Total Operations**: 3,710
-- **Conformance Engine**: 124,255 Smithy-based test variants
+- **Conformance Engine**: 124,508 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -24,6 +24,7 @@ fakecloud provides 100% API conformance across 3,717 operations. Unlike mocks, f
 - **S3**: 107 operations. Bucket lifecycle, Object tagging, Multipart uploads, real `SelectObjectContent` EventStream.
 - **DynamoDB**: 57 operations. TTL, GSI/LSI, and DynamoDB Streams.
 - **RDS**: 163 operations. Real Postgres, MySQL, MariaDB, Oracle, SQL Server, and Db2 via Docker.
+- **RDS Data API**: 6 operations. Real SQL (`ExecuteStatement`/`BatchExecuteStatement`) on the backing Postgres/MySQL container with typed parameters and results, plus transactions (`BeginTransaction`/`CommitTransaction`/`RollbackTransaction`).
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 
 ### AI & Machine Learning
