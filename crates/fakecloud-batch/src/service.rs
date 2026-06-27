@@ -86,6 +86,11 @@ pub struct BatchService {
     state: SharedBatchState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// ECS backend so a submitted job runs as a REAL container (the wedge:
+    /// every rival fakes Batch compute). `None` parks jobs at SUBMITTED
+    /// honestly (unit tests / no container runtime), never auto-succeeds.
+    ecs_state: Option<fakecloud_ecs::SharedEcsState>,
+    ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
 }
 
 impl BatchService {
@@ -94,11 +99,25 @@ impl BatchService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            ecs_state: None,
+            ecs_runtime: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Attach the ECS backend so SubmitJob launches a real container-backed
+    /// task and drives the job status off its real exit code.
+    pub fn with_ecs(
+        mut self,
+        state: fakecloud_ecs::SharedEcsState,
+        runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    ) -> Self {
+        self.ecs_state = Some(state);
+        self.ecs_runtime = runtime;
         self
     }
 
@@ -222,7 +241,6 @@ impl BatchService {
             "ListSchedulingPolicies" => self.list_scheduling_policies(req),
             "UpdateSchedulingPolicy" => self.update_scheduling_policy(req),
             "DeleteSchedulingPolicy" => self.delete_scheduling_policy(req),
-            "SubmitJob" => self.submit_job(req),
             "DescribeJobs" => self.describe_jobs(req),
             "ListJobs" => self.list_jobs(req),
             "CancelJob" => self.cancel_job(req),
@@ -632,7 +650,7 @@ impl BatchService {
 
     // ---- Jobs (control plane; real container execution lands in batch 2) ----
 
-    fn submit_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn submit_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let job_name = body
             .get("jobName")
@@ -658,21 +676,319 @@ impl BatchService {
         job.insert("jobName".into(), json!(job_name));
         job.insert("jobQueue".into(), json!(job_queue));
         job.insert("jobDefinition".into(), json!(job_definition));
-        // Control-plane only: the job is accepted and parked at SUBMITTED.
-        // Real container-backed status progression lands in the next batch.
         job.insert("status".into(), json!("SUBMITTED"));
         job.insert("createdAt".into(), json!(now));
 
-        let mut accounts = self.state.write();
-        accounts
-            .get_or_create(&req.account_id)
-            .jobs
-            .insert(job_id.clone(), Value::Object(job));
+        // Resolve the job definition's container properties (+ this submit's
+        // containerOverrides) so the job runs the right image/command.
+        let container = self.resolve_container(&req.account_id, &job_definition, &body);
+
+        {
+            let mut accounts = self.state.write();
+            accounts
+                .get_or_create(&req.account_id)
+                .jobs
+                .insert(job_id.clone(), Value::Object(job));
+        }
+
+        // Launch a REAL container-backed task on the ECS engine when wired and
+        // the definition carries an image. With no ECS backend (unit tests / no
+        // container runtime) the job stays SUBMITTED honestly — never an
+        // auto-success, which is exactly the rival anti-pattern Batch beats.
+        if let (Some(ecs_state), Some(container)) = (self.ecs_state.clone(), container) {
+            if container.get("image").and_then(Value::as_str).is_some() {
+                match self
+                    .launch_ecs_task(req, &job_id, &job_name, &container)
+                    .await
+                {
+                    Ok((cluster, task_arn)) => {
+                        {
+                            let mut accounts = self.state.write();
+                            if let Some(j) = accounts
+                                .get_or_create(&req.account_id)
+                                .jobs
+                                .get_mut(&job_id)
+                                .and_then(|j| j.as_object_mut())
+                            {
+                                j.insert("status".into(), json!("STARTING"));
+                                j.insert("ecsCluster".into(), json!(cluster));
+                                j.insert("ecsTaskArn".into(), json!(task_arn));
+                                j.insert("startedAt".into(), json!(now));
+                            }
+                        }
+                        self.spawn_status_sync(
+                            ecs_state,
+                            req.account_id.clone(),
+                            req.region.clone(),
+                            req.request_id.clone(),
+                            job_id.clone(),
+                            cluster,
+                            task_arn,
+                        );
+                    }
+                    Err(err) => {
+                        // Launch itself failed (e.g. bad definition): fail the
+                        // job with the reason rather than parking it silently.
+                        let mut accounts = self.state.write();
+                        if let Some(j) = accounts
+                            .get_or_create(&req.account_id)
+                            .jobs
+                            .get_mut(&job_id)
+                            .and_then(|j| j.as_object_mut())
+                        {
+                            j.insert("status".into(), json!("FAILED"));
+                            j.insert("statusReason".into(), json!(err.message().to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(AwsResponse::ok_json(json!({
             "jobArn": arn,
             "jobName": job_name,
             "jobId": job_id,
         })))
+    }
+
+    /// Resolve `containerProperties` from the stored job definition (by
+    /// `name:revision`, bare name -> latest, or ARN), then overlay this
+    /// submit's `containerOverrides` (command / environment / resourceRequirements).
+    fn resolve_container(
+        &self,
+        account_id: &str,
+        job_definition: &str,
+        submit_body: &Value,
+    ) -> Option<Value> {
+        let key = job_definition.rsplit('/').next().unwrap_or(job_definition);
+        let accounts = self.state.read();
+        let st = accounts.get(account_id)?;
+        // Exact "name:revision", else the highest-revision entry for the name.
+        let jd = if key.contains(':') {
+            st.job_definitions.get(key).cloned()
+        } else {
+            st.job_definitions
+                .iter()
+                .filter(|(k, _)| k.rsplit_once(':').map(|(n, _)| n) == Some(key))
+                .max_by_key(|(k, _)| {
+                    k.rsplit_once(':')
+                        .and_then(|(_, r)| r.parse::<i64>().ok())
+                        .unwrap_or(0)
+                })
+                .map(|(_, v)| v.clone())
+        }?;
+        let mut container = jd.get("containerProperties")?.as_object()?.clone();
+
+        if let Some(ov) = submit_body
+            .get("containerOverrides")
+            .and_then(Value::as_object)
+        {
+            for f in ["command", "environment", "resourceRequirements"] {
+                if let Some(v) = ov.get(f) {
+                    container.insert(f.to_string(), v.clone());
+                }
+            }
+        }
+        Some(Value::Object(container))
+    }
+
+    /// Build a fresh `EcsService` over the shared ECS state (+ runtime for the
+    /// launch path). Cross-service calls go through its public `handle()`,
+    /// mirroring how autoscaling drives EC2 — so all of ECS's real container /
+    /// portability / k8s handling is reused, not re-derived.
+    fn ecs(&self, with_runtime: bool) -> Option<fakecloud_ecs::EcsService> {
+        let state = self.ecs_state.clone()?;
+        let mut svc = fakecloud_ecs::EcsService::new(state);
+        if with_runtime {
+            if let Some(rt) = self.ecs_runtime.clone() {
+                svc = svc.with_runtime(rt);
+            }
+        }
+        Some(svc)
+    }
+
+    /// Ensure the batch ECS cluster exists, register a task definition from the
+    /// job's container properties, and RunTask it. Returns (cluster, taskArn).
+    async fn launch_ecs_task(
+        &self,
+        req: &AwsRequest,
+        job_id: &str,
+        job_name: &str,
+        container: &Value,
+    ) -> Result<(String, String), AwsServiceError> {
+        let ecs = self
+            .ecs(true)
+            .ok_or_else(|| client_error("ServerException", "ECS backend not configured"))?;
+        let cluster = "fakecloud-batch".to_string();
+
+        // Idempotent cluster create (ignore "already exists").
+        let _ = ecs
+            .handle(ecs_request(
+                "CreateCluster",
+                json!({ "clusterName": cluster }),
+                req,
+            ))
+            .await;
+
+        // Map Batch containerProperties -> an ECS container definition.
+        let image = container.get("image").and_then(Value::as_str).unwrap_or("");
+        let (vcpus, memory) = container_resources(container);
+        let mut cdef = serde_json::Map::new();
+        cdef.insert("name".into(), json!("default"));
+        cdef.insert("image".into(), json!(image));
+        cdef.insert("essential".into(), json!(true));
+        cdef.insert("cpu".into(), json!((vcpus * 1024.0).round() as i64));
+        cdef.insert("memory".into(), json!(memory));
+        if let Some(cmd) = container.get("command").filter(|v| v.is_array()) {
+            cdef.insert("command".into(), cmd.clone());
+        }
+        if let Some(env) = container.get("environment").filter(|v| v.is_array()) {
+            cdef.insert("environment".into(), env.clone());
+        }
+        let family = format!("batch-{job_name}");
+        let reg = ecs
+            .handle(ecs_request(
+                "RegisterTaskDefinition",
+                json!({
+                    "family": family,
+                    "containerDefinitions": [Value::Object(cdef)],
+                    "networkMode": "bridge",
+                    "requiresCompatibilities": ["EC2"],
+                }),
+                req,
+            ))
+            .await?;
+        let reg_body: Value = parse_body(&reg);
+        let task_def_arn = reg_body
+            .pointer("/taskDefinition/taskDefinitionArn")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or(family);
+
+        let run = ecs
+            .handle(ecs_request(
+                "RunTask",
+                json!({
+                    "cluster": cluster,
+                    "taskDefinition": task_def_arn,
+                    "count": 1,
+                    "launchType": "EC2",
+                    "startedBy": format!("batch:{job_id}"),
+                }),
+                req,
+            ))
+            .await?;
+        let run_body: Value = parse_body(&run);
+        let task_arn = run_body
+            .pointer("/tasks/0/taskArn")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| client_error("ServerException", "RunTask returned no task"))?;
+        Ok((cluster, task_arn))
+    }
+
+    /// Poll the ECS task in the background and map its real lifecycle +
+    /// container exit code onto the Batch job status. NO auto-success: the job
+    /// only reaches SUCCEEDED when the real container exits 0.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_status_sync(
+        &self,
+        ecs_state: fakecloud_ecs::SharedEcsState,
+        account_id: String,
+        region: String,
+        request_id: String,
+        job_id: String,
+        cluster: String,
+        task_arn: String,
+    ) {
+        let batch_state = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let ecs = fakecloud_ecs::EcsService::new(ecs_state);
+            let src = bare_request(&account_id, &region, &request_id);
+            // Bound the watch so a stuck container can't poll forever.
+            for _ in 0..900u32 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let resp = match ecs
+                    .handle(ecs_request(
+                        "DescribeTasks",
+                        json!({ "cluster": cluster, "tasks": [task_arn] }),
+                        &src,
+                    ))
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let body = parse_body(&resp);
+                let Some(task) = body.pointer("/tasks/0") else {
+                    continue;
+                };
+                let last = task.get("lastStatus").and_then(Value::as_str).unwrap_or("");
+                let (new_status, exit_code, reason) = match last {
+                    "RUNNING" => ("RUNNING", None, None),
+                    "STOPPED" => {
+                        let code = task
+                            .pointer("/containers/0/exitCode")
+                            .and_then(Value::as_i64);
+                        let reason = task
+                            .get("stoppedReason")
+                            .and_then(Value::as_str)
+                            .map(String::from);
+                        if code == Some(0) {
+                            ("SUCCEEDED", code, reason)
+                        } else {
+                            (
+                                "FAILED",
+                                code,
+                                reason.or(Some("Essential container exited".into())),
+                            )
+                        }
+                    }
+                    _ => continue,
+                };
+                let terminal = matches!(new_status, "SUCCEEDED" | "FAILED");
+                {
+                    let mut accounts = batch_state.write();
+                    if let Some(j) = accounts
+                        .get_or_create(&account_id)
+                        .jobs
+                        .get_mut(&job_id)
+                        .and_then(|j| j.as_object_mut())
+                    {
+                        j.insert("status".into(), json!(new_status));
+                        if let Some(c) = exit_code {
+                            // AWS Batch surfaces the exit code under
+                            // `container.exitCode`; mirror that shape.
+                            let container = j
+                                .entry("container".to_string())
+                                .or_insert_with(|| json!({}));
+                            if let Some(o) = container.as_object_mut() {
+                                o.insert("exitCode".into(), json!(c));
+                            }
+                        }
+                        if let Some(r) = reason {
+                            j.insert("statusReason".into(), json!(r.clone()));
+                            if let Some(o) = j.get_mut("container").and_then(|v| v.as_object_mut())
+                            {
+                                o.insert("reason".into(), json!(r));
+                            }
+                        }
+                        if terminal {
+                            j.insert(
+                                "stoppedAt".into(),
+                                json!(chrono::Utc::now().timestamp_millis()),
+                            );
+                        }
+                    }
+                }
+                save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
+                if terminal {
+                    break;
+                }
+            }
+        });
     }
 
     fn describe_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -869,6 +1185,109 @@ fn merge_updates(stored: &mut Value, body: &Value, fields: &[&str], arn_key: &st
     }
 }
 
+/// Build an ECS `AwsRequest` (awsJson1.1) carrying the originating
+/// account/region so the launched task lands in the caller's account.
+fn ecs_request(action: &str, body: Value, src: &AwsRequest) -> AwsRequest {
+    AwsRequest {
+        service: "ecs".to_string(),
+        action: action.to_string(),
+        region: src.region.clone(),
+        account_id: src.account_id.clone(),
+        request_id: src.request_id.clone(),
+        headers: http::HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap_or_default()),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: Vec::new(),
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+/// A minimal `AwsRequest` for the background poller (carries only the
+/// originating account/region/request-id).
+fn bare_request(account_id: &str, region: &str, request_id: &str) -> AwsRequest {
+    AwsRequest {
+        service: "batch".to_string(),
+        action: String::new(),
+        region: region.to_string(),
+        account_id: account_id.to_string(),
+        request_id: request_id.to_string(),
+        headers: http::HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: Vec::new(),
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+/// Parse a JSON `AwsResponse` body, or `Null` on failure.
+fn parse_body(resp: &AwsResponse) -> Value {
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap_or(Value::Null)
+}
+
+/// Resolve (vcpus, memoryMiB) from Batch container properties — either the
+/// legacy `vcpus`/`memory` fields or the modern `resourceRequirements` list.
+fn container_resources(container: &Value) -> (f64, i64) {
+    let mut vcpus = container
+        .get("vcpus")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    let mut memory = container
+        .get("memory")
+        .and_then(Value::as_i64)
+        .unwrap_or(512);
+    if let Some(rr) = container
+        .get("resourceRequirements")
+        .and_then(Value::as_array)
+    {
+        for r in rr {
+            let ty = r.get("type").and_then(Value::as_str).unwrap_or("");
+            let val = r
+                .get("value")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<f64>().ok());
+            match (ty, val) {
+                ("VCPU", Some(v)) => vcpus = v,
+                ("MEMORY", Some(v)) => memory = v as i64,
+                _ => {}
+            }
+        }
+    }
+    (vcpus.max(0.25), memory.max(4))
+}
+
+/// Persist the Batch state now (used by the background status poller, which
+/// can't call the `&self` snapshot method).
+async fn save_snapshot_now(
+    state: &SharedBatchState,
+    store: &Option<Arc<dyn SnapshotStore>>,
+    lock: &Arc<AsyncMutex<()>>,
+) {
+    let Some(store) = store.clone() else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let bytes = {
+        let snap = BatchSnapshot {
+            schema_version: BATCH_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(state.read().clone()),
+        };
+        serde_json::to_vec(&snap).unwrap_or_default()
+    };
+    let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+}
+
 /// Read a JSON string array into a set of owned strings.
 fn string_set(body: &Value, key: &str) -> std::collections::HashSet<String> {
     body.get(key)
@@ -944,7 +1363,13 @@ impl AwsService for BatchService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
-        let result = self.dispatch(action, &req);
+        // SubmitJob is async (it launches a real ECS task); everything else is
+        // a synchronous metadata op.
+        let result = if action == "SubmitJob" {
+            self.submit_job(&req).await
+        } else {
+            self.dispatch(action, &req)
+        };
         if MUTATING_ACTIONS.contains(&action)
             && matches!(result.as_ref(), Ok(resp) if resp.status.is_success())
         {
@@ -1174,6 +1599,88 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(d["computeEnvironments"][0]["state"], "DISABLED");
+    }
+
+    #[test]
+    fn container_resources_from_both_shapes() {
+        // Legacy vcpus/memory.
+        let (v, m) = container_resources(&json!({"vcpus": 2, "memory": 2048}));
+        assert_eq!(v, 2.0);
+        assert_eq!(m, 2048);
+        // Modern resourceRequirements override.
+        let (v, m) = container_resources(&json!({
+            "resourceRequirements": [
+                {"type": "VCPU", "value": "4"},
+                {"type": "MEMORY", "value": "8192"}
+            ]
+        }));
+        assert_eq!(v, 4.0);
+        assert_eq!(m, 8192);
+        // Defaults + floors.
+        let (v, m) = container_resources(&json!({}));
+        assert_eq!(v, 1.0);
+        assert_eq!(m, 512);
+    }
+
+    #[tokio::test]
+    async fn resolve_container_picks_latest_revision_and_overrides() {
+        let s = svc();
+        for cmd in [json!(["echo", "v1"]), json!(["echo", "v2"])] {
+            s.handle(req(
+                "/v1/registerjobdefinition",
+                json!({
+                    "jobDefinitionName": "jd",
+                    "type": "container",
+                    "containerProperties": {"image": "alpine", "command": cmd}
+                }),
+            ))
+            .await
+            .unwrap();
+        }
+        // Bare name -> latest revision (v2).
+        let c = s
+            .resolve_container("123456789012", "jd", &json!({}))
+            .unwrap();
+        assert_eq!(c["command"], json!(["echo", "v2"]));
+        // containerOverrides win.
+        let c = s
+            .resolve_container(
+                "123456789012",
+                "jd:1",
+                &json!({"containerOverrides": {"command": ["overridden"]}}),
+            )
+            .unwrap();
+        assert_eq!(c["command"], json!(["overridden"]));
+        assert_eq!(c["image"], "alpine");
+    }
+
+    #[tokio::test]
+    async fn submit_without_ecs_parks_at_submitted_never_auto_succeeds() {
+        // No ECS backend wired: the job must stay SUBMITTED (honest), not
+        // fake a SUCCEEDED like the rivals do.
+        let s = svc();
+        s.handle(req(
+            "/v1/registerjobdefinition",
+            json!({"jobDefinitionName": "jd", "type": "container",
+                   "containerProperties": {"image": "alpine"}}),
+        ))
+        .await
+        .unwrap();
+        let sub = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "j", "jobQueue": "q", "jobDefinition": "jd"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let id = sub["jobId"].as_str().unwrap().to_string();
+        let d = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [id]})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
     }
 
     #[test]

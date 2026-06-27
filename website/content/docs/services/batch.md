@@ -20,18 +20,16 @@ containers, and Batch is built to run real jobs on that same engine.
 - **Job queues** — `CreateJobQueue`, `DescribeJobQueues`, `UpdateJobQueue`, `DeleteJobQueue`, with `computeEnvironmentOrder`, `priority`, and an optional `schedulingPolicyArn`.
 - **Job definitions** — `RegisterJobDefinition` (monotonic per-name `revision`), `DescribeJobDefinitions` (filter by name / ARN / `status`), `DeregisterJobDefinition` (marks the revision `INACTIVE`).
 - **Scheduling policies** — `CreateSchedulingPolicy`, `DescribeSchedulingPolicies`, `ListSchedulingPolicies`, `UpdateSchedulingPolicy`, `DeleteSchedulingPolicy` (fair-share).
-- **Jobs (control plane)** — `SubmitJob` accepts a job against a queue + definition and returns its `jobId` / `jobArn`; `DescribeJobs` and `ListJobs` (filter by queue / status) report it; `CancelJob` and `TerminateJob` move a stoppable job to `FAILED`.
+- **Jobs — real container execution** — `SubmitJob` launches the job definition's `containerProperties` (image / command / vcpus / memory / environment, with this submit's `containerOverrides` applied) as a **real container** on fakecloud's ECS task engine, and drives the job status off the container's actual lifecycle: `SUBMITTED → STARTING → RUNNING → SUCCEEDED` when the container exits 0, or `FAILED` (carrying the real `container.exitCode`) on a non-zero exit. This is the wedge: every other free emulator fakes Batch compute (MiniStack jumps straight to `SUCCEEDED` with no container). With no container runtime available the job stays `SUBMITTED` honestly — never an auto-success. `DescribeJobs` / `ListJobs` (filter by queue / status) report live status + exit code; `CancelJob` / `TerminateJob` stop a job.
 - **Tags** — `TagResource`, `UntagResource`, `ListTagsForResource`.
 
-This is enough for Terraform / CloudFormation to provision a full Batch stack
+Terraform / CloudFormation can provision a full Batch stack
 (`aws_batch_compute_environment`, `aws_batch_job_queue`,
-`aws_batch_job_definition`, `aws_batch_scheduling_policy`) and for an SDK client
-to submit and track jobs.
+`aws_batch_job_definition`, `aws_batch_scheduling_policy`) and an SDK client can
+submit jobs that run real containers and report their real exit codes.
 
 ## Coming next
 
-Real container-backed job execution: `SubmitJob` launches the job definition's
-container on the ECS task engine and drives the job through
-`SUBMITTED → PENDING → RUNNABLE → STARTING → RUNNING → SUCCEEDED/FAILED` off the
-real container exit code, plus array jobs, job dependencies, retry strategies,
-and a CloudFormation provisioner.
+Array jobs (child spawning + `AWS_BATCH_JOB_ARRAY_INDEX`), job dependencies
+(`dependsOn` SEQUENTIAL / N_TO_N), retry strategies + timeouts, and a
+CloudFormation provisioner for `AWS::Batch::*`.
