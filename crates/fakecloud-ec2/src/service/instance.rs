@@ -56,11 +56,23 @@ fn sg_name_map(state: &Ec2State) -> HashMap<String, String> {
         .collect()
 }
 
+/// Resolve an instance's CPU architecture from its AMI in the seeded/owned
+/// catalogue (arm64 for Graviton images), defaulting to x86_64 when the AMI
+/// isn't known.
+fn arch_for(state: &Ec2State, image_id: &str) -> String {
+    state
+        .images
+        .get(image_id)
+        .map(|img| img.architecture.clone())
+        .unwrap_or_else(|| "x86_64".to_string())
+}
+
 fn instance_xml(
     i: &Instance,
     tags: &[Tag],
     owner: &str,
     sg_names: &HashMap<String, String>,
+    architecture: &str,
 ) -> String {
     let groups: Vec<String> = i
         .security_group_ids
@@ -125,7 +137,7 @@ fn instance_xml(
         ec2_elem("instanceType", &i.instance_type),
         ec2_elem("launchTime", &i.launch_time),
         ec2_elem("amiLaunchIndex", &i.ami_launch_index.to_string()),
-        ec2_elem("architecture", "x86_64"),
+        ec2_elem("architecture", architecture),
         ec2_elem("rootDeviceType", "ebs"),
         ec2_elem("rootDeviceName", "/dev/xvda"),
         ec2_elem("virtualizationType", "hvm"),
@@ -392,7 +404,8 @@ pub(crate) async fn run_instances(
                 "instance",
             );
             let tags = state.tags_for(id).to_vec();
-            rendered.push(instance_xml(&inst, &tags, &owner, &sg_names));
+            let architecture = arch_for(state, &inst.image_id);
+            rendered.push(instance_xml(&inst, &tags, &owner, &sg_names, &architecture));
             state.instances.insert(id.clone(), inst);
         }
     }
@@ -795,7 +808,14 @@ pub(crate) fn describe_instances(
         .instances
         .values()
         .filter(|i| wanted.is_empty() || wanted.contains(&i.instance_id))
-        .filter(|i| inst_match(i, state.tags_for(&i.instance_id), &filters))
+        .filter(|i| {
+            inst_match(
+                i,
+                state.tags_for(&i.instance_id),
+                &filters,
+                &arch_for(state, &i.image_id),
+            )
+        })
         .collect();
     matching.sort_by(|a, b| {
         a.reservation_id
@@ -820,6 +840,7 @@ pub(crate) fn describe_instances(
                 state.tags_for(&i.instance_id),
                 &owner,
                 &sg_names,
+                &arch_for(state, &i.image_id),
             ));
     }
     let reservations: Vec<String> = order
@@ -850,7 +871,7 @@ fn parse_max_results(params: &HashMap<String, String>) -> Option<usize> {
         .and_then(|v| v.parse::<usize>().ok())
 }
 
-fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter]) -> bool {
+fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter], architecture: &str) -> bool {
     use crate::service_helpers::filter_value_matches;
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
@@ -865,7 +886,7 @@ fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter]) -> bool {
             "private-ip-address" => vec![i.private_ip.clone()],
             "ip-address" => i.public_ip.clone().into_iter().collect(),
             "key-name" => i.key_name.clone().into_iter().collect(),
-            "architecture" => vec!["x86_64".to_string()],
+            "architecture" => vec![architecture.to_string()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -909,7 +930,14 @@ pub(crate) fn describe_instance_status(
         .values()
         .filter(|i| wanted.is_empty() || wanted.contains(&i.instance_id))
         .filter(|i| include_all || i.state_name == "running")
-        .filter(|i| inst_match(i, state.tags_for(&i.instance_id), &filters))
+        .filter(|i| {
+            inst_match(
+                i,
+                state.tags_for(&i.instance_id),
+                &filters,
+                &arch_for(state, &i.image_id),
+            )
+        })
         .collect();
     matching.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
     let (page, token) = crate::service_helpers::paginate(&matching, next_token, max_results);
