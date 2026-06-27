@@ -475,7 +475,7 @@ mod tests {
             "packed",
             &auth_data,
             -7,
-            &vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+            &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
             None,
         );
         let parsed_bad = parse_packed_attestation(&bad).expect("parse");
