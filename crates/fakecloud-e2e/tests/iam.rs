@@ -3787,3 +3787,46 @@ async fn list_attached_role_policies_filters_path_and_paginates() {
     expected.sort();
     assert_eq!(seen, expected);
 }
+
+#[tokio::test]
+async fn list_role_policies_paginates_inline_policies() {
+    let server = helpers::TestServer::start().await;
+    let client = server.iam_client().await;
+    let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    client
+        .create_role()
+        .role_name("r")
+        .assume_role_policy_document("{}")
+        .send()
+        .await
+        .unwrap();
+    for name in ["pa", "pb", "pc"] {
+        client
+            .put_role_policy()
+            .role_name("r")
+            .policy_name(name)
+            .policy_document(doc)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // MaxItems=1 truncates with a marker; pages cover all three exactly once.
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    for _ in 0..5 {
+        let mut b = client.list_role_policies().role_name("r").max_items(1);
+        if let Some(m) = &marker {
+            b = b.marker(m);
+        }
+        let resp = b.send().await.unwrap();
+        seen.extend(resp.policy_names().iter().cloned());
+        if resp.is_truncated() {
+            marker = Some(resp.marker().unwrap().to_string());
+        } else {
+            break;
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, vec!["pa", "pb", "pc"]);
+}
