@@ -844,7 +844,25 @@ impl IamService {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
 
-        let xml = xml_responses::list_role_policies_response(&policy_names, &req.request_id);
+        let (members, is_truncated, next_marker) = super::paginate_policy_names(policy_names, req);
+        let marker_section = next_marker
+            .map(|m| format!("\n    <Marker>{m}</Marker>"))
+            .unwrap_or_default();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListRolePoliciesResult>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
+    <PolicyNames>
+{members}
+    </PolicyNames>
+  </ListRolePoliciesResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListRolePoliciesResponse>"#,
+            req.request_id
+        );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 }

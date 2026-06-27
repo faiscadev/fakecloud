@@ -516,17 +516,15 @@ impl IamService {
         })?;
 
         let policy_names: Vec<String> = group.inline_policies.keys().cloned().collect();
-        let members: String = policy_names
-            .iter()
-            .map(|name| format!("      <member>{name}</member>"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
+        let (members, is_truncated, next_marker) = super::paginate_policy_names(policy_names, req);
+        let marker_section = next_marker
+            .map(|m| format!("\n    <Marker>{m}</Marker>"))
+            .unwrap_or_default();
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListGroupPoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListGroupPoliciesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <PolicyNames>
 {members}
     </PolicyNames>

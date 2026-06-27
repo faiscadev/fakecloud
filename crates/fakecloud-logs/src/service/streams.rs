@@ -1036,7 +1036,7 @@ impl LogsService {
         };
 
         for (_, stream) in streams {
-            for event in &stream.events {
+            for (idx, event) in stream.events.iter().enumerate() {
                 if let Some(cutoff) = retention_cutoff {
                     if event.timestamp < cutoff {
                         continue;
@@ -1059,7 +1059,11 @@ impl LogsService {
                     continue;
                 }
 
-                let event_id = format!("{}-{}", stream.name, event.timestamp);
+                // Include the per-stream event index so two events with the
+                // same millisecond timestamp get distinct eventIds; otherwise a
+                // nextToken whose cursor is a shared eventId resumes at the
+                // first of the group and re-delivers the rest.
+                let event_id = format!("{}-{}-{}", stream.name, event.timestamp, idx);
 
                 filtered_events.push(json!({
                     "logStreamName": stream.name,
@@ -1336,6 +1340,56 @@ mod tests {
         for e in events {
             assert!(e["logStreamName"].as_str().unwrap().starts_with("web"));
         }
+    }
+
+    #[test]
+    fn filter_log_events_paginates_same_timestamp_without_duplicates() {
+        let svc = make_service();
+        create_group(&svc, "dup");
+        create_stream(&svc, "dup", "s1");
+        // Three events sharing one millisecond timestamp (recent, so they
+        // aren't dropped as too-old by PutLogEvents).
+        let ts = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "dup",
+                "logStreamName": "s1",
+                "logEvents": [
+                    {"timestamp": ts, "message": "a"},
+                    {"timestamp": ts, "message": "b"},
+                    {"timestamp": ts, "message": "c"},
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        // Page through one at a time; every event must appear exactly once.
+        let mut seen: Vec<String> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..5 {
+            let mut body = json!({"logGroupName": "dup", "limit": 1});
+            if let Some(t) = &token {
+                body["nextToken"] = json!(t);
+            }
+            let resp = svc
+                .filter_log_events(&make_request("FilterLogEvents", body))
+                .unwrap();
+            let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            for e in out["events"].as_array().unwrap() {
+                seen.push(e["message"].as_str().unwrap().to_string());
+            }
+            match out["nextToken"].as_str() {
+                Some(t) => token = Some(t.to_string()),
+                None => break,
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["a", "b", "c"],
+            "same-timestamp events must each be delivered exactly once across pages"
+        );
     }
 
     // ---- FilterLogEvents pattern matching tests ----

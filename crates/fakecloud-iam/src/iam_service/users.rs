@@ -1757,17 +1757,15 @@ impl IamService {
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
 
-        let members: String = policy_names
-            .iter()
-            .map(|name| format!("      <member>{name}</member>"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
+        let (members, is_truncated, next_marker) = super::paginate_policy_names(policy_names, req);
+        let marker_section = next_marker
+            .map(|m| format!("\n    <Marker>{m}</Marker>"))
+            .unwrap_or_default();
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListUserPoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListUserPoliciesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <PolicyNames>
 {members}
     </PolicyNames>
