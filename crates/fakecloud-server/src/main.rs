@@ -3120,7 +3120,8 @@ async fn main() {
         } else {
             None
         };
-    let mut batch_service = fakecloud_batch::BatchService::new(batch_state.clone());
+    let mut batch_service = fakecloud_batch::BatchService::new(batch_state.clone())
+        .with_ecs(ecs_state.clone(), ecs_runtime.clone());
     if let Some(store) = batch_snapshot_store.clone() {
         batch_service = batch_service.with_snapshot_store(store);
     }
