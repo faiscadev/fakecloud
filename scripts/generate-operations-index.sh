@@ -68,6 +68,7 @@ SERVICES=(
     "route53|Route 53|route53"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"
+    "batch|Batch|batch"
     "athena|Athena|athena"
     "acm|ACM|acm"
     "cloudwatch|CloudWatch (Metrics & Alarms)|cloudwatch"

@@ -2635,6 +2635,54 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `TagResource`
 - `UntagResource`
 
+## [Batch](@/docs/services/batch.md)
+
+- `CancelJob`
+- `CreateComputeEnvironment`
+- `CreateConsumableResource`
+- `CreateJobQueue`
+- `CreateQuotaShare`
+- `CreateSchedulingPolicy`
+- `CreateServiceEnvironment`
+- `DeleteComputeEnvironment`
+- `DeleteConsumableResource`
+- `DeleteJobQueue`
+- `DeleteQuotaShare`
+- `DeleteSchedulingPolicy`
+- `DeleteServiceEnvironment`
+- `DeregisterJobDefinition`
+- `DescribeComputeEnvironments`
+- `DescribeConsumableResource`
+- `DescribeJobDefinitions`
+- `DescribeJobQueues`
+- `DescribeJobs`
+- `DescribeQuotaShare`
+- `DescribeSchedulingPolicies`
+- `DescribeServiceEnvironments`
+- `DescribeServiceJob`
+- `GetJobQueueSnapshot`
+- `ListConsumableResources`
+- `ListJobs`
+- `ListJobsByConsumableResource`
+- `ListQuotaShares`
+- `ListSchedulingPolicies`
+- `ListServiceJobs`
+- `ListTagsForResource`
+- `RegisterJobDefinition`
+- `SubmitJob`
+- `SubmitServiceJob`
+- `TagResource`
+- `TerminateJob`
+- `TerminateServiceJob`
+- `UntagResource`
+- `UpdateComputeEnvironment`
+- `UpdateConsumableResource`
+- `UpdateJobQueue`
+- `UpdateQuotaShare`
+- `UpdateSchedulingPolicy`
+- `UpdateServiceEnvironment`
+- `UpdateServiceJob`
+
 ## [Athena](@/docs/services/athena.md)
 
 - `BatchGetNamedQuery`

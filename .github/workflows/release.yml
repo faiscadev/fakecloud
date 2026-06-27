@@ -202,6 +202,7 @@ jobs:
           publish fakecloud-acm
           publish fakecloud-application-autoscaling
           publish fakecloud-autoscaling
+          publish fakecloud-batch
           publish fakecloud-wafv2
           publish fakecloud-cloudwatch
           publish fakecloud-glue
