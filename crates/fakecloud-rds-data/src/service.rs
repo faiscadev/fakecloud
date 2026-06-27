@@ -1,11 +1,14 @@
 //! RDS Data API (`rds-data`) restJson1 dispatch + real SQL execution.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_rds::SharedRdsState;
@@ -19,6 +22,13 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ExecuteSql",
 ];
 
+/// Idle transactions are rolled back and their connection released after this
+/// long with no statement, mirroring the AWS RDS Data API's ~3-minute idle
+/// transaction timeout. Without this, a client that begins a transaction and
+/// never commits (crash, dropped handle) would leak a backing DB connection
+/// forever, eventually exhausting the container's `max_connections`.
+const TXN_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Connection parameters captured from a resolved `DbInstance` (owned so the
 /// state read-lock is dropped before we touch the network).
 struct DbConn {
@@ -28,27 +38,58 @@ struct DbConn {
     user: String,
     password: String,
     db_name: String,
+    /// Optional schema (`search_path` on Postgres); ignored on MySQL where the
+    /// schema is the database.
+    schema: Option<String>,
 }
 
 /// A live connection held open across requests for the lifetime of a
-/// transaction, keyed by `transactionId`. Postgres drives its connection on a
-/// spawned task that lives as long as the `Client`; MySQL owns its socket.
+/// transaction. Postgres drives its connection on a spawned task that lives as
+/// long as the `Client`; MySQL owns its socket.
 enum HeldConn {
     Pg(tokio_postgres::Client),
     MySql(mysql_async::Conn),
 }
 
+/// One open transaction. The connection has its own lock so the global
+/// transactions-map lock is never held across an awaited SQL statement (a slow
+/// statement in one transaction must not block begin/commit/rollback of
+/// another). `last_used` drives the idle reaper.
+struct TxnEntry {
+    /// `None` once the transaction has been committed/rolled-back or reaped.
+    conn: Mutex<Option<HeldConn>>,
+    last_used: StdMutex<Instant>,
+}
+
+impl TxnEntry {
+    fn touch(&self) {
+        if let Ok(mut t) = self.last_used.lock() {
+            *t = Instant::now();
+        }
+    }
+}
+
+type TxnMap = Arc<Mutex<HashMap<String, Arc<TxnEntry>>>>;
+
 pub struct RdsDataService {
     rds_state: SharedRdsState,
-    /// Open transactions: `transactionId` -> the connection running its `BEGIN`.
-    transactions: Mutex<HashMap<String, HeldConn>>,
+    /// Open transactions: `transactionId` -> the held connection running its
+    /// `BEGIN`.
+    transactions: TxnMap,
 }
 
 impl RdsDataService {
     pub fn new(rds_state: SharedRdsState) -> Self {
+        let transactions: TxnMap = Arc::new(Mutex::new(HashMap::new()));
+        // Reap idle transactions so abandoned ones don't leak DB connections.
+        // Only spawn when a tokio runtime is present (it always is in the
+        // server; absent in some unit-test constructions).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(reap_idle_transactions(transactions.clone()));
+        }
         Self {
             rds_state,
-            transactions: Mutex::new(HashMap::new()),
+            transactions,
         }
     }
 
@@ -85,16 +126,23 @@ impl RdsDataService {
         })?;
         Some(DbConn {
             engine: inst.engine.clone(),
-            host: resolve_db_host(),
+            // Use the address the RDS runtime actually recorded for this
+            // instance (Docker sibling host or k8s Pod IP). Re-deriving a
+            // Docker-only sibling host here would break the k8s backend and
+            // shell out to `docker info` on every request.
+            host: inst.endpoint_address.clone(),
             port: inst.host_port,
             user: inst.master_username.clone(),
             password: inst.master_user_password.clone(),
             db_name: inst.db_name.clone().unwrap_or_default(),
+            schema: None,
         })
     }
 
-    /// Common front-matter for the credentialed ops: validate `secretArn` and
-    /// resolve the `resourceArn` to a connection.
+    /// Common front-matter for the credentialed ops: validate `secretArn`,
+    /// resolve the `resourceArn` to a connection, and apply the request's
+    /// `database`/`schema` overrides (AWS lets a single resource serve many
+    /// databases — Aurora clusters often have no default DB name at all).
     fn require_conn(&self, req: &AwsRequest, body: &Value) -> Result<DbConn, AwsServiceError> {
         let resource_arn = body
             .get("resourceArn")
@@ -105,12 +153,24 @@ impl RdsDataService {
         if body.get("secretArn").and_then(Value::as_str).is_none() {
             return Err(bad_request("secretArn is required"));
         }
-        self.resolve_conn(&req.account_id, resource_arn)
+        let mut conn = self
+            .resolve_conn(&req.account_id, resource_arn)
             .ok_or_else(|| {
                 bad_request(format!(
                     "HttpEndpoint is not enabled for resource {resource_arn} (no such DB)"
                 ))
-            })
+            })?;
+        if let Some(db) = body.get("database").and_then(Value::as_str) {
+            if !db.is_empty() {
+                conn.db_name = db.to_string();
+            }
+        }
+        conn.schema = body
+            .get("schema")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(conn)
     }
 
     async fn execute_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -137,8 +197,12 @@ impl RdsDataService {
             // Validate the resource still resolves (AWS still checks it), but the
             // actual execution rides the held connection.
             self.require_conn(req, &body)?;
-            let mut txns = self.transactions.lock().await;
-            let held = txns.get_mut(txid).ok_or_else(|| not_found_txn(txid))?;
+            let entry = self.txn_entry(txid).await?;
+            entry.touch();
+            // Lock only this transaction's connection, not the whole map, so a
+            // slow statement here can't block other transactions.
+            let mut guard = entry.conn.lock().await;
+            let held = guard.as_mut().ok_or_else(|| not_found_txn(txid))?;
             let value = match held {
                 HeldConn::Pg(client) => {
                     pg_run(client, sql, &params, include_metadata, format_json).await?
@@ -190,8 +254,23 @@ impl RdsDataService {
         };
 
         let txid = gen_transaction_id();
-        self.transactions.lock().await.insert(txid.clone(), held);
+        let entry = Arc::new(TxnEntry {
+            conn: Mutex::new(Some(held)),
+            last_used: StdMutex::new(Instant::now()),
+        });
+        self.transactions.lock().await.insert(txid.clone(), entry);
         Ok(AwsResponse::ok_json(json!({ "transactionId": txid })))
+    }
+
+    /// Look up an open transaction's entry, cloning the `Arc` so the map lock is
+    /// released before the caller locks the connection itself.
+    async fn txn_entry(&self, txid: &str) -> Result<Arc<TxnEntry>, AwsServiceError> {
+        self.transactions
+            .lock()
+            .await
+            .get(txid)
+            .cloned()
+            .ok_or_else(|| not_found_txn(txid))
     }
 
     /// Shared body for Commit/Rollback: pull the held connection out of the map
@@ -207,27 +286,21 @@ impl RdsDataService {
             .get("transactionId")
             .and_then(Value::as_str)
             .ok_or_else(|| bad_request("transactionId is required"))?;
-        let held = self
+        let entry = self
             .transactions
             .lock()
             .await
             .remove(txid)
             .ok_or_else(|| not_found_txn(txid))?;
-        match held {
-            HeldConn::Pg(client) => {
-                client
-                    .batch_execute(sql_keyword)
-                    .await
-                    .map_err(|e| bad_request(format!("{e}")))?;
-            }
-            HeldConn::MySql(mut conn) => {
-                use mysql_async::prelude::Queryable;
-                conn.query_drop(sql_keyword)
-                    .await
-                    .map_err(|e| bad_request(format!("{e}")))?;
-                let _ = conn.disconnect().await;
-            }
-        }
+        // Take ownership of the connection (waiting for any in-flight statement
+        // on it to finish) and run the terminal SQL.
+        let held = entry
+            .conn
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| not_found_txn(txid))?;
+        finish_held(held, sql_keyword).await?;
         Ok(AwsResponse::ok_json(json!({ "transactionStatus": status })))
     }
 
@@ -246,8 +319,10 @@ impl RdsDataService {
         // transaction when `transactionId` is given.
         if let Some(txid) = body.get("transactionId").and_then(Value::as_str) {
             self.require_conn(req, &body)?;
-            let mut txns = self.transactions.lock().await;
-            let held = txns.get_mut(txid).ok_or_else(|| not_found_txn(txid))?;
+            let entry = self.txn_entry(txid).await?;
+            entry.touch();
+            let mut guard = entry.conn.lock().await;
+            let held = guard.as_mut().ok_or_else(|| not_found_txn(txid))?;
             let mut results = Vec::with_capacity(sets.len().max(1));
             match held {
                 HeldConn::Pg(client) => {
@@ -362,11 +437,54 @@ fn gen_transaction_id() -> String {
     b64_encode(&bytes)
 }
 
-/// The host fakecloud's RDS containers are reachable at (sibling-container aware).
-fn resolve_db_host() -> String {
-    let cli =
-        fakecloud_core::container_net::detect_container_cli().unwrap_or_else(|| "docker".into());
-    fakecloud_core::container_net::HostNetworking::detect(&cli).sibling_host
+/// Run the terminal SQL (`COMMIT`/`ROLLBACK`) on a connection taken out of a
+/// transaction entry and release it.
+async fn finish_held(held: HeldConn, sql_keyword: &str) -> Result<(), AwsServiceError> {
+    match held {
+        HeldConn::Pg(client) => {
+            client
+                .batch_execute(sql_keyword)
+                .await
+                .map_err(|e| bad_request(format!("{e}")))?;
+        }
+        HeldConn::MySql(mut conn) => {
+            use mysql_async::prelude::Queryable;
+            conn.query_drop(sql_keyword)
+                .await
+                .map_err(|e| bad_request(format!("{e}")))?;
+            let _ = conn.disconnect().await;
+        }
+    }
+    Ok(())
+}
+
+/// Background sweep: roll back and release any transaction idle longer than
+/// [`TXN_IDLE_TIMEOUT`], so an abandoned `BeginTransaction` never leaks its
+/// backing DB connection forever.
+async fn reap_idle_transactions(transactions: TxnMap) {
+    let mut tick = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tick.tick().await;
+        let now = Instant::now();
+        let stale: Vec<(String, Arc<TxnEntry>)> = {
+            let map = transactions.lock().await;
+            map.iter()
+                .filter(|(_, e)| {
+                    e.last_used
+                        .lock()
+                        .map(|t| now.duration_since(*t) > TXN_IDLE_TIMEOUT)
+                        .unwrap_or(false)
+                })
+                .map(|(id, e)| (id.clone(), e.clone()))
+                .collect()
+        };
+        for (id, entry) in stale {
+            transactions.lock().await.remove(&id);
+            if let Some(held) = entry.conn.lock().await.take() {
+                let _ = finish_held(held, "ROLLBACK").await;
+            }
+        }
+    }
 }
 
 /// A single positional SQL parameter resolved from an AWS `SqlParameter`.
@@ -456,14 +574,28 @@ fn inline_params(
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Copy one whole UTF-8 character. `:` and identifier bytes are ASCII, so
+        // the placeholder scan above only ever fires on a char boundary; here we
+        // must advance by the full character width, not a single byte, or
+        // multi-byte literals (e.g. 'café') would be corrupted into mojibake.
+        let ch = sql[i..]
+            .chars()
+            .next()
+            .expect("byte index is on a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
 
 fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Quote an SQL identifier (schema/table name) so a caller-supplied `schema`
+/// can't break out of the `SET search_path` statement.
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 /// SQL literal for postgres.
@@ -529,6 +661,12 @@ async fn pg_connect(conn: &DbConn) -> Result<tokio_postgres::Client, AwsServiceE
     tokio::spawn(async move {
         let _ = connection.await;
     });
+    if let Some(schema) = &conn.schema {
+        client
+            .batch_execute(&format!("SET search_path TO {}", quote_ident(schema)))
+            .await
+            .map_err(|e| bad_request(format!("could not set schema: {e}")))?;
+    }
     Ok(client)
 }
 
@@ -561,7 +699,11 @@ async fn pg_run(
         .map_err(|e| bad_request(format!("{e}")))?;
     if rows.is_empty() {
         out.insert("numberOfRecordsUpdated".into(), json!(0));
-        out.insert("records".into(), json!([]));
+        if format_json {
+            out.insert("formattedRecords".into(), json!("[]"));
+        } else {
+            out.insert("records".into(), json!([]));
+        }
         return Ok(Value::Object(out));
     }
 
@@ -714,16 +856,49 @@ async fn my_run(
     use mysql_async::{Column, Row};
 
     let stmt = inline_params(sql, params, mysql_literal);
+    let mut out = Map::new();
+
+    // Route writes through `query_drop` so the connection retains the INSERT's
+    // OK packet (and thus `last_insert_id`); `query` collecting rows can leave a
+    // result-set terminator as the last packet.
+    if !returns_rows(&stmt) {
+        c.query_drop(stmt.as_str())
+            .await
+            .map_err(|e| bad_request(format!("{e}")))?;
+        out.insert("numberOfRecordsUpdated".into(), json!(c.affected_rows()));
+        // AWS Aurora MySQL surfaces the auto-increment key in `generatedFields`
+        // (Postgres needs `RETURNING` instead, so its arm omits this). Read it
+        // back explicitly on the same connection — robust across the text
+        // protocol regardless of which OK packet the driver retained.
+        let generated: Option<u64> = c
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .ok()
+            .flatten()
+            .filter(|id: &u64| *id != 0);
+        if let Some(id) = generated {
+            out.insert(
+                "generatedFields".into(),
+                json!([{ "longValue": id as i64 }]),
+            );
+        }
+        out.insert("records".into(), json!([]));
+        return Ok(Value::Object(out));
+    }
+
     let rows: Vec<Row> = c
         .query(stmt.as_str())
         .await
         .map_err(|e| bad_request(format!("{e}")))?;
     let affected = c.affected_rows();
 
-    let mut out = Map::new();
     if rows.is_empty() {
         out.insert("numberOfRecordsUpdated".into(), json!(affected));
-        out.insert("records".into(), json!([]));
+        if format_json {
+            out.insert("formattedRecords".into(), json!("[]"));
+        } else {
+            out.insert("records".into(), json!([]));
+        }
         return Ok(Value::Object(out));
     }
 
@@ -749,7 +924,7 @@ async fn my_run(
         let mut rec: Vec<Value> = Vec::with_capacity(cols.len());
         let mut jr = Map::new();
         for (i, col) in cols.iter().enumerate() {
-            let field = my_field(row, i);
+            let field = my_field(row, i, col.column_type());
             if format_json {
                 jr.insert(col.name_str().to_string(), field_to_plain(&field));
             }
@@ -771,18 +946,19 @@ async fn my_run(
     Ok(Value::Object(out))
 }
 
-fn my_field(row: &mysql_async::Row, i: usize) -> Value {
+fn my_field(row: &mysql_async::Row, i: usize, ty: mysql_async::consts::ColumnType) -> Value {
     use mysql_async::Value as V;
     match row.as_ref(i) {
         Some(V::NULL) | None => json!({ "isNull": true }),
+        // Binary-protocol typed values (kept for completeness).
         Some(V::Int(n)) => json!({ "longValue": n }),
         Some(V::UInt(n)) => json!({ "longValue": *n as i64 }),
         Some(V::Float(f)) => json!({ "doubleValue": *f as f64 }),
         Some(V::Double(d)) => json!({ "doubleValue": d }),
-        Some(V::Bytes(b)) => match std::str::from_utf8(b) {
-            Ok(s) => json!({ "stringValue": s }),
-            Err(_) => json!({ "blobValue": b64_encode(b) }),
-        },
+        // Under the text protocol every column arrives as raw bytes, so coerce
+        // numeric columns to the right typed Field by the column's declared
+        // type rather than always returning `stringValue`.
+        Some(V::Bytes(b)) => my_bytes_field(b, ty),
         // Temporal columns arrive as typed Date/Time values under the binary
         // protocol; render the canonical SQL text instead of the debug form.
         Some(V::Date(y, mo, d, h, mi, s, us)) => {
@@ -791,6 +967,33 @@ fn my_field(row: &mysql_async::Row, i: usize) -> Value {
         Some(V::Time(neg, days, h, mi, s, us)) => {
             json!({ "stringValue": format_mysql_time(*neg, *days, *h, *mi, *s, *us) })
         }
+    }
+}
+
+/// Coerce a text-protocol byte column to a typed AWS Field by its MySQL type.
+/// Integers -> `longValue`, real/double -> `doubleValue`; decimals, dates,
+/// times, and strings stay `stringValue`; non-UTF-8 bytes (true binary/blob)
+/// become `blobValue`.
+fn my_bytes_field(b: &[u8], ty: mysql_async::consts::ColumnType) -> Value {
+    use mysql_async::consts::ColumnType::*;
+    let as_str = std::str::from_utf8(b).ok();
+    match ty {
+        MYSQL_TYPE_TINY | MYSQL_TYPE_SHORT | MYSQL_TYPE_LONG | MYSQL_TYPE_LONGLONG
+        | MYSQL_TYPE_INT24 | MYSQL_TYPE_YEAR => {
+            if let Some(n) = as_str.and_then(|s| s.parse::<i64>().ok()) {
+                return json!({ "longValue": n });
+            }
+        }
+        MYSQL_TYPE_FLOAT | MYSQL_TYPE_DOUBLE => {
+            if let Some(d) = as_str.and_then(|s| s.parse::<f64>().ok()) {
+                return json!({ "doubleValue": d });
+            }
+        }
+        _ => {}
+    }
+    match as_str {
+        Some(s) => json!({ "stringValue": s }),
+        None => json!({ "blobValue": b64_encode(b) }),
     }
 }
 

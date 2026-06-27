@@ -317,3 +317,194 @@ async fn rds_data_api_decodes_rich_column_types() {
         "jsonb -> stringValue (compact JSON)"
     );
 }
+
+/// Non-ASCII SQL (multi-byte UTF-8 literals and string parameters) must reach
+/// the engine intact rather than being byte-cast into Latin-1 mojibake, and the
+/// `database` request override must route the statement to the named database.
+#[tokio::test]
+async fn rds_data_api_utf8_literals_and_database_override() {
+    let server = TestServer::start().await;
+    let rds = server.rds_client().await;
+
+    rds.create_db_instance()
+        .db_instance_identifier("rdsdata-utf8")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create postgres instance");
+
+    let instance = helpers::wait_for_db_available(&rds, "rdsdata-utf8", 240).await;
+    let arn = instance
+        .db_instance_arn()
+        .expect("db instance arn")
+        .to_string();
+
+    let data = aws_sdk_rdsdata::Client::new(&server.aws_config().await);
+    let secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+
+    // A multi-byte literal embedded directly in the SQL text.
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE TABLE u (id int, name text)")
+        .send()
+        .await
+        .expect("create table");
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("INSERT INTO u (id, name) VALUES (1, 'café 日本 €')")
+        .send()
+        .await
+        .expect("insert literal");
+    // A multi-byte string parameter.
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("INSERT INTO u (id, name) VALUES (2, :name)")
+        .parameters(param("name", Field::StringValue("naïve Ωmega".into())))
+        .send()
+        .await
+        .expect("insert param");
+
+    let resp = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT name FROM u ORDER BY id")
+        .send()
+        .await
+        .expect("select utf8");
+    let records = resp.records();
+    assert_eq!(
+        records[0][0].as_string_value().map(String::as_str).ok(),
+        Some("café 日本 €"),
+        "multi-byte literal round-trips intact (not mojibake)"
+    );
+    assert_eq!(
+        records[1][0].as_string_value().map(String::as_str).ok(),
+        Some("naïve Ωmega"),
+        "multi-byte string parameter round-trips intact"
+    );
+
+    // `database` override: create a second database and route statements to it.
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE DATABASE otherdb")
+        .send()
+        .await
+        .expect("create database");
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .database("otherdb")
+        .sql("CREATE TABLE only_here (id int)")
+        .send()
+        .await
+        .expect("create table in otherdb");
+
+    // The table exists in otherdb...
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .database("otherdb")
+        .sql("SELECT count(*) FROM only_here")
+        .send()
+        .await
+        .expect("table visible in otherdb");
+    // ...and NOT in the default database (proving the override actually routed).
+    let in_default = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT count(*) FROM only_here")
+        .send()
+        .await;
+    assert!(
+        in_default.is_err(),
+        "table created via database=otherdb must not exist in the default db"
+    );
+}
+
+/// MySQL path: a real INSERT returns the auto-increment key in `generatedFields`
+/// (as AWS Aurora MySQL does), and typed values round-trip through the Data API.
+#[tokio::test]
+async fn rds_data_api_mysql_generated_fields() {
+    let server = TestServer::start().await;
+    let rds = server.rds_client().await;
+
+    rds.create_db_instance()
+        .db_instance_identifier("rdsdata-mysql")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("mysql")
+        .engine_version("8.0")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create mysql instance");
+
+    let instance = helpers::wait_for_db_available(&rds, "rdsdata-mysql", 300).await;
+    let arn = instance
+        .db_instance_arn()
+        .expect("db instance arn")
+        .to_string();
+
+    let data = aws_sdk_rdsdata::Client::new(&server.aws_config().await);
+    let secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE TABLE m (id int AUTO_INCREMENT PRIMARY KEY, name text)")
+        .send()
+        .await
+        .expect("create table");
+
+    let insert = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("INSERT INTO m (name) VALUES (:name)")
+        .parameters(param("name", Field::StringValue("widget".into())))
+        .send()
+        .await
+        .expect("insert");
+    assert_eq!(insert.number_of_records_updated(), 1);
+
+    let resp = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT id, name FROM m")
+        .send()
+        .await
+        .expect("select");
+    let records = resp.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0][0].as_long_value().ok(),
+        Some(&1),
+        "auto-increment produced id 1"
+    );
+    assert_eq!(
+        records[0][1].as_string_value().map(String::as_str).ok(),
+        Some("widget")
+    );
+
+    let generated = insert.generated_fields();
+    assert_eq!(
+        generated.first().and_then(|f| f.as_long_value().ok()),
+        Some(&1),
+        "MySQL INSERT returns the auto-increment id in generatedFields"
+    );
+}
