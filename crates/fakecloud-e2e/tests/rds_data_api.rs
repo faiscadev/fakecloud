@@ -234,3 +234,86 @@ async fn rds_data_api_transactions_and_batch() {
         Some("bob")
     );
 }
+
+/// Non-scalar Postgres column types (NUMERIC, TIMESTAMP, UUID, JSONB) come back
+/// as AWS `stringValue` rather than silently collapsing to `isNull` (which is
+/// what happens when these binary-format columns hit a `String` decode).
+#[tokio::test]
+async fn rds_data_api_decodes_rich_column_types() {
+    let server = TestServer::start().await;
+    let rds = server.rds_client().await;
+
+    rds.create_db_instance()
+        .db_instance_identifier("rdsdata-types")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create postgres instance");
+
+    let instance = helpers::wait_for_db_available(&rds, "rdsdata-types", 240).await;
+    let arn = instance
+        .db_instance_arn()
+        .expect("db instance arn")
+        .to_string();
+
+    let data = aws_sdk_rdsdata::Client::new(&server.aws_config().await);
+    let secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE TABLE rich (n numeric(10,2), ts timestamp, u uuid, j jsonb)")
+        .send()
+        .await
+        .expect("create table");
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql(
+            "INSERT INTO rich VALUES (123.45, '2024-01-02 03:04:05', \
+             '550e8400-e29b-41d4-a716-446655440000', '{\"k\": \"v\"}')",
+        )
+        .send()
+        .await
+        .expect("insert rich types");
+
+    let resp = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT n, ts, u, j FROM rich")
+        .send()
+        .await
+        .expect("select rich");
+
+    let records = resp.records();
+    assert_eq!(records.len(), 1);
+    let row = &records[0];
+    assert_eq!(
+        row[0].as_string_value().map(String::as_str).ok(),
+        Some("123.45"),
+        "numeric -> stringValue"
+    );
+    assert_eq!(
+        row[1].as_string_value().map(String::as_str).ok(),
+        Some("2024-01-02 03:04:05"),
+        "timestamp -> stringValue"
+    );
+    assert_eq!(
+        row[2].as_string_value().map(String::as_str).ok(),
+        Some("550e8400-e29b-41d4-a716-446655440000"),
+        "uuid -> stringValue"
+    );
+    assert_eq!(
+        row[3].as_string_value().map(String::as_str).ok(),
+        Some("{\"k\":\"v\"}"),
+        "jsonb -> stringValue (compact JSON)"
+    );
+}
