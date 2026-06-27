@@ -1150,12 +1150,25 @@ impl GlueService {
         let db_name = body["DatabaseName"]
             .as_str()
             .ok_or_else(|| missing("DatabaseName"))?;
+        // GetTables' Expression is a regular expression matched against the
+        // table name (AWS filters server-side); GetPartitions already honors its
+        // own Expression, so GetTables doing nothing was inconsistent.
+        let name_filter = body["Expression"]
+            .as_str()
+            .filter(|e| !e.is_empty())
+            .and_then(|e| regex::Regex::new(e).ok());
         let accounts = self.state.read();
         let tables: Vec<Value> = accounts
             .get(&req.account_id)
             .and_then(|s| s.dbs_in(&req.region))
             .and_then(|dbs| dbs.get(db_name))
-            .map(|db| db.tables.values().map(table_json).collect())
+            .map(|db| {
+                db.tables
+                    .values()
+                    .filter(|t| name_filter.as_ref().is_none_or(|re| re.is_match(&t.name)))
+                    .map(table_json)
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({"TableList": tables})))
     }
