@@ -1532,6 +1532,15 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `SwitchoverGlobalCluster`
 - `SwitchoverReadReplica`
 
+## [RDS Data](@/docs/services/rds-data.md)
+
+- `BatchExecuteStatement`
+- `BeginTransaction`
+- `CommitTransaction`
+- `ExecuteSql`
+- `ExecuteStatement`
+- `RollbackTransaction`
+
 ## [ElastiCache](@/docs/services/elasticache.md)
 
 - `AddTagsToResource`

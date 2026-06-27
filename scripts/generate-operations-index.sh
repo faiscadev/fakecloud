@@ -53,6 +53,7 @@ SERVICES=(
     "cognito-identity|Cognito Identity|cognito"
     "kinesis|Kinesis|kinesis"
     "rds|RDS|rds"
+    "rds-data|RDS Data|rds-data"
     "elasticache|ElastiCache|elasticache"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"
