@@ -698,10 +698,22 @@ impl BatchService {
         let job_id = Uuid::new_v4().to_string();
         let arn = self.arn(&req.account_id, &req.region, &format!("job/{job_id}"));
         let now = chrono::Utc::now().timestamp_millis();
-        let array_size = body
+        // AWS Batch caps an array job at 2..=10000 children; reject out-of-range
+        // sizes rather than synchronously spawning an unbounded number of
+        // container launches (a single-request resource-exhaustion vector).
+        let array_size = match body
             .pointer("/arrayProperties/size")
             .and_then(Value::as_i64)
-            .filter(|n| *n > 1);
+        {
+            Some(n) if (2..=10_000).contains(&n) => Some(n),
+            Some(n) => {
+                return Err(client_error(
+                    "ClientException",
+                    format!("Array job size must be between 2 and 10000, but was {n}"),
+                ));
+            }
+            None => None,
+        };
         let depends_on: Vec<String> = body
             .get("dependsOn")
             .and_then(Value::as_array)
@@ -1760,23 +1772,35 @@ fn arn_or_name(body: &Value, key: &str) -> Result<String, AwsServiceError> {
     Ok(raw.rsplit('/').next().unwrap_or(raw).to_string())
 }
 
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn percent_decode(s: &str) -> String {
-    // ARNs in the path are percent-encoded by SDKs; decode the common escapes.
-    let mut out = String::with_capacity(s.len());
+    // ARNs in the path are percent-encoded by SDKs; decode %XX escapes on the
+    // raw BYTES and reassemble as UTF-8. Slicing the &str directly
+    // (`&s[i+1..i+3]`) panics when a `%` sits within a multi-byte char boundary
+    // (e.g. `%€`), which would kill the request task and drop the connection.
     let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b as char);
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[async_trait]
@@ -2238,5 +2262,56 @@ mod tests {
         );
         r.method = Method::DELETE;
         assert_eq!(BatchService::resolve_action(&r), Some("UntagResource"));
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_without_panicking() {
+        // A `%` adjacent to a multi-byte UTF-8 char used to slice on a non-char
+        // boundary and panic, killing the request task. The bytes after `%` are
+        // not ASCII hex, so the `%` and the char pass through unchanged.
+        assert_eq!(percent_decode("%€"), "%€");
+        // Trailing/partial escapes pass through untouched, no panic.
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        // Valid escapes still decode, and multi-byte content round-trips.
+        assert_eq!(percent_decode("arn%3Aaws%3Abatch"), "arn:aws:batch");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    #[tokio::test]
+    async fn list_tags_with_multibyte_arn_does_not_panic() {
+        let s = svc();
+        // Raw multi-byte byte in the ARN path segment (what dispatch would pass
+        // through unescaped) must yield a normal response, not a dropped conn.
+        let mut r = req("/v1/tags/%€", json!({}));
+        r.method = Method::GET;
+        let resp = s.handle(r).await.unwrap();
+        let v = body_of(resp);
+        assert!(v.get("tags").is_some());
+    }
+
+    #[tokio::test]
+    async fn submit_job_rejects_out_of_range_array_size() {
+        let s = svc();
+        for bad in [1_i64, 0, -3, 10_001, 2_000_000_000] {
+            let res = s
+                .handle(req(
+                    "/v1/submitjob",
+                    json!({
+                        "jobName": "j", "jobQueue": "q", "jobDefinition": "d",
+                        "arrayProperties": {"size": bad}
+                    }),
+                ))
+                .await;
+            match res {
+                Err(e) => assert!(
+                    format!("{e:?}").contains("between 2 and 10000"),
+                    "size {bad}: wrong error {e:?}"
+                ),
+                Ok(_) => panic!("size {bad}: out-of-range array size must be rejected"),
+            }
+        }
     }
 }
