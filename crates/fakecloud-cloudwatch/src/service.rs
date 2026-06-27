@@ -1083,85 +1083,69 @@ impl CloudWatchService {
         let state_filter = optional_query_param(req, "StateValue");
         let action_prefix = optional_query_param(req, "ActionPrefix");
 
-        // AlarmTypes selects which kinds to return; when omitted AWS returns
-        // only metric alarms (composite alarms must be requested explicitly).
-        let alarm_types: Vec<String> = req
-            .query_params
-            .iter()
-            .filter(|(k, _)| k.starts_with("AlarmTypes.member."))
-            .map(|(_, v)| v.clone())
-            .collect();
-        let include_metric =
-            alarm_types.is_empty() || alarm_types.iter().any(|t| t == "MetricAlarm");
-        let include_composite = alarm_types.iter().any(|t| t == "CompositeAlarm");
-
         let state = self.state.read();
         let mut inner = String::from("<MetricAlarms>");
-        if include_metric {
-            if let Some(acct) = state.get(&req.account_id) {
-                if let Some(alarms) = acct.alarms_in(&req.region) {
-                    for alarm in alarms.values() {
-                        if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
+        if let Some(acct) = state.get(&req.account_id) {
+            if let Some(alarms) = acct.alarms_in(&req.region) {
+                for alarm in alarms.values() {
+                    if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
+                        continue;
+                    }
+                    if let Some(p) = prefix.as_ref() {
+                        if !alarm.alarm_name.starts_with(p) {
                             continue;
                         }
-                        if let Some(p) = prefix.as_ref() {
-                            if !alarm.alarm_name.starts_with(p) {
-                                continue;
-                            }
-                        }
-                        if let Some(sv) = state_filter.as_ref() {
-                            if alarm.state_value.as_str() != sv {
-                                continue;
-                            }
-                        }
-                        if let Some(ap) = action_prefix.as_ref() {
-                            let any = alarm
-                                .alarm_actions
-                                .iter()
-                                .chain(alarm.ok_actions.iter())
-                                .chain(alarm.insufficient_data_actions.iter())
-                                .any(|a| a.starts_with(ap));
-                            if !any {
-                                continue;
-                            }
-                        }
-                        inner.push_str(&render_alarm(alarm));
                     }
+                    if let Some(sv) = state_filter.as_ref() {
+                        if alarm.state_value.as_str() != sv {
+                            continue;
+                        }
+                    }
+                    if let Some(ap) = action_prefix.as_ref() {
+                        let any = alarm
+                            .alarm_actions
+                            .iter()
+                            .chain(alarm.ok_actions.iter())
+                            .chain(alarm.insufficient_data_actions.iter())
+                            .any(|a| a.starts_with(ap));
+                        if !any {
+                            continue;
+                        }
+                    }
+                    inner.push_str(&render_alarm(alarm));
                 }
             }
         }
         inner.push_str("</MetricAlarms>");
         inner.push_str("<CompositeAlarms>");
-        if include_composite {
-            if let Some(acct) = state.get(&req.account_id) {
-                if let Some(composites) = acct.composite_alarms_in(&req.region) {
-                    for alarm in composites.values() {
-                        if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
+        if let Some(acct) = state.get(&req.account_id) {
+            if let Some(composites) = acct.composite_alarms_in(&req.region) {
+                for alarm in composites.values() {
+                    if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
+                        continue;
+                    }
+                    if let Some(p) = prefix.as_ref() {
+                        if !alarm.alarm_name.starts_with(p) {
                             continue;
                         }
-                        if let Some(p) = prefix.as_ref() {
-                            if !alarm.alarm_name.starts_with(p) {
-                                continue;
-                            }
-                        }
-                        if let Some(sv) = state_filter.as_ref() {
-                            if alarm.state_value.as_str() != sv {
-                                continue;
-                            }
-                        }
-                        if let Some(ap) = action_prefix.as_ref() {
-                            let any = alarm
-                                .alarm_actions
-                                .iter()
-                                .chain(alarm.ok_actions.iter())
-                                .chain(alarm.insufficient_data_actions.iter())
-                                .any(|a| a.starts_with(ap));
-                            if !any {
-                                continue;
-                            }
-                        }
-                        inner.push_str(&crate::composite_alarms::render_composite_alarm(alarm));
                     }
+                    if let Some(sv) = state_filter.as_ref() {
+                        if alarm.state_value.as_str() != sv {
+                            continue;
+                        }
+                    }
+                    if let Some(ap) = action_prefix.as_ref() {
+                        let any = alarm
+                            .alarm_actions
+                            .iter()
+                            .chain(alarm.ok_actions.iter())
+                            .chain(alarm.insufficient_data_actions.iter())
+                            .any(|a| a.starts_with(ap));
+                        if !any {
+                            continue;
+                        }
+                    }
+                    inner.push_str(&crate::composite_alarms::render_composite_alarm(alarm));
                 }
             }
         }

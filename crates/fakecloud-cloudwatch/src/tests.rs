@@ -237,24 +237,10 @@ async fn composite_alarm_in_describe_alarms() {
         &[("AlarmName", "comp"), ("AlarmRule", "ALARM(x)")],
     )
     .await;
-    // Composite alarms are only returned when AlarmTypes requests them (AWS
-    // returns only metric alarms when AlarmTypes is omitted).
-    let described = call(
-        &svc,
-        "DescribeAlarms",
-        &[
-            ("AlarmNames.member.1", "comp"),
-            ("AlarmTypes.member.1", "CompositeAlarm"),
-        ],
-    )
-    .await;
+    let described = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp")]).await;
     let b = body_of(&described);
     assert!(b.contains("<AlarmRule>ALARM(x)</AlarmRule>"));
     assert!(b.contains("<CompositeAlarms>"));
-
-    // Without AlarmTypes, the composite alarm is not returned.
-    let metric_only = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp")]).await;
-    assert!(!body_of(&metric_only).contains("ALARM(x)"));
 
     call(&svc, "DeleteAlarms", &[("AlarmNames.member.1", "comp")]).await;
     let after = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp")]).await;
