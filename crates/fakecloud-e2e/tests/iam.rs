@@ -3692,3 +3692,98 @@ async fn iam_account_seeds_default_service_linked_roles() {
     assert!(names.contains(&"AWSServiceRoleForSupport"));
     assert!(names.contains(&"AWSServiceRoleForTrustedAdvisor"));
 }
+
+#[tokio::test]
+async fn list_attached_role_policies_filters_path_and_paginates() {
+    let server = helpers::TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    client
+        .create_role()
+        .role_name("r1")
+        .assume_role_policy_document("{}")
+        .send()
+        .await
+        .unwrap();
+
+    // Two managed policies on different paths.
+    let team = client
+        .create_policy()
+        .policy_name("TeamPol")
+        .path("/team/")
+        .policy_document(doc)
+        .send()
+        .await
+        .unwrap();
+    let team_arn = team.policy().unwrap().arn().unwrap().to_string();
+    let other = client
+        .create_policy()
+        .policy_name("OtherPol")
+        .policy_document(doc)
+        .send()
+        .await
+        .unwrap();
+    let other_arn = other.policy().unwrap().arn().unwrap().to_string();
+    for arn in [&team_arn, &other_arn] {
+        client
+            .attach_role_policy()
+            .role_name("r1")
+            .policy_arn(arn)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // PathPrefix selects only the matching policy.
+    let filtered = client
+        .list_attached_role_policies()
+        .role_name("r1")
+        .path_prefix("/team/")
+        .send()
+        .await
+        .unwrap();
+    let arns: Vec<&str> = filtered
+        .attached_policies()
+        .iter()
+        .filter_map(|p| p.policy_arn())
+        .collect();
+    assert_eq!(arns, vec![team_arn.as_str()], "PathPrefix must filter");
+
+    // MaxItems=1 truncates and yields a marker; the second page returns the rest.
+    let page1 = client
+        .list_attached_role_policies()
+        .role_name("r1")
+        .max_items(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1.attached_policies().len(), 1);
+    assert!(
+        page1.is_truncated(),
+        "MaxItems=1 over 2 policies must truncate"
+    );
+    let marker = page1
+        .marker()
+        .expect("a truncated page must carry a marker");
+    let page2 = client
+        .list_attached_role_policies()
+        .role_name("r1")
+        .marker(marker)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.attached_policies().len(), 1);
+    assert!(!page2.is_truncated());
+    // Across both pages, every attachment appears exactly once.
+    let mut seen: Vec<String> = page1
+        .attached_policies()
+        .iter()
+        .chain(page2.attached_policies())
+        .filter_map(|p| p.policy_arn().map(str::to_string))
+        .collect();
+    seen.sort();
+    let mut expected = vec![team_arn, other_arn];
+    expected.sort();
+    assert_eq!(seen, expected);
+}

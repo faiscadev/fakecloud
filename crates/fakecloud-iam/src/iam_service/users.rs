@@ -1610,22 +1610,17 @@ impl IamService {
             .cloned()
             .unwrap_or_default();
 
-        let members: String = policy_arns
-            .iter()
-            .map(|arn| {
-                let policy_name = super::attached_policy_name(state, arn);
-                format!(
-                    "      <member>\n        <PolicyName>{policy_name}</PolicyName>\n        <PolicyArn>{arn}</PolicyArn>\n      </member>"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (members, is_truncated, next_marker) =
+            super::paginate_attached_policies(state, &policy_arns, req);
+        let marker_section = next_marker
+            .map(|m| format!("\n    <Marker>{m}</Marker>"))
+            .unwrap_or_default();
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListAttachedUserPoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListAttachedUserPoliciesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <AttachedPolicies>
 {members}
     </AttachedPolicies>
