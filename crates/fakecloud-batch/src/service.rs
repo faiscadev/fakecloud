@@ -72,6 +72,9 @@ const MUTATING_ACTIONS: &[&str] = &[
     "DeleteJobQueue",
     "RegisterJobDefinition",
     "DeregisterJobDefinition",
+    "CreateSchedulingPolicy",
+    "UpdateSchedulingPolicy",
+    "DeleteSchedulingPolicy",
     "SubmitJob",
     "CancelJob",
     "TerminateJob",
@@ -209,9 +212,21 @@ impl BatchService {
             "CreateJobQueue" => self.create_job_queue(req),
             "DescribeJobQueues" => self.describe_job_queues(req),
             "DeleteJobQueue" => self.delete_job_queue(req),
+            "UpdateComputeEnvironment" => self.update_compute_environment(req),
+            "UpdateJobQueue" => self.update_job_queue(req),
             "RegisterJobDefinition" => self.register_job_definition(req),
             "DescribeJobDefinitions" => self.describe_job_definitions(req),
             "DeregisterJobDefinition" => self.deregister_job_definition(req),
+            "CreateSchedulingPolicy" => self.create_scheduling_policy(req),
+            "DescribeSchedulingPolicies" => self.describe_scheduling_policies(req),
+            "ListSchedulingPolicies" => self.list_scheduling_policies(req),
+            "UpdateSchedulingPolicy" => self.update_scheduling_policy(req),
+            "DeleteSchedulingPolicy" => self.delete_scheduling_policy(req),
+            "SubmitJob" => self.submit_job(req),
+            "DescribeJobs" => self.describe_jobs(req),
+            "ListJobs" => self.list_jobs(req),
+            "CancelJob" => self.cancel_job(req),
+            "TerminateJob" => self.terminate_job(req),
             "TagResource" => self.tag_resource(req),
             "UntagResource" => self.untag_resource(req),
             "ListTagsForResource" => self.list_tags_for_resource(req),
@@ -468,6 +483,305 @@ impl BatchService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
+    fn update_compute_environment(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = arn_or_name(&body, "computeEnvironment")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let ce = st
+            .compute_environments
+            .get_mut(&name)
+            .ok_or_else(|| client_error("ClientException", format!("Object not found: {name}")))?;
+        let arn = merge_updates(
+            ce,
+            &body,
+            &[
+                "state",
+                "desiredvCpus",
+                "computeResources",
+                "serviceRole",
+                "updatePolicy",
+            ],
+            "computeEnvironmentArn",
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "computeEnvironmentName": name,
+            "computeEnvironmentArn": arn,
+        })))
+    }
+
+    fn update_job_queue(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = arn_or_name(&body, "jobQueue")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let q = st
+            .job_queues
+            .get_mut(&name)
+            .ok_or_else(|| client_error("ClientException", format!("Object not found: {name}")))?;
+        let arn = merge_updates(
+            q,
+            &body,
+            &[
+                "state",
+                "priority",
+                "computeEnvironmentOrder",
+                "schedulingPolicyArn",
+                "jobStateTimeLimitActions",
+            ],
+            "jobQueueArn",
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "jobQueueName": name,
+            "jobQueueArn": arn,
+        })))
+    }
+
+    // ---- Scheduling policies ----
+
+    fn create_scheduling_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = body
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| client_error("ClientException", "name is required"))?
+            .to_string();
+        let arn = self.arn(
+            &req.account_id,
+            &req.region,
+            &format!("scheduling-policy/{name}"),
+        );
+        let mut stored = obj(&body);
+        stored.insert("arn".into(), json!(arn));
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if st.scheduling_policies.contains_key(&name) {
+            return Err(client_error(
+                "ClientException",
+                format!("Object already exists: {name}"),
+            ));
+        }
+        st.scheduling_policies
+            .insert(name.clone(), Value::Object(stored));
+        Ok(AwsResponse::ok_json(json!({ "name": name, "arn": arn })))
+    }
+
+    fn describe_scheduling_policies(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let wanted = string_set(&body, "arns");
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.scheduling_policies
+                    .values()
+                    .filter(|p| {
+                        wanted.is_empty()
+                            || p.get("arn")
+                                .and_then(Value::as_str)
+                                .map(|a| wanted.contains(a))
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "schedulingPolicies": items })))
+    }
+
+    fn list_scheduling_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.scheduling_policies
+                    .values()
+                    .filter_map(|p| p.get("arn").map(|a| json!({ "arn": a })))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "schedulingPolicies": items })))
+    }
+
+    fn update_scheduling_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = arn_or_name(&body, "arn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let p = st
+            .scheduling_policies
+            .get_mut(&name)
+            .ok_or_else(|| client_error("ClientException", format!("Object not found: {name}")))?;
+        merge_updates(p, &body, &["fairsharePolicy"], "arn");
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_scheduling_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = arn_or_name(&body, "arn")?;
+        let mut accounts = self.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .scheduling_policies
+            .remove(&name);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // ---- Jobs (control plane; real container execution lands in batch 2) ----
+
+    fn submit_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let job_name = body
+            .get("jobName")
+            .and_then(Value::as_str)
+            .ok_or_else(|| client_error("ClientException", "jobName is required"))?
+            .to_string();
+        let job_queue = body
+            .get("jobQueue")
+            .and_then(Value::as_str)
+            .ok_or_else(|| client_error("ClientException", "jobQueue is required"))?
+            .to_string();
+        let job_definition = body
+            .get("jobDefinition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| client_error("ClientException", "jobDefinition is required"))?
+            .to_string();
+        let job_id = Uuid::new_v4().to_string();
+        let arn = self.arn(&req.account_id, &req.region, &format!("job/{job_id}"));
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut job = obj(&body);
+        job.insert("jobId".into(), json!(job_id));
+        job.insert("jobArn".into(), json!(arn));
+        job.insert("jobName".into(), json!(job_name));
+        job.insert("jobQueue".into(), json!(job_queue));
+        job.insert("jobDefinition".into(), json!(job_definition));
+        // Control-plane only: the job is accepted and parked at SUBMITTED.
+        // Real container-backed status progression lands in the next batch.
+        job.insert("status".into(), json!("SUBMITTED"));
+        job.insert("createdAt".into(), json!(now));
+
+        let mut accounts = self.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .jobs
+            .insert(job_id.clone(), Value::Object(job));
+        Ok(AwsResponse::ok_json(json!({
+            "jobArn": arn,
+            "jobName": job_name,
+            "jobId": job_id,
+        })))
+    }
+
+    fn describe_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let wanted = string_set(&body, "jobs");
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.jobs
+                    .values()
+                    .filter(|j| {
+                        wanted.is_empty()
+                            || j.get("jobId")
+                                .and_then(Value::as_str)
+                                .map(|id| wanted.contains(id))
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "jobs": items })))
+    }
+
+    fn list_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let queue = body
+            .get("jobQueue")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let status = body
+            .get("jobStatus")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.jobs
+                    .values()
+                    .filter(|j| {
+                        queue
+                            .as_deref()
+                            .is_none_or(|q| j.get("jobQueue").and_then(Value::as_str) == Some(q))
+                            && status
+                                .as_deref()
+                                .is_none_or(|s| j.get("status").and_then(Value::as_str) == Some(s))
+                    })
+                    .map(|j| {
+                        json!({
+                            "jobId": j.get("jobId").cloned().unwrap_or(Value::Null),
+                            "jobName": j.get("jobName").cloned().unwrap_or(Value::Null),
+                            "status": j.get("status").cloned().unwrap_or(Value::Null),
+                            "createdAt": j.get("createdAt").cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({ "jobSummaryList": items })))
+    }
+
+    fn cancel_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.stop_job(req, &["SUBMITTED", "PENDING", "RUNNABLE"], "CancelJob")
+    }
+
+    fn terminate_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.stop_job(
+            req,
+            &["SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"],
+            "TerminateJob",
+        )
+    }
+
+    fn stop_job(
+        &self,
+        req: &AwsRequest,
+        cancelable: &[&str],
+        op: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let job_id = body
+            .get("jobId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| client_error("ClientException", "jobId is required"))?
+            .to_string();
+        let reason = body
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or(op)
+            .to_string();
+        let mut accounts = self.state.write();
+        if let Some(job) = accounts
+            .get_or_create(&req.account_id)
+            .jobs
+            .get_mut(&job_id)
+        {
+            if let Some(o) = job.as_object_mut() {
+                let cur = o.get("status").and_then(Value::as_str).unwrap_or("");
+                if cancelable.contains(&cur) {
+                    o.insert("status".into(), json!("FAILED"));
+                    o.insert("statusReason".into(), json!(reason));
+                }
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
     // ---- Tags ----
 
     fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -534,6 +848,24 @@ impl BatchService {
             })
             .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({ "tags": tags })))
+    }
+}
+
+/// Apply the named mutable fields from `body` onto the stored resource and
+/// return its ARN (read from `arn_key`).
+fn merge_updates(stored: &mut Value, body: &Value, fields: &[&str], arn_key: &str) -> String {
+    if let Some(o) = stored.as_object_mut() {
+        for f in fields {
+            if let Some(v) = body.get(*f) {
+                o.insert((*f).to_string(), v.clone());
+            }
+        }
+        o.get(arn_key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -733,14 +1065,115 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_op_errors_not_fakes() {
         let s = svc();
+        // CreateConsumableResource is not yet implemented (a later batch); it
+        // must return a faithful 501, never a fake success.
         let err = match s
-            .handle(req("/v1/submitjob", json!({"jobName": "j"})))
+            .handle(req(
+                "/v1/createconsumableresource",
+                json!({"consumableResourceName": "r"}),
+            ))
             .await
         {
             Err(e) => e,
-            Ok(_) => panic!("SubmitJob must not fake-succeed in the foundation batch"),
+            Ok(_) => panic!("unimplemented op must not fake-succeed"),
         };
         assert_eq!(err.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn job_submit_describe_cancel_lifecycle() {
+        let s = svc();
+        let sub = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "j1", "jobQueue": "q1", "jobDefinition": "jd:1"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let job_id = sub["jobId"].as_str().unwrap().to_string();
+        assert_eq!(sub["jobName"], "j1");
+
+        let d = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [job_id]})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
+
+        let l = body_of(
+            s.handle(req("/v1/listjobs", json!({"jobQueue": "q1"})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(l["jobSummaryList"].as_array().unwrap().len(), 1);
+
+        s.handle(req(
+            "/v1/canceljob",
+            json!({"jobId": job_id, "reason": "stop it"}),
+        ))
+        .await
+        .unwrap();
+        let d2 = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [job_id]})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d2["jobs"][0]["status"], "FAILED");
+        assert_eq!(d2["jobs"][0]["statusReason"], "stop it");
+    }
+
+    #[tokio::test]
+    async fn scheduling_policy_crud() {
+        let s = svc();
+        let c = body_of(
+            s.handle(req("/v1/createschedulingpolicy", json!({"name": "sp1"})))
+                .await
+                .unwrap(),
+        );
+        let arn = c["arn"].as_str().unwrap().to_string();
+        assert!(arn.contains("scheduling-policy/sp1"));
+        let d = body_of(
+            s.handle(req(
+                "/v1/describeschedulingpolicies",
+                json!({"arns": [arn]}),
+            ))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(d["schedulingPolicies"].as_array().unwrap().len(), 1);
+        s.handle(req("/v1/deleteschedulingpolicy", json!({"arn": "sp1"})))
+            .await
+            .unwrap();
+        let l = body_of(
+            s.handle(req("/v1/listschedulingpolicies", json!({})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(l["schedulingPolicies"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn update_compute_environment_persists() {
+        let s = svc();
+        s.handle(req(
+            "/v1/createcomputeenvironment",
+            json!({"computeEnvironmentName": "ce1", "state": "ENABLED"}),
+        ))
+        .await
+        .unwrap();
+        s.handle(req(
+            "/v1/updatecomputeenvironment",
+            json!({"computeEnvironment": "ce1", "state": "DISABLED"}),
+        ))
+        .await
+        .unwrap();
+        let d = body_of(
+            s.handle(req("/v1/describecomputeenvironments", json!({})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d["computeEnvironments"][0]["state"], "DISABLED");
     }
 
     #[test]
