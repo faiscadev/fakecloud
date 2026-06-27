@@ -674,6 +674,15 @@ impl BatchService {
             .pointer("/arrayProperties/size")
             .and_then(Value::as_i64)
             .filter(|n| *n > 1);
+        let depends_on: Vec<String> = body
+            .get("dependsOn")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.get("jobId").and_then(Value::as_str).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut job = obj(&body);
         job.insert("jobId".into(), json!(job_id));
@@ -727,6 +736,29 @@ impl BatchService {
                 self.launch_job(req, &child_id, &job_name, child_container, now)
                     .await;
             }
+        } else if !depends_on.is_empty() {
+            // Dependency gating: park at PENDING and spawn a waiter that
+            // launches once every dependency has SUCCEEDED (or fails this job if
+            // any dependency fails). Never blocks SubmitJob.
+            job.insert("status".into(), json!("PENDING"));
+            {
+                let mut accounts = self.state.write();
+                accounts
+                    .get_or_create(&req.account_id)
+                    .jobs
+                    .insert(job_id.clone(), Value::Object(job));
+            }
+            spawn_dependency_waiter(
+                self.launch_ctx(),
+                req.account_id.clone(),
+                req.region.clone(),
+                req.request_id.clone(),
+                job_id.clone(),
+                job_name.clone(),
+                container,
+                depends_on,
+                now,
+            );
         } else {
             job.insert("status".into(), json!("SUBMITTED"));
             {
@@ -751,6 +783,18 @@ impl BatchService {
     /// definition carries an image. With no ECS backend (unit tests / no
     /// container runtime) the job stays SUBMITTED honestly — never an
     /// auto-success, which is exactly the rival anti-pattern Batch beats.
+    /// Bundle the clones a spawned task needs so the launch path can run with
+    /// no `&self` (used by SubmitJob inline and by the dependency waiter).
+    fn launch_ctx(&self) -> LaunchCtx {
+        LaunchCtx {
+            batch_state: self.state.clone(),
+            ecs_state: self.ecs_state.clone(),
+            ecs_runtime: self.ecs_runtime.clone(),
+            snapshot_store: self.snapshot_store.clone(),
+            snapshot_lock: self.snapshot_lock.clone(),
+        }
+    }
+
     async fn launch_job(
         &self,
         req: &AwsRequest,
@@ -759,54 +803,17 @@ impl BatchService {
         container: Option<Value>,
         now: i64,
     ) {
-        let (Some(ecs_state), Some(container)) = (self.ecs_state.clone(), container) else {
-            return;
-        };
-        if container.get("image").and_then(Value::as_str).is_none() {
-            return;
-        }
-        match self
-            .launch_ecs_task(req, job_id, job_name, &container)
-            .await
-        {
-            Ok((cluster, task_arn)) => {
-                {
-                    let mut accounts = self.state.write();
-                    if let Some(j) = accounts
-                        .get_or_create(&req.account_id)
-                        .jobs
-                        .get_mut(job_id)
-                        .and_then(|j| j.as_object_mut())
-                    {
-                        j.insert("status".into(), json!("STARTING"));
-                        j.insert("ecsCluster".into(), json!(cluster));
-                        j.insert("ecsTaskArn".into(), json!(task_arn));
-                        j.insert("startedAt".into(), json!(now));
-                    }
-                }
-                self.spawn_status_sync(
-                    ecs_state,
-                    req.account_id.clone(),
-                    req.region.clone(),
-                    req.request_id.clone(),
-                    job_id.to_string(),
-                    cluster,
-                    task_arn,
-                );
-            }
-            Err(err) => {
-                let mut accounts = self.state.write();
-                if let Some(j) = accounts
-                    .get_or_create(&req.account_id)
-                    .jobs
-                    .get_mut(job_id)
-                    .and_then(|j| j.as_object_mut())
-                {
-                    j.insert("status".into(), json!("FAILED"));
-                    j.insert("statusReason".into(), json!(err.message().to_string()));
-                }
-            }
-        }
+        launch(
+            &self.launch_ctx(),
+            &req.account_id,
+            &req.region,
+            &req.request_id,
+            job_id,
+            job_name,
+            container,
+            now,
+        )
+        .await;
     }
 
     /// Resolve `containerProperties` from the stored job definition (by
@@ -848,205 +855,6 @@ impl BatchService {
             }
         }
         Some(Value::Object(container))
-    }
-
-    /// Build a fresh `EcsService` over the shared ECS state (+ runtime for the
-    /// launch path). Cross-service calls go through its public `handle()`,
-    /// mirroring how autoscaling drives EC2 — so all of ECS's real container /
-    /// portability / k8s handling is reused, not re-derived.
-    fn ecs(&self, with_runtime: bool) -> Option<fakecloud_ecs::EcsService> {
-        let state = self.ecs_state.clone()?;
-        let mut svc = fakecloud_ecs::EcsService::new(state);
-        if with_runtime {
-            if let Some(rt) = self.ecs_runtime.clone() {
-                svc = svc.with_runtime(rt);
-            }
-        }
-        Some(svc)
-    }
-
-    /// Ensure the batch ECS cluster exists, register a task definition from the
-    /// job's container properties, and RunTask it. Returns (cluster, taskArn).
-    async fn launch_ecs_task(
-        &self,
-        req: &AwsRequest,
-        job_id: &str,
-        job_name: &str,
-        container: &Value,
-    ) -> Result<(String, String), AwsServiceError> {
-        let ecs = self
-            .ecs(true)
-            .ok_or_else(|| client_error("ServerException", "ECS backend not configured"))?;
-        let cluster = "fakecloud-batch".to_string();
-
-        // Idempotent cluster create (ignore "already exists").
-        let _ = ecs
-            .handle(ecs_request(
-                "CreateCluster",
-                json!({ "clusterName": cluster }),
-                req,
-            ))
-            .await;
-
-        // Map Batch containerProperties -> an ECS container definition.
-        let image = container.get("image").and_then(Value::as_str).unwrap_or("");
-        let (vcpus, memory) = container_resources(container);
-        let mut cdef = serde_json::Map::new();
-        cdef.insert("name".into(), json!("default"));
-        cdef.insert("image".into(), json!(image));
-        cdef.insert("essential".into(), json!(true));
-        cdef.insert("cpu".into(), json!((vcpus * 1024.0).round() as i64));
-        cdef.insert("memory".into(), json!(memory));
-        if let Some(cmd) = container.get("command").filter(|v| v.is_array()) {
-            cdef.insert("command".into(), cmd.clone());
-        }
-        if let Some(env) = container.get("environment").filter(|v| v.is_array()) {
-            cdef.insert("environment".into(), env.clone());
-        }
-        let family = format!("batch-{job_name}");
-        let reg = ecs
-            .handle(ecs_request(
-                "RegisterTaskDefinition",
-                json!({
-                    "family": family,
-                    "containerDefinitions": [Value::Object(cdef)],
-                    "networkMode": "bridge",
-                    "requiresCompatibilities": ["EC2"],
-                }),
-                req,
-            ))
-            .await?;
-        let reg_body: Value = parse_body(&reg);
-        let task_def_arn = reg_body
-            .pointer("/taskDefinition/taskDefinitionArn")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .unwrap_or(family);
-
-        let run = ecs
-            .handle(ecs_request(
-                "RunTask",
-                json!({
-                    "cluster": cluster,
-                    "taskDefinition": task_def_arn,
-                    "count": 1,
-                    "launchType": "EC2",
-                    "startedBy": format!("batch:{job_id}"),
-                }),
-                req,
-            ))
-            .await?;
-        let run_body: Value = parse_body(&run);
-        let task_arn = run_body
-            .pointer("/tasks/0/taskArn")
-            .and_then(Value::as_str)
-            .map(String::from)
-            .ok_or_else(|| client_error("ServerException", "RunTask returned no task"))?;
-        Ok((cluster, task_arn))
-    }
-
-    /// Poll the ECS task in the background and map its real lifecycle +
-    /// container exit code onto the Batch job status. NO auto-success: the job
-    /// only reaches SUCCEEDED when the real container exits 0.
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_status_sync(
-        &self,
-        ecs_state: fakecloud_ecs::SharedEcsState,
-        account_id: String,
-        region: String,
-        request_id: String,
-        job_id: String,
-        cluster: String,
-        task_arn: String,
-    ) {
-        let batch_state = self.state.clone();
-        let snapshot_store = self.snapshot_store.clone();
-        let snapshot_lock = self.snapshot_lock.clone();
-        tokio::spawn(async move {
-            let ecs = fakecloud_ecs::EcsService::new(ecs_state);
-            let src = bare_request(&account_id, &region, &request_id);
-            // Bound the watch so a stuck container can't poll forever.
-            for _ in 0..900u32 {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let resp = match ecs
-                    .handle(ecs_request(
-                        "DescribeTasks",
-                        json!({ "cluster": cluster, "tasks": [task_arn] }),
-                        &src,
-                    ))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let body = parse_body(&resp);
-                let Some(task) = body.pointer("/tasks/0") else {
-                    continue;
-                };
-                let last = task.get("lastStatus").and_then(Value::as_str).unwrap_or("");
-                let (new_status, exit_code, reason) = match last {
-                    "RUNNING" => ("RUNNING", None, None),
-                    "STOPPED" => {
-                        let code = task
-                            .pointer("/containers/0/exitCode")
-                            .and_then(Value::as_i64);
-                        let reason = task
-                            .get("stoppedReason")
-                            .and_then(Value::as_str)
-                            .map(String::from);
-                        if code == Some(0) {
-                            ("SUCCEEDED", code, reason)
-                        } else {
-                            (
-                                "FAILED",
-                                code,
-                                reason.or(Some("Essential container exited".into())),
-                            )
-                        }
-                    }
-                    _ => continue,
-                };
-                let terminal = matches!(new_status, "SUCCEEDED" | "FAILED");
-                {
-                    let mut accounts = batch_state.write();
-                    if let Some(j) = accounts
-                        .get_or_create(&account_id)
-                        .jobs
-                        .get_mut(&job_id)
-                        .and_then(|j| j.as_object_mut())
-                    {
-                        j.insert("status".into(), json!(new_status));
-                        if let Some(c) = exit_code {
-                            // AWS Batch surfaces the exit code under
-                            // `container.exitCode`; mirror that shape.
-                            let container = j
-                                .entry("container".to_string())
-                                .or_insert_with(|| json!({}));
-                            if let Some(o) = container.as_object_mut() {
-                                o.insert("exitCode".into(), json!(c));
-                            }
-                        }
-                        if let Some(r) = reason {
-                            j.insert("statusReason".into(), json!(r.clone()));
-                            if let Some(o) = j.get_mut("container").and_then(|v| v.as_object_mut())
-                            {
-                                o.insert("reason".into(), json!(r));
-                            }
-                        }
-                        if terminal {
-                            j.insert(
-                                "stoppedAt".into(),
-                                json!(chrono::Utc::now().timestamp_millis()),
-                            );
-                        }
-                    }
-                }
-                save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
-                if terminal {
-                    break;
-                }
-            }
-        });
     }
 
     fn describe_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1268,6 +1076,337 @@ fn merge_updates(stored: &mut Value, body: &Value, fields: &[&str], arn_key: &st
     } else {
         String::new()
     }
+}
+
+/// Everything the launch path needs without a `&self`, so a spawned task (the
+/// dependency waiter) can launch a job exactly like the inline SubmitJob path.
+#[derive(Clone)]
+struct LaunchCtx {
+    batch_state: SharedBatchState,
+    ecs_state: Option<fakecloud_ecs::SharedEcsState>,
+    ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
+}
+
+/// Launch a REAL container-backed task on the ECS engine when the backend is
+/// wired and the definition carries an image; otherwise the job stays at its
+/// current status honestly (never an auto-success). Updates the Batch job to
+/// STARTING + spawns the status sync, or FAILED on a launch error.
+#[allow(clippy::too_many_arguments)]
+async fn launch(
+    ctx: &LaunchCtx,
+    account: &str,
+    region: &str,
+    request_id: &str,
+    job_id: &str,
+    job_name: &str,
+    container: Option<Value>,
+    now: i64,
+) {
+    let (Some(ecs_state), Some(container)) = (ctx.ecs_state.clone(), container) else {
+        return;
+    };
+    if container.get("image").and_then(Value::as_str).is_none() {
+        return;
+    }
+    let src = bare_request(account, region, request_id);
+    match launch_ecs_task(
+        &ecs_state,
+        &ctx.ecs_runtime,
+        &src,
+        job_id,
+        job_name,
+        &container,
+    )
+    .await
+    {
+        Ok((cluster, task_arn)) => {
+            {
+                let mut accounts = ctx.batch_state.write();
+                if let Some(j) = accounts
+                    .get_or_create(account)
+                    .jobs
+                    .get_mut(job_id)
+                    .and_then(|j| j.as_object_mut())
+                {
+                    j.insert("status".into(), json!("STARTING"));
+                    j.insert("ecsCluster".into(), json!(cluster));
+                    j.insert("ecsTaskArn".into(), json!(task_arn));
+                    j.insert("startedAt".into(), json!(now));
+                }
+            }
+            spawn_status_sync(
+                ctx,
+                ecs_state,
+                account.to_string(),
+                region.to_string(),
+                request_id.to_string(),
+                job_id.to_string(),
+                cluster,
+                task_arn,
+            );
+        }
+        Err(err) => {
+            let mut accounts = ctx.batch_state.write();
+            if let Some(j) = accounts
+                .get_or_create(account)
+                .jobs
+                .get_mut(job_id)
+                .and_then(|j| j.as_object_mut())
+            {
+                j.insert("status".into(), json!("FAILED"));
+                j.insert("statusReason".into(), json!(err.message().to_string()));
+            }
+        }
+    }
+}
+
+/// Background waiter for a job with `dependsOn`: poll the dependency job
+/// statuses; launch this job once they have all SUCCEEDED, or fail it if any
+/// dependency reaches FAILED. Bounded so a never-finishing dependency can't
+/// wait forever.
+#[allow(clippy::too_many_arguments)]
+fn spawn_dependency_waiter(
+    ctx: LaunchCtx,
+    account: String,
+    region: String,
+    request_id: String,
+    job_id: String,
+    job_name: String,
+    container: Option<Value>,
+    depends_on: Vec<String>,
+    now: i64,
+) {
+    tokio::spawn(async move {
+        for _ in 0..1800u32 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let statuses: Vec<String> = {
+                let accounts = ctx.batch_state.read();
+                let jobs = accounts.get(&account).map(|s| &s.jobs);
+                depends_on
+                    .iter()
+                    .map(|d| {
+                        jobs.and_then(|m| m.get(d))
+                            .and_then(|j| j.get("status").and_then(Value::as_str))
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .collect()
+            };
+            if statuses.iter().any(|s| s == "FAILED") {
+                {
+                    let mut accounts = ctx.batch_state.write();
+                    if let Some(j) = accounts
+                        .get_or_create(&account)
+                        .jobs
+                        .get_mut(&job_id)
+                        .and_then(|j| j.as_object_mut())
+                    {
+                        j.insert("status".into(), json!("FAILED"));
+                        j.insert("statusReason".into(), json!("Dependent job failed"));
+                    }
+                }
+                save_snapshot_now(&ctx.batch_state, &ctx.snapshot_store, &ctx.snapshot_lock).await;
+                return;
+            }
+            if statuses.iter().all(|s| s == "SUCCEEDED") {
+                launch(
+                    &ctx,
+                    &account,
+                    &region,
+                    &request_id,
+                    &job_id,
+                    &job_name,
+                    container,
+                    now,
+                )
+                .await;
+                return;
+            }
+        }
+    });
+}
+
+/// Ensure the batch ECS cluster exists, register a task definition from the
+/// job's container properties, and RunTask it. Returns (cluster, taskArn).
+/// Cross-service calls go through ECS's public `handle()` — reusing all of
+/// ECS's real container / portability / k8s handling, not re-deriving it.
+async fn launch_ecs_task(
+    ecs_state: &fakecloud_ecs::SharedEcsState,
+    ecs_runtime: &Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    src: &AwsRequest,
+    job_id: &str,
+    job_name: &str,
+    container: &Value,
+) -> Result<(String, String), AwsServiceError> {
+    let mut ecs = fakecloud_ecs::EcsService::new(ecs_state.clone());
+    if let Some(rt) = ecs_runtime.clone() {
+        ecs = ecs.with_runtime(rt);
+    }
+    let cluster = "fakecloud-batch".to_string();
+    let _ = ecs
+        .handle(ecs_request(
+            "CreateCluster",
+            json!({ "clusterName": cluster }),
+            src,
+        ))
+        .await;
+
+    let image = container.get("image").and_then(Value::as_str).unwrap_or("");
+    let (vcpus, memory) = container_resources(container);
+    let mut cdef = serde_json::Map::new();
+    cdef.insert("name".into(), json!("default"));
+    cdef.insert("image".into(), json!(image));
+    cdef.insert("essential".into(), json!(true));
+    cdef.insert("cpu".into(), json!((vcpus * 1024.0).round() as i64));
+    cdef.insert("memory".into(), json!(memory));
+    if let Some(cmd) = container.get("command").filter(|v| v.is_array()) {
+        cdef.insert("command".into(), cmd.clone());
+    }
+    if let Some(env) = container.get("environment").filter(|v| v.is_array()) {
+        cdef.insert("environment".into(), env.clone());
+    }
+    let family = format!("batch-{job_name}");
+    let reg = ecs
+        .handle(ecs_request(
+            "RegisterTaskDefinition",
+            json!({
+                "family": family,
+                "containerDefinitions": [Value::Object(cdef)],
+                "networkMode": "bridge",
+                "requiresCompatibilities": ["EC2"],
+            }),
+            src,
+        ))
+        .await?;
+    let reg_body: Value = parse_body(&reg);
+    let task_def_arn = reg_body
+        .pointer("/taskDefinition/taskDefinitionArn")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .unwrap_or(family);
+
+    let run = ecs
+        .handle(ecs_request(
+            "RunTask",
+            json!({
+                "cluster": cluster,
+                "taskDefinition": task_def_arn,
+                "count": 1,
+                "launchType": "EC2",
+                "startedBy": format!("batch:{job_id}"),
+            }),
+            src,
+        ))
+        .await?;
+    let run_body: Value = parse_body(&run);
+    let task_arn = run_body
+        .pointer("/tasks/0/taskArn")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| client_error("ServerException", "RunTask returned no task"))?;
+    Ok((cluster, task_arn))
+}
+
+/// Poll the ECS task in the background and map its real lifecycle + container
+/// exit code onto the Batch job status. NO auto-success: the job only reaches
+/// SUCCEEDED when the real container exits 0.
+#[allow(clippy::too_many_arguments)]
+fn spawn_status_sync(
+    ctx: &LaunchCtx,
+    ecs_state: fakecloud_ecs::SharedEcsState,
+    account_id: String,
+    region: String,
+    request_id: String,
+    job_id: String,
+    cluster: String,
+    task_arn: String,
+) {
+    let batch_state = ctx.batch_state.clone();
+    let snapshot_store = ctx.snapshot_store.clone();
+    let snapshot_lock = ctx.snapshot_lock.clone();
+    tokio::spawn(async move {
+        let ecs = fakecloud_ecs::EcsService::new(ecs_state);
+        let src = bare_request(&account_id, &region, &request_id);
+        for _ in 0..900u32 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let resp = match ecs
+                .handle(ecs_request(
+                    "DescribeTasks",
+                    json!({ "cluster": cluster, "tasks": [task_arn] }),
+                    &src,
+                ))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let body = parse_body(&resp);
+            let Some(task) = body.pointer("/tasks/0") else {
+                continue;
+            };
+            let last = task.get("lastStatus").and_then(Value::as_str).unwrap_or("");
+            let (new_status, exit_code, reason) = match last {
+                "RUNNING" => ("RUNNING", None, None),
+                "STOPPED" => {
+                    let code = task
+                        .pointer("/containers/0/exitCode")
+                        .and_then(Value::as_i64);
+                    let reason = task
+                        .get("stoppedReason")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if code == Some(0) {
+                        ("SUCCEEDED", code, reason)
+                    } else {
+                        (
+                            "FAILED",
+                            code,
+                            reason.or(Some("Essential container exited".into())),
+                        )
+                    }
+                }
+                _ => continue,
+            };
+            let terminal = matches!(new_status, "SUCCEEDED" | "FAILED");
+            {
+                let mut accounts = batch_state.write();
+                if let Some(j) = accounts
+                    .get_or_create(&account_id)
+                    .jobs
+                    .get_mut(&job_id)
+                    .and_then(|j| j.as_object_mut())
+                {
+                    j.insert("status".into(), json!(new_status));
+                    if let Some(c) = exit_code {
+                        let container = j
+                            .entry("container".to_string())
+                            .or_insert_with(|| json!({}));
+                        if let Some(o) = container.as_object_mut() {
+                            o.insert("exitCode".into(), json!(c));
+                        }
+                    }
+                    if let Some(r) = reason {
+                        j.insert("statusReason".into(), json!(r.clone()));
+                        if let Some(o) = j.get_mut("container").and_then(|v| v.as_object_mut()) {
+                            o.insert("reason".into(), json!(r));
+                        }
+                    }
+                    if terminal {
+                        j.insert(
+                            "stoppedAt".into(),
+                            json!(chrono::Utc::now().timestamp_millis()),
+                        );
+                    }
+                }
+            }
+            save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
+            if terminal {
+                break;
+            }
+        }
+    });
 }
 
 /// Build an ECS `AwsRequest` (awsJson1.1) carrying the originating
@@ -1891,6 +2030,47 @@ mod tests {
         assert_eq!(st, "FAILED");
         let (_, st) = array_status_summary(&[&succ, &run]);
         assert_eq!(st, "RUNNING");
+    }
+
+    #[tokio::test]
+    async fn depends_on_parks_at_pending() {
+        let s = svc();
+        s.handle(req(
+            "/v1/registerjobdefinition",
+            json!({"jobDefinitionName": "jd", "type": "container",
+                   "containerProperties": {"image": "alpine"}}),
+        ))
+        .await
+        .unwrap();
+        let a = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "a", "jobQueue": "q", "jobDefinition": "jd"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let a_id = a["jobId"].as_str().unwrap().to_string();
+        let b = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "b", "jobQueue": "q", "jobDefinition": "jd",
+                       "dependsOn": [{"jobId": a_id, "type": "SEQUENTIAL"}]}),
+            ))
+            .await
+            .unwrap(),
+        );
+        // B parks at PENDING (its dep A is only SUBMITTED, never SUCCEEDED
+        // without a runtime) — it must not launch ahead of its dependency.
+        let d = body_of(
+            s.handle(req(
+                "/v1/describejobs",
+                json!({"jobs": [b["jobId"].clone()]}),
+            ))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(d["jobs"][0]["status"], "PENDING");
     }
 
     #[test]

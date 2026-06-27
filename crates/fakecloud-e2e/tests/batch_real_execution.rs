@@ -133,6 +133,45 @@ async fn submit_job_failing_container_fails_the_job() {
 }
 
 #[tokio::test]
+async fn depends_on_job_waits_for_its_dependency() {
+    if !require_docker_or_skip("depends_on_job_waits_for_its_dependency") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let batch = aws_sdk_batch::Client::new(&s.aws_config().await);
+    // run_job sets up CE/JQ/JD "dep-*" and submits job A (sleeps then exits 0).
+    let a = run_job(&batch, "dep", vec!["sh", "-c", "sleep 3; exit 0"]).await;
+    let b = batch
+        .submit_job()
+        .job_name("dep-b")
+        .job_queue("dep-q")
+        .job_definition("dep-jd")
+        .depends_on(
+            aws_sdk_batch::types::JobDependency::builder()
+                .job_id(&a)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("submit B")
+        .job_id()
+        .unwrap()
+        .to_string();
+
+    // While A is still running, B must NOT be RUNNING/SUCCEEDED yet.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let early = batch.describe_jobs().jobs(&b).send().await.unwrap();
+    let b_early = early.jobs()[0].status().map(|s| s.as_str()).unwrap_or("");
+    assert!(
+        b_early == "PENDING" || b_early == "SUBMITTED",
+        "B must wait for A, was {b_early}"
+    );
+
+    assert_eq!(wait_terminal(&batch, &a).await, "SUCCEEDED");
+    assert_eq!(wait_terminal(&batch, &b).await, "SUCCEEDED");
+}
+
+#[tokio::test]
 async fn array_job_runs_every_child_and_parent_succeeds() {
     if !require_docker_or_skip("array_job_runs_every_child_and_parent_succeeds") {
         return;
