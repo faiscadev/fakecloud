@@ -402,8 +402,9 @@ async fn main() {
     let autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_autoscaling::AutoScalingAccounts::new()),
     );
-    let batch_state: fakecloud_batch::SharedBatchState =
-        Arc::new(parking_lot::RwLock::new(fakecloud_batch::BatchAccounts::new()));
+    let batch_state: fakecloud_batch::SharedBatchState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_batch::BatchAccounts::new(),
+    ));
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
@@ -3111,9 +3112,9 @@ async fn main() {
                 Ok(None) => {
                     tracing::info!("no batch persistence snapshot found; starting empty");
                 }
-                Err(err) => {
-                    fatal_exit(format_args!("failed to read batch persistence snapshot: {err}"))
-                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read batch persistence snapshot: {err}"
+                )),
             }
             Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
         } else {
