@@ -402,6 +402,8 @@ async fn main() {
     let autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_autoscaling::AutoScalingAccounts::new()),
     );
+    let batch_state: fakecloud_batch::SharedBatchState =
+        Arc::new(parking_lot::RwLock::new(fakecloud_batch::BatchAccounts::new()));
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
@@ -3071,6 +3073,58 @@ async fn main() {
         cfn_snapshot_hooks.insert("autoscaling", h);
     }
     registry.register(Arc::new(autoscaling_service));
+
+    // AWS Batch — control plane (compute environments, job queues, job
+    // definitions). Real container-backed job execution lands in a later batch.
+    let batch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("batch").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_batch::BatchSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_batch::BATCH_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "batch persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_batch::BATCH_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                *batch_state.write() = accounts;
+                                tracing::info!("loaded batch persistence snapshot");
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse batch persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no batch persistence snapshot found; starting empty");
+                }
+                Err(err) => {
+                    fatal_exit(format_args!("failed to read batch persistence snapshot: {err}"))
+                }
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut batch_service = fakecloud_batch::BatchService::new(batch_state.clone());
+    if let Some(store) = batch_snapshot_store.clone() {
+        batch_service = batch_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(batch_service));
+
     let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

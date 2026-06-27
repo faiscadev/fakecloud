@@ -3036,6 +3036,7 @@ dependencies = [
  "fakecloud-athena",
  "fakecloud-autoscaling",
  "fakecloud-aws",
+ "fakecloud-batch",
  "fakecloud-bedrock",
  "fakecloud-bedrock-agent",
  "fakecloud-bedrock-agent-runtime",
@@ -3250,6 +3251,23 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "fakecloud-batch"
+version = "0.26.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
