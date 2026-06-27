@@ -63,8 +63,18 @@ async fn run_job(batch: &aws_sdk_batch::Client, name: &str, command: Vec<&str>) 
             aws_sdk_batch::types::ContainerProperties::builder()
                 .image(IMAGE)
                 .set_command(Some(command.iter().map(|s| s.to_string()).collect()))
-                .memory(128)
-                .vcpus(1)
+                .resource_requirements(
+                    aws_sdk_batch::types::ResourceRequirement::builder()
+                        .r#type(aws_sdk_batch::types::ResourceType::Vcpu)
+                        .value("1")
+                        .build(),
+                )
+                .resource_requirements(
+                    aws_sdk_batch::types::ResourceRequirement::builder()
+                        .r#type(aws_sdk_batch::types::ResourceType::Memory)
+                        .value("128")
+                        .build(),
+                )
                 .build(),
         )
         .send()
