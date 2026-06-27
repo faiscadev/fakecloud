@@ -261,6 +261,63 @@ fn client_error(code: &str, msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, msg.into())
 }
 
+type TagStore = std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>;
+
+/// Seed the authoritative per-ARN tag store from a resource's inline `tags`
+/// (what Create receives), so `ListTagsForResource` reflects create-time tags.
+fn seed_inline_tags(tags: &mut TagStore, arn: &str, stored: &Map<String, Value>) {
+    if let Some(inline) = stored.get("tags").and_then(Value::as_object) {
+        let entry = tags.entry(arn.to_string()).or_default();
+        for (k, v) in inline {
+            if let Some(s) = v.as_str() {
+                entry.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+}
+
+/// Overlay the authoritative tag store onto a resource on read, so `Describe*`
+/// reflects `TagResource`/`UntagResource` (which write only to the store) — the
+/// two used to diverge, breaking terraform tag updates.
+fn merge_tag_overlay(resource: &Value, arn_key: &str, tags: &TagStore) -> Value {
+    let mut o = obj(resource);
+    if let Some(arn) = o.get(arn_key).and_then(Value::as_str).map(String::from) {
+        if let Some(t) = tags.get(&arn) {
+            o.insert(
+                "tags".into(),
+                Value::Object(t.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
+            );
+        }
+    }
+    Value::Object(o)
+}
+
+/// Build a Batch `JobSummary` from a stored job, carrying every AWS-present
+/// field that exists on the record (jobId/jobName/createdAt/status are always
+/// there; the rest appear once the job has progressed).
+fn job_summary(j: &Value) -> Value {
+    let mut s = serde_json::Map::new();
+    for key in [
+        "jobId",
+        "jobArn",
+        "jobName",
+        "createdAt",
+        "status",
+        "statusReason",
+        "startedAt",
+        "stoppedAt",
+        "jobDefinition",
+        "container",
+        "arrayProperties",
+        "nodeProperties",
+    ] {
+        if let Some(v) = j.get(key) {
+            s.insert(key.to_string(), v.clone());
+        }
+    }
+    Value::Object(s)
+}
+
 impl BatchService {
     fn arn(&self, account: &str, region: &str, resource: &str) -> String {
         Arn::new("batch", region, account, resource).to_string()
@@ -307,6 +364,7 @@ impl BatchService {
                 format!("Object already exists: {name}"),
             ));
         }
+        seed_inline_tags(&mut st.tags, &arn, &stored);
         st.compute_environments
             .insert(name.clone(), Value::Object(stored));
         Ok(AwsResponse::ok_json(json!({
@@ -335,7 +393,15 @@ impl BatchService {
                             "computeEnvironmentArn",
                         )
                     })
-                    .cloned()
+                    .map(|ce| {
+                        let mut v = merge_tag_overlay(ce, "computeEnvironmentArn", &st.tags);
+                        // AWS always reports the orchestration backend.
+                        if let Some(o) = v.as_object_mut() {
+                            o.entry("containerOrchestrationType".to_string())
+                                .or_insert_with(|| json!("ECS"));
+                        }
+                        v
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -381,6 +447,7 @@ impl BatchService {
                 format!("Object already exists: {name}"),
             ));
         }
+        seed_inline_tags(&mut st.tags, &arn, &stored);
         st.job_queues.insert(name.clone(), Value::Object(stored));
         Ok(AwsResponse::ok_json(json!({
             "jobQueueName": name,
@@ -398,7 +465,7 @@ impl BatchService {
                 st.job_queues
                     .values()
                     .filter(|q| match_named(q, &wanted, "jobQueueName", "jobQueueArn"))
-                    .cloned()
+                    .map(|q| merge_tag_overlay(q, "jobQueueArn", &st.tags))
                     .collect()
             })
             .unwrap_or_default();
@@ -457,6 +524,7 @@ impl BatchService {
                 cp.entry(key.to_string()).or_insert_with(|| json!([]));
             }
         }
+        seed_inline_tags(&mut st.tags, &arn, &stored);
         st.job_definitions
             .insert(format!("{name}:{revision}"), Value::Object(stored));
         Ok(AwsResponse::ok_json(json!({
@@ -504,7 +572,7 @@ impl BatchService {
                             .is_none_or(|s| jd.get("status").and_then(Value::as_str) == Some(s));
                         arn_ok && name_ok && status_ok
                     })
-                    .cloned()
+                    .map(|jd| merge_tag_overlay(jd, "jobDefinitionArn", &st.tags))
                     .collect()
             })
             .unwrap_or_default();
@@ -607,6 +675,7 @@ impl BatchService {
                 format!("Object already exists: {name}"),
             ));
         }
+        seed_inline_tags(&mut st.tags, &arn, &stored);
         st.scheduling_policies
             .insert(name.clone(), Value::Object(stored));
         Ok(AwsResponse::ok_json(json!({ "name": name, "arn": arn })))
@@ -631,7 +700,7 @@ impl BatchService {
                                 .map(|a| wanted.contains(a))
                                 .unwrap_or(false)
                     })
-                    .cloned()
+                    .map(|p| merge_tag_overlay(p, "arn", &st.tags))
                     .collect()
             })
             .unwrap_or_default();
@@ -690,6 +759,23 @@ impl BatchService {
             .and_then(Value::as_str)
             .ok_or_else(|| client_error("ClientException", "jobQueue is required"))?
             .to_string();
+        // AWS rejects SubmitJob against a queue that doesn't exist.
+        {
+            let queue_name = job_queue.rsplit('/').next().unwrap_or(&job_queue);
+            let accounts = self.state.read();
+            let exists = accounts.get(&req.account_id).is_some_and(|st| {
+                st.job_queues.contains_key(queue_name)
+                    || st.job_queues.values().any(|q| {
+                        q.get("jobQueueArn").and_then(Value::as_str) == Some(job_queue.as_str())
+                    })
+            });
+            if !exists {
+                return Err(client_error(
+                    "ClientException",
+                    format!("Job queue {job_queue} does not exist"),
+                ));
+            }
+        }
         let job_definition = body
             .get("jobDefinition")
             .and_then(Value::as_str)
@@ -949,40 +1035,88 @@ impl BatchService {
 
     fn list_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let queue = body
-            .get("jobQueue")
-            .and_then(Value::as_str)
-            .map(String::from);
+        let queue = body.get("jobQueue").and_then(Value::as_str);
+        let array_job_id = body.get("arrayJobId").and_then(Value::as_str);
+        let multi_node_job_id = body.get("multiNodeJobId").and_then(Value::as_str);
+        // AWS requires exactly one of jobQueue / arrayJobId / multiNodeJobId.
+        let selectors = [queue, array_job_id, multi_node_job_id]
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+        if selectors != 1 {
+            return Err(client_error(
+                "ClientException",
+                "The ListJobs request must specify exactly one of jobQueue, arrayJobId, or multiNodeJobId",
+            ));
+        }
+        // "If you don't specify a status, only RUNNING jobs are returned."
         let status = body
             .get("jobStatus")
             .and_then(Value::as_str)
-            .map(String::from);
+            .unwrap_or("RUNNING")
+            .to_string();
+        let max_results = body
+            .get("maxResults")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map(|n| n.min(100) as usize)
+            .unwrap_or(100);
+        let start: usize = body
+            .get("nextToken")
+            .and_then(Value::as_str)
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+
         let accounts = self.state.read();
-        let items: Vec<Value> = accounts
+        let mut matched: Vec<&Value> = accounts
             .get(&req.account_id)
             .map(|st| {
                 st.jobs
                     .values()
                     .filter(|j| {
-                        queue
-                            .as_deref()
-                            .is_none_or(|q| j.get("jobQueue").and_then(Value::as_str) == Some(q))
-                            && status
-                                .as_deref()
-                                .is_none_or(|s| j.get("status").and_then(Value::as_str) == Some(s))
-                    })
-                    .map(|j| {
-                        json!({
-                            "jobId": j.get("jobId").cloned().unwrap_or(Value::Null),
-                            "jobName": j.get("jobName").cloned().unwrap_or(Value::Null),
-                            "status": j.get("status").cloned().unwrap_or(Value::Null),
-                            "createdAt": j.get("createdAt").cloned().unwrap_or(Value::Null),
-                        })
+                        let selector_ok = if let Some(q) = queue {
+                            j.get("jobQueue").and_then(Value::as_str) == Some(q)
+                        } else if let Some(a) = array_job_id {
+                            j.get("jobId")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id.starts_with(&format!("{a}:")))
+                        } else if let Some(m) = multi_node_job_id {
+                            j.get("jobId")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id.starts_with(&format!("{m}#")))
+                        } else {
+                            false
+                        };
+                        selector_ok
+                            && j.get("status").and_then(Value::as_str) == Some(status.as_str())
                     })
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "jobSummaryList": items })))
+        // Most-recent-first, stable by jobId for ties.
+        matched.sort_by(|a, b| {
+            let ka = a.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+            let kb = b.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+            kb.cmp(&ka).then_with(|| {
+                a.get("jobId")
+                    .and_then(Value::as_str)
+                    .cmp(&b.get("jobId").and_then(Value::as_str))
+            })
+        });
+        let total = matched.len();
+        let items: Vec<Value> = matched
+            .into_iter()
+            .skip(start)
+            .take(max_results)
+            .map(job_summary)
+            .collect();
+        let mut resp = serde_json::Map::new();
+        resp.insert("jobSummaryList".into(), Value::Array(items));
+        let next = start + max_results;
+        if next < total {
+            resp.insert("nextToken".into(), json!(next.to_string()));
+        }
+        Ok(AwsResponse::ok_json(Value::Object(resp)))
     }
 
     fn cancel_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1879,6 +2013,15 @@ mod tests {
         serde_json::from_slice(r.body.expect_bytes()).unwrap()
     }
 
+    async fn mk_queue(s: &BatchService, name: &str) {
+        s.handle(req(
+            "/v1/createjobqueue",
+            json!({"jobQueueName": name, "priority": 1}),
+        ))
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn compute_environment_lifecycle() {
         let s = svc();
@@ -1964,8 +2107,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tags_agree_across_describe_and_list_tags() {
+        let s = svc();
+        // Create WITH inline tags.
+        let c = body_of(
+            s.handle(req(
+                "/v1/createcomputeenvironment",
+                json!({"computeEnvironmentName": "ce", "type": "MANAGED",
+                       "tags": {"team": "data"}}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let arn = c["computeEnvironmentArn"].as_str().unwrap().to_string();
+        let enc = arn.replace('/', "%2F");
+
+        // ListTagsForResource reflects the create-time tags (used to be empty:
+        // create wrote them inline, ListTags read a separate store).
+        let mut lt = req(&format!("/v1/tags/{enc}"), json!({}));
+        lt.method = Method::GET;
+        let tags = body_of(s.handle(lt).await.unwrap());
+        assert_eq!(tags["tags"]["team"], "data");
+
+        // TagResource adds a tag; Describe* now reflects it (used to diverge).
+        let mut tr = req(&format!("/v1/tags/{enc}"), json!({"tags": {"env": "prod"}}));
+        tr.method = Method::POST;
+        s.handle(tr).await.unwrap();
+        let d = body_of(
+            s.handle(req("/v1/describecomputeenvironments", json!({})))
+                .await
+                .unwrap(),
+        );
+        let ce = &d["computeEnvironments"][0];
+        assert_eq!(ce["tags"]["team"], "data");
+        assert_eq!(ce["tags"]["env"], "prod");
+        // AWS always reports the orchestration backend.
+        assert_eq!(ce["containerOrchestrationType"], "ECS");
+    }
+
+    #[tokio::test]
     async fn job_submit_describe_cancel_lifecycle() {
         let s = svc();
+        mk_queue(&s, "q1").await;
         let sub = body_of(
             s.handle(req(
                 "/v1/submitjob",
@@ -1984,12 +2167,31 @@ mod tests {
         );
         assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
 
-        let l = body_of(
+        // No jobStatus -> AWS returns only RUNNING (this job is SUBMITTED).
+        let running = body_of(
             s.handle(req("/v1/listjobs", json!({"jobQueue": "q1"})))
                 .await
                 .unwrap(),
         );
+        assert_eq!(running["jobSummaryList"].as_array().unwrap().len(), 0);
+        // Filtering by the actual status returns it, and the summary carries
+        // jobArn (an always-present field the old summary dropped).
+        let l = body_of(
+            s.handle(req(
+                "/v1/listjobs",
+                json!({"jobQueue": "q1", "jobStatus": "SUBMITTED"}),
+            ))
+            .await
+            .unwrap(),
+        );
         assert_eq!(l["jobSummaryList"].as_array().unwrap().len(), 1);
+        assert!(l["jobSummaryList"][0]["jobArn"].as_str().is_some());
+
+        // Listing with no selector is an error (AWS requires exactly one).
+        match s.handle(req("/v1/listjobs", json!({}))).await {
+            Err(e) => assert!(format!("{e:?}").contains("exactly one")),
+            Ok(_) => panic!("ListJobs without a selector must be rejected"),
+        }
 
         s.handle(req(
             "/v1/canceljob",
@@ -2117,6 +2319,7 @@ mod tests {
         // No ECS backend wired: the job must stay SUBMITTED (honest), not
         // fake a SUCCEEDED like the rivals do.
         let s = svc();
+        mk_queue(&s, "q").await;
         s.handle(req(
             "/v1/registerjobdefinition",
             json!({"jobDefinitionName": "jd", "type": "container",
@@ -2153,6 +2356,7 @@ mod tests {
     #[tokio::test]
     async fn array_job_spawns_children_and_parent_aggregates() {
         let s = svc();
+        mk_queue(&s, "q").await;
         s.handle(req(
             "/v1/registerjobdefinition",
             json!({"jobDefinitionName": "jd", "type": "container",
@@ -2171,20 +2375,22 @@ mod tests {
         );
         let parent = sub["jobId"].as_str().unwrap().to_string();
 
-        // Three children exist (no ECS wired -> they stay SUBMITTED honestly).
-        let listed = body_of(s.handle(req("/v1/listjobs", json!({}))).await.unwrap());
-        let n_children = listed["jobSummaryList"]
-            .as_array()
+        // The arrayJobId selector returns exactly the 3 children (no ECS wired
+        // -> they stay SUBMITTED honestly, so filter by that status).
+        let listed = body_of(
+            s.handle(req(
+                "/v1/listjobs",
+                json!({"arrayJobId": parent, "jobStatus": "SUBMITTED"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let children = listed["jobSummaryList"].as_array().unwrap();
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|j| j["jobId"]
+            .as_str()
             .unwrap()
-            .iter()
-            .filter(|j| {
-                j["jobId"]
-                    .as_str()
-                    .unwrap_or("")
-                    .starts_with(&format!("{parent}:"))
-            })
-            .count();
-        assert_eq!(n_children, 3);
+            .starts_with(&format!("{parent}:"))));
 
         // The parent aggregates: PENDING with statusSummary SUBMITTED=3.
         let d = body_of(
@@ -2214,6 +2420,7 @@ mod tests {
     #[tokio::test]
     async fn depends_on_parks_at_pending() {
         let s = svc();
+        mk_queue(&s, "q").await;
         s.handle(req(
             "/v1/registerjobdefinition",
             json!({"jobDefinitionName": "jd", "type": "container",
@@ -2295,6 +2502,7 @@ mod tests {
     #[tokio::test]
     async fn submit_job_rejects_out_of_range_array_size() {
         let s = svc();
+        mk_queue(&s, "q").await;
         for bad in [1_i64, 0, -3, 10_001, 2_000_000_000] {
             let res = s
                 .handle(req(
