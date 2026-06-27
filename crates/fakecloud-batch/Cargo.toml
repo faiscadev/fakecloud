@@ -13,6 +13,7 @@ fakecloud-core = { workspace = true }
 fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

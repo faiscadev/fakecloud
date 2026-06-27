@@ -35,6 +35,9 @@ pub struct BatchState {
     /// Jobs keyed by jobId.
     #[serde(default)]
     pub jobs: JsonStore,
+    /// Fair-share scheduling policies keyed by name.
+    #[serde(default)]
+    pub scheduling_policies: JsonStore,
     /// Tags keyed by resource ARN -> { key: value }.
     #[serde(default)]
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
