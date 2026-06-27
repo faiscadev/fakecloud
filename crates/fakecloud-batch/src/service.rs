@@ -159,6 +159,42 @@ impl BatchService {
         }))
     }
 
+    /// Reconcile jobs restored from a snapshot. After a restart the background
+    /// drivers that advance a job (status-sync / dependency-waiter) are gone and
+    /// the backing ECS task was already STOPPED by the ECS reconcile, so an
+    /// in-flight job can never reach a terminal state on its own — it would hang
+    /// at RUNNING/PENDING forever. Fail every non-terminal job with a clear
+    /// reason instead of leaving a zombie.
+    pub async fn reconcile_persisted_jobs(&self) {
+        const NON_TERMINAL: &[&str] = &["SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"];
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut changed = false;
+        {
+            let mut accounts = self.state.write();
+            for acct in accounts.accounts.values_mut() {
+                for job in acct.jobs.values_mut() {
+                    let Some(o) = job.as_object_mut() else {
+                        continue;
+                    };
+                    let st = o.get("status").and_then(Value::as_str).unwrap_or("");
+                    if NON_TERMINAL.contains(&st) {
+                        o.insert("status".into(), json!("FAILED"));
+                        o.insert(
+                            "statusReason".into(),
+                            json!("Job interrupted by a fakecloud restart"),
+                        );
+                        o.entry("stoppedAt".to_string())
+                            .or_insert_with(|| json!(now));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save_snapshot().await;
+        }
+    }
+
     /// Map the restJson1 request (POST /v1/<op>, plus the /v1/tags/{arn}
     /// family) to its operation name.
     fn resolve_action(req: &AwsRequest) -> Option<&'static str> {
@@ -2342,6 +2378,54 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
+    }
+
+    #[tokio::test]
+    async fn reconcile_fails_in_flight_jobs_after_restart() {
+        // Simulate a restart: a snapshot restored a job in a non-terminal state
+        // whose background driver no longer exists. Reconcile must fail it
+        // (with a clear reason) rather than leave it frozen forever.
+        let s = svc();
+        mk_queue(&s, "q").await;
+        s.handle(req(
+            "/v1/registerjobdefinition",
+            json!({"jobDefinitionName": "jd", "type": "container",
+                   "containerProperties": {"image": "alpine"}}),
+        ))
+        .await
+        .unwrap();
+        let sub = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "j", "jobQueue": "q", "jobDefinition": "jd"}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let id = sub["jobId"].as_str().unwrap().to_string();
+
+        s.reconcile_persisted_jobs().await;
+
+        let d = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [id]})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d["jobs"][0]["status"], "FAILED");
+        assert_eq!(
+            d["jobs"][0]["statusReason"],
+            "Job interrupted by a fakecloud restart"
+        );
+        assert!(d["jobs"][0]["stoppedAt"].is_i64());
+
+        // A second reconcile is a no-op: already-terminal jobs are untouched.
+        s.reconcile_persisted_jobs().await;
+        let d2 = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [id]})))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(d2["jobs"][0]["status"], "FAILED");
     }
 
     #[test]
