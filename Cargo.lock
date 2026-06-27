@@ -1140,6 +1140,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-rdsdata"
+version = "1.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad91a142d006a997229a27307577e751eea4df7a9d2935e8b0dd0b1f30a24438"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-route53"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3087,6 +3111,7 @@ dependencies = [
  "fakecloud-organizations",
  "fakecloud-persistence",
  "fakecloud-rds",
+ "fakecloud-rds-data",
  "fakecloud-route53",
  "fakecloud-s3",
  "fakecloud-scheduler",
@@ -3654,6 +3679,7 @@ dependencies = [
  "aws-sdk-lambda",
  "aws-sdk-organizations",
  "aws-sdk-rds",
+ "aws-sdk-rdsdata",
  "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
@@ -4118,6 +4144,23 @@ dependencies = [
  "tokio-postgres",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-rds-data"
+version = "0.27.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-rds",
+ "http 1.4.0",
+ "mysql_async",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]

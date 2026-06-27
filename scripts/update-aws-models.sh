@@ -37,6 +37,7 @@ SERVICES=(
     "sesv2:sesv2"
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
+    "rds-data:rds-data"
     "elasticache:elasticache"
     "sfn:sfn"
     "bedrock:bedrock"

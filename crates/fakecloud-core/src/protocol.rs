@@ -32,6 +32,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "bedrock-agent-runtime",
     "scheduler",
     "batch",
+    "rds-data",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

@@ -194,6 +194,7 @@ jobs:
           publish fakecloud-kms
           publish fakecloud-ses
           publish fakecloud-rds
+          publish fakecloud-rds-data        # depends on rds
           publish fakecloud-elasticache
           publish fakecloud-kinesis
           publish fakecloud-scheduler

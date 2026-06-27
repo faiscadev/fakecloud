@@ -2286,7 +2286,7 @@ async fn main() {
         } else {
             None
         };
-    let mut rds_service = RdsService::new(rds_state);
+    let mut rds_service = RdsService::new(rds_state.clone());
     if let Some(ref rt) = rds_runtime {
         rds_service = rds_service.with_runtime(rt.clone());
     }
@@ -2322,6 +2322,10 @@ async fn main() {
         cfn_snapshot_hooks.insert("rds", h);
     }
     registry.register(Arc::new(rds_service));
+    // RDS Data API (rds-data): runs real SQL against the RDS container DBs.
+    registry.register(Arc::new(fakecloud_rds_data::RdsDataService::new(
+        rds_state.clone(),
+    )));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
