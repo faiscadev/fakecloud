@@ -24,6 +24,7 @@ bytes = { workspace = true }
 rand = { workspace = true }
 rsa = { workspace = true }
 sha2 = { workspace = true }
+p256 = { workspace = true }
 hmac = { workspace = true }
 num-bigint = { workspace = true }
 tokio = { workspace = true }
