@@ -1078,3 +1078,58 @@ async fn update_crawler_schedule_persists_expression() {
     let sched = got.crawler().and_then(|c| c.schedule()).expect("schedule");
     assert_eq!(sched.schedule_expression(), Some("cron(0 12 * * ? *)"));
 }
+
+#[tokio::test]
+async fn get_job_runs_orders_most_recent_first() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+    glue.create_job()
+        .name("ordered-job")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .command(
+            aws_sdk_glue::types::JobCommand::builder()
+                .name("glueetl")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create job");
+
+    // Three runs, spaced so their StartedOn timestamps are distinct.
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let r = glue
+            .start_job_run()
+            .job_name("ordered-job")
+            .send()
+            .await
+            .expect("start run");
+        ids.push(r.job_run_id().unwrap().to_string());
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let runs = glue
+        .get_job_runs()
+        .job_name("ordered-job")
+        .send()
+        .await
+        .expect("get job runs");
+    let starts: Vec<i64> = runs
+        .job_runs()
+        .iter()
+        .filter_map(|r| r.started_on())
+        .map(|t| t.as_secs_f64() as i64)
+        .collect();
+    assert_eq!(runs.job_runs().len(), 3);
+    // The newest run (last started) must be JobRuns[0].
+    assert_eq!(
+        runs.job_runs()[0].id(),
+        Some(ids.last().unwrap().as_str()),
+        "GetJobRuns must return the most recent run first"
+    );
+    // Non-increasing StartedOn across the list.
+    assert!(
+        starts.windows(2).all(|w| w[0] >= w[1]),
+        "job runs must be ordered by StartedOn descending, got {starts:?}"
+    );
+}
