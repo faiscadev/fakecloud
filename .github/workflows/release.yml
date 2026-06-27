@@ -202,7 +202,6 @@ jobs:
           publish fakecloud-acm
           publish fakecloud-application-autoscaling
           publish fakecloud-autoscaling
-          publish fakecloud-batch
           publish fakecloud-wafv2
           publish fakecloud-cloudwatch
           publish fakecloud-glue
@@ -229,6 +228,7 @@ jobs:
           publish fakecloud-athena         # depends on glue, s3
           publish fakecloud-route53        # depends on cloudfront, elbv2, logs, s3
           publish fakecloud-ecs            # depends on logs, secretsmanager, ssm
+          publish fakecloud-batch          # depends on ecs (drives ECS for real job execution)
 
           # Layer 6: depends on layer 5
           publish fakecloud-stepfunctions  # depends on dynamodb
