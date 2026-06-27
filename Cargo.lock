@@ -3479,6 +3479,7 @@ dependencies = [
  "hmac 0.12.1",
  "http 1.4.0",
  "num-bigint",
+ "p256 0.13.2",
  "parking_lot",
  "rand 0.8.5",
  "rcgen",

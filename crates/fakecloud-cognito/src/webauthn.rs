@@ -235,12 +235,37 @@ fn verify_rs256(cose: &[u8], signed: &[u8], sig: &[u8]) -> Result<(), Attestatio
         .map_err(|_| AttestationError::SignatureInvalid)
 }
 
-fn verify_es256(_cose: &[u8], _signed: &[u8], _sig: &[u8]) -> Result<(), AttestationError> {
-    // ES256 (P-256 ECDSA) verification needs a P-256 dep we don't carry.
-    // Packed self-attestation with ES256 is accepted structurally — callers
-    // still get format + signature presence enforcement; full curve verify
-    // would require pulling in `p256`.
-    Ok(())
+fn verify_es256(cose: &[u8], signed: &[u8], sig: &[u8]) -> Result<(), AttestationError> {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    use p256::EncodedPoint;
+
+    // COSE EC2 key for P-256: x = label -2, y = label -3 (32 bytes each).
+    let map = cose_key_map(cose)?;
+    let x = match cose_key_int(&map, -2) {
+        Some(CborValue::Bytes(b)) => b,
+        _ => return Err(AttestationError::InvalidStructure("EC2 x missing")),
+    };
+    let y = match cose_key_int(&map, -3) {
+        Some(CborValue::Bytes(b)) => b,
+        _ => return Err(AttestationError::InvalidStructure("EC2 y missing")),
+    };
+
+    // Build the uncompressed SEC1 point (0x04 || x || y).
+    let mut point = Vec::with_capacity(1 + x.len() + y.len());
+    point.push(0x04);
+    point.extend_from_slice(x);
+    point.extend_from_slice(y);
+    let encoded =
+        EncodedPoint::from_bytes(&point).map_err(|_| AttestationError::SignatureInvalid)?;
+    let key = VerifyingKey::from_encoded_point(&encoded)
+        .map_err(|_| AttestationError::SignatureInvalid)?;
+
+    // WebAuthn packed attestation signs with ASN.1 DER-encoded ECDSA; the
+    // verifier hashes `signed` with SHA-256 internally.
+    let signature = Signature::from_der(sig).map_err(|_| AttestationError::SignatureInvalid)?;
+    key.verify(signed, &signature)
+        .map_err(|_| AttestationError::SignatureInvalid)
 }
 
 #[cfg(test)]
@@ -390,5 +415,73 @@ mod tests {
         let parsed = parse_packed_attestation(&att_b64).expect("parse");
         assert_eq!(parsed.x5c.len(), 1);
         verify_packed_attestation(&parsed, b"{}").expect("x5c accepted");
+    }
+
+    fn build_es256_cose(x: &[u8], y: &[u8]) -> Vec<u8> {
+        let map = CborValue::Map(vec![
+            // kty = EC2 (2)
+            (CborValue::Integer(1.into()), CborValue::Integer(2.into())),
+            // alg = ES256 (-7)
+            (
+                CborValue::Integer(3.into()),
+                CborValue::Integer((-7_i64).into()),
+            ),
+            // crv = P-256 (1)
+            (
+                CborValue::Integer((-1_i64).into()),
+                CborValue::Integer(1.into()),
+            ),
+            (
+                CborValue::Integer((-2_i64).into()),
+                CborValue::Bytes(x.to_vec()),
+            ),
+            (
+                CborValue::Integer((-3_i64).into()),
+                CborValue::Bytes(y.to_vec()),
+            ),
+        ]);
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(&map, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn packed_self_attest_es256_real_signature_verifies() {
+        use p256::ecdsa::signature::Signer;
+        use p256::ecdsa::{Signature, SigningKey};
+
+        let signing = SigningKey::random(&mut rand::thread_rng());
+        let point = signing.verifying_key().to_encoded_point(false);
+        let cose = build_es256_cose(point.x().unwrap(), point.y().unwrap());
+        let auth_data = build_auth_data(&cose);
+
+        let client_data_json = br#"{"type":"webauthn.create"}"#;
+        let mut hasher = Sha256::new();
+        hasher.update(client_data_json);
+        let cd_hash = hasher.finalize();
+        let mut signed = auth_data.clone();
+        signed.extend_from_slice(&cd_hash);
+
+        let sig: Signature = signing.sign(&signed);
+        let der = sig.to_der().as_bytes().to_vec();
+
+        // A genuine ES256 signature verifies.
+        let att_b64 = build_attestation("packed", &auth_data, -7, &der, None);
+        let parsed = parse_packed_attestation(&att_b64).expect("parse");
+        verify_packed_attestation(&parsed, client_data_json).expect("real ES256 sig must verify");
+
+        // A forged signature is rejected (no longer silently accepted).
+        let bad = build_attestation(
+            "packed",
+            &auth_data,
+            -7,
+            &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01],
+            None,
+        );
+        let parsed_bad = parse_packed_attestation(&bad).expect("parse");
+        assert!(matches!(
+            verify_packed_attestation(&parsed_bad, client_data_json).unwrap_err(),
+            AttestationError::SignatureInvalid
+        ));
     }
 }
