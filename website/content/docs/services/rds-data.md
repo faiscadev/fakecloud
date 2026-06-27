@@ -18,17 +18,20 @@ real query.
 - **Typed parameters** — `:name` named parameters with `stringValue`,
   `longValue`, `doubleValue`, `booleanValue`, `blobValue`, and `isNull`,
   coerced to the column's real type.
-- **Typed results** — `records` as typed `Field`s (integers → `longValue`,
-  text → `stringValue`, `bytea`/`BLOB` → `blobValue`, etc.), with optional
+- **Typed results** — `records` as typed `Field`s (integers -> `longValue`,
+  text -> `stringValue`, `bytea`/`BLOB` -> `blobValue`, etc.), with optional
   `columnMetadata` (`includeResultMetadata`) and `formattedRecords`
   (`formatRecordsAs=JSON`). Writes report `numberOfRecordsUpdated`.
 - **Binary round-trips** — a `bytea` / `BLOB` column round-trips through
   `blobValue`, where rival emulators return an empty value.
-
-## Coming next
-
-`BatchExecuteStatement` and transactions (`BeginTransaction` /
-`CommitTransaction` / `RollbackTransaction`) over a held connection.
+- **Transactions** — `BeginTransaction` returns a `transactionId` backed by a
+  real database connection held open across requests. `ExecuteStatement` and
+  `BatchExecuteStatement` calls that pass the `transactionId` run on that same
+  connection, and `CommitTransaction` / `RollbackTransaction` commit or roll
+  back the genuine engine transaction.
+- **BatchExecuteStatement** — runs one statement across many `parameterSets`,
+  returning one `updateResults` entry per set, on a single connection (the
+  transaction's connection when a `transactionId` is given).
 
 ## Example
 
@@ -47,4 +50,17 @@ data.execute_statement(resourceArn=arn, secretArn=secret,
 resp = data.execute_statement(resourceArn=arn, secretArn=secret,
     sql="SELECT id, name FROM t", includeResultMetadata=True)
 # resp["records"] -> [[{"longValue": 1}, {"stringValue": "alice"}]]
+```
+
+Transactions and batch writes share one held connection:
+
+```python
+tx = data.begin_transaction(resourceArn=arn, secretArn=secret)["transactionId"]
+data.batch_execute_statement(resourceArn=arn, secretArn=secret, transactionId=tx,
+    sql="INSERT INTO t (id, name) VALUES (:id, :name)",
+    parameterSets=[
+        [{"name": "id", "value": {"longValue": 2}}, {"name": "name", "value": {"stringValue": "bob"}}],
+        [{"name": "id", "value": {"longValue": 3}}, {"name": "name", "value": {"stringValue": "carol"}}],
+    ])
+data.commit_transaction(resourceArn=arn, secretArn=secret, transactionId=tx)
 ```

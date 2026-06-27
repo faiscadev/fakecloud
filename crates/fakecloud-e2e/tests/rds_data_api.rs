@@ -93,3 +93,144 @@ async fn rds_data_api_executes_real_sql_with_typed_params() {
         "includeResultMetadata returns column metadata"
     );
 }
+
+/// Transactions hold a real connection open across requests: a rolled-back
+/// transaction leaves no rows, and a BatchExecuteStatement committed inside a
+/// transaction persists every parameter set. This proves Begin/Commit/Rollback
+/// run against the genuine engine, not an in-memory fake.
+#[tokio::test]
+async fn rds_data_api_transactions_and_batch() {
+    let server = TestServer::start().await;
+    let rds = server.rds_client().await;
+
+    rds.create_db_instance()
+        .db_instance_identifier("rdsdata-txn")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create postgres instance");
+
+    let instance = helpers::wait_for_db_available(&rds, "rdsdata-txn", 240).await;
+    let arn = instance
+        .db_instance_arn()
+        .expect("db instance arn")
+        .to_string();
+
+    let data = aws_sdk_rdsdata::Client::new(&server.aws_config().await);
+    let secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE TABLE accounts (id int, name text)")
+        .send()
+        .await
+        .expect("create table");
+
+    // A transaction that is rolled back leaves no trace.
+    let tx = data
+        .begin_transaction()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .send()
+        .await
+        .expect("begin transaction");
+    let txid = tx.transaction_id().expect("transaction id").to_string();
+    assert!(!txid.is_empty(), "transaction id is non-empty");
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .transaction_id(&txid)
+        .sql("INSERT INTO accounts (id, name) VALUES (:id, :name)")
+        .parameters(param("id", Field::LongValue(1)))
+        .parameters(param("name", Field::StringValue("rollme".into())))
+        .send()
+        .await
+        .expect("insert in transaction");
+
+    data.rollback_transaction()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .transaction_id(&txid)
+        .send()
+        .await
+        .expect("rollback");
+
+    let after_rollback = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT id FROM accounts")
+        .send()
+        .await
+        .expect("select after rollback");
+    assert_eq!(
+        after_rollback.records().len(),
+        0,
+        "rolled-back insert left no rows"
+    );
+
+    // A BatchExecuteStatement committed inside a transaction persists every set.
+    let tx2 = data
+        .begin_transaction()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .send()
+        .await
+        .expect("begin transaction 2");
+    let txid2 = tx2.transaction_id().expect("transaction id 2").to_string();
+
+    let batch = data
+        .batch_execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .transaction_id(&txid2)
+        .sql("INSERT INTO accounts (id, name) VALUES (:id, :name)")
+        .parameter_sets(vec![
+            param("id", Field::LongValue(10)),
+            param("name", Field::StringValue("alice".into())),
+        ])
+        .parameter_sets(vec![
+            param("id", Field::LongValue(20)),
+            param("name", Field::StringValue("bob".into())),
+        ])
+        .send()
+        .await
+        .expect("batch execute in transaction");
+    assert_eq!(
+        batch.update_results().len(),
+        2,
+        "one update result per parameter set"
+    );
+
+    data.commit_transaction()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .transaction_id(&txid2)
+        .send()
+        .await
+        .expect("commit");
+
+    let committed = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT id, name FROM accounts ORDER BY id")
+        .send()
+        .await
+        .expect("select after commit");
+    let records = committed.records();
+    assert_eq!(records.len(), 2, "both batch rows committed");
+    assert_eq!(records[0][0].as_long_value().ok(), Some(&10));
+    assert_eq!(
+        records[1][1].as_string_value().map(String::as_str).ok(),
+        Some("bob")
+    );
+}
