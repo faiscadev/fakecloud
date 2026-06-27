@@ -336,8 +336,7 @@ pub(crate) fn apply_update_expression(
             }
             UpdateAction::Remove => {
                 for attr_ref in assignments {
-                    let attr = resolve_attr_name(attr_ref.trim(), expr_attr_names);
-                    item.remove(&attr);
+                    remove_path(item, attr_ref.trim(), expr_attr_names);
                 }
             }
             UpdateAction::Add => {
