@@ -131,3 +131,39 @@ async fn submit_job_failing_container_fails_the_job() {
     let d = batch.describe_jobs().jobs(&job_id).send().await.unwrap();
     assert_eq!(d.jobs()[0].container().and_then(|c| c.exit_code()), Some(7));
 }
+
+#[tokio::test]
+async fn array_job_runs_every_child_and_parent_succeeds() {
+    if !require_docker_or_skip("array_job_runs_every_child_and_parent_succeeds") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let batch = aws_sdk_batch::Client::new(&s.aws_config().await);
+    // Reuse run_job's setup (CE/JQ/JD with an always-succeed container) but
+    // submit as an array of 3.
+    let _ = run_job(&batch, "arr", vec!["sh", "-c", "exit 0"]).await;
+    let parent = batch
+        .submit_job()
+        .job_name("arr-array")
+        .job_queue("arr-q")
+        .job_definition("arr-jd")
+        .array_properties(
+            aws_sdk_batch::types::ArrayProperties::builder()
+                .size(3)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("submit array job")
+        .job_id()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(wait_terminal(&batch, &parent).await, "SUCCEEDED");
+    let d = batch.describe_jobs().jobs(&parent).send().await.unwrap();
+    let summary = d.jobs()[0]
+        .array_properties()
+        .and_then(|a| a.status_summary())
+        .expect("array statusSummary");
+    assert_eq!(summary.get("SUCCEEDED"), Some(&3));
+}

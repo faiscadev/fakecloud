@@ -21,15 +21,17 @@ containers, and Batch is built to run real jobs on that same engine.
 - **Job definitions** — `RegisterJobDefinition` (monotonic per-name `revision`), `DescribeJobDefinitions` (filter by name / ARN / `status`), `DeregisterJobDefinition` (marks the revision `INACTIVE`).
 - **Scheduling policies** — `CreateSchedulingPolicy`, `DescribeSchedulingPolicies`, `ListSchedulingPolicies`, `UpdateSchedulingPolicy`, `DeleteSchedulingPolicy` (fair-share).
 - **Jobs — real container execution** — `SubmitJob` launches the job definition's `containerProperties` (image / command / vcpus / memory / environment, with this submit's `containerOverrides` applied) as a **real container** on fakecloud's ECS task engine, and drives the job status off the container's actual lifecycle: `SUBMITTED → STARTING → RUNNING → SUCCEEDED` when the container exits 0, or `FAILED` (carrying the real `container.exitCode`) on a non-zero exit. This is the wedge: every other free emulator fakes Batch compute (MiniStack jumps straight to `SUCCEEDED` with no container). With no container runtime available the job stays `SUBMITTED` honestly — never an auto-success. `DescribeJobs` / `ListJobs` (filter by queue / status) report live status + exit code; `CancelJob` / `TerminateJob` stop a job.
+- **Array jobs** — `SubmitJob` with `arrayProperties.size = N` spawns `N` real child containers (`<jobId>:<index>`), each with `AWS_BATCH_JOB_ARRAY_INDEX` set so it can select its slice of work. The parent's status and `arrayProperties.statusSummary` aggregate the children live — `SUCCEEDED` only when every child exits 0.
 - **Tags** — `TagResource`, `UntagResource`, `ListTagsForResource`.
 
 Terraform / CloudFormation can provision a full Batch stack
 (`aws_batch_compute_environment`, `aws_batch_job_queue`,
 `aws_batch_job_definition`, `aws_batch_scheduling_policy`) and an SDK client can
-submit jobs that run real containers and report their real exit codes.
+submit jobs (including array jobs) that run real containers and report their
+real exit codes.
 
 ## Coming next
 
-Array jobs (child spawning + `AWS_BATCH_JOB_ARRAY_INDEX`), job dependencies
-(`dependsOn` SEQUENTIAL / N_TO_N), retry strategies + timeouts, and a
+Job dependencies (`dependsOn` SEQUENTIAL / N_TO_N), retry strategies + timeouts,
+and a
 CloudFormation provisioner for `AWS::Batch::*`.

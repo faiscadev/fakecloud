@@ -670,78 +670,74 @@ impl BatchService {
         let job_id = Uuid::new_v4().to_string();
         let arn = self.arn(&req.account_id, &req.region, &format!("job/{job_id}"));
         let now = chrono::Utc::now().timestamp_millis();
+        let array_size = body
+            .pointer("/arrayProperties/size")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 1);
+
         let mut job = obj(&body);
         job.insert("jobId".into(), json!(job_id));
         job.insert("jobArn".into(), json!(arn));
         job.insert("jobName".into(), json!(job_name));
         job.insert("jobQueue".into(), json!(job_queue));
         job.insert("jobDefinition".into(), json!(job_definition));
-        job.insert("status".into(), json!("SUBMITTED"));
         job.insert("createdAt".into(), json!(now));
 
         // Resolve the job definition's container properties (+ this submit's
         // containerOverrides) so the job runs the right image/command.
         let container = self.resolve_container(&req.account_id, &job_definition, &body);
 
-        {
-            let mut accounts = self.state.write();
-            accounts
-                .get_or_create(&req.account_id)
-                .jobs
-                .insert(job_id.clone(), Value::Object(job));
-        }
-
-        // Launch a REAL container-backed task on the ECS engine when wired and
-        // the definition carries an image. With no ECS backend (unit tests / no
-        // container runtime) the job stays SUBMITTED honestly — never an
-        // auto-success, which is exactly the rival anti-pattern Batch beats.
-        if let (Some(ecs_state), Some(container)) = (self.ecs_state.clone(), container) {
-            if container.get("image").and_then(Value::as_str).is_some() {
-                match self
-                    .launch_ecs_task(req, &job_id, &job_name, &container)
-                    .await
-                {
-                    Ok((cluster, task_arn)) => {
-                        {
-                            let mut accounts = self.state.write();
-                            if let Some(j) = accounts
-                                .get_or_create(&req.account_id)
-                                .jobs
-                                .get_mut(&job_id)
-                                .and_then(|j| j.as_object_mut())
-                            {
-                                j.insert("status".into(), json!("STARTING"));
-                                j.insert("ecsCluster".into(), json!(cluster));
-                                j.insert("ecsTaskArn".into(), json!(task_arn));
-                                j.insert("startedAt".into(), json!(now));
-                            }
-                        }
-                        self.spawn_status_sync(
-                            ecs_state,
-                            req.account_id.clone(),
-                            req.region.clone(),
-                            req.request_id.clone(),
-                            job_id.clone(),
-                            cluster,
-                            task_arn,
-                        );
-                    }
-                    Err(err) => {
-                        // Launch itself failed (e.g. bad definition): fail the
-                        // job with the reason rather than parking it silently.
-                        let mut accounts = self.state.write();
-                        if let Some(j) = accounts
-                            .get_or_create(&req.account_id)
-                            .jobs
-                            .get_mut(&job_id)
-                            .and_then(|j| j.as_object_mut())
-                        {
-                            j.insert("status".into(), json!("FAILED"));
-                            j.insert("statusReason".into(), json!(err.message().to_string()));
-                        }
-                    }
-                }
+        if let Some(size) = array_size {
+            // Array job: the parent is a tracking record; spawn `size` child
+            // jobs `<parent>:<index>`, each with AWS_BATCH_JOB_ARRAY_INDEX set,
+            // and run them. The parent's status + statusSummary are computed
+            // from the children at DescribeJobs time.
+            job.insert("status".into(), json!("PENDING"));
+            job.insert("arrayProperties".into(), json!({ "size": size }));
+            {
+                let mut accounts = self.state.write();
+                accounts
+                    .get_or_create(&req.account_id)
+                    .jobs
+                    .insert(job_id.clone(), Value::Object(job));
             }
+            for index in 0..size {
+                let child_id = format!("{job_id}:{index}");
+                let child_arn = self.arn(&req.account_id, &req.region, &format!("job/{child_id}"));
+                let mut child = serde_json::Map::new();
+                child.insert("jobId".into(), json!(child_id));
+                child.insert("jobArn".into(), json!(child_arn));
+                child.insert("jobName".into(), json!(job_name));
+                child.insert("jobQueue".into(), json!(job_queue));
+                child.insert("jobDefinition".into(), json!(job_definition));
+                child.insert("status".into(), json!("SUBMITTED"));
+                child.insert("createdAt".into(), json!(now));
+                child.insert(
+                    "arrayProperties".into(),
+                    json!({ "index": index, "statusSummary": {} }),
+                );
+                {
+                    let mut accounts = self.state.write();
+                    accounts
+                        .get_or_create(&req.account_id)
+                        .jobs
+                        .insert(child_id.clone(), Value::Object(child));
+                }
+                let child_container = container.clone().map(|c| with_array_index_env(c, index));
+                self.launch_job(req, &child_id, &job_name, child_container, now)
+                    .await;
+            }
+        } else {
+            job.insert("status".into(), json!("SUBMITTED"));
+            {
+                let mut accounts = self.state.write();
+                accounts
+                    .get_or_create(&req.account_id)
+                    .jobs
+                    .insert(job_id.clone(), Value::Object(job));
+            }
+            self.launch_job(req, &job_id, &job_name, container, now)
+                .await;
         }
 
         Ok(AwsResponse::ok_json(json!({
@@ -749,6 +745,68 @@ impl BatchService {
             "jobName": job_name,
             "jobId": job_id,
         })))
+    }
+
+    /// Launch a REAL container-backed task on the ECS engine when wired and the
+    /// definition carries an image. With no ECS backend (unit tests / no
+    /// container runtime) the job stays SUBMITTED honestly — never an
+    /// auto-success, which is exactly the rival anti-pattern Batch beats.
+    async fn launch_job(
+        &self,
+        req: &AwsRequest,
+        job_id: &str,
+        job_name: &str,
+        container: Option<Value>,
+        now: i64,
+    ) {
+        let (Some(ecs_state), Some(container)) = (self.ecs_state.clone(), container) else {
+            return;
+        };
+        if container.get("image").and_then(Value::as_str).is_none() {
+            return;
+        }
+        match self
+            .launch_ecs_task(req, job_id, job_name, &container)
+            .await
+        {
+            Ok((cluster, task_arn)) => {
+                {
+                    let mut accounts = self.state.write();
+                    if let Some(j) = accounts
+                        .get_or_create(&req.account_id)
+                        .jobs
+                        .get_mut(job_id)
+                        .and_then(|j| j.as_object_mut())
+                    {
+                        j.insert("status".into(), json!("STARTING"));
+                        j.insert("ecsCluster".into(), json!(cluster));
+                        j.insert("ecsTaskArn".into(), json!(task_arn));
+                        j.insert("startedAt".into(), json!(now));
+                    }
+                }
+                self.spawn_status_sync(
+                    ecs_state,
+                    req.account_id.clone(),
+                    req.region.clone(),
+                    req.request_id.clone(),
+                    job_id.to_string(),
+                    cluster,
+                    task_arn,
+                );
+            }
+            Err(err) => {
+                let mut accounts = self.state.write();
+                if let Some(j) = accounts
+                    .get_or_create(&req.account_id)
+                    .jobs
+                    .get_mut(job_id)
+                    .and_then(|j| j.as_object_mut())
+                {
+                    j.insert("status".into(), json!("FAILED"));
+                    j.insert("statusReason".into(), json!(err.message().to_string()));
+                }
+            }
+        }
     }
 
     /// Resolve `containerProperties` from the stored job definition (by
@@ -1007,7 +1065,34 @@ impl BatchService {
                                 .map(|id| wanted.contains(id))
                                 .unwrap_or(false)
                     })
-                    .cloned()
+                    .map(|j| {
+                        // An array parent (arrayProperties.size set, no own ECS
+                        // task) reflects its children's aggregate status +
+                        // statusSummary computed live.
+                        let id = j.get("jobId").and_then(Value::as_str).unwrap_or("");
+                        let is_parent = j.pointer("/arrayProperties/size").is_some();
+                        if !is_parent {
+                            return j.clone();
+                        }
+                        let prefix = format!("{id}:");
+                        let children: Vec<&Value> = st
+                            .jobs
+                            .iter()
+                            .filter(|(k, _)| k.starts_with(&prefix))
+                            .map(|(_, v)| v)
+                            .collect();
+                        let (summary, status) = array_status_summary(&children);
+                        let mut out = j.clone();
+                        if let Some(o) = out.as_object_mut() {
+                            o.insert("status".into(), json!(status));
+                            if let Some(ap) =
+                                o.get_mut("arrayProperties").and_then(|v| v.as_object_mut())
+                            {
+                                ap.insert("statusSummary".into(), summary);
+                            }
+                        }
+                        out
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -1286,6 +1371,61 @@ async fn save_snapshot_now(
         serde_json::to_vec(&snap).unwrap_or_default()
     };
     let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+}
+
+/// Inject `AWS_BATCH_JOB_ARRAY_INDEX=<index>` into a container's environment so
+/// each array child can select its slice of work (the AWS Batch contract).
+fn with_array_index_env(mut container: Value, index: i64) -> Value {
+    if let Some(obj) = container.as_object_mut() {
+        let env = obj
+            .entry("environment".to_string())
+            .or_insert_with(|| json!([]));
+        if let Some(arr) = env.as_array_mut() {
+            arr.retain(|e| {
+                e.get("name").and_then(Value::as_str) != Some("AWS_BATCH_JOB_ARRAY_INDEX")
+            });
+            arr.push(json!({ "name": "AWS_BATCH_JOB_ARRAY_INDEX", "value": index.to_string() }));
+        }
+    }
+    container
+}
+
+/// Aggregate an array parent's child statuses into AWS Batch's
+/// `arrayProperties.statusSummary` counts + an overall parent status.
+fn array_status_summary(children: &[&Value]) -> (Value, &'static str) {
+    let mut summary = serde_json::Map::new();
+    for s in [
+        "SUBMITTED",
+        "PENDING",
+        "RUNNABLE",
+        "STARTING",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED",
+    ] {
+        let n = children
+            .iter()
+            .filter(|c| c.get("status").and_then(Value::as_str) == Some(s))
+            .count();
+        summary.insert(s.to_string(), json!(n));
+    }
+    let total = children.len();
+    let succeeded = summary["SUCCEEDED"].as_u64().unwrap_or(0) as usize;
+    let failed = summary["FAILED"].as_u64().unwrap_or(0) as usize;
+    let status = if total > 0 && succeeded + failed == total {
+        if failed > 0 {
+            "FAILED"
+        } else {
+            "SUCCEEDED"
+        }
+    } else if summary["RUNNING"].as_u64().unwrap_or(0) > 0
+        || summary["STARTING"].as_u64().unwrap_or(0) > 0
+    {
+        "RUNNING"
+    } else {
+        "PENDING"
+    };
+    (Value::Object(summary), status)
 }
 
 /// Read a JSON string array into a set of owned strings.
@@ -1681,6 +1821,76 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
+    }
+
+    #[test]
+    fn array_index_env_injected() {
+        let c = with_array_index_env(json!({"image": "alpine"}), 5);
+        let env = c["environment"].as_array().unwrap();
+        assert!(env
+            .iter()
+            .any(|e| e["name"] == "AWS_BATCH_JOB_ARRAY_INDEX" && e["value"] == "5"));
+    }
+
+    #[tokio::test]
+    async fn array_job_spawns_children_and_parent_aggregates() {
+        let s = svc();
+        s.handle(req(
+            "/v1/registerjobdefinition",
+            json!({"jobDefinitionName": "jd", "type": "container",
+                   "containerProperties": {"image": "alpine"}}),
+        ))
+        .await
+        .unwrap();
+        let sub = body_of(
+            s.handle(req(
+                "/v1/submitjob",
+                json!({"jobName": "arr", "jobQueue": "q", "jobDefinition": "jd",
+                       "arrayProperties": {"size": 3}}),
+            ))
+            .await
+            .unwrap(),
+        );
+        let parent = sub["jobId"].as_str().unwrap().to_string();
+
+        // Three children exist (no ECS wired -> they stay SUBMITTED honestly).
+        let listed = body_of(s.handle(req("/v1/listjobs", json!({}))).await.unwrap());
+        let n_children = listed["jobSummaryList"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| {
+                j["jobId"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with(&format!("{parent}:"))
+            })
+            .count();
+        assert_eq!(n_children, 3);
+
+        // The parent aggregates: PENDING with statusSummary SUBMITTED=3.
+        let d = body_of(
+            s.handle(req("/v1/describejobs", json!({"jobs": [parent]})))
+                .await
+                .unwrap(),
+        );
+        let p = &d["jobs"][0];
+        assert_eq!(p["status"], "PENDING");
+        assert_eq!(p["arrayProperties"]["statusSummary"]["SUBMITTED"], 3);
+        assert_eq!(p["arrayProperties"]["size"], 3);
+    }
+
+    #[test]
+    fn array_summary_terminal_states() {
+        let succ = json!({"status": "SUCCEEDED"});
+        let fail = json!({"status": "FAILED"});
+        let run = json!({"status": "RUNNING"});
+        let (_, st) = array_status_summary(&[&succ, &succ]);
+        assert_eq!(st, "SUCCEEDED");
+        let (_, st) = array_status_summary(&[&succ, &fail]);
+        assert_eq!(st, "FAILED");
+        let (_, st) = array_status_summary(&[&succ, &run]);
+        assert_eq!(st, "RUNNING");
     }
 
     #[test]
