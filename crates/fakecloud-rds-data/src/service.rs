@@ -609,6 +609,17 @@ async fn pg_run(
     Ok(Value::Object(out))
 }
 
+/// Append a fractional-seconds suffix only when non-zero, with trailing zeros
+/// trimmed, matching Postgres's own `timestamp::text` rendering.
+fn pg_timestamp_text(base: impl std::fmt::Display, micros: u32) -> String {
+    if micros == 0 {
+        return base.to_string();
+    }
+    let frac = format!("{micros:06}");
+    let frac = frac.trim_end_matches('0');
+    format!("{base}.{frac}")
+}
+
 fn pg_field(row: &tokio_postgres::Row, i: usize, ty: &tokio_postgres::types::Type) -> Value {
     use tokio_postgres::types::Type;
     macro_rules! opt {
@@ -620,6 +631,20 @@ fn pg_field(row: &tokio_postgres::Row, i: usize, ty: &tokio_postgres::types::Typ
             }
         }};
     }
+    // Types that AWS surfaces as `stringValue` (numeric/decimal, temporal,
+    // UUID, JSON): decode them with their real Rust representation and render
+    // the canonical text, rather than letting them fall through to the
+    // `String` arm — which fails for these binary-format columns and would
+    // wrongly report `isNull`.
+    macro_rules! strv {
+        ($t:ty, $conv:expr) => {{
+            let v: Option<$t> = row.try_get(i).unwrap_or(None);
+            match v {
+                Some(x) => json!({ "stringValue": $conv(x) }),
+                None => json!({ "isNull": true }),
+            }
+        }};
+    }
     match *ty {
         Type::BOOL => opt!(bool, "booleanValue", |x| x),
         Type::INT2 => opt!(i16, "longValue", |x| x as i64),
@@ -627,6 +652,27 @@ fn pg_field(row: &tokio_postgres::Row, i: usize, ty: &tokio_postgres::types::Typ
         Type::INT8 => opt!(i64, "longValue", |x: i64| x),
         Type::FLOAT4 => opt!(f32, "doubleValue", |x| x as f64),
         Type::FLOAT8 => opt!(f64, "doubleValue", |x: f64| x),
+        Type::NUMERIC => strv!(rust_decimal::Decimal, |d: rust_decimal::Decimal| d
+            .to_string()),
+        Type::UUID => strv!(uuid::Uuid, |u: uuid::Uuid| u.to_string()),
+        Type::JSON | Type::JSONB => {
+            strv!(serde_json::Value, |j: serde_json::Value| j.to_string())
+        }
+        Type::TIMESTAMP => strv!(chrono::NaiveDateTime, |t: chrono::NaiveDateTime| {
+            pg_timestamp_text(
+                t.format("%Y-%m-%d %H:%M:%S"),
+                t.and_utc().timestamp_subsec_micros(),
+            )
+        }),
+        Type::TIMESTAMPTZ => strv!(chrono::DateTime<chrono::Utc>, |t: chrono::DateTime<
+            chrono::Utc,
+        >| format!(
+            "{}{}",
+            pg_timestamp_text(t.format("%Y-%m-%d %H:%M:%S"), t.timestamp_subsec_micros()),
+            t.format("%:z")
+        )),
+        Type::DATE => strv!(chrono::NaiveDate, |d: chrono::NaiveDate| d.to_string()),
+        Type::TIME => strv!(chrono::NaiveTime, |t: chrono::NaiveTime| t.to_string()),
         Type::BYTEA => {
             let v: Option<Vec<u8>> = row.try_get(i).unwrap_or(None);
             match v {
@@ -737,7 +783,48 @@ fn my_field(row: &mysql_async::Row, i: usize) -> Value {
             Ok(s) => json!({ "stringValue": s }),
             Err(_) => json!({ "blobValue": b64_encode(b) }),
         },
-        Some(other) => json!({ "stringValue": format!("{other:?}") }),
+        // Temporal columns arrive as typed Date/Time values under the binary
+        // protocol; render the canonical SQL text instead of the debug form.
+        Some(V::Date(y, mo, d, h, mi, s, us)) => {
+            json!({ "stringValue": format_mysql_datetime(*y, *mo, *d, *h, *mi, *s, *us) })
+        }
+        Some(V::Time(neg, days, h, mi, s, us)) => {
+            json!({ "stringValue": format_mysql_time(*neg, *days, *h, *mi, *s, *us) })
+        }
+    }
+}
+
+/// Render a MySQL `DATE`/`DATETIME`/`TIMESTAMP` value as canonical SQL text,
+/// dropping the time portion for a pure date.
+#[allow(clippy::too_many_arguments)]
+fn format_mysql_datetime(
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    min: u8,
+    sec: u8,
+    micros: u32,
+) -> String {
+    let date = format!("{year:04}-{month:02}-{day:02}");
+    if hour == 0 && min == 0 && sec == 0 && micros == 0 {
+        return date;
+    }
+    if micros == 0 {
+        format!("{date} {hour:02}:{min:02}:{sec:02}")
+    } else {
+        format!("{date} {hour:02}:{min:02}:{sec:02}.{micros:06}")
+    }
+}
+
+/// Render a MySQL `TIME` value (a signed duration) as canonical SQL text.
+fn format_mysql_time(neg: bool, days: u32, hours: u8, mins: u8, secs: u8, micros: u32) -> String {
+    let sign = if neg { "-" } else { "" };
+    let total_hours = days * 24 + hours as u32;
+    if micros == 0 {
+        format!("{sign}{total_hours:02}:{mins:02}:{secs:02}")
+    } else {
+        format!("{sign}{total_hours:02}:{mins:02}:{secs:02}.{micros:06}")
     }
 }
 

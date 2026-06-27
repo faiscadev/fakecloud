@@ -17,9 +17,16 @@ http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tokio-postgres = { workspace = true }
+tokio-postgres = { workspace = true, features = [
+    "with-chrono-0_4",
+    "with-uuid-1",
+    "with-serde_json-1",
+] }
 mysql_async = "0.34"
 rand = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
