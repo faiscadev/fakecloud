@@ -1017,6 +1017,34 @@ fn group_xml(g: &AutoScalingGroup) -> String {
         .iter()
         .map(|a| format!("<member>{}</member>", xesc(a)))
         .collect();
+    let lbs: String = g
+        .load_balancer_names
+        .iter()
+        .map(|a| format!("<member>{}</member>", xesc(a)))
+        .collect();
+    // A launch-template-backed ASG (the modern default) must report its
+    // LaunchTemplate, or terraform reads it back empty and shows perpetual drift.
+    let lt = g
+        .launch_template
+        .as_ref()
+        .map(|lt| {
+            format!(
+                "<LaunchTemplate>{}{}{}</LaunchTemplate>",
+                lt.launch_template_id
+                    .as_deref()
+                    .map(|v| el("LaunchTemplateId", v))
+                    .unwrap_or_default(),
+                lt.launch_template_name
+                    .as_deref()
+                    .map(|v| el("LaunchTemplateName", v))
+                    .unwrap_or_default(),
+                lt.version
+                    .as_deref()
+                    .map(|v| el("Version", v))
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
     let tags: String = g
         .tags
         .iter()
@@ -1032,8 +1060,9 @@ fn group_xml(g: &AutoScalingGroup) -> String {
         })
         .collect();
     format!(
-        "<member>{}{}{}{}{}{}{}{}{}{}{}<AvailabilityZones>{azs}</AvailabilityZones>\
+        "<member>{}{}{}{lt}{}{}{}{}{}{}{}{}<AvailabilityZones>{azs}</AvailabilityZones>\
          <Instances>{instances}</Instances><TargetGroupARNs>{tgs}</TargetGroupARNs>\
+         <LoadBalancerNames>{lbs}</LoadBalancerNames>\
          <Tags>{tags}</Tags>{}{}{}</member>",
         el("AutoScalingGroupName", &g.name),
         el("AutoScalingGroupARN", &g.arn),
