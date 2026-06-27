@@ -67,7 +67,14 @@ async fn asg_launches_and_terminates_real_ec2_instances() {
         "both ASG instances must exist in EC2: {ec2_ids:?}"
     );
 
-    // Scale in to 0 -> the ASG drops them and EC2 terminates them.
+    // Scale in to 0 -> the ASG drops them and EC2 terminates them. AWS rejects
+    // a desired capacity below MinSize, so lower MinSize to 0 first.
+    asg.update_auto_scaling_group()
+        .auto_scaling_group_name("asg")
+        .min_size(0)
+        .send()
+        .await
+        .unwrap();
     asg.set_desired_capacity()
         .auto_scaling_group_name("asg")
         .desired_capacity(0)
