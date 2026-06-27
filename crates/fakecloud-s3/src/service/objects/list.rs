@@ -105,6 +105,12 @@ impl S3Service {
             count += 1;
         }
 
+        // max-keys=0 returns an empty page with IsTruncated=false (no marker),
+        // not a truncated empty NextMarker.
+        if max_keys == 0 {
+            is_truncated = false;
+        }
+
         let mut common_prefixes_xml = String::new();
         for cp in &common_prefixes {
             let display_cp = if encoding_type.as_deref() == Some("url") {
@@ -321,6 +327,13 @@ impl S3Service {
             ));
             last_key = key.clone();
             count += 1;
+        }
+
+        // max-keys=0 is a valid "give me just the count/metadata" request: AWS
+        // returns an empty page with IsTruncated=false, not a truncated empty
+        // continuation token (which the next request would reject).
+        if max_keys == 0 {
+            is_truncated = false;
         }
 
         let encoding_type = req.query_params.get("encoding-type").cloned();

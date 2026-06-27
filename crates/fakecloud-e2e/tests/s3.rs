@@ -4838,3 +4838,45 @@ async fn s3_get_zero_byte_multipart_part_does_not_panic() {
         .expect("get 0-byte part must succeed");
     assert_eq!(got.content_length(), Some(0));
 }
+
+#[tokio::test]
+async fn list_objects_max_keys_zero_is_empty_not_truncated() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client.create_bucket().bucket("mk0").send().await.unwrap();
+    for key in ["a.txt", "b.txt"] {
+        client
+            .put_object()
+            .bucket("mk0")
+            .key(key)
+            .body(ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // V2: max-keys=0 -> empty, not truncated, no continuation token (the old
+    // empty token was self-rejecting on the next request).
+    let v2 = client
+        .list_objects_v2()
+        .bucket("mk0")
+        .max_keys(0)
+        .send()
+        .await
+        .expect("list v2 max-keys=0");
+    assert_eq!(v2.key_count(), Some(0));
+    assert_eq!(v2.is_truncated(), Some(false));
+    assert!(v2.next_continuation_token().is_none());
+
+    // V1: same — empty, not truncated, no NextMarker.
+    let v1 = client
+        .list_objects()
+        .bucket("mk0")
+        .max_keys(0)
+        .send()
+        .await
+        .expect("list v1 max-keys=0");
+    assert!(v1.contents().is_empty());
+    assert_eq!(v1.is_truncated(), Some(false));
+    assert!(v1.next_marker().is_none());
+}
