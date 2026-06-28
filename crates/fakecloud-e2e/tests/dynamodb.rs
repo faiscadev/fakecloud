@@ -448,6 +448,107 @@ async fn dynamodb_scan_with_index_name_applies_projection() {
     assert!(!item.contains_key("title"));
 }
 
+// On a GSI with a non-ALL projection, a FilterExpression can only reference
+// attributes projected into the index. DynamoDB does not fetch non-projected
+// attributes from the base table to evaluate the filter, so a filter on such
+// an attribute sees it as absent and never matches.
+#[tokio::test]
+async fn dynamodb_query_gsi_filter_on_non_projected_attribute_sees_absent() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("GsiFilterTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("category")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("ByCategory")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("category")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::KeysOnly)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_item()
+        .table_name("GsiFilterTable")
+        .item("id", AttributeValue::S("a".into()))
+        .item("category", AttributeValue::S("books".into()))
+        .item("title", AttributeValue::S("Rust".into()))
+        .send()
+        .await
+        .unwrap();
+
+    // Filter on 'title' — NOT projected into the KEYS_ONLY index. The base item
+    // has title="Rust", but the index can't see it, so the filter must drop it.
+    let resp = client
+        .query()
+        .table_name("GsiFilterTable")
+        .index_name("ByCategory")
+        .key_condition_expression("category = :c")
+        .expression_attribute_values(":c", AttributeValue::S("books".into()))
+        .filter_expression("title = :t")
+        .expression_attribute_values(":t", AttributeValue::S("Rust".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.count(),
+        0,
+        "filter on non-projected attribute must see it as absent"
+    );
+    // ScannedCount still reflects the key-matched item examined pre-filter.
+    assert_eq!(resp.scanned_count(), 1);
+
+    // Control: filter on the projected index key works normally.
+    let resp = client
+        .query()
+        .table_name("GsiFilterTable")
+        .index_name("ByCategory")
+        .key_condition_expression("category = :c")
+        .expression_attribute_values(":c", AttributeValue::S("books".into()))
+        .filter_expression("category = :c")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 1);
+}
+
 #[tokio::test]
 async fn dynamodb_scan_with_unknown_index_name_errors() {
     let server = TestServer::start().await;
