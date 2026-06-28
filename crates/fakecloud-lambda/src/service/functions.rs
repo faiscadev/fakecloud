@@ -396,22 +396,57 @@ impl LambdaService {
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
-        let functions: Vec<Value> = state
+        let all_versions = function_version == Some("ALL");
+        let mut functions: Vec<Value> = state
             .functions
             .values()
             .map(|f| self.function_config_json(f))
             .collect();
+        if all_versions {
+            // FunctionVersion=ALL also lists every published numbered version,
+            // not just $LATEST.
+            for snaps in state.function_version_snapshots.values() {
+                for snap in snaps.values() {
+                    functions.push(self.function_config_json(snap));
+                }
+            }
+            // Order by function name, then $LATEST ahead of ascending versions.
+            functions.sort_by(|a, b| {
+                let an = a["FunctionName"].as_str().unwrap_or_default();
+                let bn = b["FunctionName"].as_str().unwrap_or_default();
+                an.cmp(bn)
+                    .then_with(|| version_sort_key(a).cmp(&version_sort_key(b)))
+            });
+        }
 
         // Honor Marker/MaxItems. AWS orders ListFunctions by FunctionName and
         // carries NextMarker as a string even on the final page (empty there).
-        let (page, next_marker) = super::paginate_marker(functions, marker, max_items, |f| {
-            f["FunctionName"].as_str().unwrap_or_default().to_string()
-        });
+        // With ALL versions, key on the ARN (unique per version) so duplicate
+        // function names don't collide in the pagination marker.
+        let key: fn(&Value) -> String = if all_versions { farn_key } else { fname_key };
+        let (page, next_marker) = super::paginate_marker(functions, marker, max_items, key);
         let response = json!({
             "Functions": page,
             "NextMarker": next_marker,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+}
+
+fn fname_key(f: &Value) -> String {
+    f["FunctionName"].as_str().unwrap_or_default().to_string()
+}
+
+fn farn_key(f: &Value) -> String {
+    f["FunctionArn"].as_str().unwrap_or_default().to_string()
+}
+
+/// Sort key for ListFunctions(ALL): `$LATEST` first (0), then numbered versions
+/// in ascending numeric order.
+fn version_sort_key(f: &Value) -> (u8, u64) {
+    match f["Version"].as_str() {
+        Some("$LATEST") | None => (0, 0),
+        Some(v) => (1, v.parse::<u64>().unwrap_or(u64::MAX)),
     }
 }

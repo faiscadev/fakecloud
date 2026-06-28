@@ -1237,13 +1237,15 @@ impl AwsService for LambdaService {
                     format!("MaxItems must be a number (got '{raw}')"),
                 )
             })?;
+            // ListAliases' MaxItems range is 1..10000 in the Smithy model (only
+            // the layer / url-config / provisioned-concurrency / event-invoke
+            // lists cap at 50), so it must not be grouped with the 50-cap ops.
             let max = match action {
                 "ListLayers"
                 | "ListLayerVersions"
                 | "ListFunctionUrlConfigs"
                 | "ListProvisionedConcurrencyConfigs"
-                | "ListFunctionEventInvokeConfigs"
-                | "ListAliases" => 50,
+                | "ListFunctionEventInvokeConfigs" => 50,
                 _ => 10000,
             };
             if !(1..=max).contains(&n) {
