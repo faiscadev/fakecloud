@@ -947,6 +947,14 @@ pub enum ContainerSpawnIntent {
     /// with a real Redis container via the ElastiCache runtime, matching the
     /// direct `CreateReplicationGroup` path.
     ElastiCacheReplicationGroup { replication_group_id: String },
+    /// `AWS::ECS::Service` — launch the REAL tasks (containers) the inserted
+    /// service needs to reach its `desiredCount` via the ECS runtime, matching
+    /// the direct `CreateService` path. The cluster + service name locate the
+    /// inserted record (and its desired count) when the drain runs.
+    EcsServiceTasks {
+        cluster_name: String,
+        service_name: String,
+    },
 }
 
 mod acm;

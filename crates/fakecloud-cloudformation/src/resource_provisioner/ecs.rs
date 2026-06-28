@@ -398,6 +398,22 @@ impl ResourceProvisioner {
         if let Some(c) = state.clusters.get_mut(&cluster_name) {
             c.active_services_count += 1;
         }
+        drop(accounts);
+
+        // Back the inserted service with REAL running tasks when a container
+        // runtime is wired. With no runtime (CI / metadata-only) we skip the
+        // intent, leaving running_count 0 with no tasks — the same metadata-only
+        // outcome the provisioner had before, and consistent with the direct
+        // CreateService no-runtime path.
+        if self.ecs_runtime.is_some() {
+            self.pending_container_spawns.lock().push(
+                super::ContainerSpawnIntent::EcsServiceTasks {
+                    cluster_name: cluster_name.clone(),
+                    service_name: service_name.clone(),
+                },
+            );
+        }
+
         Ok(ProvisionResult::new(service_arn.clone())
             .with("Name", service_name)
             .with("ServiceArn", service_arn))

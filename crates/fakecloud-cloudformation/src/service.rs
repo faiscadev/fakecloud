@@ -1051,6 +1051,8 @@ impl CloudFormationService {
         let autoscaling_state_for_spawn = provisioner.autoscaling_state.clone();
         let elasticache_state_for_spawn = provisioner.elasticache_state.clone();
         let elasticache_runtime_for_spawn = provisioner.elasticache_runtime.clone();
+        let ecs_state_for_spawn = provisioner.ecs_state.clone();
+        let ecs_runtime_for_spawn = provisioner.ecs_runtime.clone();
 
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
@@ -1171,6 +1173,25 @@ impl CloudFormationService {
                                     ec_state,
                                     runtime,
                                     replication_group_id,
+                                    account,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    crate::resource_provisioner::ContainerSpawnIntent::EcsServiceTasks {
+                        cluster_name,
+                        service_name,
+                    } => {
+                        if let Some(runtime) = ecs_runtime_for_spawn.clone() {
+                            let ecs_state = ecs_state_for_spawn.clone();
+                            let account = account_id.clone();
+                            tokio::spawn(async move {
+                                fakecloud_ecs::cfn_provision::cfn_launch_service_tasks(
+                                    ecs_state,
+                                    runtime,
+                                    cluster_name,
+                                    service_name,
                                     account,
                                 )
                                 .await;
