@@ -714,11 +714,13 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
+        // ListVersionsByFunction MaxItems range is 1..10000 in the Smithy model
+        // (default 50), not capped at 50.
         let max_items: usize = req
             .query_params
             .get("MaxItems")
             .and_then(|v| v.parse::<usize>().ok())
-            .map(|n| n.clamp(1, 50))
+            .map(|n| n.clamp(1, 10000))
             .unwrap_or(50);
         let marker = req.query_params.get("Marker").cloned();
         self.with_state_read(account_id, &region, |state| {

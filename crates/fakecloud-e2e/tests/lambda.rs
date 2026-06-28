@@ -1376,3 +1376,82 @@ async fn lambda_get_function_concurrency_unset_is_empty() {
         .unwrap();
     assert_eq!(set.reserved_concurrent_executions(), Some(5));
 }
+
+// bug-audit 2026-06-27, T1.13: ListFunctions(FunctionVersion=ALL) returns the
+// published numbered versions too (not only $LATEST), and the alias/version
+// list MaxItems range is 1..10000 (no spurious 400 above 50).
+#[tokio::test]
+async fn lambda_list_functions_all_versions_and_maxitems() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("verfn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .publish_version()
+        .function_name("verfn")
+        .send()
+        .await
+        .unwrap();
+    // Change $LATEST so the next publish creates a distinct version (AWS dedupes
+    // an unchanged publish).
+    client
+        .update_function_configuration()
+        .function_name("verfn")
+        .description("v2")
+        .send()
+        .await
+        .unwrap();
+    client
+        .publish_version()
+        .function_name("verfn")
+        .send()
+        .await
+        .unwrap();
+
+    let all = client
+        .list_functions()
+        .function_version(aws_sdk_lambda::types::FunctionVersion::All)
+        .send()
+        .await
+        .unwrap();
+    let versions: Vec<&str> = all
+        .functions()
+        .iter()
+        .filter(|f| f.function_name() == Some("verfn"))
+        .map(|f| f.version().unwrap())
+        .collect();
+    assert!(
+        versions.contains(&"$LATEST") && versions.contains(&"1") && versions.contains(&"2"),
+        "ListFunctions(ALL) lists $LATEST + published versions, got {versions:?}"
+    );
+
+    // MaxItems above 50 must be accepted for ListVersionsByFunction.
+    client
+        .list_versions_by_function()
+        .function_name("verfn")
+        .max_items(100)
+        .send()
+        .await
+        .expect("MaxItems=100 accepted for ListVersionsByFunction");
+    // ...and for ListAliases.
+    client
+        .list_aliases()
+        .function_name("verfn")
+        .max_items(100)
+        .send()
+        .await
+        .expect("MaxItems=100 accepted for ListAliases");
+}
