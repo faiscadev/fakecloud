@@ -599,6 +599,39 @@ impl KinesisService {
         let total_records = shard.records.len();
         let shard_closed = !shard.is_open;
 
+        // When a split/merged shard is fully drained, AWS returns `ChildShards`
+        // alongside the null NextShardIterator so KCL / Lambda ESM can fan out
+        // to the child shard(s) instead of stalling at the parent.
+        let child_shards: Vec<Value> = if shard_closed && end_index >= total_records {
+            stream
+                .shards
+                .iter()
+                .filter(|c| {
+                    c.parent_shard_id.as_deref() == Some(lease.shard_id.as_str())
+                        || c.adjacent_parent_shard_id.as_deref() == Some(lease.shard_id.as_str())
+                })
+                .map(|c| {
+                    let mut parents = Vec::new();
+                    if let Some(p) = &c.parent_shard_id {
+                        parents.push(p.clone());
+                    }
+                    if let Some(p) = &c.adjacent_parent_shard_id {
+                        parents.push(p.clone());
+                    }
+                    json!({
+                        "ShardId": c.shard_id,
+                        "ParentShards": parents,
+                        "HashKeyRange": {
+                            "StartingHashKey": c.starting_hash_key,
+                            "EndingHashKey": c.ending_hash_key,
+                        },
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // MillisBehindLatest is the real time gap between the last record
         // returned in this batch and the newest (tip) record in the shard —
         // not a 0/1 flag. Consumers (Lambda ESM IteratorAge alarms, KCL
@@ -623,11 +656,15 @@ impl KinesisService {
             json!(state.insert_iterator(&lease.stream_name, &lease.shard_id, end_index))
         };
 
-        Ok(AwsResponse::ok_json(json!({
+        let mut response = json!({
             "MillisBehindLatest": millis_behind_latest,
             "NextShardIterator": next_iterator,
             "Records": records,
-        })))
+        });
+        if !child_shards.is_empty() {
+            response["ChildShards"] = Value::Array(child_shards);
+        }
+        Ok(AwsResponse::ok_json(response))
     }
 
     fn put_record(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {

@@ -329,6 +329,54 @@ async fn s3_list_objects_v2() {
     assert_eq!(prefixes[0].prefix().unwrap(), "dir/");
 }
 
+// bug-audit 2026-06-27, T1.10: a delimiter listing paginated with a small
+// max-keys must emit each CommonPrefix exactly once across pages (the cursor
+// used to point at the first member key, re-emitting the prefix next page).
+#[tokio::test]
+async fn s3_list_objects_v2_delimiter_pagination_no_dup_prefix() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client.create_bucket().bucket("dlim").send().await.unwrap();
+    for key in &["a/1", "a/2", "b/1", "c/1"] {
+        client
+            .put_object()
+            .bucket("dlim")
+            .key(*key)
+            .body(ByteStream::from_static(b"x"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let mut prefixes: Vec<String> = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut req = client
+            .list_objects_v2()
+            .bucket("dlim")
+            .delimiter("/")
+            .max_keys(1);
+        if let Some(t) = &token {
+            req = req.continuation_token(t);
+        }
+        let resp = req.send().await.unwrap();
+        for p in resp.common_prefixes() {
+            prefixes.push(p.prefix().unwrap().to_string());
+        }
+        if resp.is_truncated() == Some(true) {
+            token = resp.next_continuation_token().map(String::from);
+        } else {
+            break;
+        }
+    }
+
+    assert_eq!(
+        prefixes,
+        vec!["a/", "b/", "c/"],
+        "each CommonPrefix appears exactly once across pages"
+    );
+}
+
 #[tokio::test]
 async fn s3_copy_object() {
     let server = TestServer::start().await;
