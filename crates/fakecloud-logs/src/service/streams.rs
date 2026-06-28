@@ -1048,7 +1048,10 @@ impl LogsService {
                     }
                 }
                 if let Some(end) = end_time {
-                    if event.timestamp >= end {
+                    // FilterLogEvents endTime is inclusive: only events with a
+                    // timestamp *later* than endTime are dropped (unlike
+                    // GetLogEvents, whose endTime is exclusive).
+                    if event.timestamp > end {
                         continue;
                     }
                 }

@@ -367,6 +367,58 @@ pub(crate) fn collect_indexed(req: &AwsRequest, prefix: &str) -> Vec<HashMap<Str
     by_index.into_values().collect()
 }
 
+/// Collect an indexed `<prefix>.member.N` numeric array out of a flattened
+/// MetricData member (e.g. `Values.member.1`, `Counts.member.1`).
+fn collect_member_numbers(
+    member: &HashMap<String, String>,
+    prefix: &str,
+) -> Result<Vec<f64>, AwsServiceError> {
+    let needle = format!("{prefix}.member.");
+    let mut by_index: BTreeMap<u32, f64> = BTreeMap::new();
+    for (k, v) in member.iter() {
+        let Some(idx_str) = k.strip_prefix(&needle) else {
+            continue;
+        };
+        let Ok(idx) = idx_str.parse::<u32>() else {
+            continue;
+        };
+        let n = v
+            .parse::<f64>()
+            .map_err(|_| invalid_param(format!("{prefix} entries must be numbers")))?;
+        by_index.insert(idx, n);
+    }
+    Ok(by_index.into_values().collect())
+}
+
+/// Build a [`StatisticSet`] from a MetricDatum's `Values`/`Counts` distribution.
+/// Returns `Ok(None)` when no `Values` array is present.
+fn values_counts_statistic(
+    member: &HashMap<String, String>,
+) -> Result<Option<StatisticSet>, AwsServiceError> {
+    let values = collect_member_numbers(member, "Values")?;
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let counts = collect_member_numbers(member, "Counts")?;
+    let mut sample_count = 0.0;
+    let mut sum = 0.0;
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for (i, v) in values.iter().enumerate() {
+        let c = counts.get(i).copied().unwrap_or(1.0);
+        sample_count += c;
+        sum += v * c;
+        minimum = minimum.min(*v);
+        maximum = maximum.max(*v);
+    }
+    Ok(Some(StatisticSet {
+        sample_count,
+        sum,
+        minimum,
+        maximum,
+    }))
+}
+
 fn parse_dimensions(member: &HashMap<String, String>, prefix: &str) -> BTreeMap<String, String> {
     let mut dims: BTreeMap<u32, (Option<String>, Option<String>)> = BTreeMap::new();
     let needle = format!("{prefix}.member.");
@@ -654,9 +706,17 @@ impl CloudWatchService {
                 None
             };
 
+            // A `Values`/`Counts` value-distribution is collapsed into a
+            // StatisticSet (which the statistics path already aggregates), so
+            // the common histogram publish path stops 400-ing.
+            let statistic_values = match statistic_values {
+                Some(s) => Some(s),
+                None => values_counts_statistic(&member)?,
+            };
+
             if value.is_none() && statistic_values.is_none() {
                 return Err(invalid_param(
-                    "MetricData entry must supply either Value or StatisticValues",
+                    "MetricData entry must supply either Value, StatisticValues, or Values",
                 ));
             }
 
