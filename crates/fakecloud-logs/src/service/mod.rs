@@ -536,14 +536,11 @@ fn matches_filter_pattern(pattern: &str, message: &str) -> bool {
         return true;
     }
 
-    // JSON/metric filter patterns: { $.field = "value" }
-    if pattern.starts_with('{') && pattern.ends_with('}') {
-        return matches_json_filter_pattern(pattern, message);
-    }
-
-    // Array-style metric filter patterns - not implemented, fail closed
-    if pattern.starts_with('[') {
-        return false;
+    // JSON `{ ... }` (incl. `||`) and array `[ ... ]` patterns use the full
+    // filter-pattern engine, so FilterLogEvents matches them the same way
+    // metric-filter ingest does instead of failing closed.
+    if (pattern.starts_with('{') && pattern.ends_with('}')) || pattern.starts_with('[') {
+        return crate::filter_pattern::matches(pattern, message);
     }
 
     // Quoted pattern: exact substring match (handles escaped inner quotes)
@@ -604,142 +601,6 @@ fn parse_filter_terms(pattern: &str) -> Vec<String> {
     }
 
     terms
-}
-
-/// Match a JSON filter pattern like `{ $.level = "ERROR" }` against a message.
-fn matches_json_filter_pattern(pattern: &str, message: &str) -> bool {
-    // Strip the outer braces
-    let inner = pattern
-        .strip_prefix('{')
-        .and_then(|s| s.strip_suffix('}'))
-        .unwrap_or("")
-        .trim();
-
-    if inner.is_empty() {
-        return true;
-    }
-
-    // Parse the message as JSON
-    let msg_json: serde_json::Value = match serde_json::from_str(message) {
-        Ok(v) => v,
-        Err(_) => return false, // Non-JSON message cannot match JSON filter
-    };
-
-    // Support: $.field = "value", $.field != "value", $.field = number,
-    //          $.field > number, $.field < number, $.field >= number, $.field <= number
-    // Also support && for multiple conditions
-    let conditions: Vec<&str> = inner.split("&&").collect();
-
-    for condition in conditions {
-        let condition = condition.trim();
-        if !matches_single_json_condition(condition, &msg_json) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn matches_single_json_condition(condition: &str, json: &serde_json::Value) -> bool {
-    // Try to parse: $.field op value
-    let condition = condition.trim();
-
-    // Find the operator
-    let ops = ["!=", ">=", "<=", "=", ">", "<"];
-    let mut found_op = None;
-    let mut op_pos = 0;
-    let mut op_len = 0;
-
-    for op in &ops {
-        if let Some(pos) = condition.find(op) {
-            // Make sure we're not inside a quoted string
-            let before = &condition[..pos];
-            let quote_count = before.chars().filter(|&c| c == '"').count();
-            if quote_count % 2 == 0 {
-                found_op = Some(*op);
-                op_pos = pos;
-                op_len = op.len();
-                break;
-            }
-        }
-    }
-
-    let (op, field_part, value_part) = match found_op {
-        Some(op) => (
-            op,
-            condition[..op_pos].trim(),
-            condition[op_pos + op_len..].trim(),
-        ),
-        None => {
-            // No operator: just check if the field exists
-            // Pattern like `{ $.field }` means field exists
-            if let Some(path) = condition.strip_prefix("$.") {
-                return resolve_json_path_simple(json, path).is_some();
-            }
-            return true;
-        }
-    };
-
-    // Extract JSON path from field_part (must start with $.)
-    let path = match field_part.strip_prefix("$.") {
-        Some(p) => p,
-        None => return false, // Don't understand this pattern, fail closed
-    };
-
-    let actual_value = match resolve_json_path_simple(json, path) {
-        Some(v) => v,
-        None => return op == "!=", // field doesn't exist: only != matches
-    };
-
-    // Parse the expected value
-    let expected_str = if value_part.starts_with('"') && value_part.ends_with('"') {
-        // String comparison
-        let s = &value_part[1..value_part.len() - 1];
-        match op {
-            "=" => actual_value.as_str() == Some(s),
-            "!=" => actual_value.as_str() != Some(s),
-            _ => false,
-        }
-    } else if let Ok(expected_num) = value_part.parse::<f64>() {
-        // Numeric comparison
-        let actual_num = actual_value.as_f64();
-        match (op, actual_num) {
-            ("=", Some(n)) => (n - expected_num).abs() < f64::EPSILON,
-            ("!=", Some(n)) => (n - expected_num).abs() >= f64::EPSILON,
-            (">", Some(n)) => n > expected_num,
-            ("<", Some(n)) => n < expected_num,
-            (">=", Some(n)) => n >= expected_num,
-            ("<=", Some(n)) => n <= expected_num,
-            _ => false,
-        }
-    } else if value_part == "true" || value_part == "false" {
-        let expected_bool = value_part == "true";
-        match op {
-            "=" => actual_value.as_bool() == Some(expected_bool),
-            "!=" => actual_value.as_bool() != Some(expected_bool),
-            _ => false,
-        }
-    } else {
-        false // Unknown value format, fail closed
-    };
-
-    expected_str
-}
-
-/// Resolve a simple dot-separated JSON path (e.g., "level" or "nested.field").
-fn resolve_json_path_simple<'a>(
-    json: &'a serde_json::Value,
-    path: &str,
-) -> Option<&'a serde_json::Value> {
-    let mut current = json;
-    for part in path.split('.') {
-        current = current.get(part)?;
-    }
-    if current.is_null() {
-        None
-    } else {
-        Some(current)
-    }
 }
 
 #[cfg(test)]
@@ -850,37 +711,34 @@ pub(crate) mod test_helpers {
         svc.put_retention_policy(&req).unwrap();
     }
 
+    // bug-audit 2026-06-27, T1.14: FilterLogEvents now evaluates array `[...]`
+    // patterns through the full engine (positional token match) instead of
+    // failing closed.
     #[test]
-    fn array_filter_pattern_does_not_match() {
-        assert!(
-            !matches_filter_pattern("[w1, w2, w3]", "some log message"),
-            "array-style filter pattern must not match (fail closed)"
-        );
+    fn array_filter_pattern_matches_positionally() {
+        // Bare-name fields match any token in their slot.
+        assert!(matches_filter_pattern("[w1, w2, w3]", "some log message"));
+        // A literal-equality field that doesn't match the token fails.
+        assert!(!matches_filter_pattern(
+            "[w1=ERROR, w2, w3]",
+            "INFO log message"
+        ));
+        // Wrong arity (4 tokens vs 3 fields) doesn't match.
+        assert!(!matches_filter_pattern("[w1, w2, w3]", "a b c d"));
     }
 
+    // JSON patterns with `||` (OR) now match via the full engine.
     #[test]
-    fn unrecognized_json_filter_path_does_not_match() {
-        // A JSON filter condition where the field part doesn't start with $.
-        // should fail closed instead of matching everything.
-        assert!(
-            !matches_single_json_condition(
-                "level = \"ERROR\"",
-                &serde_json::json!({"level": "ERROR"}),
-            ),
-            "filter condition without $. prefix must not match (fail closed)"
-        );
-    }
-
-    #[test]
-    fn unknown_value_format_does_not_match() {
-        // A value that is not a string, number, or boolean should fail closed.
-        assert!(
-            !matches_single_json_condition(
-                "$.level = ERROR",
-                &serde_json::json!({"level": "ERROR"}),
-            ),
-            "unquoted non-numeric non-boolean value must not match (fail closed)"
-        );
+    fn json_filter_pattern_supports_or() {
+        let msg = r#"{"level":"ERROR","code":500}"#;
+        assert!(matches_filter_pattern(
+            "{ $.level = \"WARN\" || $.code = 500 }",
+            msg
+        ));
+        assert!(!matches_filter_pattern(
+            "{ $.level = \"WARN\" || $.code = 200 }",
+            msg
+        ));
     }
 
     /// No snapshot store (memory mode) -> no persist hook for the CFN provisioner.
