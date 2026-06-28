@@ -782,3 +782,76 @@ async fn kinesis_subscribe_to_shard_streams_records() {
         "SubscribeToShard must stream the put record to the consumer"
     );
 }
+
+// bug-audit 2026-06-27, T1.11: GetRecords on a split (closed + drained) shard
+// must return ChildShards so KCL / Lambda ESM can fan out to the children.
+#[tokio::test]
+async fn kinesis_get_records_returns_child_shards_after_split() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("split-me")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let shards = client
+        .list_shards()
+        .stream_name("split-me")
+        .send()
+        .await
+        .unwrap();
+    let shard = &shards.shards()[0];
+    let shard_id = shard.shard_id().to_string();
+    let ending: u128 = shard
+        .hash_key_range()
+        .unwrap()
+        .ending_hash_key()
+        .parse()
+        .unwrap();
+    let mid = (ending / 2 + 1).to_string();
+
+    client
+        .split_shard()
+        .stream_name("split-me")
+        .shard_to_split(&shard_id)
+        .new_starting_hash_key(mid)
+        .send()
+        .await
+        .unwrap();
+
+    let it = client
+        .get_shard_iterator()
+        .stream_name("split-me")
+        .shard_id(&shard_id)
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap()
+        .shard_iterator()
+        .unwrap()
+        .to_string();
+
+    let recs = client
+        .get_records()
+        .shard_iterator(it)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        recs.next_shard_iterator().is_none(),
+        "closed+drained parent returns null NextShardIterator"
+    );
+    let children = recs.child_shards();
+    assert_eq!(children.len(), 2, "two child shards from the split");
+    for c in children {
+        assert!(
+            c.parent_shards().contains(&shard_id),
+            "child lists the split parent"
+        );
+        assert!(c.hash_key_range().is_some());
+    }
+}

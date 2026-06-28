@@ -49,8 +49,15 @@ impl S3Service {
             if !key.starts_with(&prefix) {
                 continue;
             }
-            if !marker.is_empty() && key.as_str() <= marker.as_str() {
-                continue;
+            if !marker.is_empty() {
+                // A marker that is a CommonPrefix (ends with the delimiter) must
+                // skip every key under it, or the next page re-emits the prefix.
+                let under_resumed_prefix = delimiter.as_deref().is_some_and(|d| {
+                    !d.is_empty() && marker.ends_with(d) && key.starts_with(marker.as_str())
+                });
+                if key.as_str() <= marker.as_str() || under_resumed_prefix {
+                    continue;
+                }
             }
 
             // Handle delimiter-based grouping
@@ -64,8 +71,10 @@ impl S3Service {
                                 is_truncated = true;
                                 break;
                             }
+                            // Cursor is the CommonPrefix so the next page resumes
+                            // past the whole group, not at its first member.
+                            last_key = cp.clone();
                             common_prefixes.push(cp);
-                            last_key = key.clone();
                             count += 1;
                         }
                         continue;
@@ -251,8 +260,16 @@ impl S3Service {
             if !key.starts_with(&prefix) {
                 continue;
             }
-            if !effective_start.is_empty() && key.as_str() <= effective_start {
-                continue;
+            if !effective_start.is_empty() {
+                // When the cursor is a CommonPrefix (it ends with the
+                // delimiter), skip every key rolled into that prefix — otherwise
+                // resuming re-emits the same CommonPrefix on the next page.
+                let under_resumed_prefix = !delimiter.is_empty()
+                    && effective_start.ends_with(delimiter.as_str())
+                    && key.starts_with(effective_start);
+                if key.as_str() <= effective_start || under_resumed_prefix {
+                    continue;
+                }
             }
 
             // Handle delimiter-based grouping
@@ -269,8 +286,10 @@ impl S3Service {
                             is_truncated = true;
                             break;
                         }
+                        // Cursor is the CommonPrefix itself so the next page
+                        // resumes past the whole group, not at its first member.
+                        last_key = cp.clone();
                         common_prefixes.push(cp);
-                        last_key = key.clone();
                         count += 1;
                     }
                     continue;
