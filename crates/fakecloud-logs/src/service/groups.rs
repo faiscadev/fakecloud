@@ -186,13 +186,18 @@ impl LogsService {
             .iter()
             .map(|g| {
                 let log_group_arn = g.arn.trim_end_matches(":*").to_string();
+                let metric_filter_count = state
+                    .metric_filters
+                    .iter()
+                    .filter(|mf| mf.log_group_name == g.name)
+                    .count();
                 let mut obj = json!({
                     "logGroupName": g.name,
                     "arn": g.arn,
                     "logGroupArn": log_group_arn,
                     "creationTime": g.creation_time,
                     "storedBytes": g.stored_bytes,
-                    "metricFilterCount": 0,
+                    "metricFilterCount": metric_filter_count,
                     // Real AWS DescribeLogGroups always returns logGroupClass.
                     // Terraform's `aws_cloudwatch_log_group` provider asserts
                     // `log_group_class == "STANDARD"` on every refresh, so

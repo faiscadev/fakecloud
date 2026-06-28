@@ -3056,3 +3056,41 @@ async fn logs_filter_log_events_end_time_inclusive() {
         "event at endTime is returned (endTime inclusive)"
     );
 }
+
+// bug-audit 2026-06-27, T1.14: DescribeLogGroups must report the real
+// metricFilterCount, not a hardcoded 0.
+#[tokio::test]
+async fn logs_describe_log_groups_reports_metric_filter_count() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+    client
+        .create_log_group()
+        .log_group_name("/mf/test")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_metric_filter()
+        .log_group_name("/mf/test")
+        .filter_name("errors")
+        .filter_pattern("ERROR")
+        .metric_transformations(
+            aws_sdk_cloudwatchlogs::types::MetricTransformation::builder()
+                .metric_name("ErrorCount")
+                .metric_namespace("MyApp")
+                .metric_value("1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_log_groups()
+        .log_group_name_prefix("/mf/test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.log_groups()[0].metric_filter_count(), Some(1));
+}

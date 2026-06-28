@@ -390,3 +390,51 @@ async fn dashboard_put_get_delete_roundtrip() {
         .iter()
         .all(|e| e.dashboard_name() != Some("dash1")));
 }
+
+// bug-audit 2026-06-27, T1.14: GetMetricStatistics must honor the Unit filter
+// instead of mixing datapoints across units.
+#[tokio::test]
+async fn get_metric_statistics_filters_by_unit() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    cw.put_metric_data()
+        .namespace("U")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("M")
+                .value(10.0)
+                .unit(StandardUnit::Count)
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        )
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("M")
+                .value(999.0)
+                .unit(StandardUnit::Milliseconds)
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put");
+
+    let stats = cw
+        .get_metric_statistics()
+        .namespace("U")
+        .metric_name("M")
+        .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+        .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+        .period(60)
+        .statistics(Statistic::Sum)
+        .unit(StandardUnit::Count)
+        .send()
+        .await
+        .expect("stats");
+    assert!(
+        (stats.datapoints()[0].sum().unwrap() - 10.0).abs() < 1e-6,
+        "only the Count datapoint aggregated, not the Milliseconds one"
+    );
+}
