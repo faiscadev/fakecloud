@@ -1049,6 +1049,8 @@ impl CloudFormationService {
         let ec2_state_for_spawn = provisioner.ec2_state.clone();
         let ec2_runtime_for_spawn = provisioner.ec2_runtime.clone();
         let autoscaling_state_for_spawn = provisioner.autoscaling_state.clone();
+        let elasticache_state_for_spawn = provisioner.elasticache_state.clone();
+        let elasticache_runtime_for_spawn = provisioner.elasticache_runtime.clone();
 
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
@@ -1140,6 +1142,40 @@ impl CloudFormationService {
                             )
                             .await;
                         });
+                    }
+                    crate::resource_provisioner::ContainerSpawnIntent::ElastiCacheCluster {
+                        cache_cluster_id,
+                    } => {
+                        if let Some(runtime) = elasticache_runtime_for_spawn.clone() {
+                            let ec_state = elasticache_state_for_spawn.clone();
+                            let account = account_id.clone();
+                            tokio::spawn(async move {
+                                fakecloud_elasticache::cfn_provision::cfn_ensure_cluster_container(
+                                    ec_state,
+                                    runtime,
+                                    cache_cluster_id,
+                                    account,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    crate::resource_provisioner::ContainerSpawnIntent::ElastiCacheReplicationGroup {
+                        replication_group_id,
+                    } => {
+                        if let Some(runtime) = elasticache_runtime_for_spawn.clone() {
+                            let ec_state = elasticache_state_for_spawn.clone();
+                            let account = account_id.clone();
+                            tokio::spawn(async move {
+                                fakecloud_elasticache::cfn_provision::cfn_ensure_replication_group_container(
+                                    ec_state,
+                                    runtime,
+                                    replication_group_id,
+                                    account,
+                                )
+                                .await;
+                            });
+                        }
                     }
                 }
             }
