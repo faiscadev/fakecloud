@@ -1557,28 +1557,57 @@ async fn sync_wait(
             sync_wait_states_start_execution(registry, initial, account_id, timeout_seconds).await
         }
         ("glue", "StartJobRun") => {
-            // Glue has no real job runner in fakecloud; treat the run as
-            // immediately SUCCEEDED so `.sync` callers see a terminal
-            // result rather than spinning forever. Real AWS would poll
-            // `GetJobRun` until JobRunState in {SUCCEEDED,FAILED,STOPPED,
-            // TIMEOUT}, so we synthesize the SUCCEEDED shape.
+            // Poll the real Glue `GetJobRun` (the job run was created by the
+            // StartJobRun integration that ran just before this waiter), so the
+            // `.sync` result is the actual run — full JobRun shape, and a
+            // FAILED/STOPPED/TIMEOUT state surfaces as a task failure rather
+            // than a hardcoded SUCCEEDED.
             let job_run_id = initial
                 .get("JobRunId")
                 .and_then(Value::as_str)
-                .unwrap_or("synthetic")
+                .unwrap_or_default()
                 .to_string();
             let job_name = input
                 .get("JobName")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .unwrap_or_default()
                 .to_string();
-            Ok(json!({
-                "JobRun": {
-                    "Id": job_run_id,
-                    "JobName": job_name,
-                    "JobRunState": "SUCCEEDED",
+            let deadline = sync_deadline(timeout_seconds);
+            loop {
+                let described = call_sdk_action(
+                    registry,
+                    "glue",
+                    "GetJobRun",
+                    &json!({ "JobName": job_name, "RunId": job_run_id }),
+                    account_id,
+                )
+                .await?;
+                let state = described
+                    .get("JobRun")
+                    .and_then(|r| r.get("JobRunState"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match state {
+                    "SUCCEEDED" => return Ok(described),
+                    "FAILED" | "STOPPED" | "TIMEOUT" | "ERROR" => {
+                        return Err((
+                            "States.TaskFailed".to_string(),
+                            format!("Glue job run {job_run_id} ended in state {state}"),
+                        ));
+                    }
+                    _ => {}
                 }
-            }))
+                if std::time::Instant::now() >= deadline {
+                    return Err((
+                        "States.Timeout".to_string(),
+                        format!(
+                            "glue:startJobRun.sync timed out after {}s for run {job_run_id}",
+                            sync_timeout_secs(timeout_seconds)
+                        ),
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+            }
         }
         _ => Err((
             "States.TaskFailed".to_string(),

@@ -473,3 +473,69 @@ async fn sfn_start_sync_malformed_choice_variable_does_not_drop_connection() {
         resp.status()
     );
 }
+
+// bug-audit 2026-06-27, T6.1: glue:startJobRun.sync returns the real GetJobRun
+// (full JobRun shape, actual state) instead of a hardcoded synthetic SUCCEEDED.
+#[tokio::test]
+async fn sfn_sync_glue_start_job_run_returns_real_job_run() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let glue = server.glue_client().await;
+
+    glue.create_job()
+        .name("etl-job")
+        .role("arn:aws:iam::123456789012:role/glue")
+        .command(
+            aws_sdk_glue::types::JobCommand::builder()
+                .name("glueetl")
+                .script_location("s3://example/script.py")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let definition = json!({
+        "StartAt": "RunJob",
+        "States": {
+            "RunJob": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                "Parameters": { "JobName": "etl-job" },
+                "End": true
+            }
+        }
+    });
+    let created = sfn
+        .create_state_machine()
+        .name("glue-sync-sm")
+        .definition(definition.to_string())
+        .role_arn("arn:aws:iam::123456789012:role/sfn-role")
+        .send()
+        .await
+        .unwrap();
+    let started = sfn
+        .start_execution()
+        .state_machine_arn(created.state_machine_arn())
+        .send()
+        .await
+        .unwrap();
+
+    let desc = wait_for_execution_full(&sfn, started.execution_arn()).await;
+    assert_eq!(
+        desc.status().as_str(),
+        "SUCCEEDED",
+        "cause={:?}",
+        desc.cause()
+    );
+    let output: Value = serde_json::from_str(desc.output().expect("output")).unwrap();
+    let jr = &output["JobRun"];
+    assert_eq!(jr["JobRunState"].as_str(), Some("SUCCEEDED"));
+    // Real GetJobRun shape carries the run Id (the synthetic stub had it too,
+    // but also JobName/StartedOn which the real shape includes).
+    assert!(jr["Id"].is_string(), "real JobRun has an Id: {output}");
+    assert!(
+        jr["JobName"].is_string(),
+        "real JobRun has JobName: {output}"
+    );
+}
