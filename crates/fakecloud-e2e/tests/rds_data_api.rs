@@ -508,3 +508,98 @@ async fn rds_data_api_mysql_generated_fields() {
         "MySQL INSERT returns the auto-increment id in generatedFields"
     );
 }
+
+// A DBInstance provisioned through a CloudFormation stack must be backed by a
+// REAL Postgres container (not phantom metadata): once the stack reports the
+// instance available, RDS Data API runs genuine SQL against it. This is the
+// CFN-provisioner-spawns-real-infrastructure guarantee — rivals' CFN paths
+// only stamp metadata, so a CFN-created DB is unusable there.
+#[tokio::test]
+async fn cfn_provisioned_rds_instance_is_a_real_connectable_postgres() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let rds = server.rds_client().await;
+
+    let template = r#"{
+      "AWSTemplateFormatVersion": "2010-09-09",
+      "Resources": {
+        "Db": {
+          "Type": "AWS::RDS::DBInstance",
+          "Properties": {
+            "DBInstanceIdentifier": "cfn-realpg",
+            "DBInstanceClass": "db.t3.micro",
+            "Engine": "postgres",
+            "EngineVersion": "16.3",
+            "MasterUsername": "admin",
+            "MasterUserPassword": "secret123",
+            "DBName": "appdb",
+            "AllocatedStorage": "20"
+          }
+        }
+      },
+      "Outputs": {
+        "Arn": {"Value": {"Fn::GetAtt": ["Db", "DBInstanceArn"]}}
+      }
+    }"#;
+
+    cfn.create_stack()
+        .stack_name("cfn-realpg-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect("create_stack");
+
+    // The container boots in the background (CreateStack does not block on it);
+    // wait for the stack-provisioned instance to flip creating -> available.
+    let instance = helpers::wait_for_db_available(&rds, "cfn-realpg", 240).await;
+    let arn = instance
+        .db_instance_arn()
+        .expect("db instance arn")
+        .to_string();
+
+    let data = aws_sdk_rdsdata::Client::new(&server.aws_config().await);
+    let secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf";
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("CREATE TABLE cfn_t (id int, name text)")
+        .send()
+        .await
+        .expect("CREATE TABLE on the CFN-provisioned Postgres");
+
+    data.execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("INSERT INTO cfn_t (id, name) VALUES (:id, :name)")
+        .parameters(param("id", Field::LongValue(42)))
+        .parameters(param("name", Field::StringValue("provisioned".into())))
+        .send()
+        .await
+        .expect("INSERT on the CFN-provisioned Postgres");
+
+    let resp = data
+        .execute_statement()
+        .resource_arn(&arn)
+        .secret_arn(secret)
+        .sql("SELECT id, name FROM cfn_t WHERE id = :id")
+        .parameters(param("id", Field::LongValue(42)))
+        .send()
+        .await
+        .expect("SELECT on the CFN-provisioned Postgres");
+
+    let records = resp.records();
+    assert_eq!(records.len(), 1, "one row from the real CFN-provisioned db");
+    let row = &records[0];
+    assert_eq!(row[0].as_long_value().ok(), Some(&42));
+    assert_eq!(
+        row[1].as_string_value().ok().map(String::as_str),
+        Some("provisioned")
+    );
+
+    cfn.delete_stack()
+        .stack_name("cfn-realpg-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+}

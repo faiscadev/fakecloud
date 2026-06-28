@@ -2562,6 +2562,10 @@ mod tests {
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
+            rds_runtime: None,
+            ec2_runtime: None,
+            ecs_runtime: None,
+            elasticache_runtime: None,
         }
     }
 

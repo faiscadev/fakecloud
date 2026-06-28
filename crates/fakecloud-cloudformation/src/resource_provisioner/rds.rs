@@ -448,6 +448,18 @@ impl ResourceProvisioner {
             .unwrap_or_default();
         let tags = parse_rds_tags(props.get("Tags"));
 
+        // When an RDS container runtime is configured, the record is inserted as
+        // "creating" and `CreateStack` drains a spawn intent that backs it with
+        // a real Postgres/MySQL container (flipping it to "available" once up),
+        // matching the direct `CreateDBInstance` path. Without a runtime (CI /
+        // metadata-only) it stays "available" with no container, as before.
+        let back_with_container = self.rds_runtime.is_some();
+        let initial_status = if back_with_container {
+            "creating"
+        } else {
+            "available"
+        };
+
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);
         let arn = state.db_instance_arn(&identifier);
@@ -462,7 +474,7 @@ impl ResourceProvisioner {
             db_instance_class: class,
             engine,
             engine_version,
-            db_instance_status: "available".to_string(),
+            db_instance_status: initial_status.to_string(),
             master_username,
             db_name,
             endpoint_address,
@@ -602,6 +614,15 @@ impl ResourceProvisioner {
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;
         state.instances.insert(identifier.clone(), inst);
+        drop(accounts);
+
+        if back_with_container {
+            self.pending_container_spawns
+                .lock()
+                .push(super::ContainerSpawnIntent::RdsInstance {
+                    identifier: identifier.clone(),
+                });
+        }
 
         Ok(ProvisionResult::new(identifier.clone())
             .with("DBInstanceArn", arn)

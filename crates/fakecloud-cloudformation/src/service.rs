@@ -323,6 +323,17 @@ pub struct CloudFormationDeps {
     /// runtime is configured — provisioning still works, the first Invoke just
     /// falls back to a cold pull.
     pub lambda_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
+    /// Container runtimes for the stateful services whose CFN-provisioned
+    /// resources must be backed by REAL containers (not phantom metadata).
+    /// When present, the provisioner inserts the resource record synchronously
+    /// (so `Ref`/`GetAtt` resolve during provisioning) and then backs it with a
+    /// real container in the background — the same container the direct API
+    /// path spawns. `None` (no Docker/Podman, e.g. CI) keeps the metadata-only
+    /// behavior, matching how the direct API degrades without a runtime.
+    pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
+    pub ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
+    pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
 }
 
 pub struct CloudFormationService {
@@ -464,6 +475,11 @@ impl CloudFormationService {
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
+            rds_runtime: self.deps.rds_runtime.clone(),
+            ec2_runtime: self.deps.ec2_runtime.clone(),
+            ecs_runtime: self.deps.ecs_runtime.clone(),
+            elasticache_runtime: self.deps.elasticache_runtime.clone(),
+            pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             s3_store: self.s3_store.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1023,6 +1039,14 @@ impl CloudFormationService {
             resource_defs,
         } = ctx;
 
+        // Capture the container-spawn handles before the provisioner is moved
+        // into spawn_blocking, so the post-provision drain (below) can back
+        // freshly-inserted container resources with REAL containers.
+        let container_spawns = provisioner.pending_container_spawns.clone();
+        let rds_runtime_for_spawn = provisioner.rds_runtime.clone();
+        let rds_state_for_spawn = provisioner.rds_state.clone();
+        let region_for_spawn = provisioner.region.clone();
+
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
         // blocking thread so it never stalls a tokio worker.
@@ -1069,6 +1093,34 @@ impl CloudFormationService {
                 return;
             }
         };
+
+        // Provisioning succeeded: back any container-backed resources (RDS
+        // instances, ...) with REAL containers. Each spawn is detached so
+        // CreateStack never blocks on a container boot/pull — the record is
+        // already inserted as "creating" and flips to "available" when the
+        // container is up (the #1539/#1730 timeout lesson).
+        {
+            let intents = std::mem::take(&mut *container_spawns.lock());
+            for intent in intents {
+                match intent {
+                    crate::resource_provisioner::ContainerSpawnIntent::RdsInstance {
+                        identifier,
+                    } => {
+                        if let Some(runtime) = rds_runtime_for_spawn.clone() {
+                            let rds_state = rds_state_for_spawn.clone();
+                            let account = account_id.clone();
+                            let region = region_for_spawn.clone();
+                            tokio::spawn(async move {
+                                fakecloud_rds::cfn_provision::cfn_ensure_instance_container(
+                                    rds_state, runtime, identifier, account, region,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         let outputs =
             Self::resolve_template_outputs(&template_body, &parameters, &resources, &state);
@@ -2514,6 +2566,10 @@ mod tests {
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
+            rds_runtime: None,
+            ec2_runtime: None,
+            ecs_runtime: None,
+            elasticache_runtime: None,
         };
         CloudFormationService::new(cf_state, deps)
     }

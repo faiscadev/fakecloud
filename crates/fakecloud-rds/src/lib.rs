@@ -1,3 +1,4 @@
+pub mod cfn_provision;
 pub mod extras;
 pub mod runtime;
 pub(crate) mod service;
