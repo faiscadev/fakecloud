@@ -148,21 +148,13 @@ impl ResourceProvisioner {
             })
             .or_else(|| prop_str(props, "VPCZoneIdentifier").map(String::from));
 
-        // Placeholder instances to satisfy the desired capacity (the service's
-        // control-plane behavior; runtime launches real ones via the API path).
-        let instances: Vec<AsgInstance> = (0..desired.max(0))
-            .map(|k| {
-                let hex = Uuid::new_v4().simple().to_string();
-                AsgInstance {
-                    instance_id: format!("i-{}", &hex[..17]),
-                    availability_zone: azs[k as usize % azs.len()].clone(),
-                    lifecycle_state: "InService".to_string(),
-                    health_status: "Healthy".to_string(),
-                    launch_configuration_name: lcn.clone(),
-                    protected_from_scale_in: false,
-                }
-            })
-            .collect();
+        // Insert the group as control-plane only (no instances). After
+        // provisioning, `CreateStack` drains an `AsgInstances` spawn intent that
+        // reconciles the group to its desired capacity by launching REAL
+        // container-backed EC2 instances via the EC2 runtime — the same
+        // instances the direct `CreateAutoScalingGroup` path spawns — instead of
+        // the phantom placeholder metadata this used to insert at CFN time.
+        let instances: Vec<AsgInstance> = Vec::new();
 
         let arn = self.asg_arn("autoScalingGroup", &name);
         let group = AutoScalingGroup {
@@ -200,6 +192,11 @@ impl ResourceProvisioner {
             .get_or_create(&self.account_id)
             .groups
             .insert(name.clone(), group);
+        self.pending_container_spawns
+            .lock()
+            .push(super::ContainerSpawnIntent::AsgInstances {
+                group_name: name.clone(),
+            });
         Ok(ProvisionResult::new(name).with("Arn", arn))
     }
 

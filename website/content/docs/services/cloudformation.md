@@ -60,12 +60,13 @@ Full control plane: `CreateStackSet`, `UpdateStackSet`, `DeleteStackSet`, `Descr
 
 Resources of these types create real backing state in the corresponding fakecloud service. Any other resource type — including real AWS types fakecloud doesn't model (e.g. `AWS::CloudFormation::WaitConditionHandle`) — is accepted and recorded as provisioned without allocating underlying state, rather than failing the stack; `Ref` on it resolves to its logical ID. Dependent operations that need real backing state may still fail.
 
-For **container-backed** services, a CloudFormation-provisioned resource is backed by the same **real container** the direct API spawns, not phantom metadata. A CFN-created `AWS::RDS::DBInstance` is a genuinely connectable Postgres/MySQL: the record is inserted synchronously (so `Ref`/`GetAtt` resolve during provisioning) and the container boots in the background, so `CreateStack` never blocks on the image pull; the instance flips from `creating` to `available` once the container is up. When no container runtime is configured (e.g. CI without Docker/Podman), provisioning degrades to metadata-only, exactly as the direct API does.
+For **container-backed** services, a CloudFormation-provisioned resource is backed by the same **real container** the direct API spawns, not phantom metadata. A CFN-created `AWS::RDS::DBInstance` is a genuinely connectable Postgres/MySQL: the record is inserted synchronously (so `Ref`/`GetAtt` resolve during provisioning) and the container boots in the background, so `CreateStack` never blocks on the image pull; the instance flips from `creating` to `available` once the container is up. A CFN-created `AWS::AutoScaling::AutoScalingGroup` likewise reconciles to **real container-backed EC2 instances**: the group record is inserted synchronously (control plane only), then a background task launches its desired capacity through the same `RunInstances` path the direct `CreateAutoScalingGroup` API uses, so the launched instances show up in EC2 `DescribeInstances` instead of being phantom ASG metadata. When no container runtime is configured (e.g. CI without Docker/Podman), provisioning degrades to metadata-only, exactly as the direct API does.
 
 - **API Gateway v1** — `RestApi`, `Resource`, `Method`, `Model`, `RequestValidator`, `Authorizer`, `Deployment`, `Stage`, `ApiKey`, `UsagePlan`, `UsagePlanKey`, `DomainName`, `BasePathMapping`, `GatewayResponse`
 - **API Gateway v2** — `Api`, `Stage`, `Route`, `RouteResponse`, `Integration`, `IntegrationResponse`, `Authorizer`, `Deployment`, `Model`, `DomainName`, `ApiMapping`, `VpcLink`
 - **Application Auto Scaling** — `ScalableTarget`, `ScalingPolicy`
 - **Athena** — `WorkGroup`, `DataCatalog`, `NamedQuery`, `PreparedStatement`
+- **Auto Scaling** — `LaunchConfiguration`, `AutoScalingGroup` (the group reconciles its `DesiredCapacity` to real container-backed EC2 instances)
 - **ACM** — `Certificate`, `Account`
 - **CloudFormation** — `Stack` (nested), `CustomResource` / `Custom::*`
 - **CloudFront** — `Distribution`, `Function`, `CachePolicy`, `OriginRequestPolicy`, `ResponseHeadersPolicy`, `KeyGroup`, `PublicKey`, `OriginAccessControl`, `CloudFrontOriginAccessIdentity`
@@ -146,7 +147,7 @@ aws --endpoint-url http://localhost:4566 cloudformation list-exports
 
 ## Gotchas
 
-- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (the remaining `AWS::EC2::*` types such as `Instance` / `NatGateway` / `Route`, `AWS::AutoScaling::*`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
+- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (the remaining `AWS::EC2::*` types such as `Instance` / `NatGateway` / `Route`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
 - **Drift always reports IN_SYNC.** fakecloud is the source of truth for backing state, so real drift never occurs. The drift API still round-trips IDs and statuses for tooling that polls them.
 - **SAM expansion runs at create time.** A re-uploaded template still requires `Capabilities=[CAPABILITY_AUTO_EXPAND]` on operations that touch transforms.
 

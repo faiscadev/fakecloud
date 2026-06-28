@@ -7,6 +7,7 @@
 //! launches real container-backed EC2 instances (batch 2), closing the gap
 //! every rival has where an ASG scales to a *mock* instance.
 
+pub mod cfn_provision;
 pub mod service;
 pub mod state;
 
