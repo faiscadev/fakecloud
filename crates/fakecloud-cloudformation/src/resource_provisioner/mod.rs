@@ -902,6 +902,20 @@ pub struct ResourceProvisioner {
     /// images (see `CloudFormationDeps::lambda_runtime`). `None` outside a
     /// configured runtime (e.g. unit tests).
     pub lambda_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
+    /// Container runtimes for stateful services whose CFN-provisioned resources
+    /// must be backed by REAL containers. See `CloudFormationDeps`. `None`
+    /// (no Docker/Podman, e.g. CI/unit tests) keeps metadata-only provisioning.
+    pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
+    pub ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
+    pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
+    /// Intents queued by container-backed provisioners during the synchronous
+    /// provisioning pass. After provisioning, `CreateStack` drains these and
+    /// backs each freshly-inserted record with a real container in the
+    /// background (so `CreateStack` returns without blocking on a container
+    /// boot — the #1539/#1730 timeout lesson). Shared via `Arc` so the drain
+    /// can read it after the provisioner is moved into `spawn_blocking`.
+    pub pending_container_spawns: Arc<parking_lot::Mutex<Vec<ContainerSpawnIntent>>>,
     /// Fine-grained S3 disk store. Bucket create/delete (and bucket-policy
     /// updates) write through this so a CFN-provisioned bucket lands on disk,
     /// matching the real `CreateBucket`/`DeleteBucket` handlers. A
@@ -910,6 +924,17 @@ pub struct ResourceProvisioner {
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
+}
+
+/// A container-backed resource the synchronous provisioning pass inserted as a
+/// "creating" record that now needs a real backing container. Drained by
+/// `CreateStack` after provisioning and backgrounded so the stack create call
+/// never blocks on a container boot/pull.
+#[derive(Debug, Clone)]
+pub enum ContainerSpawnIntent {
+    /// `AWS::RDS::DBInstance` — back the inserted DbInstance with a real
+    /// Postgres/MySQL container via the RDS runtime.
+    RdsInstance { identifier: String },
 }
 
 mod acm;
@@ -6116,6 +6141,11 @@ mod tests {
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
+            rds_runtime: None,
+            ec2_runtime: None,
+            ecs_runtime: None,
+            elasticache_runtime: None,
+            pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

@@ -60,6 +60,8 @@ Full control plane: `CreateStackSet`, `UpdateStackSet`, `DeleteStackSet`, `Descr
 
 Resources of these types create real backing state in the corresponding fakecloud service. Any other resource type — including real AWS types fakecloud doesn't model (e.g. `AWS::CloudFormation::WaitConditionHandle`) — is accepted and recorded as provisioned without allocating underlying state, rather than failing the stack; `Ref` on it resolves to its logical ID. Dependent operations that need real backing state may still fail.
 
+For **container-backed** services, a CloudFormation-provisioned resource is backed by the same **real container** the direct API spawns, not phantom metadata. A CFN-created `AWS::RDS::DBInstance` is a genuinely connectable Postgres/MySQL: the record is inserted synchronously (so `Ref`/`GetAtt` resolve during provisioning) and the container boots in the background, so `CreateStack` never blocks on the image pull; the instance flips from `creating` to `available` once the container is up. When no container runtime is configured (e.g. CI without Docker/Podman), provisioning degrades to metadata-only, exactly as the direct API does.
+
 - **API Gateway v1** — `RestApi`, `Resource`, `Method`, `Model`, `RequestValidator`, `Authorizer`, `Deployment`, `Stage`, `ApiKey`, `UsagePlan`, `UsagePlanKey`, `DomainName`, `BasePathMapping`, `GatewayResponse`
 - **API Gateway v2** — `Api`, `Stage`, `Route`, `RouteResponse`, `Integration`, `IntegrationResponse`, `Authorizer`, `Deployment`, `Model`, `DomainName`, `ApiMapping`, `VpcLink`
 - **Application Auto Scaling** — `ScalableTarget`, `ScalingPolicy`

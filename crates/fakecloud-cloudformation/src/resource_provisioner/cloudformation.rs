@@ -109,6 +109,13 @@ impl ResourceProvisioner {
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),
+            rds_runtime: self.rds_runtime.clone(),
+            ec2_runtime: self.ec2_runtime.clone(),
+            ecs_runtime: self.ecs_runtime.clone(),
+            elasticache_runtime: self.elasticache_runtime.clone(),
+            // Share the parent's queue so nested-stack container resources are
+            // drained and backed by the same CreateStack.
+            pending_container_spawns: self.pending_container_spawns.clone(),
             s3_store: self.s3_store.clone(),
             account_id: self.account_id.clone(),
             region: self.region.clone(),
