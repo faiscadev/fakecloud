@@ -240,6 +240,27 @@ impl DynamoDbService {
 
         if let Some(filter) = filter_expression.as_deref() {
             matched.retain(|item| {
+                // On an index query with a non-ALL projection, the filter can
+                // only see attributes projected into the index — DynamoDB does
+                // not fetch non-projected attributes from the base table, so a
+                // filter referencing one sees it as absent.
+                if let Some((proj, key_attrs)) = query_index_projection.as_ref() {
+                    if proj.projection_type != "ALL" {
+                        let projected = apply_index_projection(
+                            (*item).clone(),
+                            proj,
+                            key_attrs,
+                            &table_pk_hash,
+                            table_pk_range.as_deref(),
+                        );
+                        return evaluate_filter_expression(
+                            filter,
+                            &projected,
+                            &expr_attr_names,
+                            &expr_attr_values,
+                        );
+                    }
+                }
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
             });
         }
@@ -472,6 +493,27 @@ impl DynamoDbService {
 
         if let Some(filter) = filter_expression.as_deref() {
             matched.retain(|item| {
+                // On an index scan with a non-ALL projection, the filter can
+                // only see attributes projected into the index — DynamoDB does
+                // not fetch non-projected attributes from the base table, so a
+                // filter referencing one sees it as absent.
+                if let Some(ref proj) = index_projection {
+                    if proj.projection_type != "ALL" {
+                        let projected = apply_index_projection(
+                            (*item).clone(),
+                            proj,
+                            &index_key_attrs,
+                            &hash_key_name,
+                            range_key_name.as_deref(),
+                        );
+                        return evaluate_filter_expression(
+                            filter,
+                            &projected,
+                            &expr_attr_names,
+                            &expr_attr_values,
+                        );
+                    }
+                }
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
             });
         }
