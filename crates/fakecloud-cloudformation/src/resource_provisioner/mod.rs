@@ -939,6 +939,14 @@ pub enum ContainerSpawnIntent {
     /// its desired capacity by launching real container-backed EC2 instances
     /// via the EC2 runtime, matching the direct `CreateAutoScalingGroup` path.
     AsgInstances { group_name: String },
+    /// `AWS::ElastiCache::CacheCluster` — back the inserted CacheCluster with a
+    /// real Redis/Memcached container via the ElastiCache runtime, matching the
+    /// direct `CreateCacheCluster` path.
+    ElastiCacheCluster { cache_cluster_id: String },
+    /// `AWS::ElastiCache::ReplicationGroup` — back the inserted ReplicationGroup
+    /// with a real Redis container via the ElastiCache runtime, matching the
+    /// direct `CreateReplicationGroup` path.
+    ElastiCacheReplicationGroup { replication_group_id: String },
 }
 
 mod acm;
@@ -4377,6 +4385,13 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // When an ElastiCache container runtime is configured, the record is
+        // inserted as "creating" and `CreateStack` drains a spawn intent that
+        // backs it with a real Redis/Memcached container (flipping it to
+        // "available" once up), matching the direct `CreateCacheCluster` path.
+        // Without a runtime (CI / metadata-only) it stays "available" with no
+        // container, as before.
+        let back_with_container = self.elasticache_runtime.is_some();
         let mut accounts = self.elasticache_state.write();
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
@@ -4389,7 +4404,11 @@ impl ResourceProvisioner {
             cache_node_type,
             engine,
             engine_version,
-            cache_cluster_status: "available".to_string(),
+            cache_cluster_status: if back_with_container {
+                "creating".to_string()
+            } else {
+                "available".to_string()
+            },
             num_cache_nodes,
             preferred_availability_zone: preferred_az,
             cache_subnet_group_name,
@@ -4429,6 +4448,16 @@ impl ResourceProvisioner {
             preferred_outpost_arns: Vec::new(),
         };
         state.cache_clusters.insert(id.clone(), cluster);
+        drop(accounts);
+
+        if back_with_container {
+            self.pending_container_spawns
+                .lock()
+                .push(ContainerSpawnIntent::ElastiCacheCluster {
+                    cache_cluster_id: id.clone(),
+                });
+        }
+
         Ok(ProvisionResult::new(id.clone())
             .with("Arn", arn)
             .with("RedisEndpoint.Address", endpoint_address.clone())
@@ -4543,6 +4572,12 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+        // As with CacheCluster: with a runtime configured the group is inserted
+        // as "creating" and `CreateStack` drains a spawn intent that backs it
+        // with a real Redis container, matching the direct
+        // `CreateReplicationGroup` path. Without a runtime it stays "available"
+        // with no container.
+        let back_with_container = self.elasticache_runtime.is_some();
         let mut accounts = self.elasticache_state.write();
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
@@ -4567,7 +4602,11 @@ impl ResourceProvisioner {
             description,
             global_replication_group_id: None,
             global_replication_group_role: None,
-            status: "available".to_string(),
+            status: if back_with_container {
+                "creating".to_string()
+            } else {
+                "available".to_string()
+            },
             cache_node_type,
             engine,
             engine_version,
@@ -4666,6 +4705,15 @@ impl ResourceProvisioner {
                 .unwrap_or(true),
         };
         state.replication_groups.insert(id.clone(), group);
+        drop(accounts);
+
+        if back_with_container {
+            self.pending_container_spawns.lock().push(
+                ContainerSpawnIntent::ElastiCacheReplicationGroup {
+                    replication_group_id: id.clone(),
+                },
+            );
+        }
 
         let mut result = ProvisionResult::new(id.clone())
             .with("Arn", arn)
