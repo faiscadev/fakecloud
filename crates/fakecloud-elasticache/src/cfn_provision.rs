@@ -195,3 +195,28 @@ pub async fn cfn_ensure_replication_group_container(
         runtime.stop_container(&replication_group_id).await;
     }
 }
+
+/// Stop and reap the REAL container backing a CFN-provisioned cache cluster
+/// when its stack is deleted (or the resource is removed by a stack update).
+/// Mirrors the direct `DeleteCacheCluster` teardown (`stop_container` +
+/// `remove_data_volume`) so a stack delete does not leak the running engine
+/// container. Intended to be `tokio::spawn`ed by the CloudFormation delete
+/// drain after the in-memory record has already been removed.
+pub async fn cfn_teardown_cluster_container(
+    runtime: Arc<ElastiCacheRuntime>,
+    cache_cluster_id: String,
+) {
+    runtime.stop_container(&cache_cluster_id).await;
+    runtime.remove_data_volume(&cache_cluster_id).await;
+}
+
+/// Stop and reap the REAL container backing a CFN-provisioned replication group
+/// when its stack is deleted. Mirrors the direct `DeleteReplicationGroup`
+/// teardown so a stack delete does not leak the running Redis container.
+pub async fn cfn_teardown_replication_group_container(
+    runtime: Arc<ElastiCacheRuntime>,
+    replication_group_id: String,
+) {
+    runtime.stop_container(&replication_group_id).await;
+    runtime.remove_data_volume(&replication_group_id).await;
+}

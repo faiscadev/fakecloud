@@ -110,6 +110,37 @@ impl AutoScalingService {
         }
     }
 
+    /// Terminate the REAL EC2 instances that backed a CFN-provisioned Auto
+    /// Scaling Group when its stack is deleted. Public entry for the
+    /// CloudFormation delete drain: the group record itself has already been
+    /// removed by the synchronous provisioner delete, so this reaps the
+    /// orphaned instance containers that the direct `DeleteAutoScalingGroup`
+    /// path leaves running. No-op when there is no EC2 backend wired.
+    pub async fn cfn_terminate_instances(&self, account_id: &str, region: &str, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let req = AwsRequest {
+            service: "autoscaling".to_string(),
+            action: "DeleteAutoScalingGroup".to_string(),
+            region: region.to_string(),
+            account_id: account_id.to_string(),
+            request_id: Uuid::new_v4().to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        };
+        self.terminate_ec2_instances(ids, &req).await;
+    }
+
     async fn terminate_ec2_instances(&self, ids: &[String], req: &AwsRequest) {
         let Some(ec2_state) = self.ec2_state.clone() else {
             return;

@@ -916,6 +916,32 @@ pub struct ResourceProvisioner {
     /// boot — the #1539/#1730 timeout lesson). Shared via `Arc` so the drain
     /// can read it after the provisioner is moved into `spawn_blocking`.
     pub pending_container_spawns: Arc<parking_lot::Mutex<Vec<ContainerSpawnIntent>>>,
+    /// Teardown intents queued by container-backed delete provisioners during a
+    /// synchronous delete pass (stack delete, or a stack update that removes a
+    /// resource). The in-memory record is removed synchronously (so
+    /// `DescribeStacks` reflects the deletion at once); the REAL backing
+    /// container is reaped in the background by the CloudFormation delete drain,
+    /// mirroring `pending_container_spawns` for teardown. Without this drain a
+    /// stack delete would leak the running RDS / ElastiCache / ECS / EC2
+    /// containers (the create-side #2031-#2034 hardening never reached delete).
+    pub pending_container_teardowns: Arc<parking_lot::Mutex<Vec<ContainerTeardownIntent>>>,
+    /// Custom-resource (`Custom::*`) Lambda invoke intents queued during a
+    /// changeset/update provision when `defer_custom_invokes` is set. Invoking
+    /// the Lambda synchronously (`invoke_lambda_sync`) can cold-pull a container
+    /// image for minutes -- far past the client's 60s read timeout -- and, on
+    /// the changeset/update path, it ran while holding the CloudFormation state
+    /// write lock, stalling every other CFN op behind it. Queueing here lets the
+    /// caller drain + `tokio::spawn` the invokes off the request path after the
+    /// lock is dropped, mirroring how `CreateStack` provisions custom resources
+    /// off the request path.
+    pub pending_custom_invokes: Arc<parking_lot::Mutex<Vec<CustomInvokeIntent>>>,
+    /// When `true`, `create_custom_resource` / `delete_custom_resource` queue
+    /// their Lambda invoke onto `pending_custom_invokes` instead of running it
+    /// synchronously. Set on the changeset/update/delete provisioners; left
+    /// `false` for `CreateStack` (which already provisions off the request path
+    /// in a detached task, so its synchronous invoke never blocks the client or
+    /// the state lock).
+    pub defer_custom_invokes: bool,
     /// Fine-grained S3 disk store. Bucket create/delete (and bucket-policy
     /// updates) write through this so a CFN-provisioned bucket lands on disk,
     /// matching the real `CreateBucket`/`DeleteBucket` handlers. A
@@ -955,6 +981,43 @@ pub enum ContainerSpawnIntent {
         cluster_name: String,
         service_name: String,
     },
+}
+
+/// A container-backed resource the synchronous delete pass removed from memory
+/// that still has a REAL backing container to reap. Drained by the
+/// CloudFormation delete path (stack delete / update-removed) and backgrounded
+/// so the stack op never blocks on a container stop. Mirrors
+/// [`ContainerSpawnIntent`] for teardown.
+#[derive(Debug, Clone)]
+pub enum ContainerTeardownIntent {
+    /// `AWS::RDS::DBInstance` -- stop + remove the Postgres/MySQL container and
+    /// its persisted data volume.
+    RdsInstance { identifier: String },
+    /// `AWS::ElastiCache::CacheCluster` -- stop + remove the Redis/Memcached
+    /// container and its data volume.
+    ElastiCacheCluster { cache_cluster_id: String },
+    /// `AWS::ElastiCache::ReplicationGroup` -- stop + remove the Redis container
+    /// and its data volume.
+    ElastiCacheReplicationGroup { replication_group_id: String },
+    /// `AWS::ECS::Service` -- stop the REAL tasks (containers) the service was
+    /// running. The cluster + service name locate the orphaned task records.
+    EcsService {
+        cluster_name: String,
+        service_name: String,
+    },
+    /// `AWS::AutoScaling::AutoScalingGroup` -- terminate the REAL EC2 instances
+    /// the group launched (captured before the group record was removed).
+    AsgInstances { instance_ids: Vec<String> },
+}
+
+/// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
+/// `create_custom_resource` / `delete_custom_resource` when
+/// `defer_custom_invokes` is set, drained and `tokio::spawn`ed off the request
+/// path so a cold image pull never blocks the client or the CFN state lock.
+#[derive(Debug, Clone)]
+pub struct CustomInvokeIntent {
+    pub service_token: String,
+    pub payload: String,
 }
 
 mod acm;
@@ -3711,7 +3774,18 @@ impl ResourceProvisioner {
         });
 
         let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
-        self.invoke_lambda_sync(service_token, &payload)?;
+        if self.defer_custom_invokes {
+            // Changeset/update path: queue the invoke so the caller runs it off
+            // the request path after the state write lock is dropped. The Lambda
+            // response is not consumed for `GetAtt` (the physical id is generated
+            // below regardless), so deferring loses nothing.
+            self.pending_custom_invokes.lock().push(CustomInvokeIntent {
+                service_token: service_token.to_string(),
+                payload,
+            });
+        } else {
+            self.invoke_lambda_sync(service_token, &payload)?;
+        }
 
         // Physical resource ID: use a generated ID (the Lambda could return one,
         // but for simplicity we generate one here).
@@ -3742,8 +3816,15 @@ impl ResourceProvisioner {
 
         let payload = serde_json::to_string(&event).map_err(|e| e.to_string())?;
 
-        // Best-effort: don't fail stack deletion if Lambda invocation fails
-        if let Err(e) = self.invoke_lambda_sync(&service_token, &payload) {
+        if self.defer_custom_invokes {
+            // Stack-delete / update-removed path: queue the Delete invoke so the
+            // caller runs it off the request path after the lock is dropped.
+            self.pending_custom_invokes.lock().push(CustomInvokeIntent {
+                service_token,
+                payload,
+            });
+        } else if let Err(e) = self.invoke_lambda_sync(&service_token, &payload) {
+            // Best-effort: don't fail stack deletion if Lambda invocation fails
             tracing::warn!(
                 "Custom resource delete Lambda invocation failed for {}: {e}",
                 resource.logical_id
@@ -4475,9 +4556,18 @@ impl ResourceProvisioner {
     }
 
     fn delete_ec_cache_cluster(&self, physical_id: &str) -> Result<(), String> {
-        let mut accounts = self.elasticache_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        state.cache_clusters.remove(physical_id);
+        {
+            let mut accounts = self.elasticache_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            state.cache_clusters.remove(physical_id);
+        }
+        if self.elasticache_runtime.is_some() {
+            self.pending_container_teardowns.lock().push(
+                ContainerTeardownIntent::ElastiCacheCluster {
+                    cache_cluster_id: physical_id.to_string(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -4738,9 +4828,18 @@ impl ResourceProvisioner {
     }
 
     fn delete_ec_replication_group(&self, physical_id: &str) -> Result<(), String> {
-        let mut accounts = self.elasticache_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        state.replication_groups.remove(physical_id);
+        {
+            let mut accounts = self.elasticache_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            state.replication_groups.remove(physical_id);
+        }
+        if self.elasticache_runtime.is_some() {
+            self.pending_container_teardowns.lock().push(
+                ContainerTeardownIntent::ElastiCacheReplicationGroup {
+                    replication_group_id: physical_id.to_string(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -6206,6 +6305,9 @@ mod tests {
             ecs_runtime: None,
             elasticache_runtime: None,
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            defer_custom_invokes: false,
             s3_store: Arc::new(fakecloud_persistence::s3::MemoryS3Store::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

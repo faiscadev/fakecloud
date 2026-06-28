@@ -425,14 +425,30 @@ impl ResourceProvisioner {
             return Ok(());
         };
         let key = format!("{cluster}/{service}");
-        let mut accounts = self.ecs_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        if state.services.remove(&key).is_some() {
-            if let Some(c) = state.clusters.get_mut(&cluster) {
-                if c.active_services_count > 0 {
-                    c.active_services_count -= 1;
+        let removed = {
+            let mut accounts = self.ecs_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            if state.services.remove(&key).is_some() {
+                if let Some(c) = state.clusters.get_mut(&cluster) {
+                    if c.active_services_count > 0 {
+                        c.active_services_count -= 1;
+                    }
                 }
+                true
+            } else {
+                false
             }
+        };
+        // Queue stopping the REAL tasks (containers) the service was running so
+        // the stack delete drain reaps them instead of leaking them. The task
+        // records live separately from the service record removed above.
+        if removed && self.ecs_runtime.is_some() {
+            self.pending_container_teardowns.lock().push(
+                super::ContainerTeardownIntent::EcsService {
+                    cluster_name: cluster,
+                    service_name: service,
+                },
+            );
         }
         Ok(())
     }

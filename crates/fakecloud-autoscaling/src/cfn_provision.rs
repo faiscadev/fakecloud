@@ -33,3 +33,24 @@ pub async fn cfn_reconcile_capacity(
     let svc = AutoScalingService::new(asg_state).with_ec2(ec2_state, ec2_runtime);
     svc.reconcile_group(&account_id, &group_name, &region).await;
 }
+
+/// Terminate the REAL EC2 instances launched for a CFN-provisioned Auto Scaling
+/// Group when its stack is deleted (or the group is removed by a stack update).
+/// Mirrors `cfn_reconcile_capacity` for teardown: the group record has already
+/// been removed by the synchronous provisioner delete, so this reaps the
+/// orphaned instance containers via the EC2 runtime so a stack delete does not
+/// leak real EC2 containers. Intended to be `tokio::spawn`ed by the
+/// CloudFormation delete drain. No-op (nothing real to reap) with no EC2
+/// backend wired.
+pub async fn cfn_terminate_instances(
+    asg_state: SharedAutoScalingState,
+    ec2_state: fakecloud_ec2::SharedEc2State,
+    ec2_runtime: Option<Arc<fakecloud_ec2::Ec2Runtime>>,
+    instance_ids: Vec<String>,
+    account_id: String,
+    region: String,
+) {
+    let svc = AutoScalingService::new(asg_state).with_ec2(ec2_state, ec2_runtime);
+    svc.cfn_terminate_instances(&account_id, &region, &instance_ids)
+        .await;
+}

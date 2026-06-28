@@ -202,16 +202,36 @@ impl ResourceProvisioner {
 
     /// Delete an AutoScaling LaunchConfiguration / Group by physical id (name).
     pub(super) fn delete_autoscaling(&self, resource_type: &str, name: &str) {
-        let mut st = self.autoscaling_state.write();
-        let acct = st.get_or_create(&self.account_id);
-        match resource_type {
-            "AWS::AutoScaling::LaunchConfiguration" => {
-                acct.launch_configurations.remove(name);
+        let removed_instance_ids = {
+            let mut st = self.autoscaling_state.write();
+            let acct = st.get_or_create(&self.account_id);
+            match resource_type {
+                "AWS::AutoScaling::LaunchConfiguration" => {
+                    acct.launch_configurations.remove(name);
+                    Vec::new()
+                }
+                "AWS::AutoScaling::AutoScalingGroup" => acct
+                    .groups
+                    .remove(name)
+                    .map(|g| {
+                        g.instances
+                            .iter()
+                            .map(|i| i.instance_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
             }
-            "AWS::AutoScaling::AutoScalingGroup" => {
-                acct.groups.remove(name);
-            }
-            _ => {}
+        };
+        // Queue terminating the REAL EC2 instances the group launched so the
+        // stack delete drain reaps them instead of leaking real EC2 containers.
+        // Captured before the group record was removed above.
+        if !removed_instance_ids.is_empty() {
+            self.pending_container_teardowns.lock().push(
+                super::ContainerTeardownIntent::AsgInstances {
+                    instance_ids: removed_instance_ids,
+                },
+            );
         }
     }
 }

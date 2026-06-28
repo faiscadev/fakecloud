@@ -111,3 +111,19 @@ pub async fn cfn_ensure_instance_container(
         }
     }
 }
+
+/// Stop and reap the REAL container backing a CFN-provisioned DB instance when
+/// its stack is deleted (or the resource is removed by a stack update). Mirrors
+/// the direct `DeleteDBInstance` teardown (`stop_container` +
+/// `remove_data_volume`) so a stack delete does not leak the running Postgres /
+/// MySQL container or its persisted data volume. Intended to be `tokio::spawn`ed
+/// by the CloudFormation delete drain after the in-memory record has already
+/// been removed.
+pub async fn cfn_teardown_instance_container(
+    runtime: Arc<RdsRuntime>,
+    identifier: String,
+    account_id: String,
+) {
+    runtime.stop_container(&identifier).await;
+    runtime.remove_data_volume(&account_id, &identifier).await;
+}

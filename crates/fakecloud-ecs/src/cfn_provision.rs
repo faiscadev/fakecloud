@@ -64,3 +64,45 @@ pub async fn cfn_launch_service_tasks(
             .run_task(state.clone(), id, account_id.clone());
     }
 }
+
+/// Stop the REAL tasks (containers) backing a CFN-provisioned ECS service when
+/// its stack is deleted (or the service is removed by a stack update). Mirrors
+/// the direct `DeleteService` teardown (`stop_task` per running task) so a stack
+/// delete does not leak the running task containers. The service record itself
+/// has already been removed by the synchronous provisioner delete; this reaps
+/// the orphaned task containers and drops their records. Intended to be
+/// `tokio::spawn`ed by the CloudFormation delete drain.
+pub async fn cfn_stop_service_tasks(
+    state: SharedEcsState,
+    runtime: Arc<EcsRuntime>,
+    cluster_name: String,
+    service_name: String,
+    account_id: String,
+) {
+    let task_ids = {
+        let mut accounts = state.write();
+        let Some(st) = accounts.get_mut(&account_id) else {
+            return;
+        };
+        let service_tag = format!("ecs-svc/{service_name}");
+        let ids: Vec<String> = st
+            .tasks
+            .iter()
+            .filter(|(_, t)| {
+                t.started_by.as_deref() == Some(service_tag.as_str())
+                    && t.cluster_name == cluster_name
+                    && t.last_status != "STOPPED"
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids
+    };
+
+    for id in &task_ids {
+        runtime.stop_task(id, "CloudFormation stack deletion").await;
+        let mut accounts = state.write();
+        if let Some(st) = accounts.get_mut(&account_id) {
+            st.tasks.remove(id);
+        }
+    }
+}

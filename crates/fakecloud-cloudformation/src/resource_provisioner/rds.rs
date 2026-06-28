@@ -632,9 +632,22 @@ impl ResourceProvisioner {
     }
 
     pub(super) fn delete_rds_db_instance(&self, physical_id: &str) -> Result<(), String> {
-        let mut accounts = self.rds_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        state.instances.remove(physical_id);
+        {
+            let mut accounts = self.rds_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            state.instances.remove(physical_id);
+        }
+        // Queue the REAL container teardown when a runtime is wired, so the stack
+        // delete drain stops + removes the Postgres/MySQL container and its data
+        // volume instead of leaking it (the create-side #2031 hardening for the
+        // delete path).
+        if self.rds_runtime.is_some() {
+            self.pending_container_teardowns.lock().push(
+                super::ContainerTeardownIntent::RdsInstance {
+                    identifier: physical_id.to_string(),
+                },
+            );
+        }
         Ok(())
     }
 
