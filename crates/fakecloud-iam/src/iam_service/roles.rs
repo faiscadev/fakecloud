@@ -296,11 +296,12 @@ impl IamService {
             )
         })?;
 
-        // UpdateRole: if Description is provided, set it; if absent, clear it
+        // UpdateRole: Description and MaxSessionDuration are independent
+        // optionals. Only update Description when it's actually supplied;
+        // omitting it leaves the existing description unchanged (AWS does not
+        // clear it just because another field was updated).
         if let Some(desc) = req.query_params.get("Description") {
             role.description = Some(desc.clone());
-        } else {
-            role.description = None;
         }
         if let Some(dur) = req
             .query_params

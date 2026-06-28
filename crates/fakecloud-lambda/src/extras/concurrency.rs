@@ -37,12 +37,13 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
-            let n = state
-                .function_concurrency
-                .get(function_name)
-                .copied()
-                .unwrap_or(0);
-            ok(json!({"ReservedConcurrentExecutions": n}))
+            // No reserved concurrency configured -> AWS returns an empty body,
+            // not `ReservedConcurrentExecutions: 0` (which means "throttle to
+            // zero", the opposite of unset).
+            match state.function_concurrency.get(function_name).copied() {
+                Some(n) => ok(json!({ "ReservedConcurrentExecutions": n })),
+                None => ok(json!({})),
+            }
         })
     }
 

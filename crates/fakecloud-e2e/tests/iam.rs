@@ -3830,3 +3830,56 @@ async fn list_role_policies_paginates_inline_policies() {
     seen.sort();
     assert_eq!(seen, vec!["pa", "pb", "pc"]);
 }
+
+// bug-audit 2026-06-27, T1.7: UpdateRole must not clear Description when only
+// another field (e.g. MaxSessionDuration) is updated.
+#[tokio::test]
+async fn iam_update_role_preserves_description() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_role()
+        .role_name("svc")
+        .assume_role_policy_document("{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .description("important role")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_role()
+        .role_name("svc")
+        .max_session_duration(7200)
+        .send()
+        .await
+        .unwrap();
+
+    let got = client.get_role().role_name("svc").send().await.unwrap();
+    let role = got.role().unwrap();
+    assert_eq!(role.max_session_duration(), Some(7200));
+    assert_eq!(
+        role.description(),
+        Some("important role"),
+        "description retained when only max-session-duration is updated"
+    );
+}
+
+// bug-audit 2026-06-27, T1.6: GetUser with no UserName returns a stable
+// identity, not a fresh random user each call.
+#[tokio::test]
+async fn iam_get_user_no_name_is_deterministic() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let a = client.get_user().send().await.unwrap();
+    let b = client.get_user().send().await.unwrap();
+    let ua = a.user().unwrap();
+    let ub = b.user().unwrap();
+    assert_eq!(
+        ua.user_id(),
+        ub.user_id(),
+        "GetUser without a name returns a stable user id"
+    );
+    assert_eq!(ua.user_name(), ub.user_name());
+}
