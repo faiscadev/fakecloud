@@ -935,6 +935,10 @@ pub enum ContainerSpawnIntent {
     /// `AWS::RDS::DBInstance` — back the inserted DbInstance with a real
     /// Postgres/MySQL container via the RDS runtime.
     RdsInstance { identifier: String },
+    /// `AWS::AutoScaling::AutoScalingGroup` — reconcile the inserted group to
+    /// its desired capacity by launching real container-backed EC2 instances
+    /// via the EC2 runtime, matching the direct `CreateAutoScalingGroup` path.
+    AsgInstances { group_name: String },
 }
 
 mod acm;

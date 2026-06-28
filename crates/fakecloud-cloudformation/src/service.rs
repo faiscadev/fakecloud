@@ -1046,6 +1046,9 @@ impl CloudFormationService {
         let rds_runtime_for_spawn = provisioner.rds_runtime.clone();
         let rds_state_for_spawn = provisioner.rds_state.clone();
         let region_for_spawn = provisioner.region.clone();
+        let ec2_state_for_spawn = provisioner.ec2_state.clone();
+        let ec2_runtime_for_spawn = provisioner.ec2_runtime.clone();
+        let autoscaling_state_for_spawn = provisioner.autoscaling_state.clone();
 
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
@@ -1117,6 +1120,26 @@ impl CloudFormationService {
                                 .await;
                             });
                         }
+                    }
+                    crate::resource_provisioner::ContainerSpawnIntent::AsgInstances {
+                        group_name,
+                    } => {
+                        let asg_state = autoscaling_state_for_spawn.clone();
+                        let ec2_state = ec2_state_for_spawn.clone();
+                        let ec2_runtime = ec2_runtime_for_spawn.clone();
+                        let account = account_id.clone();
+                        let region = region_for_spawn.clone();
+                        tokio::spawn(async move {
+                            fakecloud_autoscaling::cfn_provision::cfn_reconcile_capacity(
+                                asg_state,
+                                ec2_state,
+                                ec2_runtime,
+                                group_name,
+                                account,
+                                region,
+                            )
+                            .await;
+                        });
                     }
                 }
             }

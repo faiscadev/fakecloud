@@ -899,6 +899,34 @@ impl AutoScalingService {
     /// change. The EC2 calls happen OFF the state lock (no `.await` under the
     /// parking_lot guard); the lock is only taken to read inputs and apply
     /// results.
+    /// Reconcile a group to its desired capacity outside the request path (e.g.
+    /// CloudFormation provisioning). Synthesizes a minimal `AwsRequest` — the
+    /// EC2 calls only read `region`/`account_id`/`request_id` off it — and runs
+    /// the same `apply_capacity` reconciliation the direct API path uses, so a
+    /// CFN-provisioned ASG ends up with REAL container-backed instances (or
+    /// synthesized ids when no EC2 backend is wired, e.g. CI).
+    pub async fn reconcile_group(&self, account: &str, name: &str, region: &str) {
+        let req = AwsRequest {
+            service: "autoscaling".to_string(),
+            action: "ReconcileGroup".to_string(),
+            region: region.to_string(),
+            account_id: account.to_string(),
+            request_id: "cfn".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        };
+        self.apply_capacity(account, name, &req).await;
+    }
+
     async fn apply_capacity(&self, account: &str, name: &str, req: &AwsRequest) {
         let (target, current_ids, azs, image_id, instance_type, subnet) = {
             let accounts = self.state.read();

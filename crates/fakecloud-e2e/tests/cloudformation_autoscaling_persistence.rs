@@ -37,6 +37,25 @@ async fn cfn_provisioned_asg_survives_restart() {
         .await
         .expect("create_stack");
 
+    // The group reconciles to its desired capacity in a detached task after
+    // CreateStack returns; wait for that to land before restarting so the
+    // reconciled instances are part of the persisted snapshot.
+    {
+        let asg = aws_sdk_autoscaling::Client::new(&server.aws_config().await);
+        helpers::wait_until(std::time::Duration::from_secs(10), || {
+            let asg = asg.clone();
+            async move {
+                let out = asg.describe_auto_scaling_groups().send().await.ok()?;
+                out.auto_scaling_groups()
+                    .iter()
+                    .any(|g| g.desired_capacity() == Some(2) && g.instances().len() == 2)
+                    .then_some(())
+            }
+        })
+        .await
+        .expect("CFN ASG reconciled to desired capacity before restart");
+    }
+
     server.restart().await;
     let asg = aws_sdk_autoscaling::Client::new(&server.aws_config().await);
 

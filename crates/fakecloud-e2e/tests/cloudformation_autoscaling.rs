@@ -53,7 +53,22 @@ async fn cfn_provisions_autoscaling_group() {
         "CFN launch configuration should exist"
     );
 
-    let groups = asg.describe_auto_scaling_groups().send().await.unwrap();
+    // Reconciliation to desired capacity happens in a detached task after
+    // CreateStack returns (so the call never blocks on launching instances), so
+    // poll until the group reports its 2 instances.
+    let groups = helpers::wait_until(std::time::Duration::from_secs(10), || {
+        let asg = asg.clone();
+        async move {
+            let out = asg.describe_auto_scaling_groups().send().await.ok()?;
+            let found = out
+                .auto_scaling_groups()
+                .iter()
+                .any(|g| g.desired_capacity() == Some(2) && g.instances().len() == 2);
+            found.then_some(out)
+        }
+    })
+    .await
+    .expect("CFN ASG reconciled to desired capacity of 2");
     let g = groups
         .auto_scaling_groups()
         .iter()
@@ -118,4 +133,69 @@ async fn cfn_asg_honors_launch_template() {
         .expect("launch template carried from CFN");
     assert_eq!(lt.launch_template_id(), Some("lt-0abc123"));
     assert_eq!(lt.version(), Some("3"));
+}
+
+// batch 2: a CFN-provisioned ASG must reconcile to REAL container-backed EC2
+// instances (via the same RunInstances path the direct CreateAutoScalingGroup
+// API uses), not the phantom placeholder metadata the provisioner used to
+// insert at CFN time. The launched instances must therefore appear in EC2
+// DescribeInstances. This holds with or without a container runtime: with no
+// runtime the EC2 records are metadata-only but still real EC2 instances.
+#[tokio::test]
+async fn cfn_asg_launches_real_ec2_instances() {
+    let s = TestServer::start().await;
+    let cfn = s.cloudformation_client().await;
+    let asg = aws_sdk_autoscaling::Client::new(&s.aws_config().await);
+    let ec2 = s.ec2_client().await;
+
+    cfn.create_stack()
+        .stack_name("asg-real-stack")
+        .template_body(TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    // Reconciliation runs in a detached task after CreateStack returns; poll
+    // until the group reports its 2 instances and capture their ids.
+    let asg_ids = helpers::wait_until(std::time::Duration::from_secs(10), || {
+        let asg = asg.clone();
+        async move {
+            let out = asg.describe_auto_scaling_groups().send().await.ok()?;
+            let g = out
+                .auto_scaling_groups()
+                .iter()
+                .find(|g| g.desired_capacity() == Some(2))?;
+            if g.instances().len() != 2 {
+                return None;
+            }
+            let ids: Vec<String> = g
+                .instances()
+                .iter()
+                .filter_map(|i| i.instance_id().map(String::from))
+                .collect();
+            (ids.len() == 2).then_some(ids)
+        }
+    })
+    .await
+    .expect("CFN ASG reconciled to 2 real instances");
+
+    // Those exact instances are REAL EC2 instances (not phantom ASG metadata).
+    let running = ec2
+        .describe_instances()
+        .instance_ids(asg_ids[0].clone())
+        .instance_ids(asg_ids[1].clone())
+        .send()
+        .await
+        .unwrap();
+    let ec2_ids: Vec<String> = running
+        .reservations()
+        .iter()
+        .flat_map(|r| r.instances())
+        .filter_map(|i| i.instance_id().map(String::from))
+        .collect();
+    assert_eq!(
+        ec2_ids.len(),
+        2,
+        "both CFN-provisioned ASG instances must exist in EC2: {ec2_ids:?}"
+    );
 }
