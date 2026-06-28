@@ -93,6 +93,135 @@ fn compare_magnitude(a: &(String, String), b: &(String, String)) -> std::cmp::Or
         .then_with(|| a.1.cmp(&b.1))
 }
 
+/// Add (`is_add`) or subtract two DynamoDB Number strings with arbitrary
+/// precision, returning the normalized result string.
+///
+/// DynamoDB numbers are 38-significant-digit decimals; parsing operands to
+/// `f64` rounds past 2^53 and saturates an `as i64` cast past ~9.2e18, so a
+/// `SET #c = #c + :inc` or `ADD #c :inc` on a large counter silently corrupts
+/// the value. This works directly on the decimal digit strings instead.
+/// Returns `None` only if either operand is not a valid number.
+/// bug-audit 2026-06-28.
+pub(crate) fn decimal_add_sub(a: &str, b: &str, is_add: bool) -> Option<String> {
+    let (a_neg, (a_int, a_frac)) = normalize_decimal(a)?;
+    let (mut b_neg, (b_int, b_frac)) = normalize_decimal(b)?;
+    if !is_add {
+        b_neg = !b_neg;
+    }
+
+    let (res_neg, (res_int, res_frac)) = if a_neg == b_neg {
+        // Same sign: add magnitudes, keep the sign.
+        (a_neg, add_magnitude(&a_int, &a_frac, &b_int, &b_frac))
+    } else {
+        // Opposite signs: subtract the smaller magnitude from the larger and
+        // take the larger's sign.
+        match compare_magnitude(
+            &(a_int.clone(), a_frac.clone()),
+            &(b_int.clone(), b_frac.clone()),
+        ) {
+            std::cmp::Ordering::Equal => (false, (String::new(), String::new())),
+            std::cmp::Ordering::Greater => (a_neg, sub_magnitude(&a_int, &a_frac, &b_int, &b_frac)),
+            std::cmp::Ordering::Less => (b_neg, sub_magnitude(&b_int, &b_frac, &a_int, &a_frac)),
+        }
+    };
+
+    Some(format_decimal(res_neg, &res_int, &res_frac))
+}
+
+/// Right-pad a fractional digit string with zeros to `len`.
+fn pad_frac(frac: &str, len: usize) -> String {
+    let mut s = frac.to_string();
+    s.extend(std::iter::repeat_n('0', len.saturating_sub(s.len())));
+    s
+}
+
+/// Split a digit string into `(int, frac)` where `frac` is the last
+/// `frac_len` digits (front-padded with zeros if the string is too short).
+fn split_at_frac(digits: &str, frac_len: usize) -> (String, String) {
+    if digits.len() <= frac_len {
+        let padded = format!("{}{}", "0".repeat(frac_len - digits.len()), digits);
+        (String::new(), padded)
+    } else {
+        let (i, f) = digits.split_at(digits.len() - frac_len);
+        (i.to_string(), f.to_string())
+    }
+}
+
+/// Add two non-negative magnitudes given as `(int_digits, frac_digits)`.
+fn add_magnitude(ai: &str, af: &str, bi: &str, bf: &str) -> (String, String) {
+    let flen = af.len().max(bf.len());
+    let a_digits = format!("{ai}{}", pad_frac(af, flen));
+    let b_digits = format!("{bi}{}", pad_frac(bf, flen));
+    split_at_frac(&add_digit_strings(&a_digits, &b_digits), flen)
+}
+
+/// Subtract magnitude `(bi, bf)` from `(ai, af)`, assuming the first is
+/// greater than or equal to the second.
+fn sub_magnitude(ai: &str, af: &str, bi: &str, bf: &str) -> (String, String) {
+    let flen = af.len().max(bf.len());
+    let a_digits = format!("{ai}{}", pad_frac(af, flen));
+    let b_digits = format!("{bi}{}", pad_frac(bf, flen));
+    split_at_frac(&sub_digit_strings(&a_digits, &b_digits), flen)
+}
+
+/// Schoolbook addition of two non-negative integer digit strings.
+fn add_digit_strings(a: &str, b: &str) -> String {
+    let a: Vec<u8> = a.bytes().rev().map(|c| c - b'0').collect();
+    let b: Vec<u8> = b.bytes().rev().map(|c| c - b'0').collect();
+    let n = a.len().max(b.len());
+    let mut out = Vec::with_capacity(n + 1);
+    let mut carry = 0u8;
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0) + b.get(i).copied().unwrap_or(0) + carry;
+        out.push(b'0' + x % 10);
+        carry = x / 10;
+    }
+    if carry > 0 {
+        out.push(b'0' + carry);
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_else(|_| "0".to_string())
+}
+
+/// Schoolbook subtraction `a - b` of two non-negative integer digit strings,
+/// assuming `a >= b`.
+fn sub_digit_strings(a: &str, b: &str) -> String {
+    let a: Vec<i16> = a.bytes().rev().map(|c| (c - b'0') as i16).collect();
+    let b: Vec<i16> = b.bytes().rev().map(|c| (c - b'0') as i16).collect();
+    let mut out = Vec::with_capacity(a.len());
+    let mut borrow = 0i16;
+    for (i, &ad) in a.iter().enumerate() {
+        let mut x = ad - borrow - b.get(i).copied().unwrap_or(0);
+        if x < 0 {
+            x += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out.push(b'0' + x as u8);
+    }
+    while out.len() > 1 && *out.last().unwrap() == b'0' {
+        out.pop();
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_else(|_| "0".to_string())
+}
+
+/// Render a signed `(int, frac)` magnitude as a DynamoDB Number string with
+/// insignificant zeros stripped and no trailing `.0` for integral results.
+fn format_decimal(neg: bool, int: &str, frac: &str) -> String {
+    let int_t = int.trim_start_matches('0');
+    let frac_t = frac.trim_end_matches('0');
+    let is_zero = int_t.is_empty() && frac_t.is_empty();
+    let sign = if neg && !is_zero { "-" } else { "" };
+    let int_disp = if int_t.is_empty() { "0" } else { int_t };
+    if frac_t.is_empty() {
+        format!("{sign}{int_disp}")
+    } else {
+        format!("{sign}{int_disp}.{frac_t}")
+    }
+}
+
 /// Two AttributeValues are comparable by the relational operators (`<`, `<=`,
 /// `>`, `>=`, BETWEEN) only when they share a scalar type (S, N, or B).
 /// DynamoDB does not match a comparison across mismatched types; without this
@@ -1205,6 +1334,42 @@ mod number_compare_tests {
         // Both negative: larger magnitude is the smaller value.
         assert_eq!(compare_number_strings("-100", "-1"), Ordering::Less);
         assert_eq!(compare_number_strings("-1", "-100"), Ordering::Greater);
+    }
+
+    // bug-audit 2026-06-28: SET/ADD arithmetic must be arbitrary precision.
+    // f64 rounds past 2^53 and `as i64` saturates past ~9.2e18, corrupting
+    // large counters; decimal_add_sub works on the digit strings instead.
+    #[test]
+    fn decimal_add_sub_big_integers_exact() {
+        // Far beyond 2^53 (9007199254740992) and i64::MAX (9223372036854775807).
+        assert_eq!(
+            decimal_add_sub("9007199254740992", "1", true).unwrap(),
+            "9007199254740993"
+        );
+        assert_eq!(
+            decimal_add_sub("99999999999999999999999999999999999999", "1", true).unwrap(),
+            "100000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            decimal_add_sub("9223372036854775807", "9223372036854775807", true).unwrap(),
+            "18446744073709551614"
+        );
+    }
+
+    #[test]
+    fn decimal_add_sub_signs_and_fractions() {
+        assert_eq!(decimal_add_sub("5", "3", false).unwrap(), "2");
+        assert_eq!(decimal_add_sub("3", "5", false).unwrap(), "-2");
+        assert_eq!(decimal_add_sub("-5", "3", true).unwrap(), "-2");
+        assert_eq!(decimal_add_sub("5", "-3", true).unwrap(), "2");
+        assert_eq!(decimal_add_sub("0.1", "0.2", true).unwrap(), "0.3");
+        assert_eq!(decimal_add_sub("1.5", "2.5", true).unwrap(), "4");
+        assert_eq!(decimal_add_sub("10", "10", false).unwrap(), "0");
+        assert_eq!(decimal_add_sub("100.25", "0.75", true).unwrap(), "101");
+        // Carry/borrow across the decimal point.
+        assert_eq!(decimal_add_sub("1", "0.001", false).unwrap(), "0.999");
+        // Non-numeric operand is rejected.
+        assert!(decimal_add_sub("abc", "1", true).is_none());
     }
 }
 

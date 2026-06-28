@@ -172,6 +172,30 @@ pub struct StreamRecord {
     pub dynamodb: DynamoDbStreamRecord,
     pub event_source_arn: String,
     pub timestamp: DateTime<Utc>,
+    /// Set only for system-generated changes. TTL deletions carry
+    /// `{principalId: "dynamodb.amazonaws.com", type: "Service"}` so consumers
+    /// can distinguish an expiry REMOVE from a user-driven DeleteItem. Absent
+    /// (and omitted from the wire) for ordinary writes.
+    #[serde(default)]
+    pub user_identity: Option<StreamUserIdentity>,
+}
+
+/// `userIdentity` block on a stream record. Present only for system-generated
+/// events such as TTL expirations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamUserIdentity {
+    pub principal_id: String,
+    pub identity_type: String,
+}
+
+impl StreamUserIdentity {
+    /// The marker AWS attaches to a TTL-expiry REMOVE record.
+    pub fn ttl() -> Self {
+        Self {
+            principal_id: "dynamodb.amazonaws.com".to_string(),
+            identity_type: "Service".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

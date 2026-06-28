@@ -190,16 +190,13 @@ pub(crate) fn apply_add_assignment(
     if let Some(add_val) = add_val {
         if let Some(existing) = item.get(&attr) {
             if let (Some(existing_num), Some(add_num)) = (
-                extract_number(&Some(existing.clone())),
-                extract_number(&Some(add_val.clone())),
+                existing.get("N").and_then(|n| n.as_str()),
+                add_val.get("N").and_then(|n| n.as_str()),
             ) {
-                let result = existing_num + add_num;
-                let num_str = if result == result.trunc() {
-                    format!("{}", result as i64)
-                } else {
-                    format!("{result}")
-                };
-                item.insert(attr, json!({"N": num_str}));
+                // Arbitrary-precision decimal add — f64 rounds past 2^53.
+                if let Some(num_str) = decimal_add_sub(existing_num, add_num, true) {
+                    item.insert(attr, json!({"N": num_str}));
+                }
             } else if let Some(existing_set) = existing.get("SS").and_then(|v| v.as_array()) {
                 if let Some(add_set) = add_val.get("SS").and_then(|v| v.as_array()) {
                     let mut merged: Vec<Value> = existing_set.clone();

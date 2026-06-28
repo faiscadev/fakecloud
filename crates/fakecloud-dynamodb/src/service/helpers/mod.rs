@@ -466,6 +466,24 @@ pub(crate) fn evaluate_set_rhs(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Result<Option<Value>, AwsServiceError> {
+    // Arithmetic is checked first so a top-level `+`/`-` is split before the
+    // `if_not_exists(`/`list_append(` prefixes are tested. The canonical
+    // atomic-counter idiom `if_not_exists(#c, :zero) + :inc` (and its mirror
+    // `:inc + if_not_exists(#c, :zero)`) has `if_not_exists` as an *operand*
+    // of `+`, not the whole RHS. `parse_arithmetic` only splits at a top-level
+    // operator (depth 0), so a bare `if_not_exists(a, :b)` or `list_append(a, b)`
+    // call — whose only `+`/`-` would be inside the parens — falls through.
+    if let Some((arith_left, arith_right, is_add)) = parse_arithmetic(right) {
+        return evaluate_arithmetic_rhs(
+            arith_left,
+            arith_right,
+            is_add,
+            item,
+            expr_attr_names,
+            expr_attr_values,
+        );
+    }
+
     if let Some(rest) = right
         .strip_prefix("if_not_exists(")
         .or_else(|| right.strip_prefix("if_not_exists ("))
@@ -490,23 +508,43 @@ pub(crate) fn evaluate_set_rhs(
         ));
     }
 
-    if let Some((arith_left, arith_right, is_add)) = parse_arithmetic(right) {
-        return evaluate_arithmetic_rhs(
-            arith_left,
-            arith_right,
-            is_add,
-            item,
-            expr_attr_names,
-            expr_attr_values,
-        );
-    }
-
     Ok(resolve_ref_or_path(
         right,
         item,
         expr_attr_names,
         expr_attr_values,
     ))
+}
+
+/// Evaluate a single arithmetic operand. Each side of a `+`/`-` may itself be
+/// an `if_not_exists(path, :default)` call (the initialize-or-increment idiom),
+/// a value reference, or a document path. Returns the resolved AttributeValue
+/// or `None` when the operand resolves to nothing (e.g. a missing attribute
+/// with no `if_not_exists` guard).
+pub(crate) fn evaluate_arithmetic_operand(
+    operand: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Option<Value> {
+    let operand = operand.trim();
+    if let Some(rest) = operand
+        .strip_prefix("if_not_exists(")
+        .or_else(|| operand.strip_prefix("if_not_exists ("))
+    {
+        // As an arithmetic operand, `if_not_exists(path, :default)` evaluates to
+        // the *value of path* when it exists, otherwise the default — unlike the
+        // top-level SET-RHS variant, where an existing path collapses to a no-op
+        // (`None`). Returning `None` here would drop the operand and fail the
+        // whole expression with a type error.
+        let inner = rest.strip_suffix(')')?;
+        let mut split = inner.splitn(2, ',');
+        let (check, default) = (split.next()?, split.next()?);
+        return resolve_ref_or_path(check.trim(), item, expr_attr_names, expr_attr_values).or_else(
+            || resolve_ref_or_path(default.trim(), item, expr_attr_names, expr_attr_values),
+        );
+    }
+    resolve_ref_or_path(operand, item, expr_attr_names, expr_attr_values)
 }
 
 /// `if_not_exists(path, :val)` — evaluates to nothing when `path` already
@@ -567,36 +605,32 @@ pub(crate) fn evaluate_arithmetic_rhs(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Result<Option<Value>, AwsServiceError> {
-    let left_val = resolve_ref_or_path(arith_left.trim(), item, expr_attr_names, expr_attr_values);
+    let left_val = evaluate_arithmetic_operand(arith_left, item, expr_attr_names, expr_attr_values);
     let right_val =
-        resolve_ref_or_path(arith_right.trim(), item, expr_attr_names, expr_attr_values);
+        evaluate_arithmetic_operand(arith_right, item, expr_attr_names, expr_attr_values);
 
-    let left_num = extract_number(&left_val).ok_or_else(|| {
+    let bad_operand = || {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "ValidationException",
             "An operand in the update expression has an incorrect data type",
         )
-    })?;
-    let right_num = extract_number(&right_val).ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "An operand in the update expression has an incorrect data type",
-        )
-    })?;
-
-    let result = if is_add {
-        left_num + right_num
-    } else {
-        left_num - right_num
     };
 
-    let num_str = if result == result.trunc() {
-        format!("{}", result as i64)
-    } else {
-        format!("{result}")
-    };
+    let left_num = left_val
+        .as_ref()
+        .and_then(|v| v.get("N"))
+        .and_then(|n| n.as_str())
+        .ok_or_else(bad_operand)?;
+    let right_num = right_val
+        .as_ref()
+        .and_then(|v| v.get("N"))
+        .and_then(|n| n.as_str())
+        .ok_or_else(bad_operand)?;
+
+    // Arbitrary-precision decimal arithmetic — f64 silently rounds past 2^53
+    // and an `as i64` cast saturates past ~9.2e18, corrupting large counters.
+    let num_str = decimal_add_sub(left_num, right_num, is_add).ok_or_else(bad_operand)?;
 
     Ok(Some(json!({ "N": num_str })))
 }
@@ -784,3 +818,75 @@ pub(crate) use schemas::*;
 pub(crate) use table_descriptions::*;
 pub(crate) use table_lookup::*;
 pub(crate) use updates::*;
+
+#[cfg(test)]
+mod set_rhs_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn names() -> HashMap<String, String> {
+        HashMap::from([("#c".to_string(), "count".to_string())])
+    }
+    fn values() -> HashMap<String, Value> {
+        HashMap::from([
+            (":zero".to_string(), json!({"N": "0"})),
+            (":inc".to_string(), json!({"N": "1"})),
+        ])
+    }
+
+    // bug-audit 2026-06-28: the canonical initialize-or-increment counter idiom
+    // `SET #c = if_not_exists(#c, :zero) + :inc` was a silent no-op (the whole
+    // RHS was handed to the if_not_exists evaluator, which bailed). Both operand
+    // orderings must compute `(if_not_exists(c, 0)) + 1`.
+    #[test]
+    fn atomic_counter_from_absent_both_orderings() {
+        let item: HashMap<String, AttributeValue> = HashMap::new();
+        let r1 = evaluate_set_rhs(
+            "if_not_exists(#c, :zero) + :inc",
+            &item,
+            &names(),
+            &values(),
+        )
+        .unwrap();
+        assert_eq!(r1, Some(json!({"N": "1"})));
+        let r2 = evaluate_set_rhs(
+            ":inc + if_not_exists(#c, :zero)",
+            &item,
+            &names(),
+            &values(),
+        )
+        .unwrap();
+        assert_eq!(r2, Some(json!({"N": "1"})));
+    }
+
+    #[test]
+    fn atomic_counter_from_existing_both_orderings() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("count".to_string(), json!({"N": "41"}))]);
+        let r1 = evaluate_set_rhs(
+            "if_not_exists(#c, :zero) + :inc",
+            &item,
+            &names(),
+            &values(),
+        )
+        .unwrap();
+        assert_eq!(r1, Some(json!({"N": "42"})));
+        let r2 = evaluate_set_rhs(
+            ":inc + if_not_exists(#c, :zero)",
+            &item,
+            &names(),
+            &values(),
+        )
+        .unwrap();
+        assert_eq!(r2, Some(json!({"N": "42"})));
+    }
+
+    // A bare if_not_exists / list_append (no top-level operator) still routes to
+    // its own evaluator rather than being misparsed as arithmetic.
+    #[test]
+    fn bare_if_not_exists_still_works() {
+        let item: HashMap<String, AttributeValue> = HashMap::new();
+        let r = evaluate_set_rhs("if_not_exists(#c, :zero)", &item, &names(), &values()).unwrap();
+        assert_eq!(r, Some(json!({"N": "0"})));
+    }
+}

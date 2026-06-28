@@ -274,7 +274,7 @@ fn stream_record_to_json(r: &crate::state::StreamRecord, table: &DynamoTable) ->
     if let Some(oi) = r.dynamodb.old_image.as_ref() {
         dynamodb["OldImage"] = json!(oi);
     }
-    json!({
+    let mut out = json!({
         "eventID": r.event_id,
         "eventName": r.event_name,
         "eventVersion": r.event_version,
@@ -282,7 +282,17 @@ fn stream_record_to_json(r: &crate::state::StreamRecord, table: &DynamoTable) ->
         "awsRegion": r.aws_region,
         "eventSourceARN": table.stream_arn.clone().unwrap_or_default(),
         "dynamodb": dynamodb,
-    })
+    });
+    if let Some(ui) = r.user_identity.as_ref() {
+        // The DynamoDB Streams GetRecords wire shape capitalizes the Identity
+        // members (`PrincipalId`, `Type`) even though the surrounding record
+        // keys are camelCase; this matches what the AWS SDKs deserialize.
+        out["userIdentity"] = json!({
+            "PrincipalId": ui.principal_id,
+            "Type": ui.identity_type,
+        });
+    }
+    out
 }
 
 fn stream_label(stream_arn: &str) -> String {
@@ -435,6 +445,7 @@ mod tests {
                 size_bytes: 16,
                 stream_view_type: "NEW_AND_OLD_IMAGES".into(),
             },
+            user_identity: None,
         };
         table.stream_records.write().push(rec);
         s.tables.insert("widgets".to_string(), table);
@@ -516,6 +527,7 @@ mod tests {
                 size_bytes: 16,
                 stream_view_type: "NEW_AND_OLD_IMAGES".into(),
             },
+            user_identity: None,
         };
         table.stream_records.write().push(rec);
     }

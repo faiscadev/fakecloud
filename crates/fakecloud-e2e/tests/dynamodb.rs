@@ -5779,3 +5779,488 @@ async fn dynamodb_batch_execute_statement_error_code_is_enum() {
         "missing-table statement reports ResourceNotFound, not a bogus ValidationException"
     );
 }
+
+// bug-audit 2026-06-28: the canonical atomic-counter idiom
+// `SET #c = if_not_exists(#c, :zero) + :inc` was a silent no-op (the whole RHS
+// went to the if_not_exists evaluator, which dropped the assignment), and the
+// mirror form raised a spurious type error. Both orderings must initialize and
+// then increment, from an absent and an existing attribute.
+#[tokio::test]
+async fn dynamodb_atomic_counter_initialize_or_increment() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("Counters")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Increment from absent (initializes to 0 then +1) using the standard form.
+    let resp = client
+        .update_item()
+        .table_name("Counters")
+        .key("id", AttributeValue::S("a".to_string()))
+        .update_expression("SET #c = if_not_exists(#c, :zero) + :inc")
+        .expression_attribute_names("#c", "count")
+        .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
+        .expression_attribute_values(":inc", AttributeValue::N("1".to_string()))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.attributes()
+            .unwrap()
+            .get("count")
+            .unwrap()
+            .as_n()
+            .unwrap(),
+        "1",
+        "initialize-or-increment from absent yields 1"
+    );
+
+    // Increment again on the existing value.
+    let resp = client
+        .update_item()
+        .table_name("Counters")
+        .key("id", AttributeValue::S("a".to_string()))
+        .update_expression("SET #c = if_not_exists(#c, :zero) + :inc")
+        .expression_attribute_names("#c", "count")
+        .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
+        .expression_attribute_values(":inc", AttributeValue::N("1".to_string()))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.attributes()
+            .unwrap()
+            .get("count")
+            .unwrap()
+            .as_n()
+            .unwrap(),
+        "2"
+    );
+
+    // Mirror operand ordering must work identically (used to throw).
+    let resp = client
+        .update_item()
+        .table_name("Counters")
+        .key("id", AttributeValue::S("b".to_string()))
+        .update_expression("SET #c = :inc + if_not_exists(#c, :zero)")
+        .expression_attribute_names("#c", "count")
+        .expression_attribute_values(":zero", AttributeValue::N("0".to_string()))
+        .expression_attribute_values(":inc", AttributeValue::N("5".to_string()))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.attributes()
+            .unwrap()
+            .get("count")
+            .unwrap()
+            .as_n()
+            .unwrap(),
+        "5",
+        "mirror operand ordering initializes-or-increments"
+    );
+}
+
+// bug-audit 2026-06-28: SET/ADD arithmetic ran through f64, which rounds past
+// 2^53 and saturates an `as i64` cast past ~9.2e18. Large counters must add
+// exactly via arbitrary-precision decimals.
+#[tokio::test]
+async fn dynamodb_add_big_integer_exact() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("BigCounters")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Seed just below 2^53 and ADD 1 -> must land exactly on 2^53 + ... .
+    client
+        .put_item()
+        .table_name("BigCounters")
+        .item("id", AttributeValue::S("big".to_string()))
+        .item("count", AttributeValue::N("9007199254740992".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .update_item()
+        .table_name("BigCounters")
+        .key("id", AttributeValue::S("big".to_string()))
+        .update_expression("ADD #c :inc")
+        .expression_attribute_names("#c", "count")
+        .expression_attribute_values(":inc", AttributeValue::N("1".to_string()))
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.attributes()
+            .unwrap()
+            .get("count")
+            .unwrap()
+            .as_n()
+            .unwrap(),
+        "9007199254740993",
+        "ADD is exact past 2^53"
+    );
+
+    // SET arithmetic on a value past i64::MAX must also be exact.
+    let resp = client
+        .update_item()
+        .table_name("BigCounters")
+        .key("id", AttributeValue::S("big".to_string()))
+        .update_expression("SET #c = #c + :huge")
+        .expression_attribute_names("#c", "count")
+        .expression_attribute_values(
+            ":huge",
+            AttributeValue::N("9223372036854775807".to_string()),
+        )
+        .return_values(aws_sdk_dynamodb::types::ReturnValue::UpdatedNew)
+        .send()
+        .await
+        .unwrap();
+    // 9007199254740993 + 9223372036854775807 = 9232379236109516800.
+    assert_eq!(
+        resp.attributes()
+            .unwrap()
+            .get("count")
+            .unwrap()
+            .as_n()
+            .unwrap(),
+        "9232379236109516800",
+        "SET + is exact across i64::MAX"
+    );
+}
+
+// bug-audit 2026-06-28: a scan on a sparse GSI returned items that lack the
+// index key attribute. AWS only projects items carrying every index key
+// attribute into the index, so such items are never returned or counted.
+#[tokio::test]
+async fn dynamodb_scan_sparse_index_excludes_unprojected_items() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("SparseIdx")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("gsiKey")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("BySparse")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("gsiKey")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // One item carries the index key, one does not.
+    client
+        .put_item()
+        .table_name("SparseIdx")
+        .item("id", AttributeValue::S("has".to_string()))
+        .item("gsiKey", AttributeValue::S("k1".to_string()))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_item()
+        .table_name("SparseIdx")
+        .item("id", AttributeValue::S("missing".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .scan()
+        .table_name("SparseIdx")
+        .index_name("BySparse")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.count(),
+        1,
+        "sparse index excludes the item lacking gsiKey"
+    );
+    assert_eq!(resp.scanned_count(), 1, "ScannedCount also excludes it");
+    let items = resp.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].get("id").unwrap().as_s().unwrap(), "has");
+}
+
+// bug-audit 2026-06-28: a retried TransactWriteItems carrying the same
+// ClientRequestToken must apply at most once. A non-idempotent ADD previously
+// advanced twice when the SDK (or a caller) replayed the request.
+#[tokio::test]
+async fn dynamodb_transact_write_items_idempotent_token() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("IdemTxn")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let token = "fixed-idempotency-token-001";
+    let build_request = || {
+        client
+            .transact_write_items()
+            .client_request_token(token)
+            .transact_items(
+                TransactWriteItem::builder()
+                    .update(
+                        aws_sdk_dynamodb::types::Update::builder()
+                            .table_name("IdemTxn")
+                            .key("id", AttributeValue::S("c".to_string()))
+                            .update_expression("ADD #n :one")
+                            .expression_attribute_names("#n", "n")
+                            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+    };
+
+    build_request().send().await.unwrap();
+    // Replay with the identical token: must be treated as the same request.
+    build_request().send().await.unwrap();
+
+    let resp = client
+        .get_item()
+        .table_name("IdemTxn")
+        .key("id", AttributeValue::S("c".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.item().unwrap().get("n").unwrap().as_n().unwrap(),
+        "1",
+        "same-token replay applies the ADD only once"
+    );
+}
+
+// bug-audit 2026-06-28: TTL expiry deleted items silently. AWS publishes a
+// REMOVE stream record per expired item carrying the
+// `dynamodb.amazonaws.com` userIdentity marker.
+#[tokio::test]
+async fn dynamodb_ttl_expiry_emits_remove_stream_record() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let streams = server.dynamodb_streams_client().await;
+
+    let table_name = "TtlStreams";
+    ddb.create_table()
+        .table_name(table_name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    ddb.update_time_to_live()
+        .table_name(table_name)
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("ttl")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Item already expired (ttl in the past).
+    ddb.put_item()
+        .table_name(table_name)
+        .item("pk", AttributeValue::S("gone".to_string()))
+        .item("ttl", AttributeValue::N("1".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Force the TTL processor to run now.
+    let url = format!(
+        "{}/_fakecloud/dynamodb/ttl-processor/tick",
+        server.endpoint()
+    );
+    let tick: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .expect("ttl tick")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(tick["expiredItems"].as_u64(), Some(1));
+
+    let table = ddb
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .unwrap();
+    let stream_arn = table
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    let desc = streams
+        .describe_stream()
+        .stream_arn(&stream_arn)
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .unwrap()
+        .to_string();
+    let it = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let records = streams
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let r = records.records();
+
+    // PutItem -> INSERT, TTL expiry -> REMOVE.
+    let remove = r
+        .iter()
+        .find(|rec| rec.event_name().unwrap().as_str() == "REMOVE")
+        .expect("a REMOVE record for the expired item");
+    let ui = remove
+        .user_identity()
+        .expect("TTL REMOVE carries userIdentity");
+    assert_eq!(ui.principal_id(), Some("dynamodb.amazonaws.com"));
+    assert_eq!(ui.r#type(), Some("Service"));
+}
