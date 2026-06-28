@@ -15,6 +15,7 @@ fakecloud-elbv2 = { workspace = true }
 fakecloud-wafv2 = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+rcgen = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

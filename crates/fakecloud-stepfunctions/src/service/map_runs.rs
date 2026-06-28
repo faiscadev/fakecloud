@@ -60,7 +60,7 @@ impl StepFunctionsService {
                 json!({
                     "mapRunArn": r.map_run_arn,
                     "executionArn": r.execution_arn,
-                    "stateMachineArn": "",
+                    "stateMachineArn": state_machine_arn_from_execution(&r.execution_arn),
                     "startDate": r.start_date.timestamp(),
                     "stopDate": r.stop_date.map(|d| d.timestamp()),
                 })
@@ -97,5 +97,34 @@ impl StepFunctionsService {
             mr.tolerated_failure_count = c;
         }
         Ok(AwsResponse::ok_json(json!({})))
+    }
+}
+
+/// Derive the state-machine ARN from an execution ARN.
+/// `arn:aws:states:R:A:execution:Name:ExecName` -> `arn:aws:states:R:A:stateMachine:Name`.
+fn state_machine_arn_from_execution(execution_arn: &str) -> String {
+    if let Some((prefix, rest)) = execution_arn.split_once(":execution:") {
+        let sm_name = rest.split(':').next().unwrap_or("");
+        format!("{prefix}:stateMachine:{sm_name}")
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(test)]
+mod sm_arn_tests {
+    use super::state_machine_arn_from_execution;
+
+    // bug-audit 2026-06-27, T6.4: ListMapRuns must report the owning state
+    // machine ARN, derived from the execution ARN.
+    #[test]
+    fn derives_state_machine_arn() {
+        assert_eq!(
+            state_machine_arn_from_execution(
+                "arn:aws:states:us-east-1:123456789012:execution:MyMachine:exec-7"
+            ),
+            "arn:aws:states:us-east-1:123456789012:stateMachine:MyMachine"
+        );
+        assert_eq!(state_machine_arn_from_execution("not-an-arn"), "");
     }
 }
