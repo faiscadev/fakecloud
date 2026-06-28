@@ -3094,3 +3094,59 @@ async fn logs_describe_log_groups_reports_metric_filter_count() {
         .unwrap();
     assert_eq!(resp.log_groups()[0].metric_filter_count(), Some(1));
 }
+
+// bug-audit 2026-06-27, T1.14: FilterLogEvents must match JSON `||` and array
+// filter patterns (previously failed closed), via the full pattern engine.
+#[tokio::test]
+async fn logs_filter_log_events_json_or_pattern() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+    client
+        .create_log_group()
+        .log_group_name("/filter/json")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/filter/json")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    for (i, body) in [
+        r#"{"level":"ERROR","code":500}"#,
+        r#"{"level":"INFO","code":200}"#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        client
+            .put_log_events()
+            .log_group_name("/filter/json")
+            .log_stream_name("s1")
+            .log_events(
+                InputLogEvent::builder()
+                    .timestamp(now + i as i64)
+                    .message(*body)
+                    .build()
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // `$.level = "ERROR" || $.code = 500` matches only the first event.
+    let resp = client
+        .filter_log_events()
+        .log_group_name("/filter/json")
+        .filter_pattern("{ $.level = \"ERROR\" || $.code = 500 }")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.events().len(), 1, "only the ERROR/500 event matches");
+    assert!(resp.events()[0].message().unwrap().contains("ERROR"));
+}
