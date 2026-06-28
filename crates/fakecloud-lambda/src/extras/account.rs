@@ -139,13 +139,18 @@ impl LambdaService {
         // accurate numbers. AWS sums total code size across all functions.
         let function_count = state.functions.len() as i64;
         let total_code_size: i64 = state.functions.values().map(|f| f.code_size).sum();
+        // UnreservedConcurrentExecutions = the account limit minus the
+        // concurrency reserved by individual functions (AWS decrements it as
+        // reserved concurrency is allocated).
+        let reserved: i64 = state.function_concurrency.values().copied().sum();
+        let unreserved = (settings.concurrent_executions - reserved).max(0);
         ok(json!({
             "AccountLimit": {
                 "ConcurrentExecutions": settings.concurrent_executions,
                 "CodeSizeZipped": settings.code_size_zipped,
                 "CodeSizeUnzipped": settings.code_size_unzipped,
                 "TotalCodeSize": settings.total_code_size,
-                "UnreservedConcurrentExecutions": settings.concurrent_executions,
+                "UnreservedConcurrentExecutions": unreserved,
             },
             "AccountUsage": {
                 "TotalCodeSize": total_code_size,

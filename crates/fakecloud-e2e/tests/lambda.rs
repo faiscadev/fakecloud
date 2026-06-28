@@ -1455,3 +1455,109 @@ async fn lambda_list_functions_all_versions_and_maxitems() {
         .await
         .expect("MaxItems=100 accepted for ListAliases");
 }
+
+// bug-audit 2026-06-27, T1.13: GetAccountSettings must decrement
+// UnreservedConcurrentExecutions by the concurrency reserved on functions.
+#[tokio::test]
+async fn lambda_account_settings_unreserved_concurrency_decrements() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let before = client.get_account_settings().send().await.unwrap();
+    let limit = before.account_limit().unwrap().concurrent_executions();
+    assert_eq!(
+        before
+            .account_limit()
+            .unwrap()
+            .unreserved_concurrent_executions(),
+        Some(limit),
+        "no reservations -> unreserved equals the limit"
+    );
+
+    client
+        .create_function()
+        .function_name("reserved-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_function_concurrency()
+        .function_name("reserved-fn")
+        .reserved_concurrent_executions(100)
+        .send()
+        .await
+        .unwrap();
+
+    let after = client.get_account_settings().send().await.unwrap();
+    assert_eq!(
+        after
+            .account_limit()
+            .unwrap()
+            .unreserved_concurrent_executions(),
+        Some(limit - 100),
+        "100 reserved -> unreserved drops by 100"
+    );
+}
+
+// bug-audit 2026-06-27, T1.13: a handler that raises an exception (the runtime
+// catches it and returns the {errorMessage,errorType} envelope) must set
+// X-Amz-Function-Error: Handled, not Unhandled. (Lives in the `lambda` binary,
+// which the lambda-api partition covers in full, rather than the
+// runtime-name-partitioned `lambda_invoke` binary.)
+#[tokio::test]
+async fn lambda_handler_exception_is_handled_function_error() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let zip = {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("index.py", options).unwrap();
+        writer
+            .write_all(b"def handler(event, context):\n    raise ValueError('boom')\n")
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    };
+    client
+        .create_function()
+        .function_name("raiser")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("raiser")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.function_error(),
+        Some("Handled"),
+        "a raised handler exception is a Handled function error"
+    );
+    let body = String::from_utf8(resp.payload().unwrap().as_ref().to_vec()).unwrap();
+    assert!(
+        body.contains("errorMessage") || body.contains("errorType"),
+        "error envelope in payload, got: {body}"
+    );
+}
