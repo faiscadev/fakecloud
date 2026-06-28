@@ -1007,3 +1007,28 @@ async fn update_request_validator_keeps_boolean_flags() {
         .expect("get_request_validator");
     assert!(got.validate_request_body());
 }
+
+// bug-audit 2026-06-27, T6.3: GenerateClientCertificate must return a real,
+// parseable PEM certificate, not a placeholder string.
+#[tokio::test]
+async fn apigw_generate_client_certificate_returns_real_pem() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let cert = client
+        .generate_client_certificate()
+        .send()
+        .await
+        .expect("generate client certificate");
+    let pem = cert.pem_encoded_certificate().expect("pem present");
+    assert!(pem.contains("-----BEGIN CERTIFICATE-----"));
+    assert!(!pem.contains("fakecloud-stub"), "not a placeholder");
+
+    // The body between the PEM markers must be valid base64 DER (a real cert).
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    use base64::Engine;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body.trim())
+        .expect("PEM body is valid base64 DER");
+    assert!(der.len() > 100, "decoded certificate is non-trivial");
+}

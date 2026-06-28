@@ -504,10 +504,7 @@ impl ApiGatewayService {
             );
             o.insert(
                 "pemEncodedCertificate".to_string(),
-                Value::String(
-                    "-----BEGIN CERTIFICATE-----\nfakecloud-stub\n-----END CERTIFICATE-----"
-                        .to_string(),
-                ),
+                Value::String(generate_client_certificate_pem()),
             );
         }
         let mut accounts = self.state.write();
@@ -585,4 +582,15 @@ impl ApiGatewayService {
         });
         ok(v.clone())
     }
+}
+
+/// Generate a real self-signed X.509 certificate (PEM) for the API Gateway
+/// client certificate, so callers configuring backend mTLS trust get a
+/// parseable cert instead of a placeholder string.
+fn generate_client_certificate_pem() -> String {
+    rcgen::generate_simple_self_signed(vec!["apigateway-client.amazonaws.com".to_string()])
+        .map(|c| c.cert.pem())
+        .unwrap_or_else(|_| {
+            "-----BEGIN CERTIFICATE-----\nfakecloud-stub\n-----END CERTIFICATE-----".to_string()
+        })
 }

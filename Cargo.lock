@@ -3183,6 +3183,7 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "percent-encoding",
+ "rcgen",
  "regex",
  "reqwest",
  "serde",
