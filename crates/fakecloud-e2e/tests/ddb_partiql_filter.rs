@@ -462,3 +462,32 @@ async fn ddb_update_remove_nested_path() {
     assert!(!profile.contains_key("middle"), "nested key removed");
     assert!(profile.contains_key("first"), "sibling key kept");
 }
+
+// bug-audit 2026-06-27, T1.12: PartiQL numeric comparisons must use the exact
+// decimal value, not f64 (which rounds past 2^53 so two distinct large ints
+// compare equal).
+#[tokio::test]
+async fn ddb_partiql_large_integer_comparison_is_exact() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    create_streamed_table(&ddb, "BigInt").await;
+
+    // 2^53 + 1 — indistinguishable from 2^53 under f64.
+    ddb.execute_statement()
+        .statement("INSERT INTO \"BigInt\" value {'pk':'a','n':9007199254740993}")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = ddb
+        .execute_statement()
+        .statement("SELECT pk FROM \"BigInt\" WHERE n > 9007199254740992")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.items().len(),
+        1,
+        "9007199254740993 > 9007199254740992 holds with exact decimal comparison"
+    );
+}

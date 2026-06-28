@@ -1048,9 +1048,22 @@ impl DynamoDbService {
                         }
                     }
                     Err(e) => {
+                        // BatchStatementError.Code is the BatchStatementErrorCodeEnum
+                        // (ValidationError, ConditionalCheckFailed, ...), not the
+                        // top-level "ValidationException" name.
+                        let code = match e.code() {
+                            "ConditionalCheckFailedException" => "ConditionalCheckFailed",
+                            "ResourceNotFoundException" => "ResourceNotFound",
+                            "DuplicateItemException" => "DuplicateItem",
+                            "TransactionConflictException" => "TransactionConflict",
+                            "ProvisionedThroughputExceededException" => {
+                                "ProvisionedThroughputExceeded"
+                            }
+                            _ => "ValidationError",
+                        };
                         responses.push(json!({
                             "Error": {
-                                "Code": "ValidationException",
+                                "Code": code,
                                 "Message": e.to_string()
                             }
                         }));

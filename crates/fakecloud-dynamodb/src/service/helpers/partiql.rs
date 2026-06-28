@@ -839,9 +839,13 @@ pub(crate) fn compare_attr(lhs: Option<&Value>, rhs: &Value) -> Option<i32> {
         l.get("N").and_then(|v| v.as_str()),
         r.get("N").and_then(|v| v.as_str()),
     ) {
-        let an: f64 = a.parse().ok()?;
-        let bn: f64 = b.parse().ok()?;
-        return Some(an.partial_cmp(&bn).map(|o| o as i32).unwrap_or(0));
+        // Compare the decimal strings directly: parsing to f64 silently rounds
+        // past 2^53, so two distinct large integers would compare Equal.
+        return Some(match compare_number_strings(a, b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        });
     }
     if let (Some(a), Some(b)) = (
         l.get("S").and_then(|v| v.as_str()),
@@ -1067,7 +1071,15 @@ pub(crate) fn parse_partiql_literal(
         let inner = &s[1..s.len() - 1];
         Some(json!({"S": inner}))
     } else if let Ok(n) = s.parse::<f64>() {
-        let num_str = if n == n.trunc() {
+        // Preserve the exact decimal text for integer literals — going through
+        // f64 silently rounds past 2^53, so a 17+ digit id would be stored
+        // wrong. Fractional/scientific literals still normalize via f64.
+        let is_integer = s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'-' || b == b'+');
+        let num_str = if is_integer {
+            s.strip_prefix('+').unwrap_or(s).to_string()
+        } else if n == n.trunc() {
             format!("{}", n as i64)
         } else {
             format!("{n}")
