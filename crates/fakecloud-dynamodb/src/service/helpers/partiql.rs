@@ -93,6 +93,21 @@ fn compare_magnitude(a: &(String, String), b: &(String, String)) -> std::cmp::Or
         .then_with(|| a.1.cmp(&b.1))
 }
 
+/// Two AttributeValues are comparable by the relational operators (`<`, `<=`,
+/// `>`, `>=`, BETWEEN) only when they share a scalar type (S, N, or B).
+/// DynamoDB does not match a comparison across mismatched types; without this
+/// guard, `compare_attribute_values` falls back to `Equal` for a type mismatch,
+/// which wrongly satisfies `<=`/`>=`/BETWEEN.
+pub(crate) fn comparable_types(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (
+        a.and_then(attribute_type_and_value),
+        b.and_then(attribute_type_and_value),
+    ) {
+        (Some((ta, _)), Some((tb, _))) => ta == tb && matches!(ta, "S" | "N" | "B"),
+        _ => false,
+    }
+}
+
 pub(crate) fn compare_attribute_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     match (a, b) {
         (None, None) => std::cmp::Ordering::Equal,

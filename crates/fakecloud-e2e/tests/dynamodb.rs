@@ -5585,3 +5585,67 @@ async fn conditional_check_failure_returns_old_item() {
         "the returned item should be the current (v=1) item"
     );
 }
+
+// bug-audit 2026-06-27, T1.12: a relational FilterExpression comparison across
+// mismatched types must not match (DynamoDB only compares same-typed values).
+#[tokio::test]
+async fn dynamodb_filter_cross_type_comparison_does_not_match() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("CrossType")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_item()
+        .table_name("CrossType")
+        .item("id", AttributeValue::S("r1".to_string()))
+        .item("n", AttributeValue::N("5".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // Number attribute `n` compared `<=` a STRING value: no match.
+    let mismatched = client
+        .scan()
+        .table_name("CrossType")
+        .filter_expression("n <= :s")
+        .expression_attribute_values(":s", AttributeValue::S("10".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        mismatched.count(),
+        0,
+        "cross-type n <= :string must not match"
+    );
+
+    // Same number type: matches.
+    let matched = client
+        .scan()
+        .table_name("CrossType")
+        .filter_expression("n <= :v")
+        .expression_attribute_values(":v", AttributeValue::N("10".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(matched.count(), 1, "same-type n <= :number matches");
+}

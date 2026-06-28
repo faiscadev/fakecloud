@@ -273,7 +273,9 @@ pub(crate) fn key_cond_between(
     let actual = item.get(&attr_name);
     match (actual, lo, hi) {
         (Some(a), Some(l), Some(h)) => {
-            compare_attribute_values(Some(a), Some(l)) != std::cmp::Ordering::Less
+            comparable_types(Some(a), Some(l))
+                && comparable_types(Some(a), Some(h))
+                && compare_attribute_values(Some(a), Some(l)) != std::cmp::Ordering::Less
                 && compare_attribute_values(Some(a), Some(h)) != std::cmp::Ordering::Greater
         }
         _ => false,
@@ -313,15 +315,25 @@ pub(crate) fn key_cond_simple_comparison(
         return match *op {
             "=" => values_equal(actual, expected),
             "<>" => !values_equal(actual, expected),
-            "<" => compare_attribute_values(actual, expected) == std::cmp::Ordering::Less,
-            ">" => compare_attribute_values(actual, expected) == std::cmp::Ordering::Greater,
+            "<" => {
+                comparable_types(actual, expected)
+                    && compare_attribute_values(actual, expected) == std::cmp::Ordering::Less
+            }
+            ">" => {
+                comparable_types(actual, expected)
+                    && compare_attribute_values(actual, expected) == std::cmp::Ordering::Greater
+            }
             "<=" => {
-                let cmp = compare_attribute_values(actual, expected);
-                cmp == std::cmp::Ordering::Less || cmp == std::cmp::Ordering::Equal
+                comparable_types(actual, expected) && {
+                    let cmp = compare_attribute_values(actual, expected);
+                    cmp == std::cmp::Ordering::Less || cmp == std::cmp::Ordering::Equal
+                }
             }
             ">=" => {
-                let cmp = compare_attribute_values(actual, expected);
-                cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal
+                comparable_types(actual, expected) && {
+                    let cmp = compare_attribute_values(actual, expected);
+                    cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal
+                }
             }
             _ => false,
         };
