@@ -113,9 +113,13 @@ impl ResourceProvisioner {
             ec2_runtime: self.ec2_runtime.clone(),
             ecs_runtime: self.ecs_runtime.clone(),
             elasticache_runtime: self.elasticache_runtime.clone(),
-            // Share the parent's queue so nested-stack container resources are
-            // drained and backed by the same CreateStack.
+            // Share the parent's queues so nested-stack container resources are
+            // drained and backed/reaped by the same parent op, and any deferred
+            // custom-resource invokes are drained alongside the parent's.
             pending_container_spawns: self.pending_container_spawns.clone(),
+            pending_container_teardowns: self.pending_container_teardowns.clone(),
+            pending_custom_invokes: self.pending_custom_invokes.clone(),
+            defer_custom_invokes: self.defer_custom_invokes,
             s3_store: self.s3_store.clone(),
             account_id: self.account_id.clone(),
             region: self.region.clone(),

@@ -914,7 +914,13 @@ impl CloudFormationService {
                     })?
                 };
 
-                let provisioner = self.provisioner(&found_stack_id, &aid, &req.region);
+                // `provisioner_deferred`: apply_resource_updates runs inside the
+                // state write lock below; a synchronous custom-resource Lambda
+                // invoke there would stall every other CFN op behind the lock and
+                // could block the client (cdk/sam/`aws cloudformation deploy`)
+                // past its read timeout. Queue those invokes and drain them off
+                // the request path after the lock is dropped (bug-audit 0.2).
+                let provisioner = self.provisioner_deferred(&found_stack_id, &aid, &req.region);
 
                 // Cross-stack exports for `Fn::ImportValue` in resource
                 // properties (1.5); collected before the write lock.
@@ -1056,6 +1062,27 @@ impl CloudFormationService {
                         "ValidationError",
                         msg,
                     ));
+                }
+
+                // The change set executed successfully. Back any newly-added
+                // container resources (RDS / ElastiCache / ECS / ASG) with REAL
+                // containers and reap any removed ones, both off the request
+                // path -- cdk/sam/`aws cloudformation deploy` provision via
+                // ExecuteChangeSet, so without this their container-backed
+                // resources sit at `creating` forever and stack deletes leak
+                // containers (the #2031-#2034 create-side hardening reaching the
+                // changeset path, bug-audit 0.1/0.3/0.4). Then run any deferred
+                // custom-resource Lambda invokes (0.2).
+                {
+                    let handles =
+                        crate::service::ContainerBackingHandles::from_provisioner(&provisioner);
+                    handles.spawn_container_intents(std::mem::take(
+                        &mut *provisioner.pending_container_spawns.lock(),
+                    ));
+                    handles.spawn_teardown_intents(std::mem::take(
+                        &mut *provisioner.pending_container_teardowns.lock(),
+                    ));
+                    crate::service::spawn_custom_invokes(&provisioner);
                 }
 
                 // Resolve the template's `Outputs` for the newly provisioned

@@ -376,6 +376,264 @@ struct CreateStackContext {
     resource_defs: Vec<template::ResourceDefinition>,
 }
 
+/// Owned clones of the service-state + container-runtime handles a provisioner
+/// holds, so the spawn / teardown drains can `tokio::spawn` REAL container work
+/// after the provisioner itself has been moved (CreateStack moves it into
+/// `spawn_blocking`) or after the CFN state lock has been dropped (the
+/// changeset/update/delete paths). Centralizes the per-resource-type match that
+/// backs a freshly-provisioned container resource or reaps a deleted one, so the
+/// CreateStack / ExecuteChangeSet / UpdateStack / DeleteStack paths stay in
+/// lockstep (the #2031-#2034 create-side hardening reaching every path).
+pub(crate) struct ContainerBackingHandles {
+    account_id: String,
+    region: String,
+    rds_state: fakecloud_rds::SharedRdsState,
+    rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
+    ec2_state: fakecloud_ec2::SharedEc2State,
+    ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
+    autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState,
+    elasticache_state: fakecloud_elasticache::SharedElastiCacheState,
+    elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
+    ecs_state: fakecloud_ecs::SharedEcsState,
+    ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+}
+
+impl ContainerBackingHandles {
+    pub(crate) fn from_provisioner(p: &ResourceProvisioner) -> Self {
+        Self {
+            account_id: p.account_id.clone(),
+            region: p.region.clone(),
+            rds_state: p.rds_state.clone(),
+            rds_runtime: p.rds_runtime.clone(),
+            ec2_state: p.ec2_state.clone(),
+            ec2_runtime: p.ec2_runtime.clone(),
+            autoscaling_state: p.autoscaling_state.clone(),
+            elasticache_state: p.elasticache_state.clone(),
+            elasticache_runtime: p.elasticache_runtime.clone(),
+            ecs_state: p.ecs_state.clone(),
+            ecs_runtime: p.ecs_runtime.clone(),
+        }
+    }
+
+    /// Back each freshly-inserted container resource with a REAL container in a
+    /// detached task, so the stack op never blocks on a container boot/pull (the
+    /// #1539/#1730 timeout lesson). Drains the provisioner's queued spawn intents.
+    pub(crate) fn spawn_container_intents(
+        &self,
+        intents: Vec<crate::resource_provisioner::ContainerSpawnIntent>,
+    ) {
+        use crate::resource_provisioner::ContainerSpawnIntent;
+        for intent in intents {
+            match intent {
+                ContainerSpawnIntent::RdsInstance { identifier } => {
+                    if let Some(runtime) = self.rds_runtime.clone() {
+                        let rds_state = self.rds_state.clone();
+                        let account = self.account_id.clone();
+                        let region = self.region.clone();
+                        tokio::spawn(async move {
+                            fakecloud_rds::cfn_provision::cfn_ensure_instance_container(
+                                rds_state, runtime, identifier, account, region,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerSpawnIntent::AsgInstances { group_name } => {
+                    let asg_state = self.autoscaling_state.clone();
+                    let ec2_state = self.ec2_state.clone();
+                    let ec2_runtime = self.ec2_runtime.clone();
+                    let account = self.account_id.clone();
+                    let region = self.region.clone();
+                    tokio::spawn(async move {
+                        fakecloud_autoscaling::cfn_provision::cfn_reconcile_capacity(
+                            asg_state,
+                            ec2_state,
+                            ec2_runtime,
+                            group_name,
+                            account,
+                            region,
+                        )
+                        .await;
+                    });
+                }
+                ContainerSpawnIntent::ElastiCacheCluster { cache_cluster_id } => {
+                    if let Some(runtime) = self.elasticache_runtime.clone() {
+                        let ec_state = self.elasticache_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_elasticache::cfn_provision::cfn_ensure_cluster_container(
+                                ec_state,
+                                runtime,
+                                cache_cluster_id,
+                                account,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerSpawnIntent::ElastiCacheReplicationGroup {
+                    replication_group_id,
+                } => {
+                    if let Some(runtime) = self.elasticache_runtime.clone() {
+                        let ec_state = self.elasticache_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_elasticache::cfn_provision::cfn_ensure_replication_group_container(
+                                ec_state,
+                                runtime,
+                                replication_group_id,
+                                account,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerSpawnIntent::EcsServiceTasks {
+                    cluster_name,
+                    service_name,
+                } => {
+                    if let Some(runtime) = self.ecs_runtime.clone() {
+                        let ecs_state = self.ecs_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_ecs::cfn_provision::cfn_launch_service_tasks(
+                                ecs_state,
+                                runtime,
+                                cluster_name,
+                                service_name,
+                                account,
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reap the REAL backing container for each deleted container resource in a
+    /// detached task, so a stack delete (or update-removed) never leaks a
+    /// running RDS / ElastiCache / ECS / EC2 container. Drains the provisioner's
+    /// queued teardown intents.
+    pub(crate) fn spawn_teardown_intents(
+        &self,
+        intents: Vec<crate::resource_provisioner::ContainerTeardownIntent>,
+    ) {
+        use crate::resource_provisioner::ContainerTeardownIntent;
+        for intent in intents {
+            match intent {
+                ContainerTeardownIntent::RdsInstance { identifier } => {
+                    if let Some(runtime) = self.rds_runtime.clone() {
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_rds::cfn_provision::cfn_teardown_instance_container(
+                                runtime, identifier, account,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::ElastiCacheCluster { cache_cluster_id } => {
+                    if let Some(runtime) = self.elasticache_runtime.clone() {
+                        tokio::spawn(async move {
+                            fakecloud_elasticache::cfn_provision::cfn_teardown_cluster_container(
+                                runtime,
+                                cache_cluster_id,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::ElastiCacheReplicationGroup {
+                    replication_group_id,
+                } => {
+                    if let Some(runtime) = self.elasticache_runtime.clone() {
+                        tokio::spawn(async move {
+                            fakecloud_elasticache::cfn_provision::cfn_teardown_replication_group_container(
+                                runtime,
+                                replication_group_id,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::EcsService {
+                    cluster_name,
+                    service_name,
+                } => {
+                    if let Some(runtime) = self.ecs_runtime.clone() {
+                        let ecs_state = self.ecs_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_ecs::cfn_provision::cfn_stop_service_tasks(
+                                ecs_state,
+                                runtime,
+                                cluster_name,
+                                service_name,
+                                account,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::AsgInstances { instance_ids } => {
+                    let asg_state = self.autoscaling_state.clone();
+                    let ec2_state = self.ec2_state.clone();
+                    let ec2_runtime = self.ec2_runtime.clone();
+                    let account = self.account_id.clone();
+                    let region = self.region.clone();
+                    tokio::spawn(async move {
+                        fakecloud_autoscaling::cfn_provision::cfn_terminate_instances(
+                            asg_state,
+                            ec2_state,
+                            ec2_runtime,
+                            instance_ids,
+                            account,
+                            region,
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Drain a provisioner's queued custom-resource Lambda invokes (`Custom::*`),
+/// running each off the request path in a detached task so a cold image pull
+/// never blocks the client or stalls the CFN state lock. Used by the
+/// changeset/update/delete paths (where `defer_custom_invokes` is set).
+pub(crate) fn spawn_custom_invokes(provisioner: &ResourceProvisioner) {
+    let intents = std::mem::take(&mut *provisioner.pending_custom_invokes.lock());
+    if intents.is_empty() {
+        return;
+    }
+    let delivery = provisioner.delivery.clone();
+    for intent in intents {
+        let delivery = delivery.clone();
+        tokio::spawn(async move {
+            match delivery
+                .invoke_lambda(&intent.service_token, &intent.payload)
+                .await
+            {
+                Some(Ok(_)) => {
+                    tracing::info!(
+                        "Custom resource Lambda {} invoked successfully",
+                        intent.service_token
+                    );
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        "Custom resource Lambda {} invocation failed: {e}",
+                        intent.service_token
+                    );
+                }
+                None => {}
+            }
+        });
+    }
+}
+
 impl CloudFormationService {
     pub fn new(state: SharedCloudFormationState, deps: CloudFormationDeps) -> Self {
         Self {
@@ -480,10 +738,36 @@ impl CloudFormationService {
             ecs_runtime: self.deps.ecs_runtime.clone(),
             elasticache_runtime: self.deps.elasticache_runtime.clone(),
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            // CreateStack provisions in a detached task, so its synchronous
+            // custom-resource invoke never blocks the client or the state lock.
+            // The changeset/update/delete paths run inside the request, so they
+            // flip this on (see `provisioner_deferred`) to queue the invoke and
+            // drain it off the request path instead.
+            defer_custom_invokes: false,
             s3_store: self.s3_store.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),
+        }
+    }
+
+    /// Build a provisioner for the changeset/update/delete paths, which run
+    /// inside the request rather than in a detached `CreateStack` task. These
+    /// queue custom-resource Lambda invokes (`defer_custom_invokes`) so a cold
+    /// image pull never blocks the client past its read timeout or stalls every
+    /// other CFN op behind the state write lock; the caller drains and
+    /// `tokio::spawn`s the queued invokes after dropping the lock.
+    pub(crate) fn provisioner_deferred(
+        &self,
+        stack_id: &str,
+        account_id: &str,
+        region: &str,
+    ) -> ResourceProvisioner {
+        ResourceProvisioner {
+            defer_custom_invokes: true,
+            ..self.provisioner(stack_id, account_id, region)
         }
     }
 
@@ -1043,16 +1327,7 @@ impl CloudFormationService {
         // into spawn_blocking, so the post-provision drain (below) can back
         // freshly-inserted container resources with REAL containers.
         let container_spawns = provisioner.pending_container_spawns.clone();
-        let rds_runtime_for_spawn = provisioner.rds_runtime.clone();
-        let rds_state_for_spawn = provisioner.rds_state.clone();
-        let region_for_spawn = provisioner.region.clone();
-        let ec2_state_for_spawn = provisioner.ec2_state.clone();
-        let ec2_runtime_for_spawn = provisioner.ec2_runtime.clone();
-        let autoscaling_state_for_spawn = provisioner.autoscaling_state.clone();
-        let elasticache_state_for_spawn = provisioner.elasticache_state.clone();
-        let elasticache_runtime_for_spawn = provisioner.elasticache_runtime.clone();
-        let ecs_state_for_spawn = provisioner.ecs_state.clone();
-        let ecs_runtime_for_spawn = provisioner.ecs_runtime.clone();
+        let backing_handles = ContainerBackingHandles::from_provisioner(&provisioner);
 
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
@@ -1106,101 +1381,7 @@ impl CloudFormationService {
         // CreateStack never blocks on a container boot/pull — the record is
         // already inserted as "creating" and flips to "available" when the
         // container is up (the #1539/#1730 timeout lesson).
-        {
-            let intents = std::mem::take(&mut *container_spawns.lock());
-            for intent in intents {
-                match intent {
-                    crate::resource_provisioner::ContainerSpawnIntent::RdsInstance {
-                        identifier,
-                    } => {
-                        if let Some(runtime) = rds_runtime_for_spawn.clone() {
-                            let rds_state = rds_state_for_spawn.clone();
-                            let account = account_id.clone();
-                            let region = region_for_spawn.clone();
-                            tokio::spawn(async move {
-                                fakecloud_rds::cfn_provision::cfn_ensure_instance_container(
-                                    rds_state, runtime, identifier, account, region,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    crate::resource_provisioner::ContainerSpawnIntent::AsgInstances {
-                        group_name,
-                    } => {
-                        let asg_state = autoscaling_state_for_spawn.clone();
-                        let ec2_state = ec2_state_for_spawn.clone();
-                        let ec2_runtime = ec2_runtime_for_spawn.clone();
-                        let account = account_id.clone();
-                        let region = region_for_spawn.clone();
-                        tokio::spawn(async move {
-                            fakecloud_autoscaling::cfn_provision::cfn_reconcile_capacity(
-                                asg_state,
-                                ec2_state,
-                                ec2_runtime,
-                                group_name,
-                                account,
-                                region,
-                            )
-                            .await;
-                        });
-                    }
-                    crate::resource_provisioner::ContainerSpawnIntent::ElastiCacheCluster {
-                        cache_cluster_id,
-                    } => {
-                        if let Some(runtime) = elasticache_runtime_for_spawn.clone() {
-                            let ec_state = elasticache_state_for_spawn.clone();
-                            let account = account_id.clone();
-                            tokio::spawn(async move {
-                                fakecloud_elasticache::cfn_provision::cfn_ensure_cluster_container(
-                                    ec_state,
-                                    runtime,
-                                    cache_cluster_id,
-                                    account,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    crate::resource_provisioner::ContainerSpawnIntent::ElastiCacheReplicationGroup {
-                        replication_group_id,
-                    } => {
-                        if let Some(runtime) = elasticache_runtime_for_spawn.clone() {
-                            let ec_state = elasticache_state_for_spawn.clone();
-                            let account = account_id.clone();
-                            tokio::spawn(async move {
-                                fakecloud_elasticache::cfn_provision::cfn_ensure_replication_group_container(
-                                    ec_state,
-                                    runtime,
-                                    replication_group_id,
-                                    account,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                    crate::resource_provisioner::ContainerSpawnIntent::EcsServiceTasks {
-                        cluster_name,
-                        service_name,
-                    } => {
-                        if let Some(runtime) = ecs_runtime_for_spawn.clone() {
-                            let ecs_state = ecs_state_for_spawn.clone();
-                            let account = account_id.clone();
-                            tokio::spawn(async move {
-                                fakecloud_ecs::cfn_provision::cfn_launch_service_tasks(
-                                    ecs_state,
-                                    runtime,
-                                    cluster_name,
-                                    service_name,
-                                    account,
-                                )
-                                .await;
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        backing_handles.spawn_container_intents(std::mem::take(&mut *container_spawns.lock()));
 
         let outputs =
             Self::resolve_template_outputs(&template_body, &parameters, &resources, &state);
@@ -1374,12 +1555,26 @@ impl CloudFormationService {
                 // Build the provisioner while we still have the stack_id
                 // Drop the write lock temporarily so the provisioner can read state
                 drop(accounts);
-                let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
+                // `provisioner_deferred`: queue any custom-resource Delete Lambda
+                // invokes so a cold image pull never blocks the client past its
+                // read timeout (drained off the request path below).
+                let provisioner =
+                    self.provisioner_deferred(&stack_id, &req.account_id, &req.region);
 
                 // Delete resources in reverse order
                 for resource in resources.iter().rev() {
                     let _ = provisioner.delete_resource(resource);
                 }
+
+                // Reap the REAL backing containers for the deleted container
+                // resources (RDS / ElastiCache / ECS / ASG-EC2) off the request
+                // path, so a stack delete does not leak running containers (the
+                // create-side #2031-#2034 hardening reaching the delete path).
+                // Each delete_resource above only removed the in-memory record.
+                ContainerBackingHandles::from_provisioner(&provisioner).spawn_teardown_intents(
+                    std::mem::take(&mut *provisioner.pending_container_teardowns.lock()),
+                );
+                spawn_custom_invokes(&provisioner);
 
                 // Re-acquire the write lock to update stack status
                 let mut accounts = self.state.write();
@@ -1645,7 +1840,12 @@ impl CloudFormationService {
             &input.parameters,
         )?;
 
-        let provisioner = self.provisioner(&found_stack_id, &req.account_id, &req.region);
+        // `provisioner_deferred`: apply_resource_updates runs inside the state
+        // write lock below; a synchronous custom-resource Lambda invoke there
+        // would stall every other CFN op behind the lock and could block the
+        // client past its read timeout. Queue those invokes and drain them off
+        // the request path after the lock is dropped.
+        let provisioner = self.provisioner_deferred(&found_stack_id, &req.account_id, &req.region);
 
         // Cross-stack exports for `Fn::ImportValue` in resource properties (1.5).
         // Computed before the write lock (collect_account_imports takes a read
@@ -1804,6 +2004,22 @@ impl CloudFormationService {
                 resources_snapshot,
             )
         };
+
+        // The update succeeded (failures returned above). Back any newly-added
+        // container resources with REAL containers and reap any removed ones,
+        // both off the request path (the #2031-#2034 create-side hardening
+        // reaching the update path), then run any deferred custom-resource
+        // invokes.
+        {
+            let handles = ContainerBackingHandles::from_provisioner(&provisioner);
+            handles.spawn_container_intents(std::mem::take(
+                &mut *provisioner.pending_container_spawns.lock(),
+            ));
+            handles.spawn_teardown_intents(std::mem::take(
+                &mut *provisioner.pending_container_teardowns.lock(),
+            ));
+            spawn_custom_invokes(&provisioner);
+        }
 
         let outputs = Self::resolve_template_outputs(
             &input.template_body,
