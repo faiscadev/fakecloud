@@ -43,11 +43,23 @@ impl StepFunctionsService {
             .ok_or_else(|| state_machine_not_found(sm_arn))?;
 
         let sm_name = sm.name.clone();
+        let sm_type = sm.machine_type;
         let definition = sm.definition.clone();
         let exec_arn = state.execution_arn(&sm_name, &execution_name);
 
-        // Check for duplicate execution name
-        if state.executions.contains_key(&exec_arn) {
+        // Handle name collisions. For STANDARD workflows, StartExecution is
+        // idempotent: re-issuing the same name AND the same input returns the
+        // existing executionArn with HTTP 200, while a different input is a
+        // 400 ExecutionAlreadyExists. (EXPRESS has no idempotency.)
+        if let Some(existing) = state.executions.get(&exec_arn) {
+            let same_input = sm_type == crate::state::StateMachineType::Standard
+                && execution_input_matches(existing.input.as_deref(), input.as_deref());
+            if same_input {
+                return Ok(AwsResponse::ok_json(json!({
+                    "executionArn": existing.execution_arn,
+                    "startDate": existing.start_date.timestamp() as f64,
+                })));
+            }
             return Err(AwsServiceError::aws_error(
                 StatusCode::CONFLICT,
                 "ExecutionAlreadyExists",

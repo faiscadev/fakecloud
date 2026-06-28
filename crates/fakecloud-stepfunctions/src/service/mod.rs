@@ -726,12 +726,42 @@ fn execution_to_json(exec: &Execution) -> Value {
     resp
 }
 
-/// Convert event type like "PassStateEntered" to the details key format "passStateEntered".
+/// Convert an event type to the JSON key prefix used in the `HistoryEvent`
+/// shape (the full key is `<prefix>EventDetails`).
+///
+/// AWS collapses every `*StateEntered` event type (Pass/Task/Choice/Wait/Map/
+/// Parallel/Succeed/...) into a single `stateEnteredEventDetails` member, and
+/// every `*StateExited` into `stateExitedEventDetails`. All other event types
+/// map by lowercasing the first character (`TaskScheduled` ->
+/// `taskScheduledEventDetails`). Without the collapse, SDK deserializers see an
+/// unknown key like `passStateEnteredEventDetails` and return null name/input.
 fn camel_to_details_key(event_type: &str) -> String {
+    if event_type.ends_with("StateEntered") {
+        return "stateEntered".to_string();
+    }
+    if event_type.ends_with("StateExited") {
+        return "stateExited".to_string();
+    }
     let mut chars = event_type.chars();
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_lowercase().to_string() + chars.as_str(),
+    }
+}
+
+/// Compare two StartExecution inputs for STANDARD idempotency. A missing input
+/// defaults to `{}` (AWS's default execution input). Comparison is structural
+/// (parsed JSON), so insignificant whitespace differences still dedup; inputs
+/// that fail to parse fall back to an exact string match.
+fn execution_input_matches(stored: Option<&str>, incoming: Option<&str>) -> bool {
+    let stored = stored.unwrap_or("{}");
+    let incoming = incoming.unwrap_or("{}");
+    match (
+        serde_json::from_str::<Value>(stored),
+        serde_json::from_str::<Value>(incoming),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => stored == incoming,
     }
 }
 
@@ -1293,17 +1323,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_execution_duplicate_name() {
+    async fn start_execution_same_name_same_input_is_idempotent() {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_sm(&svc, "dup-exec");
 
         let body = json!({
             "stateMachineArn": arn,
             "name": "same-name",
+            "input": "{\"a\":1}",
+        });
+        let req = make_request("StartExecution", &body.to_string());
+        let first = body_json(&svc.start_execution(&req).unwrap());
+
+        // Same name AND same input -> 200 with the existing executionArn.
+        let req = make_request("StartExecution", &body.to_string());
+        let second = body_json(&svc.start_execution(&req).unwrap());
+        assert_eq!(first["executionArn"], second["executionArn"]);
+        assert_eq!(first["startDate"], second["startDate"]);
+    }
+
+    #[tokio::test]
+    async fn start_execution_same_name_different_input_conflicts() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "dup-exec-diff");
+
+        let req = make_request(
+            "StartExecution",
+            &json!({
+                "stateMachineArn": arn,
+                "name": "same-name",
+                "input": "{\"a\":1}",
+            })
+            .to_string(),
+        );
+        svc.start_execution(&req).unwrap();
+
+        // Same name, DIFFERENT input -> 400 ExecutionAlreadyExists.
+        let req = make_request(
+            "StartExecution",
+            &json!({
+                "stateMachineArn": arn,
+                "name": "same-name",
+                "input": "{\"a\":2}",
+            })
+            .to_string(),
+        );
+        let err = expect_err(svc.start_execution(&req));
+        assert!(err.to_string().contains("ExecutionAlreadyExists"));
+    }
+
+    #[tokio::test]
+    async fn start_execution_express_name_collision_never_idempotent() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "dup-exec-express");
+
+        let body = json!({
+            "stateMachineArn": arn,
+            "name": "same-name",
+            "input": "{\"a\":1}",
         });
         let req = make_request("StartExecution", &body.to_string());
         svc.start_execution(&req).unwrap();
 
+        // EXPRESS has no idempotency: even an identical re-issue conflicts.
         let req = make_request("StartExecution", &body.to_string());
         let err = expect_err(svc.start_execution(&req));
         assert!(err.to_string().contains("ExecutionAlreadyExists"));
@@ -1604,7 +1686,14 @@ mod tests {
 
     #[test]
     fn test_camel_to_details_key() {
-        assert_eq!(camel_to_details_key("PassStateEntered"), "passStateEntered");
+        // All *StateEntered / *StateExited types collapse to one key each.
+        assert_eq!(camel_to_details_key("PassStateEntered"), "stateEntered");
+        assert_eq!(camel_to_details_key("TaskStateEntered"), "stateEntered");
+        assert_eq!(camel_to_details_key("ChoiceStateExited"), "stateExited");
+        assert_eq!(camel_to_details_key("MapStateExited"), "stateExited");
+        // Other event types keep first-char-lowercased prefix.
+        assert_eq!(camel_to_details_key("TaskScheduled"), "taskScheduled");
+        assert_eq!(camel_to_details_key("ExecutionStarted"), "executionStarted");
         assert_eq!(camel_to_details_key(""), "");
     }
 

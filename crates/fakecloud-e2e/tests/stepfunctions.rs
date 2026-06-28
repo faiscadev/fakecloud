@@ -922,6 +922,28 @@ async fn sfn_get_execution_history() {
 
     // First event should be ExecutionStarted
     assert_eq!(events[0].r#type().as_str(), "ExecutionStarted");
+
+    // AWS collapses every *StateEntered into the single stateEnteredEventDetails
+    // key (and *StateExited into stateExitedEventDetails). With the wrong key,
+    // the SDK deserializes these as None and the state name is lost. Assert the
+    // SDK can read a non-null name off both.
+    let entered = events
+        .iter()
+        .find(|e| e.r#type().as_str() == "PassStateEntered")
+        .expect("PassStateEntered event present");
+    let entered_details = entered
+        .state_entered_event_details()
+        .expect("stateEnteredEventDetails deserialized (collapsed key)");
+    assert!(!entered_details.name().is_empty());
+
+    let exited = events
+        .iter()
+        .find(|e| e.r#type().as_str() == "PassStateExited")
+        .expect("PassStateExited event present");
+    let exited_details = exited
+        .state_exited_event_details()
+        .expect("stateExitedEventDetails deserialized (collapsed key)");
+    assert!(!exited_details.name().is_empty());
 }
 
 #[tokio::test]
@@ -4123,4 +4145,181 @@ async fn sfn_introspection_execution_tree_not_found() {
     );
     let resp = reqwest::get(&url).await.unwrap();
     assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn sfn_start_execution_idempotent_same_input() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("idem-sm")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let first = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("dedup")
+        .input(r#"{"a":1}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Same name AND same input -> 200 with the existing executionArn.
+    let second = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("dedup")
+        .input(r#"{"a":1}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(first.execution_arn(), second.execution_arn());
+}
+
+#[tokio::test]
+async fn sfn_start_execution_conflict_different_input() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let create = client
+        .create_state_machine()
+        .name("idem-conflict-sm")
+        .definition(simple_definition())
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("dedup")
+        .input(r#"{"a":1}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Same name, DIFFERENT input -> ExecutionAlreadyExists.
+    let err = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("dedup")
+        .input(r#"{"a":2}"#)
+        .send()
+        .await
+        .unwrap_err();
+
+    let svc_err = err.into_service_error();
+    assert!(
+        svc_err.is_execution_already_exists(),
+        "expected ExecutionAlreadyExists, got: {svc_err:?}"
+    );
+}
+
+#[tokio::test]
+async fn sfn_choice_applies_output_path() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let def = json!({
+        "StartAt": "Choose",
+        "States": {
+            "Choose": {
+                "Type": "Choice",
+                "Choices": [{"Variable": "$.x", "NumericEquals": 1, "Next": "Done"}],
+                "Default": "Done",
+                "OutputPath": "$.payload"
+            },
+            "Done": {"Type": "Pass", "End": true}
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("choice-outputpath-sm")
+        .definition(def)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"x":1,"payload":{"kept":true}}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        wait_for_execution(&client, start.execution_arn()).await,
+        "SUCCEEDED"
+    );
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap()).unwrap();
+    // OutputPath narrowed the Choice output to $.payload; "x" must be gone.
+    assert_eq!(output, json!({"kept": true}));
+}
+
+#[tokio::test]
+async fn sfn_pass_evaluates_parameters() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let def = json!({
+        "StartAt": "Build",
+        "States": {
+            "Build": {
+                "Type": "Pass",
+                "Parameters": {"renamed.$": "$.value", "constant": "fixed"},
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("pass-parameters-sm")
+        .definition(def)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{"value":42,"ignored":"z"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        wait_for_execution(&client, start.execution_arn()).await,
+        "SUCCEEDED"
+    );
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap()).unwrap();
+    assert_eq!(output, json!({"renamed": 42, "constant": "fixed"}));
 }
