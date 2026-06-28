@@ -491,3 +491,36 @@ async fn ddb_partiql_large_integer_comparison_is_exact() {
         "9007199254740993 > 9007199254740992 holds with exact decimal comparison"
     );
 }
+
+// bug-audit 2026-06-27, T1.12: ExecuteStatement (PartiQL SELECT) must honor
+// Limit and return/accept NextToken for pagination.
+#[tokio::test]
+async fn ddb_partiql_execute_statement_paginates() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    create_streamed_table(&ddb, "Paged").await;
+    for (i, pk) in ["p1", "p2", "p3"].iter().enumerate() {
+        put_row(&ddb, "Paged", pk, i as i64, "x").await;
+    }
+
+    let page1 = ddb
+        .execute_statement()
+        .statement("SELECT pk FROM \"Paged\"")
+        .limit(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1.items().len(), 2, "Limit caps the page");
+    let token = page1.next_token().expect("more results -> NextToken");
+
+    let page2 = ddb
+        .execute_statement()
+        .statement("SELECT pk FROM \"Paged\"")
+        .limit(2)
+        .next_token(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.items().len(), 1, "remaining item on page 2");
+    assert!(page2.next_token().is_none(), "last page has no NextToken");
+}

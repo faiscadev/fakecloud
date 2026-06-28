@@ -920,6 +920,8 @@ impl DynamoDbService {
         // itself a ValidationException.
         let statement = require_str_with_code(&body, "Statement", "ValidationException")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
+        let limit = body["Limit"].as_i64().filter(|&n| n > 0);
+        let next_token = body["NextToken"].as_str().map(str::to_string);
 
         // Hold the write lock only long enough to mutate state and
         // capture the change capture record. Stream records are
@@ -932,7 +934,13 @@ impl DynamoDbService {
             let state = accounts.get_or_create(&req.account_id);
             let region = state.region.clone();
             let outcome = execute_partiql_in_state(state, statement, &parameters)?;
-            let response = outcome.response.clone();
+            // ExecuteStatement honors Limit + NextToken on a SELECT result set
+            // (AWS paginates PartiQL SELECTs); the token is an opaque offset.
+            let response = apply_execute_statement_pagination(
+                outcome.response.clone(),
+                limit,
+                next_token.as_deref(),
+            );
 
             let kinesis_info = if let (Some(table_name), Some(event_name)) =
                 (outcome.table_name.as_ref(), outcome.event_name.as_ref())
@@ -1300,6 +1308,38 @@ impl DynamoDbService {
 
         Self::ok_json(json!({ "Responses": applied_responses }))
     }
+}
+
+/// Apply `Limit` + `NextToken` to a PartiQL SELECT response. The token is an
+/// opaque base64-encoded offset into the (deterministically ordered) result
+/// set. No-op for write statements (which carry no `Items`).
+fn apply_execute_statement_pagination(
+    mut response: Value,
+    limit: Option<i64>,
+    next_token: Option<&str>,
+) -> Value {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let Some(items) = response.get("Items").and_then(Value::as_array) else {
+        return response;
+    };
+    let total = items.len();
+    let start = next_token
+        .and_then(|t| b64.decode(t).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(total);
+    let end = match limit {
+        Some(l) => start.saturating_add(l as usize).min(total),
+        None => total,
+    };
+    let page: Vec<Value> = items[start..end].to_vec();
+    response["Items"] = Value::Array(page);
+    if end < total {
+        response["NextToken"] = json!(b64.encode(end.to_string()));
+    }
+    response
 }
 
 #[cfg(test)]
