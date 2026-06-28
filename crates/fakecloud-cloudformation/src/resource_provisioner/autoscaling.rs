@@ -5,11 +5,32 @@
 //! real container instances are a runtime concern, not CFN-time). cycle 4.
 
 use chrono::Utc;
-use fakecloud_autoscaling::state::{AsgInstance, AutoScalingGroup, LaunchConfiguration};
+use fakecloud_autoscaling::state::{
+    AsgInstance, AutoScalingGroup, LaunchConfiguration, LaunchTemplateSpec,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+
+/// Parse a CFN `LaunchTemplate` / `LaunchTemplateSpecification` block
+/// (`{LaunchTemplateId|LaunchTemplateName, Version}`) into a [`LaunchTemplateSpec`].
+fn parse_cfn_launch_template(v: Option<&Value>) -> Option<LaunchTemplateSpec> {
+    let obj = v?;
+    let id = obj.get("LaunchTemplateId").and_then(|x| x.as_str());
+    let name = obj.get("LaunchTemplateName").and_then(|x| x.as_str());
+    if id.is_none() && name.is_none() {
+        return None;
+    }
+    Some(LaunchTemplateSpec {
+        launch_template_id: id.map(String::from),
+        launch_template_name: name.map(String::from),
+        version: obj
+            .get("Version")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+    })
+}
 
 fn prop_str<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
     p.get(k).and_then(|v| v.as_str())
@@ -105,6 +126,17 @@ impl ResourceProvisioner {
             azs.push(format!("{}a", self.region));
         }
         let lcn = prop_str(props, "LaunchConfigurationName").map(String::from);
+        // Modern templates use LaunchTemplate (or MixedInstancesPolicy) instead
+        // of the legacy LaunchConfigurationName; honor both so the launch spec
+        // isn't silently dropped.
+        let launch_template =
+            parse_cfn_launch_template(props.get("LaunchTemplate")).or_else(|| {
+                props
+                    .get("MixedInstancesPolicy")
+                    .and_then(|m| m.get("LaunchTemplate"))
+                    .and_then(|lt| lt.get("LaunchTemplateSpecification"))
+                    .and_then(|spec| parse_cfn_launch_template(Some(spec)))
+            });
         let vpc_zone_identifier = props
             .get("VPCZoneIdentifier")
             .and_then(|v| v.as_array())
@@ -137,7 +169,7 @@ impl ResourceProvisioner {
             arn: arn.clone(),
             name: name.clone(),
             launch_configuration_name: lcn,
-            launch_template: None,
+            launch_template,
             min_size,
             max_size,
             desired_capacity: desired,

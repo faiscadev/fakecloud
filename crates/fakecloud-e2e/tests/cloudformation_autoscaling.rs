@@ -78,3 +78,44 @@ async fn cfn_provisions_autoscaling_group() {
         "stack delete should remove the ASG"
     );
 }
+
+// bug-audit 2026-06-27, T1.8: a CFN ASG declared with a LaunchTemplate (not the
+// legacy LaunchConfigurationName) must carry the launch template, not drop it.
+const TEMPLATE_LT: &str = r#"{
+  "Resources": {
+    "ASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "MinSize": "1", "MaxSize": "2", "DesiredCapacity": "1",
+        "LaunchTemplate": { "LaunchTemplateId": "lt-0abc123", "Version": "3" },
+        "AvailabilityZones": ["us-east-1a"]
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_asg_honors_launch_template() {
+    let s = TestServer::start().await;
+    let cfn = s.cloudformation_client().await;
+    let asg = aws_sdk_autoscaling::Client::new(&s.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("asg-lt-stack")
+        .template_body(TEMPLATE_LT)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let groups = asg.describe_auto_scaling_groups().send().await.unwrap();
+    let g = groups
+        .auto_scaling_groups()
+        .iter()
+        .find(|g| g.auto_scaling_group_name() == Some("ASG"))
+        .expect("CFN ASG exists");
+    let lt = g
+        .launch_template()
+        .expect("launch template carried from CFN");
+    assert_eq!(lt.launch_template_id(), Some("lt-0abc123"));
+    assert_eq!(lt.version(), Some("3"));
+}
