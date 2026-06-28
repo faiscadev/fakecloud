@@ -5649,3 +5649,32 @@ async fn dynamodb_filter_cross_type_comparison_does_not_match() {
         .unwrap();
     assert_eq!(matched.count(), 1, "same-type n <= :number matches");
 }
+
+// bug-audit 2026-06-27, T1.12: a failing BatchExecuteStatement entry must report
+// a BatchStatementErrorCodeEnum value (e.g. ResourceNotFound), not the invalid
+// hardcoded "ValidationException".
+#[tokio::test]
+async fn dynamodb_batch_execute_statement_error_code_is_enum() {
+    use aws_sdk_dynamodb::types::{BatchStatementErrorCodeEnum, BatchStatementRequest};
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let resp = client
+        .batch_execute_statement()
+        .statements(
+            BatchStatementRequest::builder()
+                .statement("SELECT * FROM \"NoSuchTable\" WHERE pk = 'x'")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let err = resp.responses()[0].error().expect("statement errored");
+    assert_eq!(
+        err.code(),
+        Some(&BatchStatementErrorCodeEnum::ResourceNotFound),
+        "missing-table statement reports ResourceNotFound, not a bogus ValidationException"
+    );
+}
