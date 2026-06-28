@@ -293,9 +293,15 @@ impl LambdaService {
                                 );
                             }
                             if is_function_error {
+                                // The error envelope (errorMessage/errorType)
+                                // means the handler raised an exception the
+                                // runtime caught and serialized — AWS labels
+                                // that "Handled". "Unhandled" is for runtime
+                                // crashes (OOM/timeout/init) that never produce
+                                // an envelope.
                                 resp.headers.insert(
                                     http::header::HeaderName::from_static("x-amz-function-error"),
-                                    http::header::HeaderValue::from_static("Unhandled"),
+                                    http::header::HeaderValue::from_static("Handled"),
                                 );
                             }
                             // LogType=Tail: base64 of the last 4 KiB of logs.

@@ -812,3 +812,46 @@ def handler(event, context):
         "LogResult should contain the function's stdout: {logs}"
     );
 }
+
+// bug-audit 2026-06-27, T1.13: a handler that raises an exception (the runtime
+// catches it and returns the {errorMessage,errorType} envelope) must set
+// X-Amz-Function-Error: Handled, not Unhandled.
+#[tokio::test]
+async fn test_invoke_handler_exception_is_handled() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let zip = make_zip(&[(
+        "index.py",
+        b"def handler(event, context):\n    raise ValueError('boom')\n",
+    )]);
+    client
+        .create_function()
+        .function_name("raiser")
+        .runtime(Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("raiser")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.function_error(),
+        Some("Handled"),
+        "a raised handler exception is a Handled function error"
+    );
+    let body = String::from_utf8(resp.payload().unwrap().as_ref().to_vec()).unwrap();
+    assert!(
+        body.contains("errorMessage") || body.contains("errorType"),
+        "error envelope returned in the payload, got: {body}"
+    );
+}
