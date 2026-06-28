@@ -814,6 +814,10 @@ impl CloudWatchService {
         }
 
         let dim_filter = parse_dimensions_query(req, "Dimensions");
+        // When a Unit is given, only datapoints published with that exact unit
+        // are aggregated (AWS treats an unspecified unit as "None"); otherwise
+        // mixing units gives a meaningless statistic.
+        let unit_filter = req.query_params.get("Unit").cloned();
 
         let state = self.state.read();
         let mut datapoints: Vec<(DateTime<Utc>, BTreeMap<String, f64>)> = Vec::new();
@@ -824,6 +828,11 @@ impl CloudWatchService {
                     for d in data.iter() {
                         if d.metric_name != metric_name {
                             continue;
+                        }
+                        if let Some(uf) = &unit_filter {
+                            if d.unit.as_deref().unwrap_or("None") != uf {
+                                continue;
+                            }
                         }
                         if !dim_filter
                             .iter()
