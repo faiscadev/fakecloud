@@ -1506,3 +1506,58 @@ async fn lambda_account_settings_unreserved_concurrency_decrements() {
         "100 reserved -> unreserved drops by 100"
     );
 }
+
+// bug-audit 2026-06-27, T1.13: a handler that raises an exception (the runtime
+// catches it and returns the {errorMessage,errorType} envelope) must set
+// X-Amz-Function-Error: Handled, not Unhandled. (Lives in the `lambda` binary,
+// which the lambda-api partition covers in full, rather than the
+// runtime-name-partitioned `lambda_invoke` binary.)
+#[tokio::test]
+async fn lambda_handler_exception_is_handled_function_error() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let zip = {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("index.py", options).unwrap();
+        writer
+            .write_all(b"def handler(event, context):\n    raise ValueError('boom')\n")
+            .unwrap();
+        writer.finish().unwrap().into_inner()
+    };
+    client
+        .create_function()
+        .function_name("raiser")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("raiser")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.function_error(),
+        Some("Handled"),
+        "a raised handler exception is a Handled function error"
+    );
+    let body = String::from_utf8(resp.payload().unwrap().as_ref().to_vec()).unwrap();
+    assert!(
+        body.contains("errorMessage") || body.contains("errorType"),
+        "error envelope in payload, got: {body}"
+    );
+}
