@@ -3564,21 +3564,23 @@ pub(crate) fn modify_private_dns_name_options(
     )?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(inst) = state.instances.get_mut(&instance_id) else {
-        return Err(crate::service_helpers::instance_not_found(&instance_id));
-    };
-    if let Some(t) = req
-        .query_params
-        .get("PrivateDnsHostnameType")
-        .filter(|v| !v.is_empty())
-    {
-        inst.private_dns_hostname_type = Some(t.clone());
-    }
-    if let Some(v) = req.query_params.get("EnableResourceNameDnsARecord") {
-        inst.enable_resource_name_dns_a_record = v == "true";
-    }
-    if let Some(v) = req.query_params.get("EnableResourceNameDnsAAAARecord") {
-        inst.enable_resource_name_dns_aaaa_record = v == "true";
+    // EC2 declares no error shape for this op in the Smithy model, so an
+    // unknown instance id still returns success (synthesize without
+    // persisting); a real instance has its private-DNS options persisted.
+    if let Some(inst) = state.instances.get_mut(&instance_id) {
+        if let Some(t) = req
+            .query_params
+            .get("PrivateDnsHostnameType")
+            .filter(|v| !v.is_empty())
+        {
+            inst.private_dns_hostname_type = Some(t.clone());
+        }
+        if let Some(v) = req.query_params.get("EnableResourceNameDnsARecord") {
+            inst.enable_resource_name_dns_a_record = v == "true";
+        }
+        if let Some(v) = req.query_params.get("EnableResourceNameDnsAAAARecord") {
+            inst.enable_resource_name_dns_aaaa_record = v == "true";
+        }
     }
     Ok(Ec2Service::respond(
         "ModifyPrivateDnsNameOptions",
