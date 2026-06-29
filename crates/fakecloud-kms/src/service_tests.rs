@@ -3161,3 +3161,110 @@ fn create_external_origin_key_is_pending_import_and_disabled() {
     assert_eq!(body["KeyMetadata"]["Enabled"], json!(true));
     assert_eq!(body["KeyMetadata"]["KeyState"], json!("Enabled"));
 }
+
+#[test]
+fn generate_data_key_without_plaintext_binds_encryption_context() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let gen = svc
+        .generate_data_key_without_plaintext(&make_request(
+            "GenerateDataKeyWithoutPlaintext",
+            json!({
+                "KeyId": key_id,
+                "KeySpec": "AES_256",
+                "EncryptionContext": {"app": "prod"}
+            }),
+        ))
+        .unwrap();
+    let gen_body: Value = serde_json::from_slice(gen.body.expect_bytes()).unwrap();
+    let ciphertext = gen_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // Matching context decrypts.
+    svc.decrypt(&make_request(
+        "Decrypt",
+        json!({
+            "CiphertextBlob": &ciphertext,
+            "EncryptionContext": {"app": "prod"}
+        }),
+    ))
+    .expect("matching EC must decrypt the WithoutPlaintext data key");
+
+    // Wrong context fails.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": &ciphertext,
+                "EncryptionContext": {"app": "staging"}
+            }),
+        ))
+        .err()
+        .expect("wrong EC must error");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+
+    // Absent context fails (context must provide real protection).
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({"CiphertextBlob": &ciphertext}),
+        ))
+        .err()
+        .expect("missing EC must error");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+}
+
+#[test]
+fn generate_data_key_pair_without_plaintext_binds_encryption_context() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let gen = svc
+        .generate_data_key_pair_without_plaintext(&make_request(
+            "GenerateDataKeyPairWithoutPlaintext",
+            json!({
+                "KeyId": key_id,
+                "KeyPairSpec": "RSA_2048",
+                "EncryptionContext": {"app": "prod"}
+            }),
+        ))
+        .unwrap();
+    let gen_body: Value = serde_json::from_slice(gen.body.expect_bytes()).unwrap();
+    let ciphertext = gen_body["PrivateKeyCiphertextBlob"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Matching context decrypts.
+    svc.decrypt(&make_request(
+        "Decrypt",
+        json!({
+            "CiphertextBlob": &ciphertext,
+            "EncryptionContext": {"app": "prod"}
+        }),
+    ))
+    .expect("matching EC must decrypt the WithoutPlaintext private key");
+
+    // Wrong context fails.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": &ciphertext,
+                "EncryptionContext": {"app": "staging"}
+            }),
+        ))
+        .err()
+        .expect("wrong EC must error");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+
+    // Absent context fails.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({"CiphertextBlob": &ciphertext}),
+        ))
+        .err()
+        .expect("missing EC must error");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+}

@@ -316,6 +316,99 @@ async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after
     assert_eq!(n_body["Message"], "after-confirm");
 }
 
+/// Regression for the dead confirmation handshake at the default endpoint:
+/// a real HTTP/S subscriber confirms by issuing an UNSIGNED bare GET at the
+/// SubscribeURL SNS hands it (no Authorization header). Previously these
+/// unsigned `?Action=ConfirmSubscription` / `?Action=Unsubscribe` GETs fell
+/// through to the apigateway catch-all and 404'd, so subscriptions stayed
+/// PendingConfirmation forever. This drives the real subscriber round-trip:
+/// confirm via the SubscribeURL, then unsubscribe via the UnsubscribeUrl,
+/// both as plain unauthenticated GETs.
+#[tokio::test]
+async fn sns_unsigned_subscribe_and_unsubscribe_urls_route_to_sns() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let subscriber = MockSubscriber::start().await;
+
+    let topic = sns
+        .create_topic()
+        .name("unsigned-url-e2e")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint(&subscriber.url)
+        .send()
+        .await
+        .unwrap();
+
+    // Capture the confirmation envelope and pull out the SubscribeURL exactly
+    // as a real subscriber would.
+    let requests = subscriber.wait_for(1, Duration::from_secs(30)).await;
+    let body: serde_json::Value =
+        serde_json::from_str(requests[0].body()).expect("confirmation body is JSON");
+    let subscribe_url = body["SubscribeURL"].as_str().unwrap().to_string();
+    assert!(subscribe_url.contains("Action=ConfirmSubscription"));
+
+    // UNSIGNED GET to the SubscribeURL — no auth header at all. Must reach the
+    // SNS handler (not 404 via apigateway) and confirm the subscription.
+    let resp = reqwest::get(&subscribe_url).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "unsigned ConfirmSubscription GET must succeed, got {}",
+        resp.status()
+    );
+    let confirm_body = resp.text().await.unwrap();
+    assert!(
+        confirm_body.contains("ConfirmSubscriptionResult"),
+        "expected SNS ConfirmSubscription XML, got: {confirm_body}"
+    );
+
+    // It must no longer be PendingConfirmation: publish should now fan out.
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("after-unsigned-confirm")
+        .send()
+        .await
+        .unwrap();
+    let requests = subscriber.wait_for(2, Duration::from_secs(30)).await;
+    let notification = &requests[1];
+    let n_body: serde_json::Value =
+        serde_json::from_str(notification.body()).expect("notification body is JSON");
+    assert_eq!(n_body["Type"], "Notification");
+    assert_eq!(n_body["Message"], "after-unsigned-confirm");
+
+    // The Notification carries the UnsubscribeUrl — also an unsigned GET.
+    let unsubscribe_url = n_body["UnsubscribeURL"].as_str().unwrap().to_string();
+    assert!(unsubscribe_url.contains("Action=Unsubscribe"));
+
+    let resp = reqwest::get(&unsubscribe_url).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "unsigned Unsubscribe GET must succeed, got {}",
+        resp.status()
+    );
+
+    // After unsubscribe, publishing must not deliver anything new.
+    let before = subscriber.received.lock().await.len();
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("after-unsubscribe")
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        subscriber.received.lock().await.len(),
+        before,
+        "publish after unsubscribe must not fan out"
+    );
+}
+
 #[tokio::test]
 async fn sns_http_confirm_rejects_bad_token() {
     let server = TestServer::start().await;
