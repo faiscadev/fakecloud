@@ -32,11 +32,54 @@ use crate::state::{
 /// release the write lock and deliver one change record is extremely wasteful.
 /// Extracting only the fields the delivery path actually reads (destinations,
 /// arn, name) keeps the clone small.
-pub(super) struct KinesisDeliveryTarget {
+#[derive(Clone)]
+pub(crate) struct KinesisDeliveryTarget {
     pub destinations: Vec<KinesisDestination>,
     pub arn: String,
     pub name: String,
 }
+
+/// Build a Kinesis delivery target for a table when it has at least one active
+/// streaming destination. Free-function twin of
+/// [`DynamoDbService::kinesis_target`] so the TTL processor (no `&self`) can
+/// reuse it.
+pub(crate) fn kinesis_target_for(table: &DynamoTable) -> Option<KinesisDeliveryTarget> {
+    if table
+        .kinesis_destinations
+        .iter()
+        .any(|d| d.destination_status == "ACTIVE")
+    {
+        Some(KinesisDeliveryTarget {
+            destinations: table.kinesis_destinations.clone(),
+            arn: table.arn.clone(),
+            name: table.name.clone(),
+        })
+    } else {
+        None
+    }
+}
+
+/// A cached `TransactWriteItems` outcome, keyed by (account, client request
+/// token). AWS treats a retried transaction carrying the same
+/// `ClientRequestToken` (within a ~10 minute window) as the *same* request: it
+/// is applied at most once and the original response is replayed. Without this,
+/// a client-side retry re-applies the whole transaction (a non-idempotent
+/// `ADD` advances twice).
+struct TransactIdempotencyEntry {
+    /// When the original transaction committed; entries older than the window
+    /// are purged and treated as fresh.
+    stored_at: std::time::Instant,
+    /// Hash of the original request body, used to detect a token reused with
+    /// different parameters (AWS returns `IdempotentParameterMismatchException`).
+    request_hash: u64,
+    /// The exact JSON result returned for the original transaction.
+    response: Value,
+}
+
+/// The window for which a `ClientRequestToken` short-circuits a replay. AWS
+/// documents idempotency as lasting "a few minutes"; 10 minutes matches the
+/// commonly observed behavior.
+const TRANSACT_IDEMPOTENCY_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Operation flavor for the per-item KMS audit-trail emitter. Reads
 /// emit a paired `Decrypt` after `GenerateDataKey`; writes only emit
@@ -59,6 +102,11 @@ pub struct DynamoDbService {
     /// between state.read().clone() and store.save() and leave older
     /// bytes as the final on-disk state.
     snapshot_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Recent `TransactWriteItems` outcomes keyed by (account, ClientRequestToken)
+    /// for idempotent retry handling. In-memory only (lost on restart, which
+    /// matches AWS's short idempotency window).
+    transact_idempotency:
+        Arc<parking_lot::Mutex<HashMap<(String, String), TransactIdempotencyEntry>>>,
 }
 
 impl DynamoDbService {
@@ -72,7 +120,56 @@ impl DynamoDbService {
             kms_hook: None,
             region: "us-east-1".to_string(),
             snapshot_lock: Arc::new(tokio::sync::Mutex::new(())),
+            transact_idempotency: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Look up a cached `TransactWriteItems` result for an idempotent retry.
+    ///
+    /// Returns `Ok(Some(response))` to replay the original result for a matching
+    /// (token, request) within the window, `Err(..)` with
+    /// `IdempotentParameterMismatchException` when the same token is reused with
+    /// a different body, and `Ok(None)` when this is a fresh request (no token,
+    /// expired entry, or first use).
+    pub(crate) fn transact_idempotency_lookup(
+        &self,
+        account_id: &str,
+        token: &str,
+        request_hash: u64,
+    ) -> Result<Option<AwsResponse>, AwsServiceError> {
+        let mut cache = self.transact_idempotency.lock();
+        // Drop entries past the window so the map cannot grow unbounded.
+        cache.retain(|_, e| e.stored_at.elapsed() < TRANSACT_IDEMPOTENCY_WINDOW);
+        match cache.get(&(account_id.to_string(), token.to_string())) {
+            Some(entry) if entry.request_hash == request_hash => {
+                Ok(Some(AwsResponse::ok_json(entry.response.clone())))
+            }
+            Some(_) => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "IdempotentParameterMismatchException",
+                "Request parameters do not match the parameters of a previous \
+                 request with the same client request token",
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Record a successful `TransactWriteItems` outcome for replay.
+    pub(crate) fn transact_idempotency_store(
+        &self,
+        account_id: &str,
+        token: &str,
+        request_hash: u64,
+        response: &Value,
+    ) {
+        self.transact_idempotency.lock().insert(
+            (account_id.to_string(), token.to_string()),
+            TransactIdempotencyEntry {
+                stored_at: std::time::Instant::now(),
+                request_hash,
+                response: response.clone(),
+            },
+        );
     }
 
     pub fn with_s3(mut self, s3_state: SharedS3State) -> Self {
@@ -187,19 +284,7 @@ impl DynamoDbService {
     }
 
     fn kinesis_target(table: &DynamoTable) -> Option<KinesisDeliveryTarget> {
-        if table
-            .kinesis_destinations
-            .iter()
-            .any(|d| d.destination_status == "ACTIVE")
-        {
-            Some(KinesisDeliveryTarget {
-                destinations: table.kinesis_destinations.clone(),
-                arn: table.arn.clone(),
-                name: table.name.clone(),
-            })
-        } else {
-            None
-        }
+        kinesis_target_for(table)
     }
 
     /// Deliver a change record to all active Kinesis streaming destinations for a table.
@@ -215,51 +300,9 @@ impl DynamoDbService {
             Some(d) => d,
             None => return,
         };
-
-        let active_destinations: Vec<_> = target
-            .destinations
-            .iter()
-            .filter(|d| d.destination_status == "ACTIVE")
-            .collect();
-
-        if active_destinations.is_empty() {
-            return;
-        }
-
-        let mut record = json!({
-            "eventID": uuid::Uuid::new_v4().to_string(),
-            "eventName": event_name,
-            "eventVersion": "1.1",
-            "eventSource": "aws:dynamodb",
-            "awsRegion": target.arn.split(':').nth(3).unwrap_or("us-east-1"),
-            "dynamodb": {
-                "Keys": keys,
-                // Use the shared atomic monotonic counter (not wall-clock
-                // nanoseconds): a single BatchWriteItem fires up to 25
-                // deliveries with no delay, which collide on coarse clocks
-                // and invert on NTP steps. bug-audit 2026-06-15, 4.5.
-                "SequenceNumber": crate::streams::next_stream_sequence(),
-                "SizeBytes": serde_json::to_string(keys).map(|s| s.len()).unwrap_or(0),
-                "StreamViewType": "NEW_AND_OLD_IMAGES",
-            },
-            "eventSourceARN": &target.arn,
-            "tableName": &target.name,
-        });
-
-        if let Some(old) = old_image {
-            record["dynamodb"]["OldImage"] = json!(old);
-        }
-        if let Some(new) = new_image {
-            record["dynamodb"]["NewImage"] = json!(new);
-        }
-
-        let record_str = serde_json::to_string(&record).unwrap_or_default();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&record_str);
-        let partition_key = serde_json::to_string(keys).unwrap_or_default();
-
-        for dest in active_destinations {
-            delivery.send_to_kinesis(&dest.stream_arn, &encoded, &partition_key);
-        }
+        deliver_kinesis_change(
+            delivery, target, event_name, keys, old_image, new_image, None,
+        );
     }
 
     fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
@@ -274,6 +317,73 @@ impl DynamoDbService {
 
     fn ok_json(body: Value) -> Result<AwsResponse, AwsServiceError> {
         Ok(AwsResponse::ok_json(body))
+    }
+}
+
+/// Build and dispatch a Kinesis change record to every active streaming
+/// destination of a table. Shared by [`DynamoDbService::deliver_to_kinesis_destinations`]
+/// and the TTL processor (which is a free function with no `&self`), so both
+/// emit the identical record shape. `user_identity` is set only for
+/// system-generated changes such as TTL expirations.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_kinesis_change(
+    delivery: &DeliveryBus,
+    target: &KinesisDeliveryTarget,
+    event_name: &str,
+    keys: &HashMap<String, AttributeValue>,
+    old_image: Option<&HashMap<String, AttributeValue>>,
+    new_image: Option<&HashMap<String, AttributeValue>>,
+    user_identity: Option<&crate::state::StreamUserIdentity>,
+) {
+    let active_destinations: Vec<_> = target
+        .destinations
+        .iter()
+        .filter(|d| d.destination_status == "ACTIVE")
+        .collect();
+
+    if active_destinations.is_empty() {
+        return;
+    }
+
+    let mut record = json!({
+        "eventID": uuid::Uuid::new_v4().to_string(),
+        "eventName": event_name,
+        "eventVersion": "1.1",
+        "eventSource": "aws:dynamodb",
+        "awsRegion": target.arn.split(':').nth(3).unwrap_or("us-east-1"),
+        "dynamodb": {
+            "Keys": keys,
+            // Use the shared atomic monotonic counter (not wall-clock
+            // nanoseconds): a single BatchWriteItem fires up to 25
+            // deliveries with no delay, which collide on coarse clocks
+            // and invert on NTP steps. bug-audit 2026-06-15, 4.5.
+            "SequenceNumber": crate::streams::next_stream_sequence(),
+            "SizeBytes": serde_json::to_string(keys).map(|s| s.len()).unwrap_or(0),
+            "StreamViewType": "NEW_AND_OLD_IMAGES",
+        },
+        "eventSourceARN": &target.arn,
+        "tableName": &target.name,
+    });
+
+    if let Some(old) = old_image {
+        record["dynamodb"]["OldImage"] = json!(old);
+    }
+    if let Some(new) = new_image {
+        record["dynamodb"]["NewImage"] = json!(new);
+    }
+    if let Some(ui) = user_identity {
+        record["userIdentity"] = json!({
+            "principalId": ui.principal_id,
+            "type": ui.identity_type,
+        });
+    }
+
+    let record_str = serde_json::to_string(&record).unwrap_or_default();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&record_str);
+    let partition_key = serde_json::to_string(keys).unwrap_or_default();
+
+    for dest in active_destinations {
+        delivery.send_to_kinesis(&dest.stream_arn, &encoded, &partition_key);
     }
 }
 

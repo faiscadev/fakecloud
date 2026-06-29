@@ -113,6 +113,7 @@ pub fn generate_stream_record(
         },
         event_source_arn: table.stream_arn.clone().unwrap_or_default(),
         timestamp: Utc::now(),
+        user_identity: None,
     })
 }
 

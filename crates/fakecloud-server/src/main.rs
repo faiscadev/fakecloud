@@ -758,6 +758,9 @@ async fn main() {
     let ecr_introspection_state = ecr_state.clone();
     let ecs_introspection_state = ecs_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
+    // TTL-expiry REMOVE records flow to a table's Kinesis streaming
+    // destinations through the same delivery bus the service uses.
+    let dynamodb_ttl_delivery = delivery_for_dynamodb.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
     // Clone state refs for simulation endpoints
     let sqs_sim_expiration_state = sqs_state.clone();
@@ -5504,8 +5507,12 @@ async fn main() {
             "/_fakecloud/dynamodb/ttl-processor/tick",
             axum::routing::post({
                 let ds = dynamodb_ttl_state;
+                let delivery = dynamodb_ttl_delivery;
                 move || async move {
-                    let count = fakecloud_dynamodb::ttl::process_ttl_expirations(&ds);
+                    let count = fakecloud_dynamodb::ttl::process_ttl_expirations_with(
+                        &ds,
+                        Some(&delivery),
+                    );
                     axum::Json(types::TtlTickResponse {
                         expired_items: count as u64,
                     })

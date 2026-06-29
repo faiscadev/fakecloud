@@ -390,6 +390,27 @@ impl DynamoDbService {
             1,
             36,
         )?;
+
+        // Idempotency: a retried transaction carrying the same ClientRequestToken
+        // (within the window) must be applied at most once and replay the
+        // original result. Reusing a token with a different body is rejected.
+        // The hash covers the whole request body, so the token field itself is
+        // part of the identity — only an identical retry replays.
+        let client_token = body["ClientRequestToken"].as_str().map(str::to_string);
+        let request_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            req.body.hash(&mut h);
+            h.finish()
+        };
+        if let Some(token) = client_token.as_deref() {
+            if let Some(cached) =
+                self.transact_idempotency_lookup(&req.account_id, token, request_hash)?
+            {
+                return Ok(cached);
+            }
+        }
+
         validate_optional_enum_value(
             "returnConsumedCapacity",
             &body["ReturnConsumedCapacity"],
@@ -900,6 +921,12 @@ impl DynamoDbService {
                 old_image.as_ref(),
                 new_image.as_ref(),
             );
+        }
+
+        // Cache the committed outcome so an identical retry with the same
+        // ClientRequestToken replays this result instead of re-applying.
+        if let Some(token) = client_token.as_deref() {
+            self.transact_idempotency_store(&req.account_id, token, request_hash, &result);
         }
 
         Self::ok_json(result)

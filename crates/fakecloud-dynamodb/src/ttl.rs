@@ -1,63 +1,173 @@
-use crate::state::SharedDynamoDbState;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use fakecloud_core::delivery::DeliveryBus;
+
+use crate::state::{AttributeValue, SharedDynamoDbState, StreamUserIdentity};
+
+/// A Kinesis change record collected during a TTL sweep and dispatched after
+/// the state write lock is released: (target, keys, old_image).
+type PendingTtlKinesis = (
+    crate::service::KinesisDeliveryTarget,
+    HashMap<String, AttributeValue>,
+    HashMap<String, AttributeValue>,
+);
 
 /// Process TTL expirations across all tables.
 ///
 /// Iterates every table with TTL enabled, checks each item for the configured
 /// TTL attribute, and deletes items whose TTL value (epoch seconds as a Number)
-/// is less than the current time.
+/// is less than the current time. Each expiry emits a `REMOVE` stream record
+/// (and Kinesis delivery, when `delivery` is supplied) carrying the
+/// `dynamodb.amazonaws.com` userIdentity marker AWS attaches to TTL deletions.
 ///
 /// Returns the total number of expired (deleted) items.
 pub fn process_ttl_expirations(state: &SharedDynamoDbState) -> usize {
+    process_ttl_expirations_with(state, None)
+}
+
+/// Like [`process_ttl_expirations`] but with a Kinesis [`DeliveryBus`] so
+/// TTL-expiry REMOVE records reach a table's active Kinesis streaming
+/// destinations.
+pub fn process_ttl_expirations_with(
+    state: &SharedDynamoDbState,
+    delivery: Option<&Arc<DeliveryBus>>,
+) -> usize {
     let now = chrono::Utc::now().timestamp();
-    process_ttl_expirations_at(state, now)
+    process_ttl_expirations_at_with(state, now, delivery)
 }
 
 /// Same as [`process_ttl_expirations`] but accepts an explicit "now" timestamp,
 /// making it easy to test without time manipulation.
 pub fn process_ttl_expirations_at(state: &SharedDynamoDbState, now_epoch: i64) -> usize {
+    process_ttl_expirations_at_with(state, now_epoch, None)
+}
+
+/// Core TTL sweep with an explicit clock and an optional Kinesis delivery bus.
+pub fn process_ttl_expirations_at_with(
+    state: &SharedDynamoDbState,
+    now_epoch: i64,
+    delivery: Option<&Arc<DeliveryBus>>,
+) -> usize {
     let mut total_expired = 0;
-    let mut mas = state.write();
+    // Kinesis deliveries collected under the lock and fired after it is
+    // released, mirroring the put/delete paths (the delivery bus may take its
+    // own locks, so we never hold the DynamoDB write lock across delivery).
+    let mut pending_kinesis: Vec<PendingTtlKinesis> = Vec::new();
+    {
+        let mut mas = state.write();
 
-    // Process TTL across all accounts
-    for (_, acct_state) in mas.iter_mut() {
-        for table in acct_state.tables.values_mut() {
-            if !table.ttl_enabled {
-                continue;
-            }
+        // Process TTL across all accounts
+        for (_, acct_state) in mas.iter_mut() {
+            let region = acct_state.region.clone();
+            for table in acct_state.tables.values_mut() {
+                if !table.ttl_enabled {
+                    continue;
+                }
 
-            let ttl_attr = match &table.ttl_attribute {
-                Some(attr) => attr.clone(),
-                None => continue,
-            };
-
-            let before = table.items.len();
-            table.items.retain(|item| {
-                let av = match item.get(&ttl_attr) {
-                    Some(v) => v,
-                    None => return true, // no TTL attribute → keep
+                let ttl_attr = match &table.ttl_attribute {
+                    Some(attr) => attr.clone(),
+                    None => continue,
                 };
 
-                // TTL attribute must be a Number ({"N": "..."})
-                let epoch = match av.as_object().and_then(|obj| obj.get("N")) {
-                    Some(n) => match n.as_str().and_then(|s| s.parse::<i64>().ok()) {
-                        Some(v) => v,
-                        None => return true, // non-numeric → keep
-                    },
-                    None => return true, // not a Number type → keep
-                };
+                // Partition into kept vs. expired so we can emit a REMOVE
+                // record per expired item rather than silently dropping it.
+                let mut kept: Vec<HashMap<String, AttributeValue>> =
+                    Vec::with_capacity(table.items.len());
+                let mut expired: Vec<HashMap<String, AttributeValue>> = Vec::new();
+                for item in std::mem::take(&mut table.items) {
+                    if is_expired(&item, &ttl_attr, now_epoch) {
+                        expired.push(item);
+                    } else {
+                        kept.push(item);
+                    }
+                }
+                table.items = kept;
 
-                // Keep if TTL is in the future (or exactly now)
-                epoch >= now_epoch
-            });
-            let removed = before - table.items.len();
-            if removed > 0 {
+                if expired.is_empty() {
+                    continue;
+                }
+                total_expired += expired.len();
                 table.recalculate_stats();
+
+                let kinesis_target = crate::service::kinesis_target_for(table);
+                for item in expired {
+                    let keys = extract_key_by_schema(table, &item);
+
+                    if let Some(record) = crate::streams::generate_stream_record(
+                        table,
+                        "REMOVE",
+                        keys.clone(),
+                        Some(item.clone()),
+                        None,
+                        &region,
+                    ) {
+                        let mut record = record;
+                        record.user_identity = Some(StreamUserIdentity::ttl());
+                        crate::streams::add_stream_record(table, record);
+                    }
+
+                    if delivery.is_some() {
+                        if let Some(target) = kinesis_target.clone() {
+                            pending_kinesis.push((target, keys, item));
+                        }
+                    }
+                }
             }
-            total_expired += removed;
+        } // end per-account loop
+    } // write lock released here
+
+    if let Some(delivery) = delivery {
+        let ttl_identity = StreamUserIdentity::ttl();
+        for (target, keys, old_image) in pending_kinesis {
+            crate::service::deliver_kinesis_change(
+                delivery,
+                &target,
+                "REMOVE",
+                &keys,
+                Some(&old_image),
+                None,
+                Some(&ttl_identity),
+            );
         }
-    } // end per-account loop
+    }
 
     total_expired
+}
+
+/// Whether `item` is past its TTL. Items lacking the attribute, with a
+/// non-Number type, or with a non-numeric value are never expired (kept).
+fn is_expired(item: &HashMap<String, AttributeValue>, ttl_attr: &str, now_epoch: i64) -> bool {
+    let Some(av) = item.get(ttl_attr) else {
+        return false;
+    };
+    let epoch = av
+        .as_object()
+        .and_then(|obj| obj.get("N"))
+        .and_then(|n| n.as_str())
+        .and_then(|s| s.parse::<i64>().ok());
+    match epoch {
+        Some(e) => e < now_epoch,
+        None => false,
+    }
+}
+
+/// Extract the table's primary key (hash + optional range) from an item.
+fn extract_key_by_schema(
+    table: &crate::state::DynamoTable,
+    item: &HashMap<String, AttributeValue>,
+) -> HashMap<String, AttributeValue> {
+    let mut key = HashMap::new();
+    let hash = table.hash_key_name();
+    if let Some(v) = item.get(hash) {
+        key.insert(hash.to_string(), v.clone());
+    }
+    if let Some(range) = table.range_key_name() {
+        if let Some(v) = item.get(range) {
+            key.insert(range.to_string(), v.clone());
+        }
+    }
+    key
 }
 
 #[cfg(test)]
@@ -270,6 +380,49 @@ mod tests {
         let count = process_ttl_expirations_at(&state, now);
         assert_eq!(count, 2);
         assert_eq!(state.read().default_ref().tables["t1"].items.len(), 3);
+    }
+
+    // bug-audit 2026-06-28: a TTL expiry must publish a REMOVE stream record
+    // (carrying the dynamodb.amazonaws.com userIdentity marker) just like any
+    // other delete path, not silently drop the item.
+    #[test]
+    fn ttl_expiry_emits_remove_stream_record() {
+        let state = make_state();
+        let now = 1_000_000;
+
+        let mut table = make_table("t1", true, Some("ttl"));
+        table.stream_enabled = true;
+        table.stream_view_type = Some("NEW_AND_OLD_IMAGES".to_string());
+        table.stream_arn = Some(format!("{}/stream/2026-06-28", table.arn));
+        table
+            .items
+            .push(make_item("a", Some(json!({"N": "999999"}))));
+        state
+            .write()
+            .default_mut()
+            .tables
+            .insert("t1".to_string(), table);
+
+        let count = process_ttl_expirations_at(&state, now);
+        assert_eq!(count, 1);
+
+        let s = state.read();
+        let records = s.default_ref().tables["t1"].stream_records.read();
+        assert_eq!(records.len(), 1, "one REMOVE stream record emitted");
+        let rec = &records[0];
+        assert_eq!(rec.event_name, "REMOVE");
+        let ui = rec
+            .user_identity
+            .as_ref()
+            .expect("TTL record carries userIdentity");
+        assert_eq!(ui.principal_id, "dynamodb.amazonaws.com");
+        assert_eq!(ui.identity_type, "Service");
+        // The expiring item is captured as the OldImage and the key is present.
+        assert_eq!(
+            rec.dynamodb.old_image.as_ref().unwrap()["pk"],
+            json!({"S": "a"})
+        );
+        assert_eq!(rec.dynamodb.keys["pk"], json!({"S": "a"}));
     }
 
     #[test]

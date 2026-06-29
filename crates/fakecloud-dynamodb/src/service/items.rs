@@ -637,18 +637,11 @@ fn add_to_attribute(
                 cur.get("N").and_then(|v| v.as_str()),
                 val.get("N").and_then(|v| v.as_str()),
             ) {
-                let sum = a
-                    .parse::<f64>()
-                    .map_err(|_| invalid("ADD operand is not a number".into()))?
-                    + b.parse::<f64>()
-                        .map_err(|_| invalid("ADD operand is not a number".into()))?;
-                // Format without a trailing `.0` for integral results, matching
-                // how DynamoDB returns numeric attributes.
-                let s = if sum.fract() == 0.0 {
-                    format!("{}", sum as i64)
-                } else {
-                    format!("{sum}")
-                };
+                // Arbitrary-precision decimal add: f64 silently rounds past
+                // 2^53 and an `as i64` cast saturates past ~9.2e18, corrupting
+                // large counters. Integral results carry no trailing `.0`.
+                let s = crate::service::helpers::decimal_add_sub(a, b, true)
+                    .ok_or_else(|| invalid("ADD operand is not a number".into()))?;
                 item.insert(attr.to_string(), json!({ "N": s }));
             } else {
                 // Set union for SS/NS/BS.
