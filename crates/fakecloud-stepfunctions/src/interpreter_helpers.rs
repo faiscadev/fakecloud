@@ -318,6 +318,16 @@ pub(crate) fn run_choice_state(
 
     match evaluate_choice(state_def, &processed_input) {
         Some(next) => {
+            // A Choice state has no Parameters/ResultPath, so its effective
+            // result is the InputPath-filtered input; OutputPath then filters
+            // what flows to the next state. Previously the raw input was
+            // forwarded, silently ignoring OutputPath.
+            let output_path = state_def["OutputPath"].as_str();
+            let output = if output_path == Some("null") {
+                json!({})
+            } else {
+                apply_output_path(&processed_input, output_path)
+            };
             add_event(
                 shared_state,
                 execution_arn,
@@ -325,10 +335,10 @@ pub(crate) fn run_choice_state(
                 entered_event_id,
                 json!({
                     "name": name,
-                    "output": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
                 }),
             );
-            Advance::Next(next, input)
+            Advance::Next(next, output)
         }
         None => Advance::Fail(
             "States.NoChoiceMatched".to_string(),
@@ -349,10 +359,19 @@ pub(crate) fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
         apply_input_path(input, input_path)
     };
 
+    // A Pass state may carry a Parameters template that builds a new payload
+    // from the effective input (and intrinsics). It transforms the effective
+    // input before Result/ResultPath; previously it was ignored entirely.
+    let transformed = if let Some(params) = state_def.get("Parameters") {
+        apply_parameters(params, &effective_input, None)
+    } else {
+        effective_input
+    };
+
     let result = if let Some(r) = state_def.get("Result") {
         r.clone()
     } else {
-        effective_input.clone()
+        transformed
     };
 
     let after_result = if result_path == Some("null") {
@@ -1453,6 +1472,39 @@ mod tests {
         // contains '(' and starts with States. -> true, then evaluate
         // returns Err -> Null.
         assert_eq!(out["y"], Value::Null);
+    }
+
+    #[test]
+    fn pass_state_evaluates_parameters_template() {
+        // A Pass state with Parameters builds a fresh result from the template,
+        // resolving $-references against the (InputPath-filtered) input.
+        let state_def = json!({
+            "Type": "Pass",
+            "Parameters": {
+                "renamed.$": "$.value",
+                "constant": "fixed",
+            },
+            "End": true,
+        });
+        let input = json!({"value": 99, "ignored": "x"});
+        let out = execute_pass_state(&state_def, &input);
+        assert_eq!(out["renamed"], json!(99));
+        assert_eq!(out["constant"], json!("fixed"));
+        // The non-templated field is dropped (Parameters builds a new payload).
+        assert!(out.get("ignored").is_none());
+    }
+
+    #[test]
+    fn pass_state_parameters_then_output_path() {
+        // Parameters builds the result, OutputPath then narrows it.
+        let state_def = json!({
+            "Type": "Pass",
+            "Parameters": {"a.$": "$.n", "b": 1},
+            "OutputPath": "$.a",
+            "End": true,
+        });
+        let out = execute_pass_state(&state_def, &json!({"n": 7}));
+        assert_eq!(out, json!(7));
     }
 }
 
