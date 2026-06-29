@@ -15,8 +15,8 @@ use fakecloud_persistence::SnapshotStore;
 use tokio::sync::Mutex;
 
 use crate::state::{
-    AlarmState, CloudWatchSnapshot, Dashboard, MetricAlarm, MetricDatum, SharedCloudWatchState,
-    StatisticSet, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
+    AlarmHistoryItem, AlarmState, CloudWatchSnapshot, Dashboard, MetricAlarm, MetricDatum,
+    SharedCloudWatchState, StatisticSet, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };
 
 pub(crate) const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
@@ -573,6 +573,29 @@ pub(crate) fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Encode a pagination offset into an opaque base64 NextToken.
+pub(crate) fn encode_offset_token(offset: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(format!("offset:{offset}"))
+}
+
+/// Decode a NextToken produced by [`encode_offset_token`]. Returns 0 for an
+/// absent or unparseable token (AWS rejects bad tokens, but treating it as the
+/// first page is friendlier and never loses data).
+pub(crate) fn decode_offset_token(token: Option<&String>) -> usize {
+    use base64::Engine;
+    let Some(token) = token else {
+        return 0;
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.strip_prefix("offset:").map(|n| n.to_string()))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 /// Per-datapoint aggregation summary covering both the simple `Value` form
 /// and the `StatisticValues` form so callers don't lose the count or
 /// min/max baked into a `StatisticSet`.
@@ -630,6 +653,122 @@ fn stat_value(stat: &str, agg: DatumStats) -> Option<f64> {
         "SampleCount" => Some(agg.count),
         _ => None,
     }
+}
+
+/// Parse an extended statistic / percentile stat like `p99` or `p99.9` into the
+/// percentile in `[0, 100]`. Returns `None` for anything that isn't a `pNN`
+/// form (so callers can fall through to the simple statistics).
+pub(crate) fn parse_percentile(stat: &str) -> Option<f64> {
+    let rest = stat.strip_prefix('p').or_else(|| stat.strip_prefix('P'))?;
+    let p = rest.parse::<f64>().ok()?;
+    if (0.0..=100.0).contains(&p) {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Linear-interpolation percentile over a pre-sorted sample slice. Uses the
+/// common `rank = p/100 * (n-1)` method — close enough to CloudWatch's
+/// percentile for fakecloud's purposes.
+pub(crate) fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    if sorted.len() == 1 {
+        return Some(sorted[0]);
+    }
+    let rank = (p / 100.0) * (sorted.len() as f64 - 1.0);
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    if lo == hi {
+        return Some(sorted[lo]);
+    }
+    let frac = rank - lo as f64;
+    Some(sorted[lo] + (sorted[hi] - sorted[lo]) * frac)
+}
+
+/// One period bucket of a metric series: the merged [`DatumStats`], the
+/// individual `value` samples (used for percentiles — distributions published
+/// as `StatisticValues` don't retain their raw values so they don't
+/// contribute), and the bucket's unit when consistent.
+struct MetricBucket {
+    agg: DatumStats,
+    samples: Vec<f64>,
+    unit: Option<String>,
+}
+
+/// Resolve a single statistic (simple, e.g. `Sum`, or percentile, e.g. `p99`)
+/// for one bucket. `samples` must be sorted ascending.
+fn resolve_stat(stat: &str, bucket: &MetricBucket, samples_sorted: &[f64]) -> Option<f64> {
+    if let Some(p) = parse_percentile(stat) {
+        return percentile(samples_sorted, p);
+    }
+    stat_value(stat, bucket.agg)
+}
+
+/// Collect a metric's datapoints into period buckets, matching dimensions
+/// EXACTLY (an empty filter matches only dimensionless data, the way AWS treats
+/// each distinct dimension combination as its own metric) and, when a unit
+/// filter is set, only datapoints published with that unit.
+#[allow(clippy::too_many_arguments)]
+fn collect_metric_buckets(
+    data: &[MetricDatum],
+    metric_name: &str,
+    dim_filter: &BTreeMap<String, String>,
+    unit_filter: Option<&str>,
+    period: i64,
+    start_ts: DateTime<Utc>,
+    end_ts: DateTime<Utc>,
+) -> BTreeMap<DateTime<Utc>, MetricBucket> {
+    let mut buckets: BTreeMap<DateTime<Utc>, MetricBucket> = BTreeMap::new();
+    for d in data.iter() {
+        if d.metric_name != metric_name {
+            continue;
+        }
+        if let Some(uf) = unit_filter {
+            if d.unit.as_deref().unwrap_or("None") != uf {
+                continue;
+            }
+        }
+        // Exact dimension-set equality: each unique dimension combination is a
+        // distinct metric, so a subset never matches and an empty filter only
+        // matches data published with no dimensions.
+        if &d.dimensions != dim_filter {
+            continue;
+        }
+        if d.timestamp < start_ts || d.timestamp >= end_ts {
+            continue;
+        }
+        let Some(stats) = datum_stats(d) else {
+            continue;
+        };
+        let secs = d.timestamp.timestamp();
+        let bucket_secs = secs - secs.rem_euclid(period);
+        let bucket_ts = DateTime::<Utc>::from_timestamp(bucket_secs, 0).unwrap_or(d.timestamp);
+        match buckets.get_mut(&bucket_ts) {
+            Some(bucket) => {
+                merge_stats(&mut bucket.agg, stats);
+                if bucket.unit != d.unit {
+                    bucket.unit = None;
+                }
+                if let Some(v) = d.value {
+                    bucket.samples.push(v);
+                }
+            }
+            None => {
+                buckets.insert(
+                    bucket_ts,
+                    MetricBucket {
+                        agg: stats,
+                        samples: d.value.map(|v| vec![v]).unwrap_or_default(),
+                        unit: d.unit.clone(),
+                    },
+                );
+            }
+        }
+    }
+    buckets
 }
 
 pub(crate) fn render_dimensions(dims: &BTreeMap<String, String>) -> String {
@@ -742,9 +881,15 @@ impl CloudWatchService {
         let namespace = optional_query_param(req, "Namespace");
         let metric_name = optional_query_param(req, "MetricName");
         let dim_filter = parse_dimensions_query(req, "Dimensions");
+        // ListMetrics has no MaxResults param — AWS caps each page at 500 and
+        // round-trips a NextToken.
+        const LIST_METRICS_PAGE: usize = 500;
+        let offset = decode_offset_token(req.query_params.get("NextToken"));
 
         let state = self.state.read();
-        let mut out = String::from("<Metrics>");
+        // Flatten every distinct (namespace, metric, dims) into a stable,
+        // ordered list so the offset token is deterministic across pages.
+        let mut all: Vec<(String, String, BTreeMap<String, String>)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(map) = acct.metrics_in(&req.region) {
                 for (ns, data) in map.iter() {
@@ -761,6 +906,10 @@ impl CloudWatchService {
                                 continue;
                             }
                         }
+                        // ListMetrics filters by dimension containment (a metric
+                        // matches if it carries all the requested name/value
+                        // pairs), unlike the exact-set match used by the
+                        // statistics APIs.
                         if !dim_filter.is_empty()
                             && !dim_filter
                                 .iter()
@@ -771,16 +920,30 @@ impl CloudWatchService {
                         seen.insert((d.metric_name.clone(), d.dimensions.clone()), ());
                     }
                     for ((name, dims), _) in seen {
-                        out.push_str("<member>");
-                        out.push_str(&format!("<Namespace>{}</Namespace>", xml_escape(ns)));
-                        out.push_str(&format!("<MetricName>{}</MetricName>", xml_escape(&name)));
-                        out.push_str(&render_dimensions(&dims));
-                        out.push_str("</member>");
+                        all.push((ns.clone(), name, dims));
                     }
                 }
             }
         }
+
+        let page = all.iter().skip(offset).take(LIST_METRICS_PAGE);
+        let mut out = String::from("<Metrics>");
+        {
+            for (ns, name, dims) in page {
+                out.push_str("<member>");
+                out.push_str(&format!("<Namespace>{}</Namespace>", xml_escape(ns)));
+                out.push_str(&format!("<MetricName>{}</MetricName>", xml_escape(name)));
+                out.push_str(&render_dimensions(dims));
+                out.push_str("</member>");
+            }
+        }
         out.push_str("</Metrics>");
+        if offset + LIST_METRICS_PAGE < all.len() {
+            out.push_str(&format!(
+                "<NextToken>{}</NextToken>",
+                encode_offset_token(offset + LIST_METRICS_PAGE)
+            ));
+        }
 
         Ok(xml_response("ListMetrics", &out, &req.request_id))
     }
@@ -804,13 +967,18 @@ impl CloudWatchService {
             .with_timezone(&Utc);
 
         let mut statistics: Vec<String> = Vec::new();
+        let mut extended_statistics: Vec<String> = Vec::new();
         for (k, v) in req.query_params.iter() {
             if k.starts_with("Statistics.member.") {
                 statistics.push(v.clone());
+            } else if k.starts_with("ExtendedStatistics.member.") {
+                extended_statistics.push(v.clone());
             }
         }
-        if statistics.is_empty() {
-            return Err(invalid_param("At least one Statistic is required"));
+        if statistics.is_empty() && extended_statistics.is_empty() {
+            return Err(invalid_param(
+                "At least one of Statistics or ExtendedStatistics is required",
+            ));
         }
 
         let dim_filter = parse_dimensions_query(req, "Dimensions");
@@ -820,49 +988,44 @@ impl CloudWatchService {
         let unit_filter = req.query_params.get("Unit").cloned();
 
         let state = self.state.read();
-        let mut datapoints: Vec<(DateTime<Utc>, BTreeMap<String, f64>)> = Vec::new();
+        // (timestamp, simple stats, extended/percentile stats, unit)
+        type StatPoint = (
+            DateTime<Utc>,
+            BTreeMap<String, f64>,
+            Vec<(String, f64)>,
+            Option<String>,
+        );
+        let mut datapoints: Vec<StatPoint> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(map) = acct.metrics_in(&req.region) {
                 if let Some(data) = map.get(&namespace) {
-                    let mut buckets: BTreeMap<DateTime<Utc>, DatumStats> = BTreeMap::new();
-                    for d in data.iter() {
-                        if d.metric_name != metric_name {
-                            continue;
-                        }
-                        if let Some(uf) = &unit_filter {
-                            if d.unit.as_deref().unwrap_or("None") != uf {
-                                continue;
-                            }
-                        }
-                        if !dim_filter
-                            .iter()
-                            .all(|(k, v)| d.dimensions.get(k) == Some(v))
-                        {
-                            continue;
-                        }
-                        if d.timestamp < start_ts || d.timestamp >= end_ts {
-                            continue;
-                        }
-                        let Some(stats) = datum_stats(d) else {
-                            continue;
-                        };
-                        let secs = d.timestamp.timestamp();
-                        let bucket_secs = secs - secs.rem_euclid(period);
-                        let bucket_ts =
-                            DateTime::<Utc>::from_timestamp(bucket_secs, 0).unwrap_or(d.timestamp);
-                        buckets
-                            .entry(bucket_ts)
-                            .and_modify(|acc| merge_stats(acc, stats))
-                            .or_insert(stats);
-                    }
-                    for (ts, agg) in buckets {
-                        let mut stats = BTreeMap::new();
+                    let buckets = collect_metric_buckets(
+                        data,
+                        &metric_name,
+                        &dim_filter,
+                        unit_filter.as_deref(),
+                        period,
+                        start_ts,
+                        end_ts,
+                    );
+                    for (ts, bucket) in buckets {
+                        let mut sorted = bucket.samples.clone();
+                        sorted
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let mut simple = BTreeMap::new();
                         for stat in statistics.iter() {
-                            if let Some(v) = stat_value(stat, agg) {
-                                stats.insert(stat.clone(), v);
+                            if let Some(v) = resolve_stat(stat, &bucket, &sorted) {
+                                simple.insert(stat.clone(), v);
                             }
                         }
-                        datapoints.push((ts, stats));
+                        let mut extended = Vec::new();
+                        for stat in extended_statistics.iter() {
+                            if let Some(v) = resolve_stat(stat, &bucket, &sorted) {
+                                extended.push((stat.clone(), v));
+                            }
+                        }
+                        let unit = unit_filter.clone().or(bucket.unit);
+                        datapoints.push((ts, simple, extended, unit));
                     }
                 }
             }
@@ -870,14 +1033,28 @@ impl CloudWatchService {
 
         let mut inner = format!("<Label>{}</Label>", xml_escape(&metric_name));
         inner.push_str("<Datapoints>");
-        for (ts, stats) in datapoints {
+        for (ts, simple, extended, unit) in datapoints {
             inner.push_str("<member>");
             inner.push_str(&format!(
                 "<Timestamp>{}</Timestamp>",
                 ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             ));
-            for (name, value) in stats {
+            for (name, value) in simple {
                 inner.push_str(&format!("<{name}>{value}</{name}>"));
+            }
+            if !extended.is_empty() {
+                inner.push_str("<ExtendedStatistics>");
+                for (name, value) in extended {
+                    inner.push_str(&format!(
+                        "<entry><key>{}</key><value>{}</value></entry>",
+                        xml_escape(&name),
+                        value
+                    ));
+                }
+                inner.push_str("</ExtendedStatistics>");
+            }
+            if let Some(u) = unit {
+                inner.push_str(&format!("<Unit>{}</Unit>", xml_escape(&u)));
             }
             inner.push_str("</member>");
         }
@@ -915,85 +1092,118 @@ impl CloudWatchService {
         let queries = collect_indexed(req, "MetricDataQueries");
 
         let state = self.state.read();
-        let mut inner = String::from("<MetricDataResults>");
-        for q in queries {
+
+        // First pass: compute every MetricStat query into an aligned series so
+        // later Expression queries can reference them by id.
+        let mut series_by_id: BTreeMap<String, crate::metric_math::Series> = BTreeMap::new();
+        for q in &queries {
             let id = q.get("Id").cloned().unwrap_or_default();
-            let label = q.get("Label").cloned().unwrap_or_else(|| id.clone());
+            let Some(metric_name) = q.get("MetricStat.Metric.MetricName") else {
+                continue;
+            };
+            let Some(namespace) = q.get("MetricStat.Metric.Namespace") else {
+                continue;
+            };
             let stat = q
                 .get("MetricStat.Stat")
                 .cloned()
                 .unwrap_or_else(|| "Sum".to_string());
-            let metric_name = q.get("MetricStat.Metric.MetricName").cloned();
-            let namespace = q.get("MetricStat.Metric.Namespace").cloned();
             let period: i64 = q
                 .get("MetricStat.Period")
                 .and_then(|s| s.parse::<i64>().ok())
                 .filter(|p| *p > 0)
                 .unwrap_or(60);
-            let dim_filter = parse_dimensions(&q, "MetricStat.Metric.Dimensions");
+            let unit_filter = q.get("MetricStat.Unit").cloned();
+            let dim_filter = parse_dimensions(q, "MetricStat.Metric.Dimensions");
 
-            let (mut timestamps, mut values): (Vec<String>, Vec<f64>) = (Vec::new(), Vec::new());
-            if let (Some(metric_name), Some(namespace)) = (metric_name, namespace) {
-                if let Some(acct) = state.get(&req.account_id) {
-                    if let Some(map) = acct.metrics_in(&req.region) {
-                        if let Some(data) = map.get(&namespace) {
-                            let mut buckets: BTreeMap<DateTime<Utc>, DatumStats> = BTreeMap::new();
-                            for d in data.iter() {
-                                if d.metric_name != metric_name {
-                                    continue;
-                                }
-                                if !dim_filter
-                                    .iter()
-                                    .all(|(k, v)| d.dimensions.get(k) == Some(v))
-                                {
-                                    continue;
-                                }
-                                if d.timestamp < start_ts || d.timestamp >= end_ts {
-                                    continue;
-                                }
-                                let Some(stats) = datum_stats(d) else {
-                                    continue;
-                                };
-                                let secs = d.timestamp.timestamp();
-                                let bucket_secs = secs - secs.rem_euclid(period);
-                                let bucket_ts = DateTime::<Utc>::from_timestamp(bucket_secs, 0)
-                                    .unwrap_or(d.timestamp);
-                                buckets
-                                    .entry(bucket_ts)
-                                    .and_modify(|acc| merge_stats(acc, stats))
-                                    .or_insert(stats);
-                            }
-                            for (ts, agg) in buckets {
-                                let Some(v) = stat_value(&stat, agg) else {
-                                    continue;
-                                };
-                                timestamps
-                                    .push(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-                                values.push(v);
-                            }
-                            if descending {
-                                timestamps.reverse();
-                                values.reverse();
+            let mut series = crate::metric_math::Series::new();
+            if let Some(acct) = state.get(&req.account_id) {
+                if let Some(map) = acct.metrics_in(&req.region) {
+                    if let Some(data) = map.get(namespace) {
+                        let buckets = collect_metric_buckets(
+                            data,
+                            metric_name,
+                            &dim_filter,
+                            unit_filter.as_deref(),
+                            period,
+                            start_ts,
+                            end_ts,
+                        );
+                        for (ts, bucket) in buckets {
+                            let mut sorted = bucket.samples.clone();
+                            sorted.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            if let Some(v) = resolve_stat(&stat, &bucket, &sorted) {
+                                series.insert(ts, v);
                             }
                         }
                     }
                 }
             }
+            series_by_id.insert(id, series);
+        }
+
+        // Second pass: emit a result for each query that returns data (default
+        // true), evaluating Expression queries against the computed series.
+        let mut inner = String::from("<MetricDataResults>");
+        for q in &queries {
+            let id = q.get("Id").cloned().unwrap_or_default();
+            let label = q.get("Label").cloned().unwrap_or_else(|| id.clone());
+            let return_data = q
+                .get("ReturnData")
+                .map(|s| !s.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
+            if !return_data {
+                continue;
+            }
+
+            let mut error_message: Option<String> = None;
+            let series: crate::metric_math::Series = if let Some(expr) = q.get("Expression") {
+                match crate::metric_math::evaluate(expr, &series_by_id) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error_message = Some(e);
+                        crate::metric_math::Series::new()
+                    }
+                }
+            } else {
+                series_by_id.get(&id).cloned().unwrap_or_default()
+            };
+
+            let mut timestamps: Vec<String> = Vec::new();
+            let mut values: Vec<f64> = Vec::new();
+            for (ts, v) in series.iter() {
+                timestamps.push(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                values.push(*v);
+            }
+            if descending {
+                timestamps.reverse();
+                values.reverse();
+            }
 
             inner.push_str("<member>");
             inner.push_str(&format!("<Id>{}</Id>", xml_escape(&id)));
             inner.push_str(&format!("<Label>{}</Label>", xml_escape(&label)));
-            inner.push_str("<StatusCode>Complete</StatusCode>");
             inner.push_str("<Timestamps>");
-            for ts in timestamps {
+            for ts in &timestamps {
                 inner.push_str(&format!("<member>{ts}</member>"));
             }
             inner.push_str("</Timestamps>");
             inner.push_str("<Values>");
-            for v in values {
+            for v in &values {
                 inner.push_str(&format!("<member>{v}</member>"));
             }
             inner.push_str("</Values>");
+            if let Some(msg) = error_message {
+                inner.push_str("<StatusCode>InternalError</StatusCode>");
+                inner.push_str("<Messages><member>");
+                inner.push_str("<Code>Error</Code>");
+                inner.push_str(&format!("<Value>{}</Value>", xml_escape(&msg)));
+                inner.push_str("</member></Messages>");
+            } else {
+                inner.push_str("<StatusCode>Complete</StatusCode>");
+            }
             inner.push_str("</member>");
         }
         inner.push_str("</MetricDataResults>");
@@ -1130,7 +1340,25 @@ impl CloudWatchService {
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
         };
+        let history_name = alarm_name.clone();
+        let created = existing.is_none();
         alarms.insert(alarm_name, alarm);
+
+        let summary = if created {
+            format!("Alarm \"{history_name}\" created")
+        } else {
+            format!("Alarm \"{history_name}\" updated")
+        };
+        let history_data = "{\"type\":\"Update\",\"version\":\"1.0\"}".to_string();
+        push_alarm_history(
+            acct,
+            &req.region,
+            &history_name,
+            "MetricAlarm",
+            "ConfigurationUpdate",
+            summary,
+            history_data,
+        );
 
         Ok(empty_metadata_response("PutMetricAlarm", &req.request_id))
     }
@@ -1151,74 +1379,100 @@ impl CloudWatchService {
         let prefix = optional_query_param(req, "AlarmNamePrefix");
         let state_filter = optional_query_param(req, "StateValue");
         let action_prefix = optional_query_param(req, "ActionPrefix");
+        // AWS caps DescribeAlarms at 100 records per page (MaxRecords range
+        // 1..100) and round-trips a NextToken across the combined metric +
+        // composite alarm result set.
+        let max_records = optional_query_param(req, "MaxRecords")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let offset = decode_offset_token(req.query_params.get("NextToken"));
+
+        // `false` = metric alarm, `true` = composite alarm; rendered lazily
+        // after the slice so we only stringify the page.
+        let matches = |name: &str, sv: &str, actions: [&[String]; 3]| -> bool {
+            if !filter_names.is_empty() && !filter_names.contains(&name.to_string()) {
+                return false;
+            }
+            if let Some(p) = prefix.as_ref() {
+                if !name.starts_with(p) {
+                    return false;
+                }
+            }
+            if let Some(want) = state_filter.as_ref() {
+                if sv != want {
+                    return false;
+                }
+            }
+            if let Some(ap) = action_prefix.as_ref() {
+                let any = actions
+                    .iter()
+                    .flat_map(|a| a.iter())
+                    .any(|a| a.starts_with(ap));
+                if !any {
+                    return false;
+                }
+            }
+            true
+        };
 
         let state = self.state.read();
-        let mut inner = String::from("<MetricAlarms>");
+        let mut combined: Vec<(bool, String)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(alarms) = acct.alarms_in(&req.region) {
                 for alarm in alarms.values() {
-                    if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
-                        continue;
+                    if matches(
+                        &alarm.alarm_name,
+                        alarm.state_value.as_str(),
+                        [
+                            &alarm.alarm_actions,
+                            &alarm.ok_actions,
+                            &alarm.insufficient_data_actions,
+                        ],
+                    ) {
+                        combined.push((false, render_alarm(alarm)));
                     }
-                    if let Some(p) = prefix.as_ref() {
-                        if !alarm.alarm_name.starts_with(p) {
-                            continue;
-                        }
-                    }
-                    if let Some(sv) = state_filter.as_ref() {
-                        if alarm.state_value.as_str() != sv {
-                            continue;
-                        }
-                    }
-                    if let Some(ap) = action_prefix.as_ref() {
-                        let any = alarm
-                            .alarm_actions
-                            .iter()
-                            .chain(alarm.ok_actions.iter())
-                            .chain(alarm.insufficient_data_actions.iter())
-                            .any(|a| a.starts_with(ap));
-                        if !any {
-                            continue;
-                        }
-                    }
-                    inner.push_str(&render_alarm(alarm));
                 }
+            }
+            if let Some(composites) = acct.composite_alarms_in(&req.region) {
+                for alarm in composites.values() {
+                    if matches(
+                        &alarm.alarm_name,
+                        alarm.state_value.as_str(),
+                        [
+                            &alarm.alarm_actions,
+                            &alarm.ok_actions,
+                            &alarm.insufficient_data_actions,
+                        ],
+                    ) {
+                        combined
+                            .push((true, crate::composite_alarms::render_composite_alarm(alarm)));
+                    }
+                }
+            }
+        }
+
+        let page: Vec<&(bool, String)> = combined.iter().skip(offset).take(max_records).collect();
+        let mut inner = String::from("<MetricAlarms>");
+        for (is_composite, body) in &page {
+            if !*is_composite {
+                inner.push_str(body);
             }
         }
         inner.push_str("</MetricAlarms>");
         inner.push_str("<CompositeAlarms>");
-        if let Some(acct) = state.get(&req.account_id) {
-            if let Some(composites) = acct.composite_alarms_in(&req.region) {
-                for alarm in composites.values() {
-                    if !filter_names.is_empty() && !filter_names.contains(&alarm.alarm_name) {
-                        continue;
-                    }
-                    if let Some(p) = prefix.as_ref() {
-                        if !alarm.alarm_name.starts_with(p) {
-                            continue;
-                        }
-                    }
-                    if let Some(sv) = state_filter.as_ref() {
-                        if alarm.state_value.as_str() != sv {
-                            continue;
-                        }
-                    }
-                    if let Some(ap) = action_prefix.as_ref() {
-                        let any = alarm
-                            .alarm_actions
-                            .iter()
-                            .chain(alarm.ok_actions.iter())
-                            .chain(alarm.insufficient_data_actions.iter())
-                            .any(|a| a.starts_with(ap));
-                        if !any {
-                            continue;
-                        }
-                    }
-                    inner.push_str(&crate::composite_alarms::render_composite_alarm(alarm));
-                }
+        for (is_composite, body) in &page {
+            if *is_composite {
+                inner.push_str(body);
             }
         }
         inner.push_str("</CompositeAlarms>");
+        if offset + max_records < combined.len() {
+            inner.push_str(&format!(
+                "<NextToken>{}</NextToken>",
+                encode_offset_token(offset + max_records)
+            ));
+        }
 
         Ok(xml_response("DescribeAlarms", &inner, &req.request_id))
     }
@@ -1280,6 +1534,9 @@ impl CloudWatchService {
         for name in &names {
             acct.alarms_in_mut(&req.region).remove(name);
             acct.composite_alarms_in_mut(&req.region).remove(name);
+            // Alarm history is tied to the alarm; AWS drops it when the alarm
+            // is deleted, so clear it here rather than orphan stale items.
+            acct.alarm_history_in_mut(&req.region).remove(name);
         }
 
         Ok(empty_metadata_response("DeleteAlarms", &req.request_id))
@@ -1350,9 +1607,26 @@ impl CloudWatchService {
                 format!("Alarm {alarm_name} not found"),
             )
         })?;
+        let old_state = alarm.state_value.as_str().to_string();
         alarm.state_value = new_state;
-        alarm.state_reason = state_reason;
+        alarm.state_reason = state_reason.clone();
         alarm.state_updated_timestamp = Utc::now();
+
+        let new_state_str = new_state.as_str().to_string();
+        let summary = format!("Alarm updated from {old_state} to {new_state_str}");
+        let history_data = format!(
+            "{{\"oldState\":{{\"stateValue\":\"{old_state}\"}},\"newState\":{{\"stateValue\":\"{new_state_str}\",\"stateReason\":\"{}\"}}}}",
+            state_reason.replace('"', "\\\"")
+        );
+        push_alarm_history(
+            acct,
+            &req.region,
+            &alarm_name,
+            "MetricAlarm",
+            "StateUpdate",
+            summary,
+            history_data,
+        );
 
         Ok(empty_metadata_response("SetAlarmState", &req.request_id))
     }
@@ -1377,9 +1651,102 @@ impl CloudWatchService {
             "ScanBy",
             &["TimestampDescending", "TimestampAscending"],
         )?;
-        // Minimal implementation: return empty history. AWS pagination tokens are
-        // not tracked locally, so callers see an empty list rather than a stub.
-        let inner = String::from("<AlarmHistoryItems></AlarmHistoryItems>");
+        let alarm_filter = optional_query_param(req, "AlarmName");
+        let type_filter = optional_query_param(req, "HistoryItemType");
+        let start_date = optional_query_param(req, "StartDate")
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc));
+        let end_date = optional_query_param(req, "EndDate")
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc));
+        // DescribeAlarmHistory defaults to TimestampDescending (newest first).
+        let descending = req
+            .query_params
+            .get("ScanBy")
+            .map(|s| s != "TimestampAscending")
+            .unwrap_or(true);
+        let max_records = optional_query_param(req, "MaxRecords")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let offset = decode_offset_token(req.query_params.get("NextToken"));
+
+        let state = self.state.read();
+        let mut items: Vec<&AlarmHistoryItem> = Vec::new();
+        if let Some(acct) = state.get(&req.account_id) {
+            if let Some(history) = acct.alarm_history_in(&req.region) {
+                for (name, list) in history.iter() {
+                    if let Some(f) = alarm_filter.as_ref() {
+                        if name != f {
+                            continue;
+                        }
+                    }
+                    for item in list.iter() {
+                        if let Some(t) = type_filter.as_ref() {
+                            if &item.history_item_type != t {
+                                continue;
+                            }
+                        }
+                        if let Some(sd) = start_date {
+                            if item.timestamp < sd {
+                                continue;
+                            }
+                        }
+                        if let Some(ed) = end_date {
+                            if item.timestamp > ed {
+                                continue;
+                            }
+                        }
+                        items.push(item);
+                    }
+                }
+            }
+        }
+        items.sort_by_key(|i| i.timestamp);
+        if descending {
+            items.reverse();
+        }
+        let total = items.len();
+        let page: Vec<&AlarmHistoryItem> =
+            items.into_iter().skip(offset).take(max_records).collect();
+
+        let mut inner = String::from("<AlarmHistoryItems>");
+        for item in page {
+            inner.push_str("<member>");
+            inner.push_str(&format!(
+                "<AlarmName>{}</AlarmName>",
+                xml_escape(&item.alarm_name)
+            ));
+            inner.push_str(&format!(
+                "<AlarmType>{}</AlarmType>",
+                xml_escape(&item.alarm_type)
+            ));
+            inner.push_str(&format!(
+                "<Timestamp>{}</Timestamp>",
+                item.timestamp
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            ));
+            inner.push_str(&format!(
+                "<HistoryItemType>{}</HistoryItemType>",
+                xml_escape(&item.history_item_type)
+            ));
+            inner.push_str(&format!(
+                "<HistorySummary>{}</HistorySummary>",
+                xml_escape(&item.history_summary)
+            ));
+            inner.push_str(&format!(
+                "<HistoryData>{}</HistoryData>",
+                xml_escape(&item.history_data)
+            ));
+            inner.push_str("</member>");
+        }
+        inner.push_str("</AlarmHistoryItems>");
+        if offset + max_records < total {
+            inner.push_str(&format!(
+                "<NextToken>{}</NextToken>",
+                encode_offset_token(offset + max_records)
+            ));
+        }
         Ok(xml_response(
             "DescribeAlarmHistory",
             &inner,
@@ -1513,6 +1880,31 @@ impl CloudWatchService {
         let inner = format!("<DashboardEntries>{entries}</DashboardEntries>");
         Ok(xml_response("ListDashboards", &inner, &req.request_id))
     }
+}
+
+/// Append an alarm-history record (newest appended last). Shared by
+/// PutMetricAlarm, SetAlarmState and DeleteAlarms so DescribeAlarmHistory
+/// reflects real lifecycle transitions.
+fn push_alarm_history(
+    acct: &mut crate::state::CloudWatchState,
+    region: &str,
+    alarm_name: &str,
+    alarm_type: &str,
+    history_item_type: &str,
+    history_summary: String,
+    history_data: String,
+) {
+    acct.alarm_history_in_mut(region)
+        .entry(alarm_name.to_string())
+        .or_default()
+        .push(AlarmHistoryItem {
+            alarm_name: alarm_name.to_string(),
+            alarm_type: alarm_type.to_string(),
+            timestamp: Utc::now(),
+            history_item_type: history_item_type.to_string(),
+            history_summary,
+            history_data,
+        });
 }
 
 fn render_alarm(alarm: &MetricAlarm) -> String {

@@ -132,27 +132,69 @@ impl CloudWatchService {
             .parse::<i64>()
             .map_err(|_| invalid_param("Period must be an integer"))?;
         let metrics = collect_member_values(req, "Metrics");
-
-        let state = self.state.read();
-        let exists = state
-            .get(&req.account_id)
-            .and_then(|a| a.insight_rules_in(&req.region))
-            .map(|r| r.contains_key(&name))
-            .unwrap_or(false);
-        if !exists {
-            return Err(not_found(format!("Insight rule {name} does not exist")));
+        // Validate the requested metric names against the documented enum so a
+        // bad request fails rather than being silently ignored.
+        const ALLOWED_METRICS: &[&str] = &[
+            "UniqueContributors",
+            "MaxContributorValue",
+            "SampleCount",
+            "Average",
+            "Sum",
+            "Minimum",
+            "Maximum",
+        ];
+        for m in &metrics {
+            if !ALLOWED_METRICS.contains(&m.as_str()) {
+                return Err(invalid_param(format!("Unknown insight metric '{m}'")));
+            }
         }
 
-        let mut inner = String::from("<KeyLabels/>");
-        inner.push_str("<AggregationStatistic>Sum</AggregationStatistic>");
+        let state = self.state.read();
+        let rule = state
+            .get(&req.account_id)
+            .and_then(|a| a.insight_rules_in(&req.region))
+            .and_then(|r| r.get(&name))
+            .cloned();
+        let Some(rule) = rule else {
+            return Err(not_found(format!("Insight rule {name} does not exist")));
+        };
+
+        // Derive the report shape from the rule's actual definition. Contributor
+        // data itself is genuinely not computable here: fakecloud has no
+        // log-ingestion -> Contributor Insights pipeline, so there are no
+        // contributors to report. Rather than emit fixed all-zero constants, we
+        // surface the rule's real key labels and aggregation statistic and an
+        // honestly-empty contributor/datapoint set.
+        let def: serde_json::Value =
+            serde_json::from_str(&rule.definition).unwrap_or(serde_json::Value::Null);
+        let key_labels: Vec<String> = def
+            .get("Contribution")
+            .and_then(|c| c.get("Keys"))
+            .and_then(|k| k.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let aggregation_statistic = match def.get("AggregateOn").and_then(|v| v.as_str()) {
+            Some("Sum") => "Sum",
+            Some("Average") => "Average",
+            _ => "Sum",
+        };
+
+        let mut inner = String::from("<KeyLabels>");
+        for label in &key_labels {
+            inner.push_str(&format!("<member>{}</member>", xml_escape(label)));
+        }
+        inner.push_str("</KeyLabels>");
+        inner.push_str(&format!(
+            "<AggregationStatistic>{aggregation_statistic}</AggregationStatistic>"
+        ));
         inner.push_str("<AggregateValue>0.0</AggregateValue>");
         inner.push_str("<ApproximateUniqueCount>0</ApproximateUniqueCount>");
         inner.push_str("<Contributors/>");
         inner.push_str("<MetricDatapoints/>");
-        // Echo requested metrics back so callers can confirm the report shape;
-        // the metric list itself isn't part of the output but the wire stays
-        // well-formed regardless of how many metrics were requested.
-        let _ = metrics;
         Ok(xml_response(
             "GetInsightRuleReport",
             &inner,

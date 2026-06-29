@@ -137,8 +137,10 @@ impl LogsService {
         // Collect events by stream from every group/identifier the query
         // referenced, not just the legacy single `log_group_name`. ARNs are
         // resolved to bare group names so multi-group StartQuery requests
-        // actually scan every requested group.
-        let mut stream_events: Vec<(String, Vec<LogEvent>)> = Vec::new();
+        // actually scan every requested group. Each event keeps its original
+        // index in the stream's full event list so the `@ptr` it produces
+        // round-trips through GetLogRecord.
+        let mut streams: Vec<query::QueryStream> = Vec::new();
         let mut seen_groups: std::collections::HashSet<String> = Default::default();
         let identifiers: Vec<String> = if query_info.log_group_identifiers.is_empty() {
             vec![query_info.log_group_name.clone()]
@@ -162,30 +164,33 @@ impl LogsService {
                     .retention_in_days
                     .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
                 for stream in group.log_streams.values() {
-                    let events: Vec<LogEvent> = if let Some(cutoff) = retention_cutoff {
-                        stream
-                            .events
-                            .iter()
-                            .filter(|e| e.timestamp >= cutoff)
-                            .cloned()
-                            .collect()
-                    } else {
-                        stream.events.clone()
-                    };
-                    stream_events.push((stream.name.clone(), events));
+                    let events: Vec<(usize, LogEvent)> = stream
+                        .events
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| {
+                            retention_cutoff.is_none_or(|cutoff| e.timestamp >= cutoff)
+                        })
+                        .map(|(i, e)| (i, e.clone()))
+                        .collect();
+                    streams.push(query::QueryStream {
+                        group_name: group_name.clone(),
+                        stream_name: stream.name.clone(),
+                        events,
+                    });
                 }
             }
         }
 
         let results = query::execute_query(
             &parsed,
-            &stream_events,
+            &streams,
             query_info.start_time,
             query_info.end_time,
         );
 
         let records_matched = results.len() as f64;
-        let total_scanned: usize = stream_events.iter().map(|(_, e)| e.len()).sum();
+        let total_scanned: usize = streams.iter().map(|s| s.events.len()).sum();
 
         Ok(AwsResponse::json(
             StatusCode::OK,
