@@ -1016,11 +1016,23 @@ async fn sfn_start_execution_with_name() {
 
     wait_for_execution(&client, start.execution_arn()).await;
 
-    // Duplicate execution name should fail
+    // Duplicate name with the SAME input is idempotent: AWS returns the
+    // existing execution ARN with HTTP 200 (not ExecutionAlreadyExists).
+    let dup = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .name("my-execution")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.execution_arn(), start.execution_arn());
+
+    // Duplicate name with a DIFFERENT input must fail with ExecutionAlreadyExists.
     let err = client
         .start_execution()
         .state_machine_arn(create.state_machine_arn())
         .name("my-execution")
+        .input("{\"changed\": true}")
         .send()
         .await;
     assert!(err.is_err());
