@@ -78,7 +78,7 @@ pub(crate) fn describe_regions(
 }
 
 pub(crate) fn describe_availability_zones(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     // Three zones (a/b/c) for the request's region, matching the common case.
@@ -88,6 +88,15 @@ pub(crate) fn describe_availability_zones(
         &req.region
     };
     let requested = indexed_list(&req.query_params, "ZoneName");
+    // A standard AZ's group name is its region; ModifyAvailabilityZoneGroup
+    // opt-in status (if set) is reflected here so the round-trip is observable.
+    let optin = {
+        let accounts = svc.state.read();
+        accounts
+            .get(&req.account_id)
+            .and_then(|s| s.az_group_optin.get(region).cloned())
+    };
+    let opt_in_status = optin.as_deref().unwrap_or("opt-in-not-required");
 
     let items: Vec<String> = ["a", "b", "c"]
         .iter()
@@ -98,12 +107,14 @@ pub(crate) fn describe_availability_zones(
             // zoneId uses AWS's `<region-short>-az<N>` convention.
             let short = region_short_code(region);
             format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}{}",
                 ec2_elem("zoneName", &zone),
                 ec2_elem("zoneState", "available"),
+                ec2_elem("optInStatus", opt_in_status),
                 ec2_elem("regionName", region),
                 ec2_elem("zoneId", &format!("{short}-az{idx}")),
                 ec2_elem("zoneType", "availability-zone"),
+                ec2_elem("groupName", region),
             )
         })
         .collect();
