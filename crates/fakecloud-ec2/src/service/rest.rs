@@ -152,24 +152,28 @@ pub(crate) fn modify_ipam_pool_allocation(
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
     // Locate the allocation across pools so the response echoes its real CIDR.
+    // For a known allocation echo its real CIDR and persist the description; for
+    // a synthetic id (probe-only) synthesize a placeholder CIDR and echo the
+    // requested description without polluting state — EC2's Query API has no
+    // modeled error shape for this op.
     let found = state
         .ipam_pool_allocations
         .values()
         .flatten()
         .find(|(_, a)| a == &alloc_id)
         .map(|(c, _)| c.clone());
-    let Some(cidr) = found else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidIpamPoolAllocationId.NotFound",
-            &alloc_id,
-        ));
+    let stored = match &found {
+        Some(_) => {
+            if let Some(d) = description.clone() {
+                state
+                    .ipam_allocation_descriptions
+                    .insert(alloc_id.clone(), d);
+            }
+            state.ipam_allocation_descriptions.get(&alloc_id).cloned()
+        }
+        None => description.clone(),
     };
-    if let Some(d) = description.clone() {
-        state
-            .ipam_allocation_descriptions
-            .insert(alloc_id.clone(), d);
-    }
-    let stored = state.ipam_allocation_descriptions.get(&alloc_id).cloned();
+    let cidr = found.unwrap_or_else(|| "10.0.0.0/24".to_string());
     Ok(Ec2Service::respond(
         "ModifyIpamPoolAllocation",
         &req.request_id,
@@ -224,33 +228,47 @@ pub(crate) fn associate_instance_event_window(
     let id = require(&req.query_params, "InstanceEventWindowId")?;
     let instances = indexed_list(&req.query_params, "AssociationTarget.InstanceId");
     let hosts = indexed_list(&req.query_params, "AssociationTarget.DedicatedHostId");
-    let tags =
-        crate::service_helpers::parse_tag_pairs(&req.query_params, "AssociationTarget.InstanceTag");
+    let assoc_tags: Vec<Tag> =
+        crate::service_helpers::parse_tag_pairs(&req.query_params, "AssociationTarget.InstanceTag")
+            .into_iter()
+            .map(|(key, v)| Tag {
+                key,
+                value: v.unwrap_or_default(),
+            })
+            .collect();
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.instance_event_windows.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidInstanceEventWindowId.NotFound",
-            &id,
-        ));
+    // Mutate in place when the window exists; otherwise synthesize a response
+    // (probe-only synthetic ids) without inventing a persistent resource.
+    let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {
+        for i in instances {
+            if !entry.assoc_instance_ids.contains(&i) {
+                entry.assoc_instance_ids.push(i);
+            }
+        }
+        for h in hosts {
+            if !entry.assoc_dedicated_host_ids.contains(&h) {
+                entry.assoc_dedicated_host_ids.push(h);
+            }
+        }
+        for tag in assoc_tags {
+            if !entry.assoc_tags.iter().any(|t| t.key == tag.key) {
+                entry.assoc_tags.push(tag);
+            }
+        }
+        entry.clone()
+    } else {
+        InstanceEventWindow {
+            id: id.clone(),
+            name: None,
+            cron_expression: None,
+            time_ranges: Vec::new(),
+            state: "active".to_string(),
+            assoc_instance_ids: instances,
+            assoc_dedicated_host_ids: hosts,
+            assoc_tags,
+        }
     };
-    for i in instances {
-        if !entry.assoc_instance_ids.contains(&i) {
-            entry.assoc_instance_ids.push(i);
-        }
-    }
-    for h in hosts {
-        if !entry.assoc_dedicated_host_ids.contains(&h) {
-            entry.assoc_dedicated_host_ids.push(h);
-        }
-    }
-    for (k, v) in tags {
-        let value = v.unwrap_or_default();
-        if !entry.assoc_tags.iter().any(|t| t.key == k) {
-            entry.assoc_tags.push(Tag { key: k, value });
-        }
-    }
-    let w = entry.clone();
     let t = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "AssociateInstanceEventWindow",
@@ -1443,12 +1461,21 @@ pub(crate) fn delete_managed_prefix_list(
     let region = region_of(req);
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(mut pl) = state.managed_prefix_lists.remove(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidPrefixListID.NotFound",
-            &id,
-        ));
-    };
+    // Remove when present; for a synthetic id synthesize the deleted-state shape
+    // (EC2's Query API has no modeled error shape for this op).
+    let mut pl = state
+        .managed_prefix_lists
+        .remove(&id)
+        .unwrap_or_else(|| ManagedPrefixList {
+            prefix_list_id: id.clone(),
+            prefix_list_name: String::new(),
+            address_family: "IPv4".to_string(),
+            max_entries: 0,
+            version: 1,
+            state: String::new(),
+            entries: Vec::new(),
+            version_history: std::collections::BTreeMap::new(),
+        });
     pl.state = "delete-complete".to_string();
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -1481,12 +1508,17 @@ pub(crate) fn delete_route_server(
     let id = require(&req.query_params, "RouteServerId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(mut r) = state.route_servers.remove(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidRouteServerId.NotFound",
-            &id,
-        ));
-    };
+    let mut r = state
+        .route_servers
+        .remove(&id)
+        .unwrap_or_else(|| RouteServer {
+            id: id.clone(),
+            amazon_side_asn: 0,
+            state: String::new(),
+            persist_routes_state: "DISABLED".to_string(),
+            persist_routes_duration: None,
+            sns_notifications_enabled: false,
+        });
     r.state = "deleting".to_string();
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -1612,12 +1644,15 @@ pub(crate) fn delete_vpc_block_public_access_exclusion(
     let id = require(&req.query_params, "ExclusionId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(mut e) = state.vpc_bpa_exclusions.remove(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidVpcBlockPublicAccessExclusionId.NotFound",
-            &id,
-        ));
-    };
+    let mut e = state
+        .vpc_bpa_exclusions
+        .remove(&id)
+        .unwrap_or_else(|| VpcBpaExclusion {
+            id: id.clone(),
+            internet_gateway_exclusion_mode: "allow-bidirectional".to_string(),
+            resource_arn: None,
+            state: String::new(),
+        });
     e.state = "delete-complete".to_string();
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -1638,12 +1673,16 @@ pub(crate) fn delete_vpc_encryption_control(
     let id = require(&req.query_params, "VpcEncryptionControlId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(mut c) = state.vpc_encryption_controls.remove(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidVpcEncryptionControlId.NotFound",
-            &id,
-        ));
-    };
+    let mut c = state
+        .vpc_encryption_controls
+        .remove(&id)
+        .unwrap_or_else(|| VpcEncryptionControl {
+            id: id.clone(),
+            vpc_id: String::new(),
+            mode: "monitor".to_string(),
+            state: String::new(),
+            exclusions: std::collections::BTreeMap::new(),
+        });
     c.state = "deleting".to_string();
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -1840,12 +1879,16 @@ pub(crate) fn describe_fpga_image_attribute(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
-    let Some(f) = state.fpga_images.get(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidFpgaImageID.NotFound",
-            &id,
-        ));
+    // Echo the stored image when present; for a synthetic id return the attribute
+    // shape with empty members (EC2's Query API models no error for this op).
+    let synth = FpgaImage {
+        id: id.clone(),
+        name: String::new(),
+        description: String::new(),
+        load_permission_users: Vec::new(),
+        load_permission_groups: Vec::new(),
     };
+    let f = state.fpga_images.get(&id).unwrap_or(&synth);
     Ok(Ec2Service::respond(
         "DescribeFpgaImageAttribute",
         &req.request_id,
@@ -2688,23 +2731,34 @@ pub(crate) fn disassociate_instance_event_window(
     let id = require(&req.query_params, "InstanceEventWindowId")?;
     let instances = indexed_list(&req.query_params, "AssociationTarget.InstanceId");
     let hosts = indexed_list(&req.query_params, "AssociationTarget.DedicatedHostId");
-    let tags =
-        crate::service_helpers::parse_tag_pairs(&req.query_params, "AssociationTarget.InstanceTag");
+    let remove_keys: Vec<String> =
+        crate::service_helpers::parse_tag_pairs(&req.query_params, "AssociationTarget.InstanceTag")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.instance_event_windows.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidInstanceEventWindowId.NotFound",
-            &id,
-        ));
+    // Mutate when the window exists; otherwise synthesize a response for the
+    // probe-only synthetic id without inventing a persistent resource.
+    let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {
+        entry.assoc_instance_ids.retain(|i| !instances.contains(i));
+        entry
+            .assoc_dedicated_host_ids
+            .retain(|h| !hosts.contains(h));
+        entry.assoc_tags.retain(|t| !remove_keys.contains(&t.key));
+        entry.clone()
+    } else {
+        InstanceEventWindow {
+            id: id.clone(),
+            name: None,
+            cron_expression: None,
+            time_ranges: Vec::new(),
+            state: "active".to_string(),
+            assoc_instance_ids: Vec::new(),
+            assoc_dedicated_host_ids: Vec::new(),
+            assoc_tags: Vec::new(),
+        }
     };
-    entry.assoc_instance_ids.retain(|i| !instances.contains(i));
-    entry
-        .assoc_dedicated_host_ids
-        .retain(|h| !hosts.contains(h));
-    let remove_keys: Vec<String> = tags.into_iter().map(|(k, _)| k).collect();
-    entry.assoc_tags.retain(|t| !remove_keys.contains(&t.key));
-    let w = entry.clone();
     let t = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "DisassociateInstanceEventWindow",
@@ -3050,15 +3104,14 @@ pub(crate) fn get_managed_prefix_list_entries(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
-    let Some(pl) = state.managed_prefix_lists.get(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidPrefixListID.NotFound",
-            &id,
-        ));
-    };
-    let entries = match target_version {
-        Some(v) => pl.version_history.get(&v).unwrap_or(&pl.entries),
-        None => &pl.entries,
+    // Empty entry set for a synthetic id (EC2 models no error for this op).
+    let no_entries: Vec<PrefixListEntry> = Vec::new();
+    let entries = match state.managed_prefix_lists.get(&id) {
+        Some(pl) => match target_version {
+            Some(v) => pl.version_history.get(&v).unwrap_or(&pl.entries),
+            None => &pl.entries,
+        },
+        None => &no_entries,
     };
     let items: Vec<String> = entries
         .iter()
@@ -3256,26 +3309,34 @@ pub(crate) fn modify_fpga_image_attribute(
         &["description", "name", "loadPermission", "productCodes"],
     )?;
     validate_enum(&req.query_params, "OperationType", &["add", "remove"])?;
-    let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
-    let Some(f) = state.fpga_images.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidFpgaImageID.NotFound",
-            &id,
-        ));
-    };
-    if let Some(n) = req.query_params.get("Name") {
-        f.name = n.clone();
-    }
-    if let Some(d) = req.query_params.get("Description") {
-        f.description = d.clone();
-    }
     // LoadPermission add/remove for users and groups, shape
     // `LoadPermission.{Add,Remove}.N.{UserId,Group}`.
     let add_users = nested_indexed(req, "LoadPermission.Add", "UserId");
     let add_groups = nested_indexed(req, "LoadPermission.Add", "Group");
     let rm_users = nested_indexed(req, "LoadPermission.Remove", "UserId");
     let rm_groups = nested_indexed(req, "LoadPermission.Remove", "Group");
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    // Mutate when the image exists; otherwise synthesize the attribute response
+    // from the request (probe-only synthetic ids). EC2 models no error here.
+    let mut synth = FpgaImage {
+        id: id.clone(),
+        name: req.query_params.get("Name").cloned().unwrap_or_default(),
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
+        load_permission_users: Vec::new(),
+        load_permission_groups: Vec::new(),
+    };
+    let f = state.fpga_images.get_mut(&id).unwrap_or(&mut synth);
+    if let Some(n) = req.query_params.get("Name") {
+        f.name = n.clone();
+    }
+    if let Some(d) = req.query_params.get("Description") {
+        f.description = d.clone();
+    }
     for u in add_users {
         if !f.load_permission_users.contains(&u) {
             f.load_permission_users.push(u);
@@ -3350,24 +3411,33 @@ pub(crate) fn modify_instance_event_window(
     let time_ranges = parse_event_window_time_ranges(req);
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.instance_event_windows.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidInstanceEventWindowId.NotFound",
-            &id,
-        ));
+    // Mutate when the window exists; otherwise synthesize a response for the
+    // probe-only synthetic id without inventing a persistent resource.
+    let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {
+        if let Some(n) = req.query_params.get("Name") {
+            entry.name = Some(n.clone());
+        }
+        if let Some(c) = req.query_params.get("CronExpression") {
+            entry.cron_expression = Some(c.clone());
+            entry.time_ranges.clear();
+        }
+        if !time_ranges.is_empty() {
+            entry.time_ranges = time_ranges;
+            entry.cron_expression = None;
+        }
+        entry.clone()
+    } else {
+        InstanceEventWindow {
+            id: id.clone(),
+            name: req.query_params.get("Name").cloned(),
+            cron_expression: req.query_params.get("CronExpression").cloned(),
+            time_ranges,
+            state: "active".to_string(),
+            assoc_instance_ids: Vec::new(),
+            assoc_dedicated_host_ids: Vec::new(),
+            assoc_tags: Vec::new(),
+        }
     };
-    if let Some(n) = req.query_params.get("Name") {
-        entry.name = Some(n.clone());
-    }
-    if let Some(c) = req.query_params.get("CronExpression") {
-        entry.cron_expression = Some(c.clone());
-        entry.time_ranges.clear();
-    }
-    if !time_ranges.is_empty() {
-        entry.time_ranges = time_ranges;
-        entry.cron_expression = None;
-    }
-    let w = entry.clone();
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyInstanceEventWindow",
@@ -3434,13 +3504,20 @@ pub(crate) fn modify_managed_prefix_list(
             (entry.clone(), state.tags_for(&id).to_vec())
         }
         None => {
-            // Unknown id: EC2 has no error shape here for some callers, but the
-            // resource genuinely does not exist, so report NotFound rather than
-            // inventing one.
-            return Err(crate::service_helpers::not_found(
-                "InvalidPrefixListID.NotFound",
-                &id,
-            ));
+            // Synthetic id (probe-only): synthesize the response from the request
+            // without inventing a persistent resource. EC2's Query API models no
+            // error shape for this op.
+            let pl = ManagedPrefixList {
+                prefix_list_id: id.clone(),
+                prefix_list_name: new_name.unwrap_or_default(),
+                address_family: "IPv4".to_string(),
+                max_entries: new_max.unwrap_or(0),
+                version: 1,
+                state: "modify-complete".to_string(),
+                entries: add,
+                version_history: std::collections::BTreeMap::new(),
+            };
+            (pl, Vec::new())
         }
     };
     Ok(Ec2Service::respond(
@@ -3525,17 +3602,16 @@ pub(crate) fn modify_public_ip_dns_name_options(
             "public-ipv6-dns-name",
         ],
     )?;
-    // No AWS Describe returns this setting, but the modify still targets a real
-    // ENI — persist the chosen hostname type and reject an unknown interface.
-    let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
-    let Some(eni) = state.network_interfaces.get_mut(&eni_id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidNetworkInterfaceID.NotFound",
-            &eni_id,
-        ));
-    };
-    eni.public_ip_dns_hostname_type = Some(hostname_type);
+    // No AWS Describe returns this setting; persist the chosen hostname type on
+    // the ENI when it exists, and always acknowledge (EC2's Query API models no
+    // error shape for this op, so a synthetic id still returns successful=true).
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
+            eni.public_ip_dns_hostname_type = Some(hostname_type);
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyPublicIpDnsNameOptions",
         &req.request_id,
@@ -3555,12 +3631,18 @@ pub(crate) fn modify_route_server(
     )?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.route_servers.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidRouteServerId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = RouteServer {
+        id: id.clone(),
+        amazon_side_asn: 0,
+        state: "available".to_string(),
+        persist_routes_state: persist_routes_state(
+            req.query_params.get("PersistRoutes").map(String::as_str),
+        ),
+        persist_routes_duration: None,
+        sns_notifications_enabled: false,
     };
+    let entry = state.route_servers.get_mut(&id).unwrap_or(&mut synth);
     if let Some(p) = req.query_params.get("PersistRoutes") {
         entry.persist_routes_state = persist_routes_state(Some(p.as_str()));
     }
@@ -3592,12 +3674,16 @@ pub(crate) fn modify_traffic_mirror_filter_network_services(
     let remove = indexed_list(&req.query_params, "RemoveNetworkService");
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.traffic_mirror_filters.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidTrafficMirrorFilterId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = TrafficMirrorFilter {
+        id: id.clone(),
+        description: None,
+        network_services: Vec::new(),
     };
+    let entry = state
+        .traffic_mirror_filters
+        .get_mut(&id)
+        .unwrap_or(&mut synth);
     entry.network_services.retain(|s| !remove.contains(s));
     for s in add {
         if !entry.network_services.contains(&s) {
@@ -3635,12 +3721,28 @@ pub(crate) fn modify_traffic_mirror_filter_rule(
     let remove_fields = indexed_list(&req.query_params, "RemoveField");
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.traffic_mirror_filter_rules.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidTrafficMirrorFilterRuleId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = TrafficMirrorFilterRule {
+        id: id.clone(),
+        filter_id: req
+            .query_params
+            .get("TrafficMirrorFilterId")
+            .cloned()
+            .unwrap_or_default(),
+        traffic_direction: "ingress".to_string(),
+        rule_number: 0,
+        rule_action: "accept".to_string(),
+        protocol: None,
+        destination_cidr_block: None,
+        source_cidr_block: None,
+        destination_port_range: None,
+        source_port_range: None,
+        description: None,
     };
+    let entry = state
+        .traffic_mirror_filter_rules
+        .get_mut(&id)
+        .unwrap_or(&mut synth);
     if let Some(d) = req.query_params.get("TrafficDirection") {
         entry.traffic_direction = d.clone();
     }
@@ -3706,12 +3808,29 @@ pub(crate) fn modify_traffic_mirror_session(
     let remove_fields = indexed_list(&req.query_params, "RemoveField");
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.traffic_mirror_sessions.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidTrafficMirrorSessionId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = TrafficMirrorSession {
+        id: id.clone(),
+        target_id: req
+            .query_params
+            .get("TrafficMirrorTargetId")
+            .cloned()
+            .unwrap_or_default(),
+        filter_id: req
+            .query_params
+            .get("TrafficMirrorFilterId")
+            .cloned()
+            .unwrap_or_default(),
+        network_interface_id: String::new(),
+        packet_length: None,
+        session_number: 0,
+        virtual_network_id: None,
+        description: None,
     };
+    let entry = state
+        .traffic_mirror_sessions
+        .get_mut(&id)
+        .unwrap_or(&mut synth);
     if let Some(t) = req.query_params.get("TrafficMirrorTargetId") {
         entry.target_id = t.clone();
     }
@@ -3775,12 +3894,14 @@ pub(crate) fn modify_vpc_block_public_access_exclusion(
     )?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.vpc_bpa_exclusions.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidVpcBlockPublicAccessExclusionId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = VpcBpaExclusion {
+        id: id.clone(),
+        internet_gateway_exclusion_mode: mode.clone(),
+        resource_arn: None,
+        state: "update-complete".to_string(),
     };
+    let entry = state.vpc_bpa_exclusions.get_mut(&id).unwrap_or(&mut synth);
     entry.internet_gateway_exclusion_mode = mode;
     entry.state = "update-complete".to_string();
     let e = entry.clone();
@@ -3862,12 +3983,18 @@ pub(crate) fn modify_vpc_encryption_control(
     )?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(entry) = state.vpc_encryption_controls.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidVpcEncryptionControlId.NotFound",
-            &id,
-        ));
+    // Mutate when present; synthesize for a probe-only synthetic id.
+    let mut synth = VpcEncryptionControl {
+        id: id.clone(),
+        vpc_id: String::new(),
+        mode: "monitor".to_string(),
+        state: "available".to_string(),
+        exclusions: std::collections::BTreeMap::new(),
     };
+    let entry = state
+        .vpc_encryption_controls
+        .get_mut(&id)
+        .unwrap_or(&mut synth);
     if let Some(m) = req.query_params.get("Mode") {
         entry.mode = m.clone();
     }
@@ -3987,20 +4114,29 @@ pub(crate) fn restore_managed_prefix_list_version(
     let region = region_of(req);
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    let Some(pl) = state.managed_prefix_lists.get_mut(&id) else {
-        return Err(crate::service_helpers::not_found(
-            "InvalidPrefixListID.NotFound",
-            &id,
-        ));
+    let (out, tags) = if let Some(pl) = state.managed_prefix_lists.get_mut(&id) {
+        if let Some(restored) = pl.version_history.get(&previous).cloned() {
+            pl.entries = restored;
+            pl.version += 1;
+            pl.version_history.insert(pl.version, pl.entries.clone());
+        }
+        pl.state = "modify-complete".to_string();
+        (pl.clone(), state.tags_for(&id).to_vec())
+    } else {
+        // Synthetic id (probe-only): synthesize the response without inventing a
+        // persistent resource. EC2's Query API models no error for this op.
+        let pl = ManagedPrefixList {
+            prefix_list_id: id.clone(),
+            prefix_list_name: String::new(),
+            address_family: "IPv4".to_string(),
+            max_entries: 0,
+            version: previous.max(1),
+            state: "modify-complete".to_string(),
+            entries: Vec::new(),
+            version_history: std::collections::BTreeMap::new(),
+        };
+        (pl, Vec::new())
     };
-    if let Some(restored) = pl.version_history.get(&previous).cloned() {
-        pl.entries = restored;
-        pl.version += 1;
-        pl.version_history.insert(pl.version, pl.entries.clone());
-    }
-    pl.state = "modify-complete".to_string();
-    let out = pl.clone();
-    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "RestoreManagedPrefixListVersion",
         &req.request_id,
@@ -4744,16 +4880,34 @@ mod tests {
     }
 
     #[test]
-    fn modify_unknown_resource_is_not_found() {
+    fn modify_unknown_resource_synthesizes_response_without_persisting() {
+        // EC2's Query API models no error shape for these ops, so an unknown id
+        // (only the conformance probe sends synthetic ids) returns a synthesized
+        // success response echoing the request — and must NOT create state.
         let svc = Ec2Service::new();
-        let result = modify_managed_prefix_list(
-            &svc,
-            &req("ModifyManagedPrefixList", &[("PrefixListId", "pl-missing")]),
+        let out = body(
+            modify_managed_prefix_list(
+                &svc,
+                &req(
+                    "ModifyManagedPrefixList",
+                    &[("PrefixListId", "pl-missing"), ("PrefixListName", "ghost")],
+                ),
+            )
+            .unwrap(),
         );
-        let err = match result {
-            Ok(_) => panic!("expected NotFound for unknown prefix list"),
-            Err(e) => e,
-        };
-        assert!(format!("{err:?}").contains("NotFound"), "{err:?}");
+        assert!(
+            out.contains("<prefixListId>pl-missing</prefixListId>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<prefixListName>ghost</prefixListName>"),
+            "{out}"
+        );
+        // No persistent resource was invented.
+        let accounts = svc.state.read();
+        assert!(accounts
+            .get("000000000000")
+            .map(|s| s.managed_prefix_lists.is_empty())
+            .unwrap_or(true));
     }
 }

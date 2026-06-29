@@ -99,7 +99,11 @@ fn build_subnet(vpc_id: String, cidr: String, az: &str, default_for_az: bool) ->
 
 /// Deterministic association id for a subnet's IPv6 CIDR.
 fn subnet_ipv6_assoc_id(subnet_id: &str) -> String {
-    format!("subnet-cidr-assoc-ipv6-{}", &subnet_id[7..])
+    // Probe variants send arbitrary (often short) synthetic ids; strip the
+    // `subnet-` prefix when present rather than slicing by byte offset, which
+    // would panic on an id shorter than 7 bytes or off a UTF-8 boundary.
+    let suffix = subnet_id.strip_prefix("subnet-").unwrap_or(subnet_id);
+    format!("subnet-cidr-assoc-ipv6-{suffix}")
 }
 
 fn default_az(req: &AwsRequest) -> String {

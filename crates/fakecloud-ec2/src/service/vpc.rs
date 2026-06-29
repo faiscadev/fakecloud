@@ -359,7 +359,12 @@ pub(crate) fn associate_vpc_cidr_block(
         .unwrap_or(false)
     {
         let ipv6 = generated_ipv6_cidr(&vpc_id);
-        let assoc_id = format!("vpc-cidr-assoc-ipv6-{}", &vpc_id[4..]);
+        // Strip the `vpc-` prefix when present; never byte-slice, which panics on
+        // a synthetic id shorter than 4 bytes or off a UTF-8 boundary.
+        let assoc_id = format!(
+            "vpc-cidr-assoc-ipv6-{}",
+            vpc_id.strip_prefix("vpc-").unwrap_or(&vpc_id)
+        );
         {
             let mut accounts = svc.state.write();
             let state = accounts.get_or_create(&req.account_id);
