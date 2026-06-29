@@ -523,6 +523,10 @@ fn infer_service_from_action(action: &str) -> Option<String> {
         | "CreateReceiptFilter"
         | "DeleteReceiptFilter"
         | "ListReceiptFilters" => Some("ses".to_string()),
+        // SNS subscription handshake: the SubscribeURL / UnsubscribeUrl that SNS
+        // hands to HTTP/S and email subscribers are unsigned bare GETs (no auth
+        // header), so the service must be inferred from the action alone.
+        "ConfirmSubscription" | "Unsubscribe" => Some("sns".to_string()),
         _ => None,
     }
 }
@@ -768,6 +772,41 @@ mod tests {
             infer_service_from_action("ListIdentities").as_deref(),
             Some("ses")
         );
+    }
+
+    #[test]
+    fn infer_service_from_action_maps_sns_confirmation_flow() {
+        // SNS hands subscribers unsigned SubscribeURL / UnsubscribeUrl GETs,
+        // so the service must be inferred from the action alone.
+        assert_eq!(
+            infer_service_from_action("ConfirmSubscription").as_deref(),
+            Some("sns")
+        );
+        assert_eq!(
+            infer_service_from_action("Unsubscribe").as_deref(),
+            Some("sns")
+        );
+    }
+
+    #[test]
+    fn detect_service_routes_unsigned_confirm_subscription_to_sns() {
+        // Mirror the bare GET an HTTP/S subscriber issues at the SubscribeURL:
+        // no Authorization header, bare-localhost Host, Action in the query.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:4566".parse().unwrap());
+        let mut query_params = HashMap::new();
+        query_params.insert("Action".to_string(), "ConfirmSubscription".to_string());
+        query_params.insert(
+            "TopicArn".to_string(),
+            "arn:aws:sns:us-east-1:000000000000:t".to_string(),
+        );
+        query_params.insert("Token".to_string(), "abc123".to_string());
+
+        let detected = detect_service(&headers, &query_params, &Bytes::new())
+            .expect("ConfirmSubscription must route to a service");
+        assert_eq!(detected.service, "sns");
+        assert_eq!(detected.action, "ConfirmSubscription");
+        assert_eq!(detected.protocol, AwsProtocol::Query);
     }
 
     #[test]

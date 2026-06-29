@@ -429,8 +429,20 @@ impl KmsService {
 
         let num_bytes = data_key_size_from_body(&body)?;
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
-        let _ = base64::engine::general_purpose::STANDARD.encode(&data_key_bytes);
-        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &data_key_bytes);
+
+        // Bind the caller's EncryptionContext into the AAD, identical to the
+        // GenerateDataKey (with-plaintext) sibling. Previously this used
+        // crate::blob::encode (AAD = key-id only), so a data key generated here
+        // with an EncryptionContext could never be decrypted with that context
+        // (AEAD mismatch -> InvalidCiphertextException) and Decrypt with no
+        // context wrongly succeeded.
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let blob = crate::blob::encode_with_context(
+            &state.master_key_bytes,
+            &key.key_id,
+            &data_key_bytes,
+            &ec_aad,
+        );
         let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
@@ -1022,7 +1034,17 @@ impl KmsService {
         let (private_key_bytes, public_key_bytes) = generate_data_keypair_bytes(&key_pair_spec)?;
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
 
-        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &private_key_bytes);
+        // Bind the caller's EncryptionContext into the AAD, identical to the
+        // GenerateDataKeyPair (with-plaintext) sibling. Previously this used
+        // crate::blob::encode (AAD = key-id only), so the private key could
+        // never be decrypted with its EncryptionContext.
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let blob = crate::blob::encode_with_context(
+            &state.master_key_bytes,
+            &key.key_id,
+            &private_key_bytes,
+            &ec_aad,
+        );
         let private_ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
