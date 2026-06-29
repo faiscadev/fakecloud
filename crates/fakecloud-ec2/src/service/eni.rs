@@ -140,6 +140,7 @@ pub(crate) fn create_network_interface(
         private_ips: Vec::new(),
         ipv6_addresses: Vec::new(),
         attachment: None,
+        public_ip_dns_hostname_type: None,
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -648,6 +649,7 @@ mod tests {
                     private_ips: vec![],
                     ipv6_addresses: vec![],
                     attachment: None,
+                    public_ip_dns_hostname_type: None,
                 },
             );
         }
@@ -691,6 +693,7 @@ mod tests {
                 private_ips: vec![],
                 ipv6_addresses: vec![],
                 attachment: None,
+                public_ip_dns_hostname_type: None,
             },
         );
     }

@@ -117,6 +117,14 @@ fn instance_xml(
             )
         })
         .unwrap_or_default();
+    let private_dns_name_options = format!(
+        "<privateDnsNameOptions><hostnameType>{}</hostnameType>\
+         <enableResourceNameDnsARecord>{}</enableResourceNameDnsARecord>\
+         <enableResourceNameDnsAAAARecord>{}</enableResourceNameDnsAAAARecord></privateDnsNameOptions>",
+        i.private_dns_hostname_type.as_deref().unwrap_or("ip-name"),
+        i.enable_resource_name_dns_a_record,
+        i.enable_resource_name_dns_aaaa_record,
+    );
     let tenancy = i.placement_tenancy.as_deref().unwrap_or("default");
     let placement_group = i
         .placement_group_name
@@ -124,7 +132,7 @@ fn instance_xml(
         .map(|g| ec2_elem("groupName", g))
         .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("instanceId", &i.instance_id),
         ec2_elem("imageId", &i.image_id),
         state_xml("instanceState", i.state_code, &i.state_name),
@@ -177,6 +185,7 @@ fn instance_xml(
         metadata_options,
         cpu_options,
         super::tags::tag_set_xml(tags),
+        private_dns_name_options,
     )
 }
 
@@ -396,6 +405,9 @@ pub(crate) async fn run_instances(
                 placement_tenancy: None,
                 placement_affinity: None,
                 placement_group_name: req.query_params.get("Placement.GroupName").cloned(),
+                private_dns_hostname_type: None,
+                enable_resource_name_dns_a_record: false,
+                enable_resource_name_dns_aaaa_record: false,
             };
             crate::service::tags::apply_tag_specifications(
                 state,

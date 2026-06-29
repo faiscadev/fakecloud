@@ -230,6 +230,9 @@ mod tests {
             placement_tenancy: None,
             placement_affinity: None,
             placement_group_name: None,
+            private_dns_hostname_type: None,
+            enable_resource_name_dns_a_record: false,
+            enable_resource_name_dns_aaaa_record: false,
         }
     }
 

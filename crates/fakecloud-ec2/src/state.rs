@@ -278,6 +278,12 @@ pub struct NetworkInterface {
     #[serde(default)]
     pub ipv6_addresses: Vec<String>,
     pub attachment: Option<EniAttachment>,
+    /// `publicIpDnsNameOptions.publicHostnameType` set by
+    /// `ModifyPublicIpDnsNameOptions`. AWS exposes no Describe that returns this
+    /// setting, so it is persisted (and the ENI's existence enforced) but not
+    /// reflected back through a Describe.
+    #[serde(default)]
+    pub public_ip_dns_hostname_type: Option<String>,
 }
 
 /// A network-interface permission grant.
@@ -355,6 +361,17 @@ pub struct Instance {
     pub placement_affinity: Option<String>,
     #[serde(default)]
     pub placement_group_name: Option<String>,
+    // ---- ModifyPrivateDnsNameOptions round-trip state ----
+    /// `privateDnsNameOptions.hostnameType` — `ip-name` | `resource-name`.
+    /// `None` reports the AWS default `ip-name`.
+    #[serde(default)]
+    pub private_dns_hostname_type: Option<String>,
+    /// `privateDnsNameOptions.enableResourceNameDnsARecord`.
+    #[serde(default)]
+    pub enable_resource_name_dns_a_record: bool,
+    /// `privateDnsNameOptions.enableResourceNameDnsAAAARecord`.
+    #[serde(default)]
+    pub enable_resource_name_dns_aaaa_record: bool,
 }
 
 fn default_true() -> bool {
@@ -1050,6 +1067,171 @@ pub struct TgwPeering {
     pub state: String,
 }
 
+/// One entry in a customer-managed prefix list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixListEntry {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A customer-managed prefix list (`CreateManagedPrefixList`). Versions are a
+/// monotonic counter; each entry-mutating Modify bumps `version` and snapshots
+/// the prior entries into `version_history` so `RestoreManagedPrefixListVersion`
+/// and `GetManagedPrefixListEntries(TargetVersion)` round-trip.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManagedPrefixList {
+    pub prefix_list_id: String,
+    pub prefix_list_name: String,
+    pub address_family: String,
+    pub max_entries: i64,
+    pub version: i64,
+    /// `create-complete` | `modify-complete`.
+    pub state: String,
+    #[serde(default)]
+    pub entries: Vec<PrefixListEntry>,
+    /// version -> entries snapshot at that version.
+    #[serde(default)]
+    pub version_history: BTreeMap<i64, Vec<PrefixListEntry>>,
+}
+
+/// A weekly time range within an instance event window.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EventWindowTimeRange {
+    pub start_week_day: String,
+    pub start_hour: i64,
+    pub end_week_day: String,
+    pub end_hour: i64,
+}
+
+/// An instance event window (`CreateInstanceEventWindow`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstanceEventWindow {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub time_ranges: Vec<EventWindowTimeRange>,
+    /// `creating` | `active` | `deleting` | `deleted`.
+    pub state: String,
+    /// Association target — instance ids, dedicated-host ids, or tags
+    /// (`AssociateInstanceEventWindow` / `DisassociateInstanceEventWindow`).
+    #[serde(default)]
+    pub assoc_instance_ids: Vec<String>,
+    #[serde(default)]
+    pub assoc_dedicated_host_ids: Vec<String>,
+    #[serde(default)]
+    pub assoc_tags: Vec<Tag>,
+}
+
+/// A traffic-mirror target (`CreateTrafficMirrorTarget`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficMirrorTarget {
+    pub id: String,
+    pub network_interface_id: Option<String>,
+    pub network_load_balancer_arn: Option<String>,
+    pub gateway_lb_endpoint_id: Option<String>,
+    /// `network-interface` | `network-load-balancer` | `gateway-load-balancer-endpoint`.
+    pub target_type: String,
+    pub description: Option<String>,
+}
+
+/// A traffic-mirror filter (`CreateTrafficMirrorFilter`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficMirrorFilter {
+    pub id: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub network_services: Vec<String>,
+}
+
+/// A traffic-mirror filter rule (`CreateTrafficMirrorFilterRule`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficMirrorFilterRule {
+    pub id: String,
+    pub filter_id: String,
+    pub traffic_direction: String,
+    pub rule_number: i64,
+    pub rule_action: String,
+    pub protocol: Option<i64>,
+    pub destination_cidr_block: Option<String>,
+    pub source_cidr_block: Option<String>,
+    /// (from, to) port ranges.
+    pub destination_port_range: Option<(i64, i64)>,
+    pub source_port_range: Option<(i64, i64)>,
+    pub description: Option<String>,
+}
+
+/// A traffic-mirror session (`CreateTrafficMirrorSession`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficMirrorSession {
+    pub id: String,
+    pub target_id: String,
+    pub filter_id: String,
+    pub network_interface_id: String,
+    pub packet_length: Option<i64>,
+    pub session_number: i64,
+    pub virtual_network_id: Option<i64>,
+    pub description: Option<String>,
+}
+
+/// A route server (`CreateRouteServer`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteServer {
+    pub id: String,
+    pub amazon_side_asn: i64,
+    /// `available` (lowercase per the AWS state enum is uppercase; we store the
+    /// wire value).
+    pub state: String,
+    /// `ENABLED` | `DISABLED` | `RESETTING` | ...
+    pub persist_routes_state: String,
+    pub persist_routes_duration: Option<i64>,
+    pub sns_notifications_enabled: bool,
+}
+
+/// A VPC encryption control (`CreateVpcEncryptionControl`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpcEncryptionControl {
+    pub id: String,
+    pub vpc_id: String,
+    /// `monitor` | `enforce`.
+    pub mode: String,
+    /// `available` | `monitor_in_progress` | `enforce_in_progress` | ...
+    pub state: String,
+    /// Per-resource-type exclusion state: resource -> `enabled` | `disabled`.
+    #[serde(default)]
+    pub exclusions: BTreeMap<String, String>,
+}
+
+/// A VPC block-public-access exclusion (`CreateVpcBlockPublicAccessExclusion`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VpcBpaExclusion {
+    pub id: String,
+    /// `allow-bidirectional` | `allow-egress`.
+    pub internet_gateway_exclusion_mode: String,
+    pub resource_arn: Option<String>,
+    /// `create-complete` | `update-complete` | `delete-complete`.
+    pub state: String,
+}
+
+/// An Amazon FPGA image (`CreateFpgaImage` / `CopyFpgaImage`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FpgaImage {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// `loadPermission` users the image is shared with.
+    #[serde(default)]
+    pub load_permission_users: Vec<String>,
+    /// `loadPermission` groups (`all` for public).
+    #[serde(default)]
+    pub load_permission_groups: Vec<String>,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1291,6 +1473,53 @@ pub struct Ec2State {
     pub fast_launch_images: std::collections::HashSet<String>,
     #[serde(default)]
     pub serial_console_access: bool,
+    // ---- account/region-scoped id-format settings (ModifyIdFormat) ----
+    /// resource type -> use-long-ids (account default).
+    #[serde(default)]
+    pub id_format: BTreeMap<String, bool>,
+    /// principal ARN -> (resource type -> use-long-ids).
+    #[serde(default)]
+    pub identity_id_format: BTreeMap<String, BTreeMap<String, bool>>,
+    /// burstable instance family -> CpuCredits (`standard` | `unlimited`),
+    /// set by ModifyDefaultCreditSpecification, read by GetDefaultCreditSpecification.
+    #[serde(default)]
+    pub default_credit_specs: BTreeMap<String, String>,
+    /// VPC block-public-access `InternetGatewayBlockMode` (account/region
+    /// singleton). `None` reports the default `off`.
+    #[serde(default)]
+    pub vpc_bpa_internet_gateway_block_mode: Option<String>,
+    /// Managed-resource `DefaultVisibility` (`hidden` | `visible`). `None`
+    /// reports the default `visible`.
+    #[serde(default)]
+    pub managed_resource_default_visibility: Option<String>,
+    /// Availability-zone group -> opt-in status (`opted-in` | `not-opted-in`),
+    /// set by ModifyAvailabilityZoneGroup, reflected in DescribeAvailabilityZones.
+    #[serde(default)]
+    pub az_group_optin: BTreeMap<String, String>,
+    #[serde(default)]
+    pub managed_prefix_lists: BTreeMap<String, ManagedPrefixList>,
+    #[serde(default)]
+    pub instance_event_windows: BTreeMap<String, InstanceEventWindow>,
+    #[serde(default)]
+    pub traffic_mirror_targets: BTreeMap<String, TrafficMirrorTarget>,
+    #[serde(default)]
+    pub traffic_mirror_filters: BTreeMap<String, TrafficMirrorFilter>,
+    #[serde(default)]
+    pub traffic_mirror_filter_rules: BTreeMap<String, TrafficMirrorFilterRule>,
+    #[serde(default)]
+    pub traffic_mirror_sessions: BTreeMap<String, TrafficMirrorSession>,
+    #[serde(default)]
+    pub route_servers: BTreeMap<String, RouteServer>,
+    #[serde(default)]
+    pub vpc_encryption_controls: BTreeMap<String, VpcEncryptionControl>,
+    #[serde(default)]
+    pub vpc_bpa_exclusions: BTreeMap<String, VpcBpaExclusion>,
+    #[serde(default)]
+    pub fpga_images: BTreeMap<String, FpgaImage>,
+    /// IPAM pool allocation id -> description (ModifyIpamPoolAllocation), read
+    /// back by DescribeIpamPoolAllocations.
+    #[serde(default)]
+    pub ipam_allocation_descriptions: BTreeMap<String, String>,
 }
 
 impl Ec2State {
@@ -1448,6 +1677,9 @@ mod tests {
             placement_tenancy: Some("dedicated".to_string()),
             placement_affinity: None,
             placement_group_name: Some("cluster-1".to_string()),
+            private_dns_hostname_type: Some("resource-name".to_string()),
+            enable_resource_name_dns_a_record: true,
+            enable_resource_name_dns_aaaa_record: false,
         }
     }
 
