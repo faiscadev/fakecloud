@@ -93,19 +93,75 @@ impl IamService {
             )
         })?;
 
-        let user_members: String = group
+        // Marker/MaxItems pagination over the group's members (the cursor is
+        // the member user name). Previously both were ignored and IsTruncated
+        // was hardcoded false, so large groups never paged.
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
+        validate_optional_range_i64(
+            "maxItems",
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
+            1,
+            1000,
+        )?;
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let marker = req.query_params.get("Marker").cloned();
+
+        // Resolve members (skipping any whose user record vanished) preserving
+        // membership order, then page after the marker.
+        let resolved: Vec<&crate::state::IamUser> = group
             .members
             .iter()
-            .filter_map(|uname| {
-                state.users.get(uname).map(|u| {
-                    format!(
-                        "      <member>\n        <Path>{}</Path>\n        <UserName>{}</UserName>\n        <UserId>{}</UserId>\n        <Arn>{}</Arn>\n        <CreateDate>{}</CreateDate>\n      </member>",
-                        u.path, u.user_name, u.user_id, u.arn, u.created_at.format("%Y-%m-%dT%H:%M:%SZ")
-                    )
-                })
+            .filter_map(|uname| state.users.get(uname))
+            .collect();
+        let start_idx = marker
+            .as_ref()
+            .and_then(|m| {
+                resolved
+                    .iter()
+                    .position(|u| u.user_name == *m)
+                    .map(|p| p + 1)
+            })
+            .unwrap_or(0);
+        let rest = resolved.get(start_idx..).unwrap_or(&[]);
+        let is_truncated = rest.len() > max_items;
+        let page = if is_truncated {
+            &rest[..max_items]
+        } else {
+            rest
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|u| u.user_name.clone())
+        } else {
+            None
+        };
+
+        let user_members: String = page
+            .iter()
+            .map(|u| {
+                format!(
+                    "      <member>\n        <Path>{}</Path>\n        <UserName>{}</UserName>\n        <UserId>{}</UserId>\n        <Arn>{}</Arn>\n        <CreateDate>{}</CreateDate>\n      </member>",
+                    u.path, u.user_name, u.user_id, u.arn, u.created_at.format("%Y-%m-%dT%H:%M:%SZ")
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
+
+        let marker_xml = next_marker
+            .as_deref()
+            .map(|m| format!("    <Marker>{m}</Marker>\n"))
+            .unwrap_or_default();
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -118,8 +174,8 @@ impl IamService {
       <Arn>{}</Arn>
       <CreateDate>{}</CreateDate>
     </Group>
-    <IsTruncated>false</IsTruncated>
-    <Users>
+    <IsTruncated>{is_truncated}</IsTruncated>
+{marker_xml}    <Users>
 {user_members}
     </Users>
   </GetGroupResult>

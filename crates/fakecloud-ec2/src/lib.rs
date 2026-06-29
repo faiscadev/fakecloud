@@ -7,6 +7,7 @@
 //! tagging subsystem, and the region/AZ/account-attribute describe primitives
 //! that almost every SDK client calls implicitly.
 
+pub mod cfn_provision;
 pub mod defaults;
 pub mod runtime;
 pub mod service;

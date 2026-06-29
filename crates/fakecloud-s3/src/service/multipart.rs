@@ -356,6 +356,29 @@ impl S3Service {
             .get("x-amz-copy-source-range")
             .and_then(|v| v.to_str().ok());
 
+        // Copy-source preconditions (x-amz-copy-source-if-*). These were never
+        // read on the part-copy path, so a mismatched source still copied + 200'd.
+        let cs_if_match = req
+            .headers
+            .get("x-amz-copy-source-if-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let cs_if_none_match = req
+            .headers
+            .get("x-amz-copy-source-if-none-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let cs_if_modified_since = req
+            .headers
+            .get("x-amz-copy-source-if-modified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(super::parse_http_date);
+        let cs_if_unmodified_since = req
+            .headers
+            .get("x-amz-copy-source-if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(super::parse_http_date);
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let src_body_ref = {
@@ -371,6 +394,34 @@ impl S3Service {
                     .get(src_key)
                     .ok_or_else(|| no_such_key(src_key))?
             };
+            let precondition_412 = || {
+                AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                )
+            };
+            let src_etag = format!("\"{}\"", src_obj.etag);
+            if let Some(ref im) = cs_if_match {
+                if !super::etag_matches(im, &src_etag) {
+                    return Err(precondition_412());
+                }
+            }
+            if let Some(ref inm) = cs_if_none_match {
+                if super::etag_matches(inm, &src_etag) {
+                    return Err(precondition_412());
+                }
+            }
+            if let Some(since) = cs_if_unmodified_since {
+                if src_obj.last_modified > since {
+                    return Err(precondition_412());
+                }
+            }
+            if let Some(since) = cs_if_modified_since {
+                if src_obj.last_modified <= since {
+                    return Err(precondition_412());
+                }
+            }
             src_obj.body.clone()
         };
         let src_bytes = state.read_body(&src_body_ref).map_err(super::io_to_aws)?;

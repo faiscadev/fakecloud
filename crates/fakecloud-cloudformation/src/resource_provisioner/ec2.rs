@@ -301,6 +301,93 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone()).with("RouteTableId", id))
     }
 
+    /// `AWS::EC2::Instance` — create a REAL control-plane instance synchronously
+    /// (so `Ref` resolves to the `i-...` id and `Fn::GetAtt`
+    /// PrivateIp/PublicIp/AvailabilityZone resolve during provisioning), then
+    /// queue a spawn intent that backs it with a real container via the EC2
+    /// runtime — the same instance the direct `RunInstances` path launches.
+    /// Previously this fell through to the no-op `other =>` catch-all and `Ref`
+    /// resolved to the bare logical id, inconsistent with ASG launching real
+    /// instances.
+    pub(super) fn create_ec2_instance(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let security_group_ids: Vec<String> = props
+            .get("SecurityGroupIds")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let spec = fakecloud_ec2::cfn_provision::CfnInstanceSpec {
+            image_id: prop_str(props, "ImageId").map(String::from),
+            instance_type: prop_str(props, "InstanceType").map(String::from),
+            subnet_id: prop_str(props, "SubnetId").map(String::from),
+            availability_zone: props
+                .get("AvailabilityZone")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    props
+                        .get("Placement")
+                        .and_then(|p| p.get("AvailabilityZone"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                }),
+            security_group_ids,
+            key_name: prop_str(props, "KeyName").map(String::from),
+            user_data: prop_str(props, "UserData").map(String::from),
+            private_ip: prop_str(props, "PrivateIpAddress").map(String::from),
+        };
+
+        let attrs = fakecloud_ec2::cfn_provision::cfn_create(
+            self.ec2_state.clone(),
+            &self.account_id,
+            &self.region,
+            &spec,
+        );
+
+        // Apply the template's Tags to the created instance (mirrors a direct
+        // CreateTags) so DescribeInstances / cost reports reflect them.
+        if let Some(tags) = props.get("Tags").and_then(|v| v.as_array()) {
+            if !tags.is_empty() {
+                let mut params = HashMap::new();
+                params.insert("ResourceId.1".to_string(), attrs.instance_id.clone());
+                for (i, t) in tags.iter().enumerate() {
+                    if let (Some(k), Some(v)) = (
+                        t.get("Key").and_then(|v| v.as_str()),
+                        t.get("Value").and_then(|v| v.as_str()),
+                    ) {
+                        let n = i + 1;
+                        params.insert(format!("Tag.{n}.Key"), k.to_string());
+                        params.insert(format!("Tag.{n}.Value"), v.to_string());
+                    }
+                }
+                let _ = self.ec2_dispatch("CreateTags", params);
+            }
+        }
+
+        // Background the container boot via the spawn-intent drain so stack
+        // creation never blocks on a cold image pull / Pod readiness.
+        self.pending_container_spawns
+            .lock()
+            .push(super::ContainerSpawnIntent::Ec2Instance {
+                instance_id: attrs.instance_id.clone(),
+            });
+
+        let mut result = ProvisionResult::new(attrs.instance_id.clone())
+            .with("PrivateIp", attrs.private_ip)
+            .with("AvailabilityZone", attrs.availability_zone);
+        if let Some(public_ip) = attrs.public_ip {
+            result = result.with("PublicIp", public_ip);
+        }
+        Ok(result)
+    }
+
     /// Delete an EC2 resource by its physical id, routing through the real
     /// handler so dependent default resources are cleaned up correctly.
     pub(super) fn delete_ec2_resource(

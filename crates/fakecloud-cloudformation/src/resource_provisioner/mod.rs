@@ -965,6 +965,10 @@ pub enum ContainerSpawnIntent {
     /// its desired capacity by launching real container-backed EC2 instances
     /// via the EC2 runtime, matching the direct `CreateAutoScalingGroup` path.
     AsgInstances { group_name: String },
+    /// `AWS::EC2::Instance` — back the inserted (control-plane `pending`)
+    /// instance with a real container via the EC2 runtime, matching the direct
+    /// `RunInstances` path.
+    Ec2Instance { instance_id: String },
     /// `AWS::ElastiCache::CacheCluster` — back the inserted CacheCluster with a
     /// real Redis/Memcached container via the ElastiCache runtime, matching the
     /// direct `CreateCacheCluster` path.
@@ -1008,6 +1012,9 @@ pub enum ContainerTeardownIntent {
     /// `AWS::AutoScaling::AutoScalingGroup` -- terminate the REAL EC2 instances
     /// the group launched (captured before the group record was removed).
     AsgInstances { instance_ids: Vec<String> },
+    /// `AWS::EC2::Instance` -- terminate the REAL EC2 instance + reap its
+    /// backing container when the stack is deleted.
+    Ec2Instance { instance_id: String },
 }
 
 /// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
@@ -1166,6 +1173,7 @@ impl ResourceProvisioner {
             "AWS::Batch::JobDefinition" => self.create_batch_job_definition(resource),
             "AWS::Batch::SchedulingPolicy" => self.create_batch_scheduling_policy(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
+            "AWS::EC2::Instance" => self.create_ec2_instance(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
             "AWS::EC2::SecurityGroup" => self.create_ec2_security_group(resource),
             "AWS::EC2::InternetGateway" => self.create_ec2_internet_gateway(resource),
@@ -1511,6 +1519,7 @@ impl ResourceProvisioner {
             | "AWS::EC2::Subnet"
             | "AWS::EC2::SecurityGroup"
             | "AWS::EC2::InternetGateway"
+            | "AWS::EC2::Instance"
             | "AWS::EC2::RouteTable" => self.get_att_ec2(resource, attribute),
             "AWS::ECS::CapacityProvider" => {
                 self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
@@ -1733,6 +1742,17 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
             "AWS::RDS::DBInstance" => self.delete_rds_db_instance(&resource.physical_id),
             "AWS::RDS::DBCluster" => self.delete_rds_db_cluster(&resource.physical_id),
+            "AWS::EC2::Instance" => {
+                // Queue terminating the REAL instance + reaping its backing
+                // container so the stack delete drain doesn't leak an EC2
+                // container.
+                self.pending_container_teardowns.lock().push(
+                    ContainerTeardownIntent::Ec2Instance {
+                        instance_id: resource.physical_id.clone(),
+                    },
+                );
+                Ok(())
+            }
             "AWS::EC2::VPC"
             | "AWS::EC2::Subnet"
             | "AWS::EC2::SecurityGroup"

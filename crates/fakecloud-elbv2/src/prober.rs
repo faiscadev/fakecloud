@@ -23,6 +23,15 @@ pub fn spawn_prober(state: SharedElbv2State) {
         debug!("ELBv2 health probes disabled via {ENV_DISABLE}");
         return;
     }
+    // Detect once: EC2-instance (`i-*`) and ECS bridge-mode (`127.0.0.1`)
+    // targets publish their ports on the host daemon's loopback, reached via
+    // `sibling_host` (`127.0.0.1` on the host, or the host alias when fakecloud
+    // is itself containerized). This mirrors the data plane's
+    // `resolve_upstream_host` so probes succeed under FAKECLOUD_IN_CONTAINER=1
+    // instead of hitting fakecloud's own loopback and 503'ing every target.
+    let sibling_host = fakecloud_core::container_net::detect_container_cli()
+        .map(|cli| fakecloud_core::container_net::HostNetworking::detect(&cli).sibling_host)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     tokio::spawn(async move {
         // No client-level timeout: each probe wraps the request in a
         // `tokio::time::timeout` keyed off the target group's
@@ -38,7 +47,7 @@ pub fn spawn_prober(state: SharedElbv2State) {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            run_one_pass(&state, &client).await;
+            run_one_pass(&state, &client, &sibling_host).await;
         }
     });
 }
@@ -58,7 +67,7 @@ struct ProbeJob {
     unhealthy_threshold: u32,
 }
 
-async fn run_one_pass(state: &SharedElbv2State, client: &Client) {
+async fn run_one_pass(state: &SharedElbv2State, client: &Client, sibling_host: &str) {
     let now = Utc::now();
     let jobs: Vec<ProbeJob> = {
         let accounts = state.read();
@@ -89,7 +98,7 @@ async fn run_one_pass(state: &SharedElbv2State, client: &Client) {
         return;
     }
 
-    let results = futures_concurrent(jobs, client).await;
+    let results = futures_concurrent(jobs, client, sibling_host).await;
 
     let mut accounts = state.write();
     for (job, ok) in results {
@@ -174,12 +183,17 @@ fn build_job(
     })
 }
 
-async fn futures_concurrent(jobs: Vec<ProbeJob>, client: &Client) -> Vec<(ProbeJob, bool)> {
+async fn futures_concurrent(
+    jobs: Vec<ProbeJob>,
+    client: &Client,
+    sibling_host: &str,
+) -> Vec<(ProbeJob, bool)> {
     let mut handles = Vec::with_capacity(jobs.len());
     for job in jobs {
         let client = client.clone();
+        let sibling_host = sibling_host.to_string();
         handles.push(tokio::spawn(async move {
-            let ok = probe(&client, &job).await;
+            let ok = probe(&client, &job, &sibling_host).await;
             (job, ok)
         }));
     }
@@ -192,12 +206,20 @@ async fn futures_concurrent(jobs: Vec<ProbeJob>, client: &Client) -> Vec<(ProbeJ
     out
 }
 
-async fn probe(client: &Client, job: &ProbeJob) -> bool {
-    let host = if job.target_id.starts_with("i-") {
-        "127.0.0.1".to_string()
+/// Resolve the host to probe for a target. EC2-instance (`i-*`) and ECS
+/// bridge-mode (`127.0.0.1`) targets publish on the host daemon's loopback and
+/// are reached via `sibling_host`; any other id (a real container IP/DNS) is
+/// used verbatim. Mirrors the data plane's `resolve_upstream_host`.
+fn resolve_probe_host(target_id: &str, sibling_host: &str) -> String {
+    if target_id.starts_with("i-") || target_id == "127.0.0.1" {
+        sibling_host.to_string()
     } else {
-        job.target_id.clone()
-    };
+        target_id.to_string()
+    }
+}
+
+async fn probe(client: &Client, job: &ProbeJob, sibling_host: &str) -> bool {
+    let host = resolve_probe_host(&job.target_id, sibling_host);
     let probe_timeout = Duration::from_secs(job.timeout_secs);
 
     match job.protocol.as_str() {
@@ -283,5 +305,34 @@ mod tests {
         assert!(matcher_matches("200,300-399", 350));
         assert!(matcher_matches("200,300-399", 200));
         assert!(!matcher_matches("200,300-399", 400));
+    }
+
+    #[test]
+    fn resolve_probe_host_uses_sibling_for_ec2_and_bridge() {
+        // EC2 instance ids resolve to the sibling host (host alias when
+        // fakecloud is itself containerized), not fakecloud's own loopback.
+        assert_eq!(
+            resolve_probe_host("i-0123456789abcdef0", "host.docker.internal"),
+            "host.docker.internal"
+        );
+        // ECS bridge-mode tasks register as 127.0.0.1 and resolve the same way.
+        assert_eq!(
+            resolve_probe_host("127.0.0.1", "host.docker.internal"),
+            "host.docker.internal"
+        );
+        // On the host, sibling_host is plain loopback.
+        assert_eq!(resolve_probe_host("i-abc", "127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn resolve_probe_host_passes_real_container_ip_verbatim() {
+        assert_eq!(
+            resolve_probe_host("10.0.1.5", "host.docker.internal"),
+            "10.0.1.5"
+        );
+        assert_eq!(
+            resolve_probe_host("ip-10-0-1-5.ec2.internal", "host.docker.internal"),
+            "ip-10-0-1-5.ec2.internal"
+        );
     }
 }

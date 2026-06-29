@@ -151,7 +151,7 @@ impl S3Service {
             }
         }
         if let Some(ref redirect) = obj.website_redirect_location {
-            headers.insert("x-amz-website-redirect-location", redirect.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-website-redirect-location", redirect);
         }
         if !obj.tags.is_empty() {
             headers.insert(
@@ -532,7 +532,7 @@ impl S3Service {
             }
         }
         if let Some(ref redirect) = obj.website_redirect_location {
-            headers.insert("x-amz-website-redirect-location", redirect.parse().unwrap());
+            insert_str_header(&mut headers, "x-amz-website-redirect-location", redirect);
         }
         if !obj.tags.is_empty() {
             headers.insert(

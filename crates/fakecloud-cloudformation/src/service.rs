@@ -456,6 +456,20 @@ impl ContainerBackingHandles {
                         .await;
                     });
                 }
+                ContainerSpawnIntent::Ec2Instance { instance_id } => {
+                    let ec2_state = self.ec2_state.clone();
+                    let ec2_runtime = self.ec2_runtime.clone();
+                    let account = self.account_id.clone();
+                    tokio::spawn(async move {
+                        fakecloud_ec2::cfn_provision::cfn_back_instance(
+                            ec2_state,
+                            ec2_runtime,
+                            account,
+                            instance_id,
+                        )
+                        .await;
+                    });
+                }
                 ContainerSpawnIntent::ElastiCacheCluster { cache_cluster_id } => {
                     if let Some(runtime) = self.elasticache_runtime.clone() {
                         let ec_state = self.elasticache_state.clone();
@@ -575,6 +589,22 @@ impl ContainerBackingHandles {
                             .await;
                         });
                     }
+                }
+                ContainerTeardownIntent::Ec2Instance { instance_id } => {
+                    let ec2_state = self.ec2_state.clone();
+                    let ec2_runtime = self.ec2_runtime.clone();
+                    let account = self.account_id.clone();
+                    let region = self.region.clone();
+                    tokio::spawn(async move {
+                        fakecloud_ec2::cfn_provision::cfn_terminate(
+                            ec2_state,
+                            ec2_runtime,
+                            account,
+                            region,
+                            instance_id,
+                        )
+                        .await;
+                    });
                 }
                 ContainerTeardownIntent::AsgInstances { instance_ids } => {
                     let asg_state = self.autoscaling_state.clone();

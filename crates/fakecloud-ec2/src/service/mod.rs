@@ -10,7 +10,7 @@ mod firewall_model;
 mod fleet;
 mod ice;
 mod image;
-mod instance;
+pub(crate) mod instance;
 mod ipam;
 mod ipam_discovery;
 mod ipam_policy;

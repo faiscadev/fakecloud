@@ -3899,10 +3899,13 @@ async fn main() {
     }
     if iam_mode.is_enabled() {
         let (enforced, skipped) = registry.iam_enforcement_split();
-        tracing::info!(
+        // warn (not info): the `skipped` services accept any authorized caller
+        // even under --iam, a security-relevant gap that should be as loud as
+        // the SigV4 caveat above rather than buried at info level.
+        tracing::warn!(
             enforced = ?enforced,
             skipped = ?skipped,
-            "IAM enforcement surface: listed `enforced` services evaluate policies; `skipped` services are not yet wired for enforcement"
+            "IAM enforcement surface: listed `enforced` services evaluate policies; `skipped` services are NOT yet wired for enforcement and allow any authorized caller"
         );
     }
     let config = DispatchConfig {

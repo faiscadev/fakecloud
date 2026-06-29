@@ -660,6 +660,15 @@ impl IamService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // A nonexistent user must raise NoSuchEntity, not return an empty 200
+        // (matches ListSigningCertificates).
+        if !state.users.contains_key(&user_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("The user with name {user_name} cannot be found."),
+            ));
+        }
         let mut keys = state
             .access_keys
             .get(&user_name)
@@ -1351,6 +1360,15 @@ impl IamService {
             .cloned()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| resolve_calling_user(state, &req.account_id));
+
+        // A nonexistent user must raise NoSuchEntity, not return an empty 200.
+        if !state.users.contains_key(&user_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("The user with name {user_name} cannot be found."),
+            ));
+        }
 
         let keys = state.ssh_public_keys.get(&user_name);
         let members: String = keys
