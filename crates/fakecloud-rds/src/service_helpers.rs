@@ -1988,7 +1988,7 @@ pub(crate) fn default_db_name(engine: &str) -> &'static str {
 /// Pick the port AWS defaults to for a freshly-created instance of
 /// `engine`. Mirrors the AWS RDS defaults so client SDKs that connect
 /// without an explicit `--port` flag hit the right listener.
-pub(crate) fn default_port_for_engine(engine: &str) -> i32 {
+pub fn default_port_for_engine(engine: &str) -> i32 {
     match engine {
         "postgres" => 5432,
         "mysql" | "mariadb" => 3306,

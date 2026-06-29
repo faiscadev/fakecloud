@@ -485,6 +485,262 @@ fn reconcile_started(
     }
 }
 
+/// Inputs for a CloudFormation-driven `AWS::EC2::Instance` launch.
+#[derive(Debug, Clone, Default)]
+pub struct CfnInstanceSpec {
+    pub image_id: Option<String>,
+    pub instance_type: Option<String>,
+    pub subnet_id: Option<String>,
+    pub availability_zone: Option<String>,
+    pub security_group_ids: Vec<String>,
+    pub key_name: Option<String>,
+    pub user_data: Option<String>,
+    pub private_ip: Option<String>,
+}
+
+/// The Ref / GetAtt-resolvable attributes of a CFN-launched instance.
+#[derive(Debug, Clone)]
+pub struct CfnInstanceAttrs {
+    pub instance_id: String,
+    pub private_ip: String,
+    pub public_ip: Option<String>,
+    pub availability_zone: String,
+}
+
+/// Synchronously insert a control-plane `AWS::EC2::Instance` record (status
+/// `pending`) and return its Ref/GetAtt attributes. Mirrors the control-plane
+/// half of [`run_instances`] for a single instance so a CFN-provisioned
+/// instance resolves `Ref` to a real `i-...` id and `GetAtt`
+/// PrivateIp/PublicIp/AvailabilityZone immediately. The backing container is
+/// booted afterwards by [`cfn_boot_instance`] (drained off the request path).
+pub(crate) fn cfn_create_instance(
+    svc: &Ec2Service,
+    account_id: &str,
+    region: &str,
+    spec: &CfnInstanceSpec,
+) -> CfnInstanceAttrs {
+    let image_id = spec
+        .image_id
+        .clone()
+        .unwrap_or_else(|| "ami-00000000000000000".to_string());
+    let instance_type = spec
+        .instance_type
+        .clone()
+        .unwrap_or_else(|| "t3.micro".to_string());
+    let region = if region.is_empty() {
+        "us-east-1"
+    } else {
+        region
+    };
+    let mut subnet_id = spec.subnet_id.clone();
+    let mut sg_ids = spec.security_group_ids.clone();
+
+    let (vpc_id, subnet_auto_public, ip_prefix, az) = {
+        let accounts = svc.state.read();
+        let empty = Ec2State::new(account_id, region);
+        let state = accounts.get(account_id).unwrap_or(&empty);
+        // Resolve a default subnet when none is given, preferring the requested
+        // AZ, exactly like `run_instances`.
+        if subnet_id.is_none() {
+            let want_az = spec.availability_zone.clone();
+            if let Some(s) = state
+                .subnets
+                .values()
+                .filter(|s| s.default_for_az)
+                .find(|s| want_az.as_deref().is_none_or(|a| s.availability_zone == a))
+                .or_else(|| state.subnets.values().find(|s| s.default_for_az))
+            {
+                subnet_id = Some(s.subnet_id.clone());
+            }
+        }
+        let resolved_vpc = subnet_id
+            .as_ref()
+            .and_then(|sid| state.subnets.get(sid))
+            .map(|s| s.vpc_id.clone());
+        if sg_ids.is_empty() {
+            let vpc = resolved_vpc
+                .clone()
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id));
+            if let Some(sg) = state
+                .security_groups
+                .values()
+                .find(|g| g.vpc_id == vpc && g.group_name == "default")
+            {
+                sg_ids = vec![sg.group_id.clone()];
+            }
+        }
+        let (vpc, auto_public, az) = match subnet_id.as_ref() {
+            Some(sid) => state
+                .subnets
+                .get(sid)
+                .map(|s| {
+                    (
+                        Some(s.vpc_id.clone()),
+                        s.map_public_ip_on_launch || s.default_for_az,
+                        s.availability_zone.clone(),
+                    )
+                })
+                .unwrap_or((None, false, format!("{region}a"))),
+            None => (
+                Some(crate::defaults::default_vpc_id(account_id)),
+                true,
+                format!("{region}a"),
+            ),
+        };
+        let az = spec.availability_zone.clone().unwrap_or(az);
+        let ip_prefix = subnet_id
+            .as_ref()
+            .and_then(|sid| state.subnets.get(sid))
+            .map(|s| subnet_ip_prefix(&s.cidr_block))
+            .unwrap_or_else(|| "10.0.0".to_string());
+        (vpc, auto_public, ip_prefix, az)
+    };
+
+    let assign_public = subnet_auto_public;
+    let id = gen_id("i");
+    let private_ip = spec
+        .private_ip
+        .clone()
+        .unwrap_or_else(|| format!("{ip_prefix}.10"));
+    let public_ip = if assign_public {
+        Some("52.0.0.10".to_string())
+    } else {
+        None
+    };
+
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(account_id);
+        let inst = Instance {
+            instance_id: id.clone(),
+            image_id,
+            instance_type,
+            state_code: 0,
+            state_name: "pending".to_string(),
+            private_ip: private_ip.clone(),
+            public_ip: public_ip.clone(),
+            subnet_id: subnet_id.clone(),
+            vpc_id: vpc_id.clone(),
+            key_name: spec.key_name.clone(),
+            security_group_ids: sg_ids,
+            reservation_id: gen_id("r"),
+            ami_launch_index: 0,
+            monitoring: false,
+            az: az.clone(),
+            launch_time: LAUNCH_TIME.to_string(),
+            container_id: None,
+            disable_api_termination: false,
+            disable_api_stop: false,
+            source_dest_check: true,
+            ebs_optimized: false,
+            instance_initiated_shutdown_behavior: "stop".to_string(),
+            user_data: spec.user_data.clone().filter(|s| !s.is_empty()),
+            metadata_options: crate::state::MetadataOptions::default(),
+            cpu_options: None,
+            bandwidth_weighting: None,
+            maintenance_options: crate::state::MaintenanceOptions::default(),
+            placement_tenancy: None,
+            placement_affinity: None,
+            placement_group_name: None,
+        };
+        state.instances.insert(id.clone(), inst);
+    }
+
+    CfnInstanceAttrs {
+        instance_id: id,
+        private_ip,
+        public_ip,
+        availability_zone: az,
+    }
+}
+
+/// Boot the backing container for a CFN-created instance and reconcile it to
+/// `running` (or metadata-only `running` when no runtime is wired). Mirrors the
+/// background-boot half of [`run_instances`]. Intended to be `tokio::spawn`ed by
+/// the CloudFormation create drain so stack creation never blocks on a cold
+/// image pull / Pod readiness.
+pub(crate) async fn cfn_boot_instance(svc: &Ec2Service, account_id: &str, id: &str) {
+    let (user_data, instance_network) = {
+        let accounts = svc.state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return;
+        };
+        let Some(inst) = state.instances.get(id) else {
+            return;
+        };
+        let network = inst
+            .subnet_id
+            .as_ref()
+            .map(|sid| crate::runtime::InstanceNetwork {
+                subnet_id: sid.clone(),
+                internal: !crate::defaults::subnet_is_public(state, sid),
+            });
+        (inst.user_data.clone(), network)
+    };
+
+    let empty_tags = std::collections::BTreeMap::new();
+    let running = if let Some(rt) = &svc.runtime {
+        match rt
+            .run_instance(
+                account_id,
+                id,
+                user_data.as_deref(),
+                &empty_tags,
+                instance_network.as_ref(),
+            )
+            .await
+        {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(instance_id = %id, error = %e, "CFN EC2 instance container failed to start; serving metadata-only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    reconcile_started(&svc.state, account_id, id, running);
+
+    if let Some(rt) = &svc.runtime {
+        if rt.network_isolation_enforced() {
+            super::firewall_model::reconcile(&svc.state, rt).await;
+        }
+    }
+}
+
+/// Terminate a CFN-created instance (reaping its real backing container) when
+/// its stack is deleted. Routes through the real `TerminateInstances` handler so
+/// the container/Pod is stopped and the firewall re-reconciled, instead of
+/// leaking a running EC2 container. No-op if the instance is already gone.
+pub(crate) async fn cfn_terminate_instance(
+    svc: &Ec2Service,
+    account_id: &str,
+    region: &str,
+    instance_id: &str,
+) {
+    let mut query_params = std::collections::HashMap::new();
+    query_params.insert("InstanceId.1".to_string(), instance_id.to_string());
+    let req = AwsRequest {
+        service: "ec2".to_string(),
+        action: "TerminateInstances".to_string(),
+        region: region.to_string(),
+        account_id: account_id.to_string(),
+        request_id: gen_id("req"),
+        headers: http::HeaderMap::new(),
+        query_params,
+        body: bytes::Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: Vec::new(),
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: http::Method::POST,
+        is_query_protocol: true,
+        access_key_id: None,
+        principal: None,
+    };
+    let _ = terminate_instances(svc, &req).await;
+}
+
 fn validate_enum_instance_type(req: &AwsRequest) -> Result<(), AwsServiceError> {
     // InstanceType has ~850 enum members; accept any non-empty value that looks
     // like a `family.size` token rather than enumerating them all.

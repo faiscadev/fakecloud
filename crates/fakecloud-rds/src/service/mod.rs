@@ -997,7 +997,7 @@ fn attach_cluster_member(state: &mut RdsState, cluster_id: &str, instance_id: &s
 }
 
 #[path = "../service_helpers.rs"]
-mod service_helpers;
+pub(crate) mod service_helpers;
 pub(crate) use service_helpers::*;
 
 #[cfg(test)]

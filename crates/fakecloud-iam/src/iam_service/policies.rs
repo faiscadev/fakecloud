@@ -202,6 +202,32 @@ impl IamService {
         if let Some(prefix) = path_prefix {
             policies.retain(|p| p.path.starts_with(&prefix));
         }
+
+        // PolicyUsageFilter selects which attachment relationship counts as
+        // "in use": permissions policies (default) vs permissions boundaries.
+        let usage_filter = req
+            .query_params
+            .get("PolicyUsageFilter")
+            .map(|s| s.as_str())
+            .unwrap_or("PermissionsPolicy");
+        // OnlyAttached: drop policies that are not attached (in the selected
+        // usage sense). Both were previously ignored, so unattached policies
+        // always came back.
+        let only_attached = req
+            .query_params
+            .get("OnlyAttached")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if only_attached {
+            policies.retain(|p| {
+                if usage_filter.eq_ignore_ascii_case("PermissionsBoundary") {
+                    count_boundary_attachments(state, &p.arn) > 0
+                } else {
+                    count_managed_attachments(state, &p.arn) > 0
+                }
+            });
+        }
+
         policies.sort_by(|a, b| a.policy_name.cmp(&b.policy_name));
 
         // Marker-based pagination: resume after the marked item (by ARN, the
@@ -617,6 +643,34 @@ impl IamService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let policy_arn = required_param(&req.query_params, "PolicyArn")?;
         let entity_filter = req.query_params.get("EntityFilter").cloned();
+        validate_optional_string_length(
+            "pathPrefix",
+            req.query_params.get("PathPrefix").map(|s| s.as_str()),
+            1,
+            512,
+        )?;
+        validate_optional_string_length(
+            "marker",
+            req.query_params.get("Marker").map(|s| s.as_str()),
+            1,
+            320,
+        )?;
+        validate_optional_range_i64(
+            "maxItems",
+            parse_optional_i64_param(
+                "maxItems",
+                req.query_params.get("MaxItems").map(|s| s.as_str()),
+            )?,
+            1,
+            1000,
+        )?;
+        validate_optional_enum(
+            "policyUsageFilter",
+            req.query_params
+                .get("PolicyUsageFilter")
+                .map(|s| s.as_str()),
+            &["PermissionsPolicy", "PermissionsBoundary"],
+        )?;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -644,70 +698,160 @@ impl IamService {
             None | Some("Group") | Some("LocalManagedPolicy") | Some("AWSManagedPolicy")
         );
 
-        // Find roles attached to this policy
-        let role_members: String = if !include_roles {
-            String::new()
-        } else {
-            state
-            .role_policies
-            .iter()
-            .filter(|(_, arns)| arns.contains(&policy_arn))
-            .filter_map(|(role_name, _)| {
-                state.roles.get(role_name).map(|r| {
-                    format!(
-                        "      <member>\n        <RoleName>{}</RoleName>\n        <RoleId>{}</RoleId>\n      </member>",
-                        r.role_name, r.role_id
-                    )
-                })
+        let path_prefix = req.query_params.get("PathPrefix").cloned();
+        // PermissionsBoundary usage lists entities that reference the policy as
+        // their boundary (users/roles only); the default lists attachments.
+        let boundary_usage = req
+            .query_params
+            .get("PolicyUsageFilter")
+            .map(|v| v.eq_ignore_ascii_case("PermissionsBoundary"))
+            .unwrap_or(false);
+
+        // Build a unified, ordered entity list so pagination spans all three
+        // member kinds with a single Marker (cursor = "kind:name"). Previously
+        // Marker/MaxItems/PathPrefix/PolicyUsageFilter were all ignored.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Kind {
+            Role,
+            User,
+            Group,
+        }
+        let path_ok = |p: &str| path_prefix.as_deref().is_none_or(|pre| p.starts_with(pre));
+        let mut entities: Vec<(Kind, String, String)> = Vec::new();
+
+        if include_roles {
+            for r in state.roles.values() {
+                let matches_policy = if boundary_usage {
+                    r.permissions_boundary.as_deref() == Some(policy_arn.as_str())
+                } else {
+                    state
+                        .role_policies
+                        .get(&r.role_name)
+                        .is_some_and(|arns| arns.contains(&policy_arn))
+                };
+                if matches_policy && path_ok(&r.path) {
+                    entities.push((Kind::Role, r.role_name.clone(), r.role_id.clone()));
+                }
+            }
+        }
+        if include_users {
+            for u in state.users.values() {
+                let matches_policy = if boundary_usage {
+                    u.permissions_boundary.as_deref() == Some(policy_arn.as_str())
+                } else {
+                    state
+                        .user_policies
+                        .get(&u.user_name)
+                        .is_some_and(|arns| arns.contains(&policy_arn))
+                };
+                if matches_policy && path_ok(&u.path) {
+                    entities.push((Kind::User, u.user_name.clone(), u.user_id.clone()));
+                }
+            }
+        }
+        // Groups cannot have permissions boundaries, so they never appear under
+        // the PermissionsBoundary usage filter.
+        if include_groups && !boundary_usage {
+            for g in state.groups.values() {
+                if g.attached_policies.contains(&policy_arn) && path_ok(&g.path) {
+                    entities.push((Kind::Group, g.group_name.clone(), g.group_id.clone()));
+                }
+            }
+        }
+
+        let cursor = |k: Kind, name: &str| {
+            let prefix = match k {
+                Kind::Role => "role",
+                Kind::User => "user",
+                Kind::Group => "group",
+            };
+            format!("{prefix}:{name}")
+        };
+        // Stable order: by kind (role, user, group) then name.
+        entities.sort_by(|a, b| {
+            let ka = match a.0 {
+                Kind::Role => 0,
+                Kind::User => 1,
+                Kind::Group => 2,
+            };
+            let kb = match b.0 {
+                Kind::Role => 0,
+                Kind::User => 1,
+                Kind::Group => 2,
+            };
+            ka.cmp(&kb).then_with(|| a.1.cmp(&b.1))
+        });
+
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let marker = req.query_params.get("Marker").cloned();
+        let start_idx = marker
+            .as_ref()
+            .and_then(|m| {
+                entities
+                    .iter()
+                    .position(|(k, name, _)| cursor(*k, name) == *m)
+                    .map(|p| p + 1)
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .unwrap_or(0);
+        let rest = entities.get(start_idx..).unwrap_or(&[]);
+        let is_truncated = rest.len() > max_items;
+        let page = if is_truncated {
+            &rest[..max_items]
+        } else {
+            rest
+        };
+        let next_marker = if is_truncated {
+            page.last().map(|(k, name, _)| cursor(*k, name))
+        } else {
+            None
         };
 
-        // Find users attached to this policy
-        let user_members: String = if !include_users {
-            String::new()
-        } else {
-            state
-            .user_policies
+        let role_members = page
             .iter()
-            .filter(|(_, arns)| arns.contains(&policy_arn))
-            .filter_map(|(user_name, _)| {
-                state.users.get(user_name).map(|u| {
-                    format!(
-                        "      <member>\n        <UserName>{}</UserName>\n        <UserId>{}</UserId>\n      </member>",
-                        u.user_name, u.user_id
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-        };
-
-        // Find groups attached to this policy
-        let group_members: String = if !include_groups {
-            String::new()
-        } else {
-            state
-            .groups
-            .values()
-            .filter(|g| g.attached_policies.contains(&policy_arn))
-            .map(|g| {
+            .filter(|(k, ..)| *k == Kind::Role)
+            .map(|(_, name, id)| {
                 format!(
-                    "      <member>\n        <GroupName>{}</GroupName>\n        <GroupId>{}</GroupId>\n      </member>",
-                    g.group_name, g.group_id
+                    "      <member>\n        <RoleName>{name}</RoleName>\n        <RoleId>{id}</RoleId>\n      </member>"
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n")
-        };
+            .join("\n");
+        let user_members = page
+            .iter()
+            .filter(|(k, ..)| *k == Kind::User)
+            .map(|(_, name, id)| {
+                format!(
+                    "      <member>\n        <UserName>{name}</UserName>\n        <UserId>{id}</UserId>\n      </member>"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let group_members = page
+            .iter()
+            .filter(|(k, ..)| *k == Kind::Group)
+            .map(|(_, name, id)| {
+                format!(
+                    "      <member>\n        <GroupName>{name}</GroupName>\n        <GroupId>{id}</GroupId>\n      </member>"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let marker_xml = next_marker
+            .as_deref()
+            .map(|m| format!("    <Marker>{m}</Marker>\n"))
+            .unwrap_or_default();
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListEntitiesForPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListEntitiesForPolicyResult>
-    <IsTruncated>false</IsTruncated>
-    <PolicyRoles>
+    <IsTruncated>{is_truncated}</IsTruncated>
+{marker_xml}    <PolicyRoles>
 {role_members}
     </PolicyRoles>
     <PolicyUsers>
@@ -795,6 +939,24 @@ fn count_managed_attachments(state: &crate::state::IamState, arn: &str) -> u32 {
     }
     for group in state.groups.values() {
         if group.attached_policies.iter().any(|a| a == arn) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Count how many users/roles reference this policy ARN as their permissions
+/// boundary. Used by ListPolicies/ListEntitiesForPolicy with
+/// `PolicyUsageFilter=PermissionsBoundary`.
+fn count_boundary_attachments(state: &crate::state::IamState, arn: &str) -> u32 {
+    let mut count = 0u32;
+    for user in state.users.values() {
+        if user.permissions_boundary.as_deref() == Some(arn) {
+            count += 1;
+        }
+    }
+    for role in state.roles.values() {
+        if role.permissions_boundary.as_deref() == Some(arn) {
             count += 1;
         }
     }

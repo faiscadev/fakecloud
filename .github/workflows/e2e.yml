@@ -318,9 +318,24 @@ jobs:
           # rules, so the deny "bypasses" and every subsequent attempt fails
           # identically. Pruning before each attempt makes the retries genuinely
           # independent (the real fix for this job's intermittent failures).
+          # `docker network rm`/`prune` alone does NOT always reclaim Docker's
+          # default address pool once it gets wedged: a per-subnet bridge from a
+          # prior attempt can leave the pool in a state where the next
+          # `docker network create fakecloud-subnet-<id>` fails, and the runtime
+          # then falls back to docker0 (172.17.x). On docker0 same-subnet traffic
+          # never reaches fakecloud's per-subnet nft forward chain, so the deny
+          # silently bypasses and every later attempt fails identically on a
+          # 172.17.x instance IP (observed: attempt 1 on 172.18.x, attempts 2-3
+          # on 172.17.0.3). A full daemon restart is the only reliable way to
+          # recreate docker0 fresh and reclaim the pool; images (alpine:3) persist
+          # across the restart, so this is cheap. ensure_bridge_nf runs *after*
+          # this (docker recreating docker0 can reset bridge-nf-call-iptables).
           clean_docker() {
             sudo docker ps -aq --filter "label=fakecloud-ec2" | xargs -r sudo docker rm -f >/dev/null 2>&1 || true
             sudo docker network ls -q --filter "name=fakecloud-subnet-" | xargs -r sudo docker network rm >/dev/null 2>&1 || true
+            sudo docker network prune -f >/dev/null 2>&1 || true
+            sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null || true
+            for _ in $(seq 1 30); do sudo docker info >/dev/null 2>&1 && break; sleep 1; done
             sudo docker network prune -f >/dev/null 2>&1 || true
           }
           run_once() {

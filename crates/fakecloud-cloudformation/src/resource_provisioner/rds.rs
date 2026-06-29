@@ -370,11 +370,14 @@ impl ResourceProvisioner {
             .get("DBName")
             .and_then(|v| v.as_str())
             .map(String::from);
+        // Default the port from the engine (MySQL/MariaDB -> 3306, Oracle ->
+        // 1521, SQL Server -> 1433, Db2 -> 50000, Postgres -> 5432) instead of
+        // hardcoding 5432 for every engine.
         let port = props
             .get("Port")
             .and_then(|v| v.as_i64())
             .map(|n| n as i32)
-            .unwrap_or(5432);
+            .unwrap_or_else(|| fakecloud_rds::default_port_for_engine(&engine));
         let allocated_storage = props
             .get("AllocatedStorage")
             .and_then(|v| {
@@ -468,6 +471,7 @@ impl ResourceProvisioner {
             state.region
         );
         let dbi_resource_id = format!("db-{}", Uuid::new_v4().simple());
+        let dbi_resource_id_attr = dbi_resource_id.clone();
         let inst = DbInstance {
             db_instance_identifier: identifier.clone(),
             db_instance_arn: arn.clone(),
@@ -628,7 +632,7 @@ impl ResourceProvisioner {
             .with("DBInstanceArn", arn)
             .with("Endpoint.Address", endpoint)
             .with("Endpoint.Port", endpoint_port.to_string())
-            .with("DbiResourceId", format!("db-{identifier}")))
+            .with("DbiResourceId", dbi_resource_id_attr))
     }
 
     pub(super) fn delete_rds_db_instance(&self, physical_id: &str) -> Result<(), String> {

@@ -728,6 +728,12 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let if_match = req
+            .headers
+            .get("x-amz-copy-source-if-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let if_none_match = req
             .headers
             .get("x-amz-copy-source-if-none-match")
@@ -769,6 +775,23 @@ impl S3Service {
             ));
         }
 
+        // x-amz-copy-source-if-match: fail with 412 when the source ETag does
+        // NOT match (bug-audit — this header was never read, so a mismatched
+        // source still copied + 200'd).
+        if let Some(ref im) = if_match {
+            let src_etag = format!("\"{}\"", src_obj.etag);
+            if !etag_matches(im, &src_etag) {
+                return Err(AwsServiceError::aws_error_with_fields(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailed",
+                    "At least one of the pre-conditions you specified did not hold",
+                    vec![(
+                        "Condition".to_string(),
+                        "x-amz-copy-source-If-Match".to_string(),
+                    )],
+                ));
+            }
+        }
         if let Some(ref inm) = if_none_match {
             let src_etag = format!("\"{}\"", src_obj.etag);
             if etag_matches(inm, &src_etag) {

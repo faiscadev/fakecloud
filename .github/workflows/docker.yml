@@ -62,17 +62,20 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
-      # Real artifact test: the published image must contain `nft`, or EC2
-      # security-group enforcement silently degrades even with CAP_NET_ADMIN
-      # (the #1539 Bug-4 / bug-hunt 2026-06-18 finding 0.1 class — "documented
-      # feature, missing binary"). Load the just-built native-arch image locally
-      # (reusing the gha cache) and assert the binary is present.
-      - name: Smoke-test image (nft present)
+      # Real artifact test: the published image must contain `nft` (EC2
+      # security-group enforcement) and the `docker` CLI (container-backed
+      # services spawn siblings via it), or those features silently degrade even
+      # with the right caps (the #1539 Bug-4 / bug-hunt 2026-06-18 finding 0.1
+      # class — "documented feature, missing binary"). Load the just-built
+      # native-arch image locally (reusing the gha cache) and assert the
+      # binaries are present.
+      - name: Smoke-test image (nft + docker CLI present)
         run: |
           docker buildx build --load \
             --cache-from type=gha,scope=${{ matrix.platform }} \
             -t fakecloud-smoke:test .
           docker run --rm --entrypoint nft fakecloud-smoke:test --version
+          docker run --rm --entrypoint docker fakecloud-smoke:test --version
 
       - name: Export digest
         run: |
