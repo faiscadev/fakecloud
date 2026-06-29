@@ -57,6 +57,11 @@ pub struct CloudWatchState {
     /// region -> alarm_name -> CompositeAlarm
     #[serde(default)]
     pub composite_alarms: BTreeMap<String, BTreeMap<String, CompositeAlarm>>,
+    /// region -> alarm_name -> history items (newest appended last). Populated
+    /// by PutMetricAlarm (ConfigurationUpdate), SetAlarmState (StateUpdate) and
+    /// DeleteAlarms so DescribeAlarmHistory reflects real transitions.
+    #[serde(default)]
+    pub alarm_history: BTreeMap<String, BTreeMap<String, Vec<AlarmHistoryItem>>>,
     /// Dashboards keyed by name (CloudWatch dashboards are global per
     /// account, not regional).
     #[serde(default)]
@@ -139,6 +144,20 @@ impl CloudWatchState {
         region: &str,
     ) -> &mut BTreeMap<String, CompositeAlarm> {
         self.composite_alarms.entry(region.to_string()).or_default()
+    }
+
+    pub fn alarm_history_in(
+        &self,
+        region: &str,
+    ) -> Option<&BTreeMap<String, Vec<AlarmHistoryItem>>> {
+        self.alarm_history.get(region)
+    }
+
+    pub fn alarm_history_in_mut(
+        &mut self,
+        region: &str,
+    ) -> &mut BTreeMap<String, Vec<AlarmHistoryItem>> {
+        self.alarm_history.entry(region.to_string()).or_default()
     }
 
     pub fn anomaly_detectors_in(&self, region: &str) -> Option<&BTreeMap<String, AnomalyDetector>> {
@@ -275,6 +294,21 @@ impl AlarmState {
             _ => None,
         }
     }
+}
+
+/// A single alarm-history record returned by `DescribeAlarmHistory`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlarmHistoryItem {
+    pub alarm_name: String,
+    /// `MetricAlarm` or `CompositeAlarm`.
+    pub alarm_type: String,
+    pub timestamp: DateTime<Utc>,
+    /// One of the `HistoryItemType` enum values (ConfigurationUpdate /
+    /// StateUpdate / Action).
+    pub history_item_type: String,
+    pub history_summary: String,
+    /// JSON blob (`HistoryData`) describing the transition.
+    pub history_data: String,
 }
 
 /// A composite alarm (defined by an `AlarmRule` expression over other alarms).

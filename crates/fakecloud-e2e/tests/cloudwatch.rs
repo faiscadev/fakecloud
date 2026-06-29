@@ -438,3 +438,314 @@ async fn get_metric_statistics_filters_by_unit() {
         "only the Count datapoint aggregated, not the Milliseconds one"
     );
 }
+
+// bug-cluster: GetMetricStatistics must match dimensions as an EXACT set. A
+// dimensionless query must only see dimensionless data (not aggregate every
+// dimension combination), and an exact-set query returns only that combination.
+#[tokio::test]
+async fn get_metric_statistics_exact_dimension_matching() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    // Two datapoints with DIFFERENT dimension sets, plus one dimensionless.
+    cw.put_metric_data()
+        .namespace("Dim")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("M")
+                .value(5.0)
+                .dimensions(Dimension::builder().name("Service").value("api").build())
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        )
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("M")
+                .value(7.0)
+                .dimensions(Dimension::builder().name("Service").value("worker").build())
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put");
+
+    let start = AwsDateTime::from_secs(now.timestamp() - 600);
+    let end = AwsDateTime::from_secs(now.timestamp() + 600);
+
+    // Dimensionless query: must be EMPTY (no datapoint published without dims).
+    let dimensionless = cw
+        .get_metric_statistics()
+        .namespace("Dim")
+        .metric_name("M")
+        .start_time(start)
+        .end_time(end)
+        .period(60)
+        .statistics(Statistic::Sum)
+        .send()
+        .await
+        .expect("stats");
+    assert!(
+        dimensionless.datapoints().is_empty(),
+        "dimensionless query must not aggregate dimensioned data"
+    );
+
+    // Exact-set query: only the api datapoint (5.0), not the worker one.
+    let api = cw
+        .get_metric_statistics()
+        .namespace("Dim")
+        .metric_name("M")
+        .dimensions(Dimension::builder().name("Service").value("api").build())
+        .start_time(start)
+        .end_time(end)
+        .period(60)
+        .statistics(Statistic::Sum)
+        .send()
+        .await
+        .expect("stats");
+    assert_eq!(api.datapoints().len(), 1);
+    assert!((api.datapoints()[0].sum().unwrap() - 5.0).abs() < 1e-6);
+}
+
+// bug-cluster: GetMetricData must evaluate metric-math Expression queries.
+#[tokio::test]
+async fn get_metric_data_evaluates_expression() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    for (name, v) in [("A", 5.0_f64), ("B", 7.0)] {
+        cw.put_metric_data()
+            .namespace("ExprNs")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name(name)
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let mk_metric_stat = |name: &str| {
+        MetricStat::builder()
+            .metric(
+                CwMetric::builder()
+                    .namespace("ExprNs")
+                    .metric_name(name)
+                    .build(),
+            )
+            .period(60)
+            .stat("Sum")
+            .build()
+    };
+
+    let resp = cw
+        .get_metric_data()
+        .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+        .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("m1")
+                .metric_stat(mk_metric_stat("A"))
+                .return_data(false)
+                .build(),
+        )
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("m2")
+                .metric_stat(mk_metric_stat("B"))
+                .return_data(false)
+                .build(),
+        )
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("e1")
+                .expression("m1+m2")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("metric data");
+
+    let results = resp.metric_data_results();
+    // Only the expression result is returned (the metric inputs set
+    // ReturnData=false).
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id(), Some("e1"));
+    assert_eq!(results[0].values(), &[12.0]);
+}
+
+// bug-cluster: ExtendedStatistics (percentiles) must be computed.
+#[tokio::test]
+async fn get_metric_statistics_computes_percentiles() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    for v in [10.0, 20.0, 30.0] {
+        cw.put_metric_data()
+            .namespace("Pct")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name("M")
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let stats = cw
+        .get_metric_statistics()
+        .namespace("Pct")
+        .metric_name("M")
+        .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+        .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+        .period(60)
+        .extended_statistics("p50")
+        .send()
+        .await
+        .expect("stats");
+
+    let dp = &stats.datapoints()[0];
+    let ext = dp
+        .extended_statistics()
+        .expect("extended statistics present");
+    // Median of {10,20,30} via linear interpolation = 20.
+    assert!((ext.get("p50").copied().unwrap() - 20.0).abs() < 1e-6);
+}
+
+// bug-cluster: DescribeAlarms must paginate via MaxRecords + NextToken.
+#[tokio::test]
+async fn describe_alarms_paginates() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    for name in ["alarm-a", "alarm-b"] {
+        cw.put_metric_alarm()
+            .alarm_name(name)
+            .namespace("App")
+            .metric_name("Errors")
+            .statistic(Statistic::Sum)
+            .period(60)
+            .evaluation_periods(1)
+            .threshold(1.0)
+            .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+            .send()
+            .await
+            .expect("put alarm");
+    }
+
+    let page1 = cw
+        .describe_alarms()
+        .max_records(1)
+        .send()
+        .await
+        .expect("page1");
+    assert_eq!(page1.metric_alarms().len(), 1);
+    let token = page1.next_token().expect("next token on first page");
+
+    let page2 = cw
+        .describe_alarms()
+        .max_records(1)
+        .next_token(token)
+        .send()
+        .await
+        .expect("page2");
+    assert_eq!(page2.metric_alarms().len(), 1);
+    assert_ne!(
+        page1.metric_alarms()[0].alarm_name(),
+        page2.metric_alarms()[0].alarm_name()
+    );
+}
+
+// bug-cluster: ListMetrics must cap each page (500) and round-trip a NextToken.
+#[tokio::test]
+async fn list_metrics_paginates() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    // 501 distinct metrics -> first page 500 + NextToken, second page 1.
+    // Published in batches to keep each request body small.
+    let mut next = 0;
+    while next < 501 {
+        let mut put = cw.put_metric_data().namespace("Many");
+        for i in next..(next + 100).min(501) {
+            put = put.metric_data(
+                MetricDatum::builder()
+                    .metric_name(format!("M{i}"))
+                    .value(1.0)
+                    .build(),
+            );
+        }
+        put.send().await.expect("put many");
+        next += 100;
+    }
+
+    let page1 = cw
+        .list_metrics()
+        .namespace("Many")
+        .send()
+        .await
+        .expect("page1");
+    assert_eq!(page1.metrics().len(), 500);
+    let token = page1.next_token().expect("next token");
+
+    let page2 = cw
+        .list_metrics()
+        .namespace("Many")
+        .next_token(token)
+        .send()
+        .await
+        .expect("page2");
+    assert_eq!(page2.metrics().len(), 1);
+}
+
+// bug-cluster: DescribeAlarmHistory must reflect real state transitions.
+#[tokio::test]
+async fn describe_alarm_history_records_transitions() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_alarm()
+        .alarm_name("HistAlarm")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .send()
+        .await
+        .expect("put alarm");
+
+    cw.set_alarm_state()
+        .alarm_name("HistAlarm")
+        .state_value(StateValue::Alarm)
+        .state_reason("breached")
+        .send()
+        .await
+        .expect("set state");
+
+    let history = cw
+        .describe_alarm_history()
+        .alarm_name("HistAlarm")
+        .send()
+        .await
+        .expect("history");
+    let items = history.alarm_history_items();
+    assert!(!items.is_empty(), "history must not be empty");
+    assert!(
+        items
+            .iter()
+            .any(|i| i.history_item_type().map(|t| t.as_str()) == Some("StateUpdate")),
+        "a StateUpdate history item must be recorded"
+    );
+}

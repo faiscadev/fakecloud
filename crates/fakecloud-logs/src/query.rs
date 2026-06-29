@@ -1,22 +1,33 @@
-/// CloudWatch Logs Insights query language parser and executor.
-///
-/// Supports a subset of CWLI syntax:
-/// - `fields @timestamp, @message` — select specific fields
-/// - `filter @message like /pattern/` — filter by regex/substring
-/// - `filter field = "value"` — filter by field equality
-/// - `sort @timestamp desc` — sort results
-/// - `limit N` — limit number of results
+//! CloudWatch Logs Insights query language parser and executor.
+//!
+//! Supports the common subset of CWLI syntax as an ordered pipeline:
+//! - `fields @timestamp, @message` / `display ...` — select output fields
+//! - `filter field = "value"` / `!= ` / `like /pattern/` — filter rows
+//! - `parse @message "* [*] *" as a, b, c` — extract fields via a glob
+//! - `stats count(*) [as alias] by field, ...` — aggregate (count/sum/avg/min/
+//!   max/count_distinct), optionally grouped
+//! - `dedup field, ...` — drop duplicate rows by the given fields
+//! - `sort @timestamp desc` — order rows
+//! - `limit N` — cap row count
 use crate::state::LogEvent;
 use serde_json::{json, Value};
 
-/// Parsed representation of a CWLI query.
+/// A parsed CWLI query: an ordered pipeline of commands.
 #[derive(Debug, Default)]
 pub struct ParsedQuery {
-    pub fields: Vec<String>,
-    pub filters: Vec<FilterClause>,
-    pub sort_field: Option<String>,
-    pub sort_desc: bool,
-    pub limit: Option<usize>,
+    pub commands: Vec<Command>,
+}
+
+#[derive(Debug)]
+pub enum Command {
+    Fields(Vec<String>),
+    Display(Vec<String>),
+    Filter(FilterClause),
+    Sort { field: String, desc: bool },
+    Limit(usize),
+    Parse(ParseSpec),
+    Dedup(Vec<String>),
+    Stats { aggs: Vec<AggExpr>, by: Vec<String> },
 }
 
 #[derive(Debug)]
@@ -29,50 +40,93 @@ pub enum FilterClause {
     Like { field: String, pattern: String },
 }
 
-/// Parse a CWLI query string into a structured representation.
+/// A `parse` directive: glob `pattern` applied to `source`, binding each `*`
+/// wildcard (in order) to the corresponding name in `names`.
+#[derive(Debug)]
+pub struct ParseSpec {
+    pub source: String,
+    pub pattern: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct AggExpr {
+    pub func: AggFunc,
+    pub field: Option<String>,
+    pub alias: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    CountDistinct,
+}
+
+/// Strip a leading keyword (followed by whitespace) from a command, returning
+/// the remainder.
+fn strip_keyword<'a>(cmd: &'a str, kw: &str) -> Option<&'a str> {
+    let rest = cmd.strip_prefix(kw)?;
+    // The keyword must be followed by whitespace (so `fieldspec` isn't matched
+    // as `fields`).
+    if rest.starts_with(|c: char| c.is_whitespace()) {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
+}
+
+fn parse_field_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
+/// Parse a CWLI query string into a structured pipeline.
 pub fn parse_query(query: &str) -> ParsedQuery {
     let mut parsed = ParsedQuery::default();
 
-    // Split on pipe delimiter, trimming whitespace
-    let commands: Vec<&str> = query.split('|').map(|s| s.trim()).collect();
-
-    for cmd in commands {
+    for raw in query.split('|') {
+        let cmd = raw.trim();
         if cmd.is_empty() {
             continue;
         }
 
-        if let Some(rest) = cmd
-            .strip_prefix("fields ")
-            .or_else(|| cmd.strip_prefix("fields\t"))
-        {
-            parsed.fields = rest
-                .split(',')
-                .map(|f| f.trim().to_string())
-                .filter(|f| !f.is_empty())
-                .collect();
-        } else if let Some(rest) = cmd
-            .strip_prefix("filter ")
-            .or_else(|| cmd.strip_prefix("filter\t"))
-        {
+        if let Some(rest) = strip_keyword(cmd, "fields") {
+            parsed
+                .commands
+                .push(Command::Fields(parse_field_list(rest)));
+        } else if let Some(rest) = strip_keyword(cmd, "display") {
+            parsed
+                .commands
+                .push(Command::Display(parse_field_list(rest)));
+        } else if let Some(rest) = strip_keyword(cmd, "filter") {
             if let Some(clause) = parse_filter_clause(rest.trim()) {
-                parsed.filters.push(clause);
+                parsed.commands.push(Command::Filter(clause));
             }
-        } else if let Some(rest) = cmd
-            .strip_prefix("sort ")
-            .or_else(|| cmd.strip_prefix("sort\t"))
-        {
+        } else if let Some(rest) = strip_keyword(cmd, "stats") {
+            parsed.commands.push(parse_stats(rest));
+        } else if let Some(rest) = strip_keyword(cmd, "parse") {
+            if let Some(spec) = parse_parse(rest) {
+                parsed.commands.push(Command::Parse(spec));
+            }
+        } else if let Some(rest) = strip_keyword(cmd, "dedup") {
+            parsed.commands.push(Command::Dedup(parse_field_list(rest)));
+        } else if let Some(rest) = strip_keyword(cmd, "sort") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if !parts.is_empty() {
-                parsed.sort_field = Some(parts[0].to_string());
-                parsed.sort_desc =
-                    parts.get(1).map(|s| s.eq_ignore_ascii_case("desc")) == Some(true);
+                parsed.commands.push(Command::Sort {
+                    field: parts[0].to_string(),
+                    desc: parts.get(1).map(|s| s.eq_ignore_ascii_case("desc")) == Some(true),
+                });
             }
-        } else if let Some(rest) = cmd
-            .strip_prefix("limit ")
-            .or_else(|| cmd.strip_prefix("limit\t"))
-        {
+        } else if let Some(rest) = strip_keyword(cmd, "limit") {
             if let Ok(n) = rest.trim().parse::<usize>() {
-                parsed.limit = Some(n);
+                parsed.commands.push(Command::Limit(n));
             }
         }
     }
@@ -86,23 +140,19 @@ fn parse_filter_clause(s: &str) -> Option<FilterClause> {
         let field = s[..like_pos].trim().to_string();
         let pattern_str = s[like_pos + 6..].trim();
         let pattern = if pattern_str.starts_with('/') && pattern_str.ends_with('/') {
-            // Regex pattern - extract content between slashes
             pattern_str[1..pattern_str.len() - 1].to_string()
         } else {
-            // Quoted string
             unquote(pattern_str)
         };
         return Some(FilterClause::Like { field, pattern });
     }
 
-    // Try: field != "value"
     if let Some(ne_pos) = s.find(" != ") {
         let field = s[..ne_pos].trim().to_string();
         let value = unquote(s[ne_pos + 4..].trim());
         return Some(FilterClause::NotEquals { field, value });
     }
 
-    // Try: field = "value"
     if let Some(eq_pos) = s.find(" = ") {
         let field = s[..eq_pos].trim().to_string();
         let value = unquote(s[eq_pos + 3..].trim());
@@ -110,6 +160,106 @@ fn parse_filter_clause(s: &str) -> Option<FilterClause> {
     }
 
     None
+}
+
+/// Parse a `stats` command body (the text after `stats`).
+fn parse_stats(rest: &str) -> Command {
+    // Split off the optional `by <fields>` clause (case-insensitive).
+    let lower = rest.to_ascii_lowercase();
+    let (agg_part, by_part) = match lower.find(" by ") {
+        Some(pos) => (&rest[..pos], Some(rest[pos + 4..].trim())),
+        None => (rest, None),
+    };
+    let aggs = split_top_level_commas(agg_part)
+        .iter()
+        .filter_map(|s| parse_agg_expr(s.trim()))
+        .collect();
+    let by = by_part.map(parse_field_list).unwrap_or_default();
+    Command::Stats { aggs, by }
+}
+
+/// Split on commas that are not nested inside parentheses, so
+/// `count(*), avg(latency)` splits but `pct(latency, 99)` doesn't.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for c in s.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn parse_agg_expr(s: &str) -> Option<AggExpr> {
+    // Split off an optional `as alias`.
+    let (expr, alias) = match s.to_ascii_lowercase().find(" as ") {
+        Some(pos) => (s[..pos].trim(), Some(s[pos + 4..].trim().to_string())),
+        None => (s.trim(), None),
+    };
+    let open = expr.find('(')?;
+    let close = expr.rfind(')')?;
+    if close < open {
+        return None;
+    }
+    let func_name = expr[..open].trim().to_ascii_lowercase();
+    let arg = expr[open + 1..close].trim();
+    let func = match func_name.as_str() {
+        "count" => AggFunc::Count,
+        "sum" => AggFunc::Sum,
+        "avg" | "average" => AggFunc::Avg,
+        "min" => AggFunc::Min,
+        "max" => AggFunc::Max,
+        "count_distinct" | "countdistinct" => AggFunc::CountDistinct,
+        _ => return None,
+    };
+    let field = if arg.is_empty() || arg == "*" {
+        None
+    } else {
+        Some(arg.to_string())
+    };
+    let alias = alias.unwrap_or_else(|| expr.to_string());
+    Some(AggExpr { func, field, alias })
+}
+
+/// Parse a `parse <source> "<glob>" as a, b, ...` command body.
+fn parse_parse(rest: &str) -> Option<ParseSpec> {
+    let rest = rest.trim();
+    // The source token is everything up to the first quote.
+    let quote_pos = rest.find(['"', '\''])?;
+    let source = rest[..quote_pos].trim().to_string();
+    if source.is_empty() {
+        return None;
+    }
+    let quote = rest.as_bytes()[quote_pos] as char;
+    let after = &rest[quote_pos + 1..];
+    let end = after.find(quote)?;
+    let pattern = after[..end].to_string();
+    let tail = after[end + 1..].trim();
+    let names = match tail.to_ascii_lowercase().strip_prefix("as ") {
+        Some(_) => parse_field_list(&tail[3..]),
+        None => Vec::new(),
+    };
+    Some(ParseSpec {
+        source,
+        pattern,
+        names,
+    })
 }
 
 fn unquote(s: &str) -> String {
@@ -120,45 +270,81 @@ fn unquote(s: &str) -> String {
     }
 }
 
-/// Get the value of a virtual field for a log event.
-fn get_field_value(event: &LogEvent, field: &str, stream_name: &str) -> Option<String> {
-    match field {
-        "@timestamp" => {
-            // Format as ISO 8601
-            let secs = event.timestamp / 1000;
-            let nsecs = ((event.timestamp % 1000) * 1_000_000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Some(dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
-            } else {
-                Some(event.timestamp.to_string())
-            }
-        }
-        "@message" => Some(event.message.clone()),
-        "@logStream" => Some(stream_name.to_string()),
-        "@ingestionTime" => Some(event.ingestion_time.to_string()),
-        "@ptr" => Some(format!("{}/{}", stream_name, event.timestamp)),
-        _ => {
-            // Try to extract from JSON message
-            if let Ok(parsed) = serde_json::from_str::<Value>(&event.message) {
-                // Strip leading @ if present for JSON field lookup
-                let key = field.strip_prefix('@').unwrap_or(field);
-                parsed.get(key).map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-            } else {
-                None
-            }
+/// A materialized query row: ordered (field, value) pairs. Insertion order is
+/// preserved so output column ordering is stable.
+#[derive(Clone, Default)]
+struct Record {
+    fields: Vec<(String, String)>,
+}
+
+impl Record {
+    fn get(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn set(&mut self, name: &str, value: String) {
+        if let Some(entry) = self.fields.iter_mut().find(|(k, _)| k == name) {
+            entry.1 = value;
+        } else {
+            self.fields.push((name.to_string(), value));
         }
     }
 }
 
-/// Check if a substring pattern matches a string (simple glob-like matching).
+/// Format a timestamp (epoch millis) the way CWLI renders `@timestamp`.
+fn format_timestamp(ms: i64) -> String {
+    let secs = ms / 1000;
+    let nsecs = ((ms % 1000) * 1_000_000) as u32;
+    match chrono::DateTime::from_timestamp(secs, nsecs) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        None => ms.to_string(),
+    }
+}
+
+/// Mint a GetLogRecord-compatible `@ptr`: base64(`<group>|<stream>|<index>`).
+fn encode_ptr(group: &str, stream: &str, index: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(format!("{group}|{stream}|{index}").as_bytes())
+}
+
+/// Build the base record for a log event, including the synthetic `@`-fields
+/// and any top-level keys discovered from a JSON message body.
+fn build_record(event: &LogEvent, group: &str, stream: &str, index: usize) -> Record {
+    let mut r = Record::default();
+    r.set("@timestamp", format_timestamp(event.timestamp));
+    r.set("@message", event.message.clone());
+    r.set("@logStream", stream.to_string());
+    r.set("@ingestionTime", event.ingestion_time.to_string());
+    r.set("@ptr", encode_ptr(group, stream, index));
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&event.message) {
+        for (k, v) in map {
+            let value = match v {
+                Value::String(s) => s,
+                other => other.to_string(),
+            };
+            // Discovered JSON fields don't clobber the synthetic ones.
+            if r.get(&k).is_none() {
+                r.set(&k, value);
+            }
+        }
+    }
+    r
+}
+
+/// Resolve a field for filtering/grouping, allowing the `@`-stripped JSON
+/// fallback (e.g. `level` resolves a JSON key `level`).
+fn record_field(r: &Record, name: &str) -> Option<String> {
+    if let Some(v) = r.get(name) {
+        return Some(v.to_string());
+    }
+    let stripped = name.strip_prefix('@').unwrap_or(name);
+    r.get(stripped).map(|v| v.to_string())
+}
+
 fn matches_pattern(haystack: &str, pattern: &str) -> bool {
-    // Simple substring/regex-like matching without the regex crate.
-    // For `/pattern/` syntax we do substring match.
-    // For more complex patterns, we handle common regex anchors:
-    //   ^..$ for exact match, ^ for starts-with, $ for ends-with
     if let Some(inner) = pattern.strip_prefix('^').and_then(|p| p.strip_suffix('$')) {
         haystack == inner
     } else if let Some(prefix) = pattern.strip_prefix('^') {
@@ -166,111 +352,232 @@ fn matches_pattern(haystack: &str, pattern: &str) -> bool {
     } else if let Some(suffix) = pattern.strip_suffix('$') {
         haystack.ends_with(suffix)
     } else {
-        // Default: substring match
         haystack.contains(pattern)
     }
 }
 
-/// Apply a filter clause to an event, returning true if the event matches.
-fn event_matches_filter(event: &LogEvent, stream_name: &str, clause: &FilterClause) -> bool {
+fn record_matches_filter(r: &Record, clause: &FilterClause) -> bool {
     match clause {
-        FilterClause::Equals { field, value } => get_field_value(event, field, stream_name)
-            .map(|v| v == *value)
-            .unwrap_or(false),
-        FilterClause::NotEquals { field, value } => get_field_value(event, field, stream_name)
-            .map(|v| v != *value)
-            .unwrap_or(true),
-        FilterClause::Like { field, pattern } => get_field_value(event, field, stream_name)
+        FilterClause::Equals { field, value } => {
+            record_field(r, field).map(|v| v == *value).unwrap_or(false)
+        }
+        FilterClause::NotEquals { field, value } => {
+            record_field(r, field).map(|v| v != *value).unwrap_or(true)
+        }
+        FilterClause::Like { field, pattern } => record_field(r, field)
             .map(|v| matches_pattern(&v, pattern))
             .unwrap_or(false),
     }
 }
 
-/// A log event together with its stream name context, used during query execution.
-struct EventWithContext<'a> {
-    event: &'a LogEvent,
-    stream_name: &'a str,
+/// Apply a glob `parse` to a record, binding each `*` to the matching name.
+fn apply_parse(r: &mut Record, spec: &ParseSpec) {
+    let Some(source) = record_field(r, &spec.source) else {
+        return;
+    };
+    let segments: Vec<&str> = spec.pattern.split('*').collect();
+    let mut captures: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    // The first segment is a required prefix.
+    if let Some(first) = segments.first() {
+        if !source[pos..].starts_with(first) {
+            return;
+        }
+        pos += first.len();
+    }
+    for seg in segments.iter().skip(1) {
+        if seg.is_empty() {
+            // Trailing wildcard: capture the rest.
+            captures.push(source[pos..].to_string());
+            pos = source.len();
+            continue;
+        }
+        let Some(found) = source[pos..].find(seg) else {
+            return;
+        };
+        captures.push(source[pos..pos + found].to_string());
+        pos += found + seg.len();
+    }
+    for (name, value) in spec.names.iter().zip(captures) {
+        r.set(name, value);
+    }
 }
 
-/// Execute a parsed query against a set of log events.
-/// Returns results in the CloudWatch Logs Insights format: array of arrays of {field, value} objects.
+fn parse_number(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok()
+}
+
+/// Format an aggregate result, dropping a trailing `.0` so counts read as
+/// integers the way CloudWatch renders them.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+fn compute_agg(agg: &AggExpr, group: &[&Record]) -> String {
+    match agg.func {
+        AggFunc::Count => match &agg.field {
+            None => format_number(group.len() as f64),
+            Some(f) => {
+                let n = group
+                    .iter()
+                    .filter(|r| record_field(r, f).is_some())
+                    .count();
+                format_number(n as f64)
+            }
+        },
+        AggFunc::CountDistinct => {
+            let field = match &agg.field {
+                Some(f) => f,
+                None => return "0".to_string(),
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for r in group {
+                if let Some(v) = record_field(r, field) {
+                    seen.insert(v);
+                }
+            }
+            format_number(seen.len() as f64)
+        }
+        AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
+            let field = match &agg.field {
+                Some(f) => f,
+                None => return "0".to_string(),
+            };
+            let nums: Vec<f64> = group
+                .iter()
+                .filter_map(|r| record_field(r, field).and_then(|v| parse_number(&v)))
+                .collect();
+            if nums.is_empty() {
+                return "0".to_string();
+            }
+            let v = match agg.func {
+                AggFunc::Sum => nums.iter().sum(),
+                AggFunc::Avg => nums.iter().sum::<f64>() / nums.len() as f64,
+                AggFunc::Min => nums.iter().cloned().fold(f64::INFINITY, f64::min),
+                AggFunc::Max => nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                _ => unreachable!(),
+            };
+            format_number(v)
+        }
+    }
+}
+
+/// One stream's events for query execution.
+pub struct QueryStream {
+    pub group_name: String,
+    pub stream_name: String,
+    /// Each event paired with its index in the stream's full event list so
+    /// `@ptr` round-trips through GetLogRecord.
+    pub events: Vec<(usize, LogEvent)>,
+}
+
+/// Execute a parsed query against a set of streams, returning results in the
+/// CloudWatch Logs Insights format: an array of rows, each an array of
+/// `{field, value}` objects.
 pub fn execute_query(
     query: &ParsedQuery,
-    events: &[(String, Vec<LogEvent>)], // (stream_name, events) pairs
+    streams: &[QueryStream],
     start_time_secs: i64,
     end_time_secs: i64,
 ) -> Vec<Value> {
-    // Collect all events with context
-    let mut all_events: Vec<EventWithContext> = Vec::new();
-    for (stream_name, stream_events) in events {
-        for event in stream_events {
+    // Materialize records inside the time window.
+    let mut records: Vec<Record> = Vec::new();
+    for stream in streams {
+        for (index, event) in &stream.events {
             let event_time_secs = event.timestamp / 1000;
             if event_time_secs >= start_time_secs && event_time_secs < end_time_secs {
-                all_events.push(EventWithContext { event, stream_name });
+                records.push(build_record(
+                    event,
+                    &stream.group_name,
+                    &stream.stream_name,
+                    *index,
+                ));
             }
         }
     }
 
-    // Apply filters
-    let filtered: Vec<&EventWithContext> = all_events
-        .iter()
-        .filter(|ec| {
-            query
-                .filters
-                .iter()
-                .all(|f| event_matches_filter(ec.event, ec.stream_name, f))
-        })
-        .collect();
+    // Default ordering is by timestamp ascending; an explicit `sort` overrides.
+    records.sort_by(|a, b| {
+        a.get("@timestamp")
+            .unwrap_or_default()
+            .cmp(b.get("@timestamp").unwrap_or_default())
+    });
 
-    // Sort
-    let mut sorted: Vec<&EventWithContext> = filtered;
-    if let Some(ref sort_field) = query.sort_field {
-        let field = sort_field.clone();
-        let desc = query.sort_desc;
-        sorted.sort_by(|a, b| {
-            let va = get_field_value(a.event, &field, a.stream_name).unwrap_or_default();
-            let vb = get_field_value(b.event, &field, b.stream_name).unwrap_or_default();
-            if desc {
-                vb.cmp(&va)
-            } else {
-                va.cmp(&vb)
+    let mut explicit_fields: Option<Vec<String>> = None;
+    let mut aggregated = false;
+
+    for cmd in &query.commands {
+        match cmd {
+            Command::Filter(clause) => {
+                records.retain(|r| record_matches_filter(r, clause));
             }
-        });
-    } else {
-        // Default: sort by timestamp ascending
-        sorted.sort_by_key(|ec| ec.event.timestamp);
+            Command::Parse(spec) => {
+                for r in records.iter_mut() {
+                    apply_parse(r, spec);
+                }
+            }
+            Command::Fields(f) | Command::Display(f) => {
+                explicit_fields = Some(f.clone());
+            }
+            Command::Dedup(fields) => {
+                let mut seen = std::collections::HashSet::new();
+                records.retain(|r| {
+                    let key: Vec<Option<String>> =
+                        fields.iter().map(|f| record_field(r, f)).collect();
+                    seen.insert(format!("{key:?}"))
+                });
+            }
+            Command::Sort { field, desc } => {
+                records.sort_by(|a, b| {
+                    let va = record_field(a, field).unwrap_or_default();
+                    let vb = record_field(b, field).unwrap_or_default();
+                    if *desc {
+                        vb.cmp(&va)
+                    } else {
+                        va.cmp(&vb)
+                    }
+                });
+            }
+            Command::Limit(n) => {
+                records.truncate(*n);
+            }
+            Command::Stats { aggs, by } => {
+                records = run_stats(&records, aggs, by);
+                aggregated = true;
+                // After aggregation, the output columns are the by-fields plus
+                // the agg aliases.
+                let mut cols: Vec<String> = by.clone();
+                cols.extend(aggs.iter().map(|a| a.alias.clone()));
+                explicit_fields = Some(cols);
+            }
+        }
     }
 
-    // Apply limit
-    if let Some(limit) = query.limit {
-        sorted.truncate(limit);
-    }
-
-    // Determine which fields to output
-    let output_fields = if query.fields.is_empty() {
-        vec![
+    // Decide output columns.
+    let mut output_fields: Vec<String> = match explicit_fields {
+        Some(f) => f,
+        None => vec![
             "@timestamp".to_string(),
             "@message".to_string(),
             "@ptr".to_string(),
-        ]
-    } else {
-        let mut fields = query.fields.clone();
-        // Always include @ptr
-        if !fields.iter().any(|f| f == "@ptr") {
-            fields.push("@ptr".to_string());
-        }
-        fields
+        ],
     };
+    // Raw (non-aggregated) results always carry @ptr so callers can drill in.
+    if !aggregated && !output_fields.iter().any(|f| f == "@ptr") {
+        output_fields.push("@ptr".to_string());
+    }
 
-    // Build result rows
-    sorted
+    records
         .iter()
-        .map(|ec| {
+        .map(|r| {
             let row: Vec<Value> = output_fields
                 .iter()
                 .filter_map(|field| {
-                    get_field_value(ec.event, field, ec.stream_name)
-                        .map(|value| json!({"field": field, "value": value}))
+                    record_field(r, field).map(|value| json!({"field": field, "value": value}))
                 })
                 .collect();
             Value::Array(row)
@@ -278,233 +585,213 @@ pub fn execute_query(
         .collect()
 }
 
+/// Group records and compute the requested aggregates, returning one synthetic
+/// record per group.
+fn run_stats(records: &[Record], aggs: &[AggExpr], by: &[String]) -> Vec<Record> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<Vec<String>, Vec<&Record>> = BTreeMap::new();
+    for r in records {
+        let key: Vec<String> = by
+            .iter()
+            .map(|f| record_field(r, f).unwrap_or_default())
+            .collect();
+        groups.entry(key).or_default().push(r);
+    }
+
+    let mut out = Vec::new();
+    for (key, group) in groups {
+        let mut rec = Record::default();
+        for (field, value) in by.iter().zip(key.iter()) {
+            rec.set(field, value.clone());
+        }
+        for agg in aggs {
+            rec.set(&agg.alias, compute_agg(agg, &group));
+        }
+        out.push(rec);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn stream(name: &str, events: Vec<LogEvent>) -> QueryStream {
+        QueryStream {
+            group_name: "/g".to_string(),
+            stream_name: name.to_string(),
+            events: events.into_iter().enumerate().collect(),
+        }
+    }
+
+    fn ev(ts: i64, msg: &str) -> LogEvent {
+        LogEvent {
+            timestamp: ts,
+            message: msg.to_string(),
+            ingestion_time: ts,
+        }
+    }
+
     #[test]
     fn parse_fields_and_limit() {
         let q = parse_query("fields @timestamp, @message | limit 5");
-        assert_eq!(q.fields, vec!["@timestamp", "@message"]);
-        assert_eq!(q.limit, Some(5));
-    }
-
-    #[test]
-    fn parse_filter_equals() {
-        let q = parse_query("filter level = \"ERROR\"");
-        assert_eq!(q.filters.len(), 1);
-        match &q.filters[0] {
-            FilterClause::Equals { field, value } => {
-                assert_eq!(field, "level");
-                assert_eq!(value, "ERROR");
-            }
-            _ => panic!("expected Equals"),
+        assert_eq!(q.commands.len(), 2);
+        match &q.commands[0] {
+            Command::Fields(f) => assert_eq!(f, &vec!["@timestamp", "@message"]),
+            _ => panic!("expected Fields"),
+        }
+        match &q.commands[1] {
+            Command::Limit(n) => assert_eq!(*n, 5),
+            _ => panic!("expected Limit"),
         }
     }
 
     #[test]
-    fn parse_filter_like_regex() {
-        let q = parse_query("filter @message like /ERROR/");
-        assert_eq!(q.filters.len(), 1);
-        match &q.filters[0] {
-            FilterClause::Like { field, pattern } => {
-                assert_eq!(field, "@message");
-                assert_eq!(pattern, "ERROR");
-            }
-            _ => panic!("expected Like"),
-        }
+    fn execute_filters_events() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, "ERROR: broke"),
+                ev(2000000, "INFO: ok"),
+                ev(3000000, "ERROR: again"),
+            ],
+        )];
+        let q = parse_query("filter @message like /ERROR/ | limit 10");
+        let r = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(r.len(), 2);
     }
 
     #[test]
-    fn parse_sort_desc() {
+    fn execute_json_field_filter() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, r#"{"level":"ERROR","msg":"fail"}"#),
+                ev(2000000, r#"{"level":"INFO","msg":"ok"}"#),
+            ],
+        )];
+        let q = parse_query(r#"filter level = "ERROR""#);
+        let r = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn execute_not_equals_filter() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, r#"{"level":"ERROR"}"#),
+                ev(2000000, r#"{"level":"INFO"}"#),
+            ],
+        )];
+        let q = parse_query(r#"filter level != "ERROR""#);
+        let r = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn stats_count_by_field() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, r#"{"level":"ERROR"}"#),
+                ev(2000000, r#"{"level":"INFO"}"#),
+                ev(3000000, r#"{"level":"ERROR"}"#),
+                ev(4000000, r#"{"level":"ERROR"}"#),
+            ],
+        )];
+        let q = parse_query("stats count(*) by level");
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 2);
+        let error_row = rows
+            .iter()
+            .find(|row| {
+                row.as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f["field"] == "level" && f["value"] == "ERROR")
+            })
+            .unwrap();
+        let count = error_row
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["field"] == "count(*)")
+            .unwrap();
+        assert_eq!(count["value"], "3");
+    }
+
+    #[test]
+    fn stats_sum_avg() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, r#"{"svc":"a","latency":10}"#),
+                ev(2000000, r#"{"svc":"a","latency":30}"#),
+            ],
+        )];
+        let q = parse_query("stats sum(latency) as total, avg(latency) as mean by svc");
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_array().unwrap();
+        let total = row.iter().find(|f| f["field"] == "total").unwrap();
+        let mean = row.iter().find(|f| f["field"] == "mean").unwrap();
+        assert_eq!(total["value"], "40");
+        assert_eq!(mean["value"], "20");
+    }
+
+    #[test]
+    fn ptr_is_base64_group_stream_index() {
+        use base64::Engine;
+        let streams = vec![stream("s1", vec![ev(1000000, "hello")])];
+        let q = parse_query("fields @message");
+        let rows = execute_query(&q, &streams, 0, 10000);
+        let row = rows[0].as_array().unwrap();
+        let ptr = row.iter().find(|f| f["field"] == "@ptr").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(ptr["value"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "/g|s1|0");
+    }
+
+    #[test]
+    fn parse_glob_extracts_fields() {
+        let streams = vec![stream("s1", vec![ev(1000000, "GET /api 200")])];
+        let q =
+            parse_query("parse @message \"* * *\" as method, path, code | filter code = \"200\"");
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn dedup_drops_duplicates() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, r#"{"level":"ERROR"}"#),
+                ev(2000000, r#"{"level":"ERROR"}"#),
+                ev(3000000, r#"{"level":"INFO"}"#),
+            ],
+        )];
+        let q = parse_query("dedup level");
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn sort_desc_by_timestamp() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, "first"),
+                ev(3000000, "third"),
+                ev(2000000, "second"),
+            ],
+        )];
         let q = parse_query("sort @timestamp desc");
-        assert_eq!(q.sort_field.as_deref(), Some("@timestamp"));
-        assert!(q.sort_desc);
-    }
-
-    #[test]
-    fn parse_sort_asc() {
-        let q = parse_query("sort @timestamp asc");
-        assert_eq!(q.sort_field.as_deref(), Some("@timestamp"));
-        assert!(!q.sort_desc);
-    }
-
-    #[test]
-    fn parse_complex_query() {
-        let q = parse_query(
-            "fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 10",
-        );
-        assert_eq!(q.fields, vec!["@timestamp", "@message"]);
-        assert_eq!(q.filters.len(), 1);
-        assert_eq!(q.sort_field.as_deref(), Some("@timestamp"));
-        assert!(q.sort_desc);
-        assert_eq!(q.limit, Some(10));
-    }
-
-    #[test]
-    fn execute_query_filters_events() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![
-                LogEvent {
-                    timestamp: 1000000,
-                    message: "ERROR: something broke".to_string(),
-                    ingestion_time: 1000000,
-                },
-                LogEvent {
-                    timestamp: 2000000,
-                    message: "INFO: all good".to_string(),
-                    ingestion_time: 2000000,
-                },
-                LogEvent {
-                    timestamp: 3000000,
-                    message: "ERROR: another failure".to_string(),
-                    ingestion_time: 3000000,
-                },
-            ],
-        )];
-
-        let query = parse_query("filter @message like /ERROR/ | limit 10");
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn execute_query_limit() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![
-                LogEvent {
-                    timestamp: 1000000,
-                    message: "msg1".to_string(),
-                    ingestion_time: 1000000,
-                },
-                LogEvent {
-                    timestamp: 2000000,
-                    message: "msg2".to_string(),
-                    ingestion_time: 2000000,
-                },
-                LogEvent {
-                    timestamp: 3000000,
-                    message: "msg3".to_string(),
-                    ingestion_time: 3000000,
-                },
-            ],
-        )];
-
-        let query = parse_query("limit 2");
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn execute_query_fields_selection() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![LogEvent {
-                timestamp: 1000000,
-                message: "hello".to_string(),
-                ingestion_time: 1000000,
-            }],
-        )];
-
-        let query = parse_query("fields @message");
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 1);
-
-        let row = results[0].as_array().unwrap();
-        let field_names: Vec<&str> = row.iter().map(|f| f["field"].as_str().unwrap()).collect();
-        assert!(field_names.contains(&"@message"));
-        assert!(field_names.contains(&"@ptr")); // always included
-        assert!(!field_names.contains(&"@timestamp")); // not requested
-    }
-
-    #[test]
-    fn execute_query_sort_desc() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![
-                LogEvent {
-                    timestamp: 1000000,
-                    message: "first".to_string(),
-                    ingestion_time: 1000000,
-                },
-                LogEvent {
-                    timestamp: 3000000,
-                    message: "third".to_string(),
-                    ingestion_time: 3000000,
-                },
-                LogEvent {
-                    timestamp: 2000000,
-                    message: "second".to_string(),
-                    ingestion_time: 2000000,
-                },
-            ],
-        )];
-
-        let query = parse_query("sort @timestamp desc");
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 3);
-        // First result should have the latest timestamp
-        let first_msg = results[0]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["field"].as_str() == Some("@message"))
-            .unwrap();
-        assert_eq!(first_msg["value"].as_str().unwrap(), "third");
-    }
-
-    #[test]
-    fn execute_query_json_field_filter() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![
-                LogEvent {
-                    timestamp: 1000000,
-                    message: r#"{"level":"ERROR","msg":"fail"}"#.to_string(),
-                    ingestion_time: 1000000,
-                },
-                LogEvent {
-                    timestamp: 2000000,
-                    message: r#"{"level":"INFO","msg":"ok"}"#.to_string(),
-                    ingestion_time: 2000000,
-                },
-            ],
-        )];
-
-        let query = parse_query(r#"filter level = "ERROR""#);
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn execute_query_not_equals_filter() {
-        let events = vec![(
-            "stream-1".to_string(),
-            vec![
-                LogEvent {
-                    timestamp: 1000000,
-                    message: r#"{"level":"ERROR","msg":"fail"}"#.to_string(),
-                    ingestion_time: 1000000,
-                },
-                LogEvent {
-                    timestamp: 2000000,
-                    message: r#"{"level":"INFO","msg":"ok"}"#.to_string(),
-                    ingestion_time: 2000000,
-                },
-            ],
-        )];
-
-        let query = parse_query(r#"filter level != "ERROR""#);
-        let results = execute_query(&query, &events, 0, 10000);
-        assert_eq!(results.len(), 1);
-        let msg = results[0]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["field"].as_str() == Some("@message"))
-            .unwrap();
-        assert!(msg["value"].as_str().unwrap().contains("INFO"));
+        let rows = execute_query(&q, &streams, 0, 10000);
+        let first = rows[0].as_array().unwrap();
+        let msg = first.iter().find(|f| f["field"] == "@message").unwrap();
+        assert_eq!(msg["value"], "third");
     }
 }

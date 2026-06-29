@@ -4,6 +4,7 @@ pub(crate) mod datasets;
 pub mod delivery;
 pub(crate) mod insight_rules;
 pub mod introspection;
+pub(crate) mod metric_math;
 pub(crate) mod metric_streams;
 pub(crate) mod mute_rules;
 pub(crate) mod otel;

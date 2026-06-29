@@ -3150,3 +3150,115 @@ async fn logs_filter_log_events_json_or_pattern() {
     assert_eq!(resp.events().len(), 1, "only the ERROR/500 event matches");
     assert!(resp.events()[0].message().unwrap().contains("ERROR"));
 }
+
+// bug-cluster: Logs Insights `stats count(*) by field` returns aggregated rows,
+// and the `@ptr` from a raw query resolves via GetLogRecord.
+#[tokio::test]
+async fn logs_insights_stats_and_ptr() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+
+    client
+        .create_log_group()
+        .log_group_name("/stats/e2e")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name("/stats/e2e")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let messages = [
+        r#"{"level":"ERROR","msg":"a"}"#,
+        r#"{"level":"INFO","msg":"b"}"#,
+        r#"{"level":"ERROR","msg":"c"}"#,
+        r#"{"level":"ERROR","msg":"d"}"#,
+    ];
+    let mut put = client
+        .put_log_events()
+        .log_group_name("/stats/e2e")
+        .log_stream_name("s1");
+    for (i, m) in messages.iter().enumerate() {
+        put = put.log_events(
+            InputLogEvent::builder()
+                .timestamp(now + i as i64 * 1000)
+                .message(*m)
+                .build()
+                .unwrap(),
+        );
+    }
+    put.send().await.unwrap();
+
+    let start_secs = (now / 1000) - 1;
+    let end_secs = (now / 1000) + 60;
+
+    // stats count(*) by level -> aggregated rows.
+    let q = client
+        .start_query()
+        .log_group_name("/stats/e2e")
+        .start_time(start_secs)
+        .end_time(end_secs)
+        .query_string("stats count(*) by level")
+        .send()
+        .await
+        .unwrap();
+    let qid = q.query_id().unwrap().to_string();
+    let resp = client
+        .get_query_results()
+        .query_id(&qid)
+        .send()
+        .await
+        .unwrap();
+    let rows = resp.results();
+    assert_eq!(rows.len(), 2, "one aggregated row per level");
+    let error_row = rows
+        .iter()
+        .find(|row| {
+            row.iter()
+                .any(|f| f.field() == Some("level") && f.value() == Some("ERROR"))
+        })
+        .expect("ERROR group present");
+    let count = error_row
+        .iter()
+        .find(|f| f.field() == Some("count(*)"))
+        .and_then(|f| f.value())
+        .unwrap();
+    assert_eq!(count, "3");
+
+    // A raw query yields an @ptr that GetLogRecord can resolve.
+    let q2 = client
+        .start_query()
+        .log_group_name("/stats/e2e")
+        .start_time(start_secs)
+        .end_time(end_secs)
+        .query_string("fields @message | limit 1")
+        .send()
+        .await
+        .unwrap();
+    let qid2 = q2.query_id().unwrap().to_string();
+    let resp2 = client
+        .get_query_results()
+        .query_id(&qid2)
+        .send()
+        .await
+        .unwrap();
+    let ptr = resp2.results()[0]
+        .iter()
+        .find(|f| f.field() == Some("@ptr"))
+        .and_then(|f| f.value())
+        .expect("@ptr present");
+
+    let record = client
+        .get_log_record()
+        .log_record_pointer(ptr)
+        .send()
+        .await
+        .expect("get_log_record resolves the @ptr");
+    let rec = record.log_record().expect("log record body");
+    assert!(rec.contains_key("@message"), "resolved record has @message");
+}
