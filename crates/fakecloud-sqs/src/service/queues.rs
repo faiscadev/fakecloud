@@ -472,6 +472,29 @@ impl SqsService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
+
+        // Validate the redrive DLQ target the same way CreateQueue does,
+        // before storing it. Terraform's `aws_sqs_redrive_policy` resource
+        // configures the DLQ via SetQueueAttributes, and an unchecked
+        // bad/nonexistent DLQ ARN makes failed messages churn on the source
+        // forever instead of being dead-lettered. Done with immutable borrows
+        // before the mutable `get_mut` below.
+        if let Some(rp_str) = body["Attributes"]
+            .as_object()
+            .and_then(|a| a.get("RedrivePolicy"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(rp) = parse_redrive_policy(rp_str) {
+                let is_fifo = state
+                    .queues
+                    .get(&resolved_url)
+                    .map(|q| q.is_fifo)
+                    .unwrap_or(false);
+                validate_redrive_policy_target(state, &rp, is_fifo)?;
+            }
+        }
+
         let queue = state
             .queues
             .get_mut(&resolved_url)

@@ -354,6 +354,157 @@ impl SqsService {
             req.is_query_protocol,
         ))
     }
+
+    /// Re-spawn the background mover for any message-move task left in a
+    /// non-terminal state (RUNNING / CANCELLING) by a previous process.
+    ///
+    /// On restart the task row persists but the tokio task driving it is
+    /// gone, so without this `ListMessageMoveTasks` would report RUNNING
+    /// forever and the DLQ drain would never finish. We reclaim each
+    /// orphaned task under the current pid and continue draining from where
+    /// it left off (the persisted `messages_moved` count is preserved). A
+    /// task that was CANCELLING keeps its cancel intent so the resumed
+    /// mover finalizes it as CANCELLED; a task whose source queue no longer
+    /// exists is finalized as FAILED. Call once at startup.
+    pub fn resume_message_move_tasks(&self) {
+        let pid = std::process::id();
+
+        struct Resume {
+            account_id: String,
+            region: String,
+            task_handle: String,
+            source_url: String,
+            destination_arn: Option<String>,
+            dlq_targets: Vec<String>,
+            rate: u64,
+            cancel_flag: Arc<AtomicBool>,
+        }
+
+        /// Fields snapshotted from an orphaned task before re-borrowing state.
+        struct Orphan {
+            task_handle: String,
+            source_arn: String,
+            destination_arn: Option<String>,
+            max_per_sec: Option<i32>,
+            cancelling: bool,
+        }
+
+        let mut to_resume: Vec<Resume> = Vec::new();
+        {
+            let mut accounts = self.state.write();
+            for (account_id, state) in accounts.iter_mut() {
+                let account_id = account_id.to_string();
+                // Snapshot the orphaned tasks first (immutable read), then
+                // mutate each one below — avoids overlapping borrows of
+                // `state.queues` and `state.message_move_tasks`.
+                let orphans: Vec<Orphan> = state
+                    .message_move_tasks
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            t.status,
+                            MessageMoveTaskStatus::Running | MessageMoveTaskStatus::Cancelling
+                        ) && t.driver_pid != pid
+                    })
+                    .map(|t| Orphan {
+                        task_handle: t.task_handle.clone(),
+                        source_arn: t.source_arn.clone(),
+                        destination_arn: t.destination_arn.clone(),
+                        max_per_sec: t.max_messages_per_second,
+                        cancelling: t.status == MessageMoveTaskStatus::Cancelling,
+                    })
+                    .collect();
+
+                for Orphan {
+                    task_handle,
+                    source_arn,
+                    destination_arn,
+                    max_per_sec,
+                    cancelling,
+                } in orphans
+                {
+                    let source_url = state
+                        .queues
+                        .values()
+                        .find(|q| q.arn == source_arn)
+                        .map(|q| q.queue_url.clone());
+
+                    let Some(source_url) = source_url else {
+                        // Source queue is gone — finalize Failed so the task
+                        // doesn't hang at RUNNING forever.
+                        if let Some(task) = state
+                            .message_move_tasks
+                            .iter_mut()
+                            .find(|t| t.task_handle == task_handle)
+                        {
+                            task.driver_pid = pid;
+                            task.status = MessageMoveTaskStatus::Failed;
+                            task.failure_reason =
+                                Some("Source queue no longer exists after restart.".to_string());
+                        }
+                        continue;
+                    };
+
+                    let dlq_targets: Vec<String> = state
+                        .queues
+                        .values()
+                        .filter(|q| {
+                            q.redrive_policy
+                                .as_ref()
+                                .map(|rp| rp.dead_letter_target_arn == source_arn)
+                                .unwrap_or(false)
+                        })
+                        .map(|q| q.queue_url.clone())
+                        .collect();
+
+                    let cancel_flag = Arc::new(AtomicBool::new(cancelling));
+                    if let Some(task) = state
+                        .message_move_tasks
+                        .iter_mut()
+                        .find(|t| t.task_handle == task_handle)
+                    {
+                        task.driver_pid = pid;
+                        task.cancel_flag = cancel_flag.clone();
+                    }
+
+                    let rate = max_per_sec.unwrap_or(1).max(1) as u64;
+                    to_resume.push(Resume {
+                        account_id: account_id.clone(),
+                        region: state.region.clone(),
+                        task_handle,
+                        source_url,
+                        destination_arn,
+                        dlq_targets,
+                        rate,
+                        cancel_flag,
+                    });
+                }
+            }
+        }
+
+        for r in to_resume {
+            let state_handle = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let interval = std::time::Duration::from_nanos(1_000_000_000 / r.rate);
+            tokio::spawn(async move {
+                run_message_move_task(
+                    state_handle,
+                    r.account_id,
+                    r.region,
+                    r.task_handle,
+                    r.source_url,
+                    r.destination_arn,
+                    r.dlq_targets,
+                    interval,
+                    r.cancel_flag,
+                    snapshot_store,
+                    snapshot_lock,
+                )
+                .await;
+            });
+        }
+    }
 }
 
 /// A persisted move task blocks a new StartMessageMoveTask for its source queue

@@ -1027,7 +1027,11 @@ async fn main() {
     if let Some(h) = sqs_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("sqs", h);
     }
-    registry.register(Arc::new(sqs_service));
+    // Resume any in-progress message-move task left RUNNING/CANCELLING by a
+    // previous process so it doesn't hang forever and the DLQ drain continues.
+    let sqs_service = Arc::new(sqs_service);
+    sqs_service.resume_message_move_tasks();
+    registry.register(sqs_service);
     // Flush cross-service SQS deliveries (SNS/EventBridge/S3/Scheduler fan-out)
     // that the sync delivery trait cannot persist itself. bug-audit 4.8.
     if let Some(store) = sqs_snapshot_store {
@@ -1924,6 +1928,12 @@ async fn main() {
         } else {
             None
         };
+    // Keep a clone of the snapshot store (and a dedicated write lock) for the
+    // `/_fakecloud/dynamodb/ttl-processor/tick` admin route, which mutates
+    // state outside any handler and must persist the result the same way the
+    // normal mutating API path does.
+    let dynamodb_ttl_snapshot_store = dynamodb_snapshot_store.clone();
+    let dynamodb_ttl_snapshot_lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut dynamodb_service = DynamoDbService::new(dynamodb_state_for_register)
         .with_s3(s3_state.clone())
         .with_s3_store(s3_store.clone())
@@ -5511,11 +5521,19 @@ async fn main() {
             axum::routing::post({
                 let ds = dynamodb_ttl_state;
                 let delivery = dynamodb_ttl_delivery;
+                let store = dynamodb_ttl_snapshot_store;
+                let lock = dynamodb_ttl_snapshot_lock;
                 move || async move {
                     let count = fakecloud_dynamodb::ttl::process_ttl_expirations_with(
                         &ds,
                         Some(&delivery),
                     );
+                    // Persist the deletions: the tick mutates state outside any
+                    // handler, so without this the expired items reappear on the
+                    // next restart (the normal mutating API path saves here).
+                    if count > 0 {
+                        fakecloud_dynamodb::save_dynamodb_snapshot(&ds, store.clone(), &lock).await;
+                    }
                     axum::Json(types::TtlTickResponse {
                         expired_items: count as u64,
                     })

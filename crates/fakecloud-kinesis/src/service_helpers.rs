@@ -370,6 +370,68 @@ pub(crate) fn validate_stream_id(body: &Value) -> Result<(), AwsServiceError> {
     validate_optional_string_length("StreamId", body["StreamId"].as_str(), 1, 24)
 }
 
+/// Evaluate a `ListShards` `ShardFilter` against a single shard. Returns
+/// whether the shard should be included.
+///
+/// - `AT_LATEST`: only currently-open shards.
+/// - `AT_TRIM_HORIZON` / `FROM_TRIM_HORIZON`: every shard (data is still
+///   within the retention window in this model).
+/// - `AFTER_SHARD_ID`: shards whose id sorts after the filter's `ShardId`.
+/// - `AT_TIMESTAMP` / `FROM_TIMESTAMP`: shards that are still open or that
+///   hold at least one record at/after the filter `Timestamp`.
+///
+/// Required companion fields (`ShardId` / `Timestamp`) are validated, matching
+/// the `InvalidArgumentException` AWS raises when they're missing.
+pub(crate) fn shard_matches_filter(
+    shard: &KinesisShard,
+    filter: &Value,
+) -> Result<bool, AwsServiceError> {
+    let filter_type = filter["Type"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| invalid_argument("ShardFilter.Type is required"))?;
+
+    match filter_type {
+        "AT_LATEST" => Ok(shard.is_open),
+        "AT_TRIM_HORIZON" | "FROM_TRIM_HORIZON" => Ok(true),
+        "AFTER_SHARD_ID" => {
+            let after = filter["ShardId"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    invalid_argument("ShardFilter.ShardId is required for AFTER_SHARD_ID")
+                })?;
+            Ok(shard.shard_id.as_str() > after)
+        }
+        "AT_TIMESTAMP" | "FROM_TIMESTAMP" => {
+            let ts_value = filter["Timestamp"].as_f64().ok_or_else(|| {
+                invalid_argument(
+                    "ShardFilter.Timestamp is required for AT_TIMESTAMP/FROM_TIMESTAMP",
+                )
+            })?;
+            if !ts_value.is_finite() || ts_value < 0.0 {
+                return Err(invalid_argument(
+                    "ShardFilter.Timestamp must be a non-negative epoch",
+                ));
+            }
+            let secs = ts_value.trunc() as i64;
+            let nanos = ((ts_value - ts_value.trunc()) * 1_000_000_000.0) as u32;
+            let target = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+                .ok_or_else(|| invalid_argument("ShardFilter.Timestamp is invalid"))?;
+            if shard.is_open {
+                return Ok(true);
+            }
+            Ok(shard
+                .records
+                .iter()
+                .any(|r| r.approximate_arrival_timestamp >= target))
+        }
+        other => Err(invalid_argument(format!(
+            "Unsupported ShardFilter.Type: {other}"
+        ))),
+    }
+}
+
 pub(crate) fn resource_not_found_arn(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,

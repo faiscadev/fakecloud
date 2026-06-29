@@ -473,6 +473,15 @@ pub struct DynamoDbState {
     pub global_tables: BTreeMap<String, GlobalTableDescription>,
     pub exports: BTreeMap<String, ExportDescription>,
     pub imports: BTreeMap<String, ImportDescription>,
+    /// DynamoDB Streams -> Lambda event-source-mapping checkpoints: the
+    /// last stream sequence number delivered for each mapping
+    /// (keyed by ESM uuid). Persisted so the streams poller resumes from
+    /// where it left off after a restart instead of re-seeding TRIM_HORIZON
+    /// and re-invoking the target Lambda with the whole retained backlog
+    /// (duplicate side effects). Mirrors `KinesisState.lambda_checkpoints`.
+    /// `#[serde(default)]` keeps older snapshots loadable.
+    #[serde(default)]
+    pub lambda_stream_checkpoints: BTreeMap<String, String>,
 }
 
 /// On-disk snapshot envelope. The payload is the full [`DynamoDbState`];
@@ -501,6 +510,7 @@ impl DynamoDbState {
             global_tables: BTreeMap::new(),
             exports: BTreeMap::new(),
             imports: BTreeMap::new(),
+            lambda_stream_checkpoints: BTreeMap::new(),
         }
     }
 
@@ -510,6 +520,22 @@ impl DynamoDbState {
         self.global_tables.clear();
         self.exports.clear();
         self.imports.clear();
+        self.lambda_stream_checkpoints.clear();
+    }
+
+    /// Last stream sequence number delivered for the given DynamoDB
+    /// Streams -> Lambda event source mapping, or `None` if the mapping
+    /// has never delivered (so the poller seeds from StartingPosition).
+    pub fn lambda_stream_checkpoint(&self, mapping_uuid: &str) -> Option<String> {
+        self.lambda_stream_checkpoints.get(mapping_uuid).cloned()
+    }
+
+    /// Record the last stream sequence number delivered for a mapping. The
+    /// value rides along with the next DynamoDB snapshot save, exactly the
+    /// way Kinesis lambda checkpoints persist through their snapshot.
+    pub fn set_lambda_stream_checkpoint(&mut self, mapping_uuid: &str, sequence_number: String) {
+        self.lambda_stream_checkpoints
+            .insert(mapping_uuid.to_string(), sequence_number);
     }
 }
 

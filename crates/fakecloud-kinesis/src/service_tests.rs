@@ -345,6 +345,91 @@ fn describe_stream_returns_shard_descriptions() {
 }
 
 #[test]
+fn describe_stream_paginates_with_limit_and_exclusive_start() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 5);
+
+    // First page: cap at Limit=2 and report HasMoreShards.
+    let resp = svc
+        .describe_stream(&request(
+            "DescribeStream",
+            json!({ "StreamName": "orders", "Limit": 2 }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    let desc = &body["StreamDescription"];
+    let page1 = desc["Shards"].as_array().unwrap();
+    assert_eq!(page1.len(), 2, "Limit honored");
+    assert_eq!(desc["HasMoreShards"], json!(true), "more shards remain");
+    let last_id = page1.last().unwrap()["ShardId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Second page: resume after the last returned shard id.
+    let resp = svc
+        .describe_stream(&request(
+            "DescribeStream",
+            json!({ "StreamName": "orders", "ExclusiveStartShardId": last_id }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    let desc = &body["StreamDescription"];
+    let page2 = desc["Shards"].as_array().unwrap();
+    assert_eq!(page2.len(), 3, "remaining shards returned");
+    assert_eq!(desc["HasMoreShards"], json!(false), "no more shards");
+}
+
+#[test]
+fn list_shards_honors_shard_filter() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 3);
+
+    // AFTER_SHARD_ID drops the named shard and everything before it.
+    let resp = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({
+                "StreamName": "orders",
+                "ShardFilter": { "Type": "AFTER_SHARD_ID", "ShardId": "shardId-000000000000" }
+            }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    let shards = body["Shards"].as_array().unwrap();
+    assert_eq!(
+        shards.len(),
+        2,
+        "two shards sort after shardId-000000000000"
+    );
+    assert!(
+        shards
+            .iter()
+            .all(|s| s["ShardId"].as_str().unwrap() != "shardId-000000000000"),
+        "the filtered shard is excluded"
+    );
+
+    // AT_LATEST returns the currently-open shards (all of them here).
+    let resp = svc
+        .list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "orders", "ShardFilter": { "Type": "AT_LATEST" } }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    assert_eq!(body["Shards"].as_array().unwrap().len(), 3);
+
+    // A ShardFilter that requires ShardId but omits it is rejected.
+    assert_code_kinesis(
+        svc.list_shards(&request(
+            "ListShards",
+            json!({ "StreamName": "orders", "ShardFilter": { "Type": "AFTER_SHARD_ID" } }),
+        )),
+        "InvalidArgumentException",
+    );
+}
+
+#[test]
 fn describe_stream_unknown_errors() {
     let (svc, _) = make_service();
     assert_code_kinesis(
