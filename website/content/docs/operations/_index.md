@@ -821,6 +821,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteRetentionPolicy`
 - `DeleteScheduledQuery`
 - `DeleteSubscriptionFilter`
+- `DeleteSyslogConfiguration`
 - `DeleteTransformer`
 - `DescribeAccountPolicies`
 - `DescribeConfigurationTemplates`
@@ -869,6 +870,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListLogGroupsForQuery`
 - `ListScheduledQueries`
 - `ListSourcesForS3TableIntegration`
+- `ListSyslogConfigurations`
 - `ListTagsForResource`
 - `ListTagsLogGroup`
 - `PutAccountPolicy`
@@ -888,6 +890,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutResourcePolicy`
 - `PutRetentionPolicy`
 - `PutSubscriptionFilter`
+- `PutSyslogConfiguration`
 - `PutTransformer`
 - `StartLiveTail`
 - `StartQuery`

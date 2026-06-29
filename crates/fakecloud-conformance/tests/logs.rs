@@ -1630,3 +1630,95 @@ async fn logs_describe_configuration_templates() {
         .unwrap();
     assert!(!resp.configuration_templates().is_empty());
 }
+
+// -- Syslog configurations --
+
+/// POST an awsJson1.1 CloudWatch Logs request directly. The syslog-configuration
+/// operations are newer than aws-sdk-cloudwatchlogs 1.x, so the typed client
+/// can't express them yet — drive them over raw HTTP instead.
+async fn logs_json(
+    http: &reqwest::Client,
+    endpoint: &str,
+    action: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = http
+        .post(endpoint)
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("Logs_20140328.{action}"))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/logs/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[test_action("logs", "PutSyslogConfiguration", checksum = "71b11cf7")]
+#[test_action("logs", "ListSyslogConfigurations", checksum = "998980b5")]
+#[test_action("logs", "DeleteSyslogConfiguration", checksum = "73ede964")]
+#[tokio::test]
+async fn logs_syslog_configurations() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+
+    client
+        .create_log_group()
+        .log_group_name("conf-syslog")
+        .send()
+        .await
+        .unwrap();
+
+    let (status, _) = logs_json(
+        &http,
+        ep,
+        "PutSyslogConfiguration",
+        serde_json::json!({
+            "logGroupIdentifier": "conf-syslog",
+            "vpcEndpointId": "vpce-0a1b2c3d4e5f"
+        }),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "PutSyslogConfiguration failed: {status}"
+    );
+
+    let (status, list) = logs_json(
+        &http,
+        ep,
+        "ListSyslogConfigurations",
+        serde_json::json!({ "logGroupIdentifier": "conf-syslog" }),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "ListSyslogConfigurations failed: {status}"
+    );
+    let configs = list["syslogConfigurations"].as_array().unwrap();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0]["vpcEndpointId"], "vpce-0a1b2c3d4e5f");
+    assert_eq!(configs[0]["sourceType"], "VPCE");
+
+    let (status, _) = logs_json(
+        &http,
+        ep,
+        "DeleteSyslogConfiguration",
+        serde_json::json!({ "logGroupIdentifier": "conf-syslog" }),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "DeleteSyslogConfiguration failed: {status}"
+    );
+
+    let (_, list) = logs_json(&http, ep, "ListSyslogConfigurations", serde_json::json!({})).await;
+    assert!(list["syslogConfigurations"].as_array().unwrap().is_empty());
+}

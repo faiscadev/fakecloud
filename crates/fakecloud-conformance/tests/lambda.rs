@@ -881,9 +881,9 @@ async fn lambda_scaling_config_via_route() {
     assert!(resp.status().is_success(), "get status: {}", resp.status());
 }
 
-#[test_action("lambda", "TagResource", checksum = "0662a9c9")]
-#[test_action("lambda", "UntagResource", checksum = "0d55cb3a")]
-#[test_action("lambda", "ListTags", checksum = "ef1e8bc2")]
+#[test_action("lambda", "TagResource", checksum = "c6e9b1d6")]
+#[test_action("lambda", "UntagResource", checksum = "b9cec3b0")]
+#[test_action("lambda", "ListTags", checksum = "e919618b")]
 #[tokio::test]
 async fn lambda_tag_resource_lifecycle() {
     let server = TestServer::start().await;

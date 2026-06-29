@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-42 services, 3,723 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+42 services, 3,726 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
