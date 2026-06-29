@@ -3780,7 +3780,7 @@ async fn ec2_disable_allowed_images_settings() {
     assert!(r.allowed_images_settings_state().is_some());
 }
 
-#[test_action("ec2", "GetAllowedImagesSettings", checksum = "5412ccbd")]
+#[test_action("ec2", "GetAllowedImagesSettings", checksum = "4cd2eb06")]
 #[tokio::test]
 async fn ec2_get_allowed_images_settings() {
     let s = TestServer::start().await;
@@ -3792,7 +3792,7 @@ async fn ec2_get_allowed_images_settings() {
 #[test_action(
     "ec2",
     "ReplaceImageCriteriaInAllowedImagesSettings",
-    checksum = "3cecaf96"
+    checksum = "83c01581"
 )]
 #[tokio::test]
 async fn ec2_replace_image_criteria() {

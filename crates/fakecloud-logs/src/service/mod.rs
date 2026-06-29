@@ -22,6 +22,7 @@ mod misc;
 mod policies;
 mod queries;
 mod streams;
+mod syslog;
 mod tags;
 
 /// CloudWatch Logs actions that do NOT mutate state. Everything else
@@ -79,6 +80,7 @@ fn is_read_only_action(action: &str) -> bool {
             | "GetLogFields"
             | "ListSourcesForS3TableIntegration"
             | "DescribeConfigurationTemplates"
+            | "ListSyslogConfigurations"
             | "GetExportedData"
     )
 }
@@ -294,6 +296,9 @@ impl AwsService for LogsService {
             }
             "UpdateDeliveryConfiguration" => self.update_delivery_configuration(&req),
             "DescribeConfigurationTemplates" => self.describe_configuration_templates(&req),
+            "PutSyslogConfiguration" => self.put_syslog_configuration(&req),
+            "ListSyslogConfigurations" => self.list_syslog_configurations(&req),
+            "DeleteSyslogConfiguration" => self.delete_syslog_configuration(&req),
             // Internal action for testing export storage
             "GetExportedData" => self.get_exported_data(&req),
             _ => Err(AwsServiceError::action_not_implemented("logs", &req.action)),
@@ -423,6 +428,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "DisassociateSourceFromS3TableIntegration",
     "UpdateDeliveryConfiguration",
     "DescribeConfigurationTemplates",
+    "PutSyslogConfiguration",
+    "ListSyslogConfigurations",
+    "DeleteSyslogConfiguration",
 ];
 
 fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {

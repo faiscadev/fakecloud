@@ -80,6 +80,19 @@ pub struct LogsState {
     /// through ListAnomalies / UpdateAnomaly.
     #[serde(default)]
     pub anomalies: BTreeMap<String, LogAnomaly>,
+    /// Syslog configurations keyed by log group name. Each enables syslog
+    /// ingestion into the log group through a VPC endpoint, surfaced through
+    /// PutSyslogConfiguration / ListSyslogConfigurations / DeleteSyslogConfiguration.
+    #[serde(default)]
+    pub syslog_configurations: BTreeMap<String, SyslogConfiguration>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyslogConfiguration {
+    pub log_group_arn: String,
+    pub source_type: String,
+    pub vpc_endpoint_id: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -121,6 +134,7 @@ impl LogsState {
             bearer_token_auth: BTreeMap::new(),
             export_storage: BTreeMap::new(),
             anomalies: BTreeMap::new(),
+            syslog_configurations: BTreeMap::new(),
         }
     }
 
@@ -145,6 +159,7 @@ impl LogsState {
         self.bearer_token_auth.clear();
         self.export_storage.clear();
         self.anomalies.clear();
+        self.syslog_configurations.clear();
     }
 }
 
