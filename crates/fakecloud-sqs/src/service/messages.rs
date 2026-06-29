@@ -371,6 +371,22 @@ impl SqsService {
         let max_messages = max_messages_raw.unwrap_or(1).min(10) as usize;
 
         let visibility_timeout = val_as_i64(&body["VisibilityTimeout"]);
+        // Range-validate the request-level VisibilityTimeout (0..=43200) the
+        // same way ChangeMessageVisibility does. Without this a near-i64::MAX
+        // value overflows `now + Duration::seconds(v)` and PANICS the worker
+        // thread (dropping the connection), and a negative value would make
+        // the message immediately visible. AWS returns InvalidParameterValue.
+        if let Some(vt) = visibility_timeout {
+            if !(0..=43200).contains(&vt) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Value {vt} for parameter VisibilityTimeout is invalid. Reason: Must be between 0 and 43200 seconds."
+                    ),
+                ));
+            }
+        }
 
         // FIFO receive de-dup: a retried receive carrying the same
         // ReceiveRequestAttemptId within the visibility window replays the

@@ -1355,13 +1355,18 @@ fn list_dead_letter_source_queues_finds_sources() {
 
 #[test]
 fn redrive_with_unresolvable_dlq_arn_keeps_message_on_source_queue() {
-    // A RedrivePolicy whose deadLetterTargetArn doesn't resolve (DLQ deleted,
-    // ARN typo) must not destroy over-limit messages: real SQS keeps them on
-    // the source queue. Previously the redrive move silently dropped them.
+    // A RedrivePolicy whose deadLetterTargetArn no longer resolves at runtime
+    // (the DLQ was deleted after being configured) must not destroy over-limit
+    // messages: real SQS keeps them on the source queue. Previously the redrive
+    // move silently dropped them. (The DLQ is created + configured first, since
+    // SetQueueAttributes now validates the target at config time, then deleted
+    // to recreate the unresolvable-at-runtime condition.)
     let svc = make_service();
     let src_url = create_queue_url(&svc, "bad-dlq-src");
+    let dlq_url = create_queue_url(&svc, "transient-dlq");
+    let dlq_arn = "arn:aws:sqs:us-east-1:123456789012:transient-dlq";
     let redrive = json!({
-        "deadLetterTargetArn": "arn:aws:sqs:us-east-1:000000000000:no-such-dlq",
+        "deadLetterTargetArn": dlq_arn,
         "maxReceiveCount": "1"
     })
     .to_string();
@@ -1370,6 +1375,9 @@ fn redrive_with_unresolvable_dlq_arn_keeps_message_on_source_queue() {
         json!({ "QueueUrl": src_url, "Attributes": { "RedrivePolicy": redrive } }),
     ))
     .unwrap();
+    // Delete the DLQ so the redrive target no longer resolves at runtime.
+    svc.delete_queue(&make_request("DeleteQueue", json!({ "QueueUrl": dlq_url })))
+        .unwrap();
     send_msg(&svc, &src_url, "survivor");
 
     // First receive delivers (receive_count 1 == max); the second crosses
@@ -2667,4 +2675,141 @@ async fn snapshot_hook_fires_with_store() {
         .snapshot_hook()
         .expect("hook present when a store is set");
     hook().await;
+}
+
+/// A request-level VisibilityTimeout outside 0..=43200 must be rejected with
+/// InvalidParameterValue instead of panicking the worker thread (a near-i64::MAX
+/// value overflows `now + Duration::seconds(v)`).
+#[tokio::test]
+async fn receive_message_rejects_out_of_range_visibility_timeout() {
+    let svc = make_service();
+    let url = create_queue(&svc, "vt-q");
+    send_msg(&svc, &url, "hello");
+
+    let huge = make_request(
+        "ReceiveMessage",
+        json!({ "QueueUrl": url, "VisibilityTimeout": i64::MAX }),
+    );
+    let err = expect_err(svc.receive_message(&huge).await);
+    assert_eq!(err.code(), "InvalidParameterValue");
+
+    let negative = make_request(
+        "ReceiveMessage",
+        json!({ "QueueUrl": url, "VisibilityTimeout": -1 }),
+    );
+    let err = expect_err(svc.receive_message(&negative).await);
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+/// SetQueueAttributes must validate the redrive DLQ target the same way
+/// CreateQueue does — Terraform's `aws_sqs_redrive_policy` configures the DLQ
+/// through SetQueueAttributes, and an unchecked bad ARN churns messages forever.
+#[test]
+fn set_queue_attributes_rejects_nonexistent_redrive_target() {
+    let svc = make_service();
+    let url = create_queue(&svc, "src-q");
+
+    let bad = make_request(
+        "SetQueueAttributes",
+        json!({
+            "QueueUrl": url,
+            "Attributes": {
+                "RedrivePolicy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:123456789012:ghost-dlq\",\"maxReceiveCount\":3}"
+            }
+        }),
+    );
+    let err = expect_err(svc.set_queue_attributes(&bad));
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
+
+    // A real DLQ is accepted.
+    let dlq_url = create_queue(&svc, "real-dlq");
+    let dlq_arn = "arn:aws:sqs:us-east-1:123456789012:real-dlq";
+    assert!(dlq_url.ends_with("real-dlq"));
+    let good = make_request(
+        "SetQueueAttributes",
+        json!({
+            "QueueUrl": url,
+            "Attributes": {
+                "RedrivePolicy": format!("{{\"deadLetterTargetArn\":\"{dlq_arn}\",\"maxReceiveCount\":3}}")
+            }
+        }),
+    );
+    svc.set_queue_attributes(&good).expect("valid DLQ accepted");
+}
+
+/// A message-move task left RUNNING by a previous process (stale driver pid)
+/// must be resumed at startup so it doesn't hang forever and the DLQ drain
+/// completes.
+#[tokio::test]
+async fn resume_message_move_tasks_drains_orphaned_running_task() {
+    let svc = make_service();
+    let dlq_url = create_queue(&svc, "drain-dlq");
+    let main_url = create_queue(&svc, "drain-main");
+    let dlq_arn = "arn:aws:sqs:us-east-1:123456789012:drain-dlq".to_string();
+
+    // main references dlq as its DLQ, so dlq is a valid move source.
+    let set_redrive = make_request(
+        "SetQueueAttributes",
+        json!({
+            "QueueUrl": main_url,
+            "Attributes": {
+                "RedrivePolicy": format!("{{\"deadLetterTargetArn\":\"{dlq_arn}\",\"maxReceiveCount\":1}}")
+            }
+        }),
+    );
+    svc.set_queue_attributes(&set_redrive).unwrap();
+
+    send_msg(&svc, &dlq_url, "m1");
+    send_msg(&svc, &dlq_url, "m2");
+
+    // Inject an orphaned RUNNING task (stale pid => left by a prior process).
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("123456789012");
+        state.message_move_tasks.push(MessageMoveTask {
+            task_handle: "FakeCloudMessageMoveTask-orphan".to_string(),
+            source_arn: dlq_arn.clone(),
+            destination_arn: None,
+            max_messages_per_second: Some(500),
+            status: MessageMoveTaskStatus::Running,
+            messages_moved: 0,
+            messages_to_move: 2,
+            started_timestamp: Utc::now().timestamp_millis(),
+            failure_reason: None,
+            driver_pid: std::process::id().wrapping_add(1), // not us
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        });
+    }
+
+    svc.resume_message_move_tasks();
+
+    // Wait for the resumed mover to drain the DLQ into main.
+    let mut completed = false;
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let task = state
+            .message_move_tasks
+            .iter()
+            .find(|t| t.task_handle == "FakeCloudMessageMoveTask-orphan")
+            .unwrap();
+        if task.status == MessageMoveTaskStatus::Completed {
+            completed = true;
+            assert_eq!(task.messages_moved, 2);
+            assert_eq!(
+                state
+                    .queues
+                    .values()
+                    .find(|q| q.arn == dlq_arn)
+                    .unwrap()
+                    .messages
+                    .len(),
+                0,
+                "source DLQ drained"
+            );
+            break;
+        }
+    }
+    assert!(completed, "orphaned move task should resume and complete");
 }

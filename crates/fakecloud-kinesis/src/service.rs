@@ -293,6 +293,10 @@ impl KinesisService {
 
     fn describe_stream(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        // Limit is 1..=10000 in the model but a single DescribeStream call
+        // returns at most 100 shards; anything above is capped to 100 and
+        // `HasMoreShards` signals the caller to page with ExclusiveStartShardId.
+        validate_optional_json_range("Limit", &body["Limit"], 1, 10000)?;
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
@@ -304,14 +308,33 @@ impl KinesisService {
             json!([{ "ShardLevelMetrics": stream.enhanced_metrics }])
         };
 
+        let limit = body["Limit"]
+            .as_i64()
+            .map(|n| n.clamp(1, 100))
+            .unwrap_or(100) as usize;
+        let exclusive_start = body["ExclusiveStartShardId"].as_str();
+        let mut shards: Vec<Value> = stream
+            .shards
+            .iter()
+            .filter(|s| {
+                exclusive_start
+                    .map(|start| s.shard_id.as_str() > start)
+                    .unwrap_or(true)
+            })
+            .take(limit + 1)
+            .map(shard_to_json)
+            .collect();
+        let has_more = shards.len() > limit;
+        shards.truncate(limit);
+
         Ok(AwsResponse::ok_json(json!({
             "StreamDescription": {
                 "EncryptionType": stream.encryption_type,
                 "EnhancedMonitoring": enhanced_monitoring,
-                "HasMoreShards": false,
+                "HasMoreShards": has_more,
                 "KeyId": stream.key_id,
                 "RetentionPeriodHours": stream.retention_period_hours,
-                "Shards": stream.shards.iter().map(shard_to_json).collect::<Vec<_>>(),
+                "Shards": shards,
                 "StreamARN": stream.stream_arn,
                 "StreamCreationTimestamp": stream.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
                 "StreamModeDetails": {
@@ -671,6 +694,9 @@ impl KinesisService {
         let body = request.json_body();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        // Drop records past retention on write so they don't accumulate in
+        // memory (and in every snapshot) unbounded.
+        state.trim_expired_records();
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
         let stream = state
@@ -697,6 +723,9 @@ impl KinesisService {
         let body = request.json_body();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        // Drop records past retention on write so they don't accumulate in
+        // memory (and in every snapshot) unbounded.
+        state.trim_expired_records();
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
         let stream = state
@@ -1525,9 +1554,22 @@ impl KinesisService {
             None => body["ExclusiveStartShardId"].as_str().map(str::to_string),
         };
 
-        let mut shards: Vec<Value> = stream
-            .shards
-            .iter()
+        // Apply an optional ShardFilter (AT_LATEST / AT_TRIM_HORIZON /
+        // AT_TIMESTAMP / AFTER_SHARD_ID / FROM_*) before paginating. KCL
+        // relies on this to fan out only to the relevant shards.
+        let shard_filter = body.get("ShardFilter").filter(|f| f.is_object());
+        let mut filtered_shards: Vec<&KinesisShard> = Vec::new();
+        for shard in &stream.shards {
+            if let Some(filter) = shard_filter {
+                if !shard_matches_filter(shard, filter)? {
+                    continue;
+                }
+            }
+            filtered_shards.push(shard);
+        }
+
+        let mut shards: Vec<Value> = filtered_shards
+            .into_iter()
             .filter(|s| {
                 if let Some(start_id) = exclusive_start.as_deref() {
                     s.shard_id.as_str() > start_id

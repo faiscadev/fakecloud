@@ -174,6 +174,53 @@ impl KinesisState {
         self.lambda_checkpoints
             .insert(format!("{mapping_uuid}:{shard_id}"), offset);
     }
+
+    /// Physically drop shard records older than each stream's retention
+    /// period. `get_records` only advanced the read cursor past expired
+    /// records, so they lived in memory (and in every snapshot) forever.
+    /// Removing them from the front of a shard shifts all index-based
+    /// offsets, so we decrement the Lambda checkpoints and shard-iterator
+    /// leases that point into the trimmed shard by the same amount, keeping
+    /// sequence/iterator correctness intact.
+    pub fn trim_expired_records(&mut self) {
+        self.trim_expired_records_at(Utc::now());
+    }
+
+    /// [`trim_expired_records`] with an explicit "now", for deterministic tests.
+    pub fn trim_expired_records_at(&mut self, now: DateTime<Utc>) {
+        for (stream_name, stream) in self.streams.iter_mut() {
+            let cutoff = now - Duration::hours(stream.retention_period_hours as i64);
+            for shard in stream.shards.iter_mut() {
+                // Records are stored in arrival order, so the expired ones
+                // are a contiguous prefix.
+                let trim = shard
+                    .records
+                    .iter()
+                    .take_while(|r| r.approximate_arrival_timestamp < cutoff)
+                    .count();
+                if trim == 0 {
+                    continue;
+                }
+                shard.records.drain(0..trim);
+
+                // Shift index-based offsets that referenced this shard.
+                for (key, offset) in self.lambda_checkpoints.iter_mut() {
+                    if key
+                        .rsplit_once(':')
+                        .map(|(_, sid)| sid == shard.shard_id)
+                        .unwrap_or(false)
+                    {
+                        *offset = offset.saturating_sub(trim);
+                    }
+                }
+                for lease in self.iterators.values_mut() {
+                    if lease.stream_name == *stream_name && lease.shard_id == shard.shard_id {
+                        lease.next_record_index = lease.next_record_index.saturating_sub(trim);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// On-disk snapshot envelope for Kinesis state. Versioned so format
@@ -257,5 +304,78 @@ mod tests {
         let mut state = KinesisState::new("123456789012", "us-east-1");
         state.set_lambda_checkpoint("uuid-1", "shard-0", 42);
         assert_eq!(state.lambda_checkpoint("uuid-1", "shard-0"), 42);
+    }
+
+    fn record_at(seq: &str, age_hours: i64) -> KinesisRecord {
+        KinesisRecord {
+            sequence_number: seq.to_string(),
+            partition_key: "pk".to_string(),
+            data: vec![1, 2, 3],
+            approximate_arrival_timestamp: Utc::now() - Duration::hours(age_hours),
+        }
+    }
+
+    #[test]
+    fn trim_expired_records_drops_old_and_shifts_offsets() {
+        let mut state = KinesisState::new("123456789012", "us-east-1");
+        let shard_id = "shardId-000000000000".to_string();
+        let stream = KinesisStream {
+            stream_name: "s".to_string(),
+            stream_arn: state.stream_arn("s"),
+            stream_status: "ACTIVE".to_string(),
+            stream_creation_timestamp: Utc::now(),
+            retention_period_hours: 24,
+            stream_mode: "PROVISIONED".to_string(),
+            encryption_type: "NONE".to_string(),
+            key_id: None,
+            shard_count: 1,
+            open_shard_count: 1,
+            tags: BTreeMap::new(),
+            shards: vec![KinesisShard {
+                shard_id: shard_id.clone(),
+                starting_hash_key: "0".to_string(),
+                ending_hash_key: "1".to_string(),
+                parent_shard_id: None,
+                adjacent_parent_shard_id: None,
+                is_open: true,
+                next_sequence_number: 3,
+                // Two records aged past the 24h window, one fresh.
+                records: vec![record_at("0", 48), record_at("1", 48), record_at("2", 1)],
+            }],
+            next_shard_index: 1,
+            enhanced_metrics: Vec::new(),
+            warm_throughput_mibps: None,
+            max_record_size_kib: None,
+        };
+        state.streams.insert("s".to_string(), stream);
+
+        // A consumer checkpoint that has read all 3, and a live iterator
+        // pointing past all 3 — both index-based.
+        state.set_lambda_checkpoint("uuid-1", &shard_id, 3);
+        state.iterators.insert(
+            "tok".to_string(),
+            ShardIteratorLease {
+                iterator_token: "tok".to_string(),
+                stream_name: "s".to_string(),
+                shard_id: shard_id.clone(),
+                next_record_index: 3,
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+        );
+
+        state.trim_expired_records();
+
+        let shard = &state.streams["s"].shards[0];
+        assert_eq!(shard.records.len(), 1, "two expired records trimmed");
+        assert_eq!(shard.records[0].sequence_number, "2", "fresh record kept");
+        assert_eq!(
+            state.lambda_checkpoint("uuid-1", &shard_id),
+            1,
+            "checkpoint shifted down by the trimmed prefix"
+        );
+        assert_eq!(
+            state.iterators["tok"].next_record_index, 1,
+            "iterator offset shifted down by the trimmed prefix"
+        );
     }
 }
