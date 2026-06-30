@@ -52,16 +52,20 @@ plaintext just like a real AWS consumer.
   are forwarded; non-matching events are acked (deleted) from the source, exactly
   as AWS Pipes drops filtered events.
 - **Targets** — **Lambda** (the matching batch is invoked as a JSON array),
-  **SQS**, and **SNS** (one message per event). A message is deleted from the
+  **SQS** and **SNS** (one message per event), **Step Functions**
+  (`StartExecution` per event), **EventBridge bus** (`PutEvents`, with
+  `Source`/`DetailType` from `TargetParameters.EventBridgeEventBusParameters`),
+  and **Kinesis** (one record per event, partition key from
+  `TargetParameters.KinesisStreamParameters`). A message is deleted from the
   source only after it is filtered out or successfully delivered; a delivery
   failure leaves it for redelivery.
 
 ## Roadmap
 
 - **More sources** — DynamoDB Streams and Kinesis sources.
-- **More targets** — Step Functions `StartExecution`, EventBridge bus
-  `PutEvents`, and Kinesis.
 - **Enrichment + transforms** — optional enrichment (Lambda / Step Functions /
   API destination) and `InputTemplate` target input transformers.
+- **More targets** — ECS, Batch, Redshift Data, HTTP/API destination,
+  SageMaker, CloudWatch Logs, Timestream.
 - **CloudFormation** — `AWS::Pipes::Pipe` provisioning.
 - **Terraform** — `aws_pipes_pipe` acceptance coverage.
