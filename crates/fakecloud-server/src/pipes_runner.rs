@@ -4,15 +4,16 @@
 //! the source queue, applies the pipe's EventBridge-pattern filter (matching
 //! events are forwarded, non-matching events are acked/deleted — "filter
 //! drop-as-ack", exactly as AWS Pipes does), and delivers the matching events
-//! to the pipe's target (Lambda / SQS / SNS) via the shared `DeliveryBus`,
-//! reusing the same cross-service delivery paths every other fakecloud feature
-//! uses. A message is deleted from the source only after it is either filtered
-//! out or successfully delivered; a delivery failure leaves it for redelivery.
+//! to the pipe's target (Lambda / SQS / SNS / Step Functions / EventBridge bus
+//! / Kinesis) via the shared `DeliveryBus`, reusing the same cross-service
+//! delivery paths every other fakecloud feature uses. A message is deleted
+//! from the source only after it is either filtered out or successfully
+//! delivered; a delivery failure leaves it for redelivery.
 //!
-//! DynamoDB-stream / Kinesis sources, enrichment, the remaining target types
-//! (Step Functions / EventBridge bus / Kinesis), and InputTemplate transforms
-//! land in a later batch. Each unsupported source/target is left untouched
-//! (the pipe simply does no work) rather than faking delivery.
+//! DynamoDB-stream / Kinesis sources, enrichment, InputTemplate transforms,
+//! and the remaining target types (ECS / Batch / Redshift / HTTP / …) land in
+//! a later batch. Each unsupported source/target is left untouched (the pipe
+//! simply does no work) rather than faking delivery.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use fakecloud_sqs::SharedSqsState;
 struct SqsSourcePipe {
     source_arn: String,
     target_arn: String,
+    target_params: Option<Value>,
     filter: FilterSet,
     batch_size: usize,
 }
@@ -109,6 +111,7 @@ impl PipesRunner {
                 out.push(SqsSourcePipe {
                     source_arn: source_arn.to_string(),
                     target_arn: target_arn.to_string(),
+                    target_params: pipe.get("TargetParameters").cloned(),
                     filter,
                     batch_size,
                 });
@@ -139,7 +142,9 @@ impl PipesRunner {
         }
 
         if !to_deliver.is_empty() {
-            let delivered = self.deliver(&pipe.target_arn, &to_deliver).await;
+            let delivered = self
+                .deliver(&pipe.target_arn, pipe.target_params.as_ref(), &to_deliver)
+                .await;
             if delivered {
                 ack_ids.extend(to_deliver.into_iter().map(|(id, _)| id));
             }
@@ -251,7 +256,12 @@ impl PipesRunner {
     /// Deliver the batch to the target. Returns true if delivery succeeded (and
     /// the events may be acked). Lambda receives the whole batch as a JSON
     /// array (Pipes batches to Lambda); SQS/SNS receive one message per event.
-    async fn deliver(&self, target_arn: &str, batch: &[(String, Value)]) -> bool {
+    async fn deliver(
+        &self,
+        target_arn: &str,
+        target_params: Option<&Value>,
+        batch: &[(String, Value)],
+    ) -> bool {
         if target_arn.contains(":lambda:") {
             let payload = Value::Array(batch.iter().map(|(_, e)| e.clone()).collect());
             let payload = serde_json::to_string(&payload).unwrap_or_else(|_| "[]".to_string());
@@ -277,10 +287,57 @@ impl PipesRunner {
                 self.delivery.publish_to_sns(target_arn, &body, None);
             }
             true
+        } else if target_arn.contains(":states:") {
+            // Step Functions: start one execution per event with the event as
+            // input (Pipes invokes standard state machines per record).
+            for (_, event) in batch {
+                let input = serde_json::to_string(event).unwrap_or_default();
+                self.delivery
+                    .start_stepfunctions_execution(target_arn, &input);
+            }
+            true
+        } else if target_arn.contains(":events:") {
+            // EventBridge bus: PutEvents one entry per event. Source/DetailType
+            // come from the target's EventBridgeEventBusParameters (AWS
+            // requires them), defaulting to Pipes' conventional values.
+            let bus_name = target_arn
+                .rsplit_once("event-bus/")
+                .map(|(_, n)| n)
+                .unwrap_or("default");
+            let eb_params = target_params.and_then(|p| p.get("EventBridgeEventBusParameters"));
+            let source = eb_params
+                .and_then(|p| p.get("Source"))
+                .and_then(Value::as_str)
+                .unwrap_or("Pipes");
+            let detail_type = eb_params
+                .and_then(|p| p.get("DetailType"))
+                .and_then(Value::as_str)
+                .unwrap_or("Event");
+            for (_, event) in batch {
+                let detail = serde_json::to_string(event).unwrap_or_default();
+                self.delivery
+                    .put_event_to_eventbridge(source, detail_type, &detail, bus_name);
+            }
+            true
+        } else if target_arn.contains(":kinesis:") {
+            // Kinesis: one record per event. PartitionKey comes from the
+            // target's KinesisStreamParameters (a literal here), falling back
+            // to the source message id so records still spread across shards.
+            let configured_pk = target_params
+                .and_then(|p| p.get("KinesisStreamParameters"))
+                .and_then(|p| p.get("PartitionKey"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            for (id, event) in batch {
+                let data = serde_json::to_string(event).unwrap_or_default();
+                let pk = configured_pk.unwrap_or(id.as_str());
+                self.delivery.send_to_kinesis(target_arn, &data, pk);
+            }
+            true
         } else {
-            // Step Functions / EventBridge bus / Kinesis / etc. land in a later
-            // batch. Don't ack — leave the events so they're delivered once the
-            // target type is supported rather than silently dropped.
+            // Other targets (ECS / Batch / Redshift / HTTP / SageMaker / …)
+            // land in a later batch. Don't ack — leave the events so they're
+            // delivered once the target type is supported, never faked.
             false
         }
     }

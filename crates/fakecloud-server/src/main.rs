@@ -3874,7 +3874,7 @@ async fn main() {
     }
     tokio::spawn(sqs_lambda_poller.run());
     let mut kinesis_lambda_poller =
-        KinesisLambdaPoller::new(kinesis_state, lambda_invocations_state.clone());
+        KinesisLambdaPoller::new(kinesis_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
         kinesis_lambda_poller = kinesis_lambda_poller.with_lambda_delivery(ld.clone());
     }
@@ -3886,12 +3886,49 @@ async fn main() {
     }
     tokio::spawn(Arc::new(dynamodb_streams_poller).run());
     // EventBridge Pipes runner: executes RUNNING pipes with an SQS source,
-    // filtering events and delivering matches to Lambda/SQS/SNS targets via
-    // the shared delivery paths. Other sources/targets land in a later batch.
+    // filtering events and delivering matches to Lambda/SQS/SNS/Step
+    // Functions/EventBridge-bus/Kinesis targets via the shared delivery
+    // paths. DynamoDB-stream/Kinesis sources + enrichment land in a later
+    // batch.
     {
+        // EventBridge-bus + Step Functions target senders need their own
+        // delivery impls (mirroring the scheduler/EB wiring); a minimal inner
+        // bus suffices because a pipe delivers *to* these targets rather than
+        // driving their downstream fan-out.
+        let pipes_eb_delivery = {
+            let mut inner = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+            if let Some(ref ld) = lambda_delivery {
+                inner = inner.with_lambda(ld.clone());
+            }
+            Arc::new(
+                fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+                    eb_state.clone(),
+                    Arc::new(inner),
+                ),
+            )
+        };
+        let pipes_sfn_delivery = {
+            let mut sfn_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
+            if let Some(ref ld) = lambda_delivery {
+                sfn_bus = sfn_bus.with_lambda(ld.clone());
+            }
+            Arc::new(
+                stepfunctions_delivery::StepFunctionsDeliveryImpl::new(
+                    stepfunctions_state.clone(),
+                    Some(Arc::new(sfn_bus)),
+                    Some(dynamodb_state.clone()),
+                )
+                .with_registry(sfn_registry_handle.clone()),
+            )
+        };
+        let pipes_kinesis_delivery =
+            fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
         let mut pipes_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
-            .with_sns(sns_delivery.clone());
+            .with_sns(sns_delivery.clone())
+            .with_eventbridge(pipes_eb_delivery)
+            .with_stepfunctions(pipes_sfn_delivery)
+            .with_kinesis(pipes_kinesis_delivery);
         if let Some(ref ld) = lambda_delivery {
             pipes_bus = pipes_bus.with_lambda(ld.clone());
         }
