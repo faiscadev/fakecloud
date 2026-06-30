@@ -405,6 +405,9 @@ async fn main() {
     let batch_state: fakecloud_batch::SharedBatchState = Arc::new(parking_lot::RwLock::new(
         fakecloud_batch::BatchAccounts::new(),
     ));
+    let pipes_state: fakecloud_pipes::SharedPipesState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_pipes::PipesAccounts::new(),
+    ));
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
@@ -3154,6 +3157,64 @@ async fn main() {
         cfn_snapshot_hooks.insert("batch", h);
     }
     registry.register(Arc::new(batch_service));
+
+    // EventBridge Pipes — control plane (CreatePipe/Describe/List/Update/
+    // Delete/Start/Stop + tags) with a faithful lifecycle state machine. Real
+    // source->enrichment->target execution lands in a later batch.
+    let pipes_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("pipes").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_pipes::PipesSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_pipes::PIPES_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "pipes persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_pipes::PIPES_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                *pipes_state.write() = accounts;
+                                tracing::info!("loaded pipes persistence snapshot");
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse pipes persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no pipes persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read pipes persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut pipes_service = fakecloud_pipes::PipesService::new(pipes_state.clone());
+    if let Some(store) = pipes_snapshot_store.clone() {
+        pipes_service = pipes_service.with_snapshot_store(store);
+    }
+    // Re-drive any pipe left mid-transition by a restart so it doesn't stay
+    // stuck in CREATING/UPDATING/etc forever.
+    pipes_service.recover_persisted_pipes().await;
+    if let Some(h) = pipes_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("pipes", h);
+    }
+    registry.register(Arc::new(pipes_service));
 
     let wafv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

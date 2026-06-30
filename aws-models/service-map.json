@@ -11,6 +11,10 @@
         "repo_dir": "eventbridge",
         "service_name": "events"
     },
+    "pipes": {
+        "repo_dir": "pipes",
+        "service_name": "pipes"
+    },
     "iam": {
         "repo_dir": "iam",
         "service_name": "iam"
