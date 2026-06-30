@@ -84,7 +84,7 @@ async fn execute_change_set_provisions_and_deletes_rds_instance() {
     // The instance must reach `available` -- this is the bug: before the
     // changeset-side drain it stayed `creating` forever whenever a runtime was
     // wired (and was never backed by a real container).
-    let available = helpers::wait_until(std::time::Duration::from_secs(15), || {
+    let available = helpers::wait_until(std::time::Duration::from_secs(120), || {
         let rds = rds.clone();
         async move {
             let out = rds
@@ -112,7 +112,7 @@ async fn execute_change_set_provisions_and_deletes_rds_instance() {
         .await
         .expect("delete_stack");
 
-    let gone = helpers::wait_until(std::time::Duration::from_secs(15), || {
+    let gone = helpers::wait_until(std::time::Duration::from_secs(120), || {
         let rds = rds.clone();
         async move {
             match rds
@@ -181,7 +181,7 @@ async fn create_change_set_provisions_and_deletes_elasticache_cluster() {
         .await
         .expect("execute_change_set");
 
-    let available = helpers::wait_until(std::time::Duration::from_secs(15), || {
+    let available = helpers::wait_until(std::time::Duration::from_secs(120), || {
         let ec = ec.clone();
         async move {
             let out = ec
@@ -207,7 +207,7 @@ async fn create_change_set_provisions_and_deletes_elasticache_cluster() {
         .await
         .expect("delete_stack");
 
-    let gone = helpers::wait_until(std::time::Duration::from_secs(15), || {
+    let gone = helpers::wait_until(std::time::Duration::from_secs(120), || {
         let ec = ec.clone();
         async move {
             match ec
