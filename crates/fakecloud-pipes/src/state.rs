@@ -29,6 +29,14 @@ pub struct PipesState {
     /// Tags keyed by resource ARN -> { key: value }.
     #[serde(default)]
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// Source checkpoints for streaming sources, so a restart resumes
+    /// instead of re-replaying the retained backlog. Keyed by
+    /// `"<pipeArn>#<shardId>"` for a Kinesis source (value = the next
+    /// record index in that shard) and `"<pipeArn>"` for a DynamoDB-stream
+    /// source (value = the last delivered sequence number). SQS sources
+    /// don't checkpoint — they ack by deleting the source message.
+    #[serde(default)]
+    pub source_checkpoints: BTreeMap<String, String>,
 }
 
 impl PipesAccounts {

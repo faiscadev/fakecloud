@@ -9,6 +9,6 @@ pub use service::{save_dynamodb_snapshot, DynamoDbService};
 pub use state::{
     AttributeDefinition, DynamoDbSnapshot, DynamoDbState, DynamoTable, GlobalSecondaryIndex,
     KeySchemaElement, LocalSecondaryIndex, OnDemandThroughput, Projection, ProvisionedThroughput,
-    SharedDynamoDbState, DYNAMODB_SNAPSHOT_SCHEMA_VERSION,
+    SharedDynamoDbState, StreamRecord, DYNAMODB_SNAPSHOT_SCHEMA_VERSION,
 };
 pub use streams_dataplane::DynamoDbStreamsService;

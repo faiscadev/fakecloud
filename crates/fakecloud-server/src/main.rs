@@ -3885,11 +3885,11 @@ async fn main() {
         dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(Arc::new(dynamodb_streams_poller).run());
-    // EventBridge Pipes runner: executes RUNNING pipes with an SQS source,
-    // filtering events and delivering matches to Lambda/SQS/SNS/Step
-    // Functions/EventBridge-bus/Kinesis targets via the shared delivery
-    // paths. DynamoDB-stream/Kinesis sources + enrichment land in a later
-    // batch.
+    // EventBridge Pipes runner: executes RUNNING pipes with an SQS / Kinesis /
+    // DynamoDB-stream source, filtering events, optionally running them through
+    // a Lambda enrichment, applying the target InputTemplate, and delivering
+    // matches to Lambda/SQS/SNS/Step Functions/EventBridge-bus/Kinesis targets
+    // via the shared delivery paths.
     {
         // EventBridge-bus + Step Functions target senders need their own
         // delivery impls (mirroring the scheduler/EB wiring); a minimal inner
@@ -3937,6 +3937,8 @@ async fn main() {
             sqs_state.clone(),
             Arc::new(pipes_bus),
         )
+        .with_kinesis_state(kinesis_state.clone())
+        .with_dynamodb_state(dynamodb_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
         tokio::spawn(runner.run());
     }
