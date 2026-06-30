@@ -20,6 +20,7 @@ mod dynamodb_streams_lambda_poller;
 mod introspection;
 mod kinesis_lambda_poller;
 mod lambda_delivery;
+mod pipes_runner;
 mod reaper;
 mod reset;
 mod runtime;
@@ -3884,6 +3885,24 @@ async fn main() {
         dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
     }
     tokio::spawn(Arc::new(dynamodb_streams_poller).run());
+    // EventBridge Pipes runner: executes RUNNING pipes with an SQS source,
+    // filtering events and delivering matches to Lambda/SQS/SNS targets via
+    // the shared delivery paths. Other sources/targets land in a later batch.
+    {
+        let mut pipes_bus = DeliveryBus::new()
+            .with_sqs(sqs_delivery.clone())
+            .with_sns(sns_delivery.clone());
+        if let Some(ref ld) = lambda_delivery {
+            pipes_bus = pipes_bus.with_lambda(ld.clone());
+        }
+        let runner = pipes_runner::PipesRunner::new(
+            pipes_state.clone(),
+            sqs_state.clone(),
+            Arc::new(pipes_bus),
+        )
+        .with_kms_hook(kms_hook_for_services.clone());
+        tokio::spawn(runner.run());
+    }
     if let Some(ref rt) = container_runtime {
         let rt = rt.clone();
         tokio::spawn(rt.run_cleanup_loop(std::time::Duration::from_secs(300)));

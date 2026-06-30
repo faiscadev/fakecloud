@@ -38,12 +38,30 @@ machine and persistence:
   `Tags` on `CreatePipe`.
 - **Persistence** — pipes survive a restart in persistent mode.
 
+## Execution — SQS source (real delivery)
+
+A RUNNING pipe whose **source is an SQS queue** is executed for real by a
+background runner: it polls the source queue, applies the pipe's
+`FilterCriteria` (the same EventBridge event-pattern syntax used everywhere
+else in fakecloud), and delivers matching events to the target — reusing the
+exact cross-service delivery paths the rest of fakecloud uses. SSE-KMS /
+managed-SSE source bodies are decrypted before forwarding, so the target sees
+plaintext just like a real AWS consumer.
+
+- **Filtering** — events matching `SourceParameters.FilterCriteria.Filters[].Pattern`
+  are forwarded; non-matching events are acked (deleted) from the source, exactly
+  as AWS Pipes drops filtered events.
+- **Targets** — **Lambda** (the matching batch is invoked as a JSON array),
+  **SQS**, and **SNS** (one message per event). A message is deleted from the
+  source only after it is filtered out or successfully delivered; a delivery
+  failure leaves it for redelivery.
+
 ## Roadmap
 
-- **Execution engine** — real source polling (SQS / DynamoDB Streams / Kinesis)
-  with EventBridge-pattern filtering, optional enrichment (Lambda / Step
-  Functions / API destination), and target delivery (Lambda / SQS / SNS / Step
-  Functions / EventBridge bus / Kinesis) reusing fakecloud's existing invoke and
-  delivery paths.
+- **More sources** — DynamoDB Streams and Kinesis sources.
+- **More targets** — Step Functions `StartExecution`, EventBridge bus
+  `PutEvents`, and Kinesis.
+- **Enrichment + transforms** — optional enrichment (Lambda / Step Functions /
+  API destination) and `InputTemplate` target input transformers.
 - **CloudFormation** — `AWS::Pipes::Pipe` provisioning.
 - **Terraform** — `aws_pipes_pipe` acceptance coverage.
