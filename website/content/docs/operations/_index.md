@@ -257,6 +257,19 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateEndpoint`
 - `UpdateEventBus`
 
+## [EventBridge Pipes](@/docs/services/pipes.md)
+
+- `CreatePipe`
+- `DeletePipe`
+- `DescribePipe`
+- `ListPipes`
+- `ListTagsForResource`
+- `StartPipe`
+- `StopPipe`
+- `TagResource`
+- `UntagResource`
+- `UpdatePipe`
+
 ## [EventBridge Scheduler](@/docs/services/scheduler.md)
 
 - `CreateSchedule`

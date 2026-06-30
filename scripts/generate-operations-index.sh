@@ -38,6 +38,7 @@ SERVICES=(
     "sqs|SQS|sqs"
     "sns|SNS|sns"
     "eventbridge|EventBridge|eventbridge"
+    "pipes|EventBridge Pipes|pipes"
     "scheduler|EventBridge Scheduler|scheduler"
     "lambda|Lambda|lambda"
     "dynamodb|DynamoDB|dynamodb"

@@ -59,6 +59,7 @@ SERVICES=(
     "glue:glue"
     "organizations:organizations"
     "ec2:ec2"
+    "pipes:pipes"
 )
 
 # Sparse checkout only the models we need
