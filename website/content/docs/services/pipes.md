@@ -38,33 +38,44 @@ machine and persistence:
   `Tags` on `CreatePipe`.
 - **Persistence** — pipes survive a restart in persistent mode.
 
-## Execution — SQS source (real delivery)
+## Execution — real source → enrichment → target
 
-A RUNNING pipe whose **source is an SQS queue** is executed for real by a
-background runner: it polls the source queue, applies the pipe's
-`FilterCriteria` (the same EventBridge event-pattern syntax used everywhere
-else in fakecloud), and delivers matching events to the target — reusing the
-exact cross-service delivery paths the rest of fakecloud uses. SSE-KMS /
-managed-SSE source bodies are decrypted before forwarding, so the target sees
-plaintext just like a real AWS consumer.
+A RUNNING pipe is executed for real by a background runner: it polls the
+source, applies the pipe's `FilterCriteria` (the same EventBridge event-pattern
+syntax used everywhere else in fakecloud), optionally runs the matched batch
+through an enrichment, applies the target `InputTemplate`, and delivers the
+result to the target — reusing the exact cross-service delivery paths the rest
+of fakecloud uses.
 
+- **Sources** — **SQS queues**, **Kinesis streams**, and **DynamoDB streams**.
+  SQS acks by deleting the source message once it is filtered out or
+  successfully delivered; SSE-KMS / managed-SSE source bodies are decrypted
+  before forwarding, so the target sees plaintext just like a real AWS consumer.
+  The stream sources keep a durable per-pipe checkpoint (persisted with the
+  Pipes state, so a restart resumes instead of re-replaying the backlog) and
+  honor `StartingPosition` (`TRIM_HORIZON` / `LATEST`, plus `AT_TIMESTAMP` for
+  Kinesis). A delivery failure leaves the window for redelivery (at-least-once).
 - **Filtering** — events matching `SourceParameters.FilterCriteria.Filters[].Pattern`
-  are forwarded; non-matching events are acked (deleted) from the source, exactly
-  as AWS Pipes drops filtered events.
-- **Targets** — **Lambda** (the matching batch is invoked as a JSON array),
-  **SQS** and **SNS** (one message per event), **Step Functions**
-  (`StartExecution` per event), **EventBridge bus** (`PutEvents`, with
-  `Source`/`DetailType` from `TargetParameters.EventBridgeEventBusParameters`),
-  and **Kinesis** (one record per event, partition key from
-  `TargetParameters.KinesisStreamParameters`). A message is deleted from the
-  source only after it is filtered out or successfully delivered; a delivery
-  failure leaves it for redelivery.
+  are forwarded; non-matching events are dropped (acked), exactly as AWS Pipes
+  drops filtered events.
+- **Enrichment** — when `Enrichment` is a **Lambda** ARN, the matched batch is
+  sent to it as a JSON array and the function's JSON return *replaces* the batch
+  (0..N events) before target delivery; an enrichment that returns an empty
+  array drops the batch. `EnrichmentParameters.InputTemplate` transforms each
+  event before the enrichment call.
+- **Input transform** — `TargetParameters.InputTemplate` is applied per event
+  before delivery: `<$.json.path>` placeholders resolve against the event and
+  `<aws.pipes.event.json>` expands to the whole event; a template that renders
+  valid JSON is delivered as that JSON, otherwise as a string.
+- **Targets** — **Lambda** (the batch is invoked as a JSON array), **SQS** and
+  **SNS** (one message per event), **Step Functions** (`StartExecution` per
+  event), **EventBridge bus** (`PutEvents`, with `Source`/`DetailType` from
+  `TargetParameters.EventBridgeEventBusParameters`), and **Kinesis** (one record
+  per event, partition key from `TargetParameters.KinesisStreamParameters`).
 
 ## Roadmap
 
-- **More sources** — DynamoDB Streams and Kinesis sources.
-- **Enrichment + transforms** — optional enrichment (Lambda / Step Functions /
-  API destination) and `InputTemplate` target input transformers.
+- **More enrichment** — Step Functions (sync), API destination, API Gateway.
 - **More targets** — ECS, Batch, Redshift Data, HTTP/API destination,
   SageMaker, CloudWatch Logs, Timestream.
 - **CloudFormation** — `AWS::Pipes::Pipe` provisioning.
