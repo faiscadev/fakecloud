@@ -3445,6 +3445,7 @@ dependencies = [
  "fakecloud-logs",
  "fakecloud-organizations",
  "fakecloud-persistence",
+ "fakecloud-pipes",
  "fakecloud-rds",
  "fakecloud-route53",
  "fakecloud-s3",

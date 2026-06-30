@@ -932,6 +932,7 @@ async fn main() {
             ec2: ec2_state.clone(),
             autoscaling: autoscaling_state.clone(),
             batch: batch_state.clone(),
+            pipes: pipes_state.clone(),
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
             elasticache: elasticache_state.clone(),

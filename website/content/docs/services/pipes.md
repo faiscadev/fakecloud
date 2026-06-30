@@ -73,10 +73,19 @@ of fakecloud uses.
   `TargetParameters.EventBridgeEventBusParameters`), and **Kinesis** (one record
   per event, partition key from `TargetParameters.KinesisStreamParameters`).
 
+## CloudFormation
+
+`AWS::Pipes::Pipe` is provisioned as a real pipe in the control plane: the
+provisioner stores the same JSON shape as the direct `CreatePipe`, so the
+background runner picks it up and it reads back identically on `DescribePipe`.
+A CFN-created pipe is born settled (`RUNNING`, or `STOPPED` when
+`DesiredState=STOPPED`); `Ref` returns the pipe name and `Fn::GetAtt` exposes
+`Arn`, `CurrentState`, `StateReason`, `CreationTime`, and `LastModifiedTime`.
+The pipe survives a restart in persistent mode and is removed on stack delete.
+
 ## Roadmap
 
 - **More enrichment** — Step Functions (sync), API destination, API Gateway.
 - **More targets** — ECS, Batch, Redshift Data, HTTP/API destination,
   SageMaker, CloudWatch Logs, Timestream.
-- **CloudFormation** — `AWS::Pipes::Pipe` provisioning.
 - **Terraform** — `aws_pipes_pipe` acceptance coverage.

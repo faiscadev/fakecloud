@@ -882,6 +882,7 @@ pub struct ResourceProvisioner {
     pub ec2_state: fakecloud_ec2::SharedEc2State,
     pub autoscaling_state: fakecloud_autoscaling::SharedAutoScalingState,
     pub batch_state: fakecloud_batch::SharedBatchState,
+    pub pipes_state: fakecloud_pipes::SharedPipesState,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub elasticache_state: SharedElastiCacheState,
@@ -1048,6 +1049,7 @@ mod kinesis;
 mod kms;
 mod lambda;
 mod logs;
+mod pipes;
 mod rds;
 mod route;
 mod s3;
@@ -1172,6 +1174,7 @@ impl ResourceProvisioner {
             "AWS::Batch::JobQueue" => self.create_batch_job_queue(resource),
             "AWS::Batch::JobDefinition" => self.create_batch_job_definition(resource),
             "AWS::Batch::SchedulingPolicy" => self.create_batch_scheduling_policy(resource),
+            "AWS::Pipes::Pipe" => self.create_pipes_pipe(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Instance" => self.create_ec2_instance(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
@@ -1769,6 +1772,10 @@ impl ResourceProvisioner {
             | "AWS::Batch::JobDefinition"
             | "AWS::Batch::SchedulingPolicy" => {
                 self.delete_batch(&resource.resource_type, &resource.physical_id);
+                Ok(())
+            }
+            "AWS::Pipes::Pipe" => {
+                self.delete_pipes_pipe(&resource.physical_id);
                 Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
@@ -6263,6 +6270,7 @@ mod tests {
                 fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),
             batch_state: Arc::new(RwLock::new(fakecloud_batch::BatchAccounts::new())),
+            pipes_state: Arc::new(RwLock::new(fakecloud_pipes::PipesAccounts::new())),
             ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),

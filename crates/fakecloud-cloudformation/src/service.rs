@@ -125,6 +125,7 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "AutoScaling" => "autoscaling",
         "Batch" => "batch",
         "ApplicationAutoScaling" => "application-autoscaling",
+        "Pipes" => "pipes",
         _ => return None,
     })
 }
@@ -300,6 +301,7 @@ pub struct CloudFormationDeps {
     pub ec2: fakecloud_ec2::SharedEc2State,
     pub autoscaling: fakecloud_autoscaling::SharedAutoScalingState,
     pub batch: fakecloud_batch::SharedBatchState,
+    pub pipes: fakecloud_pipes::SharedPipesState,
     pub ecs: fakecloud_ecs::SharedEcsState,
     pub acm: fakecloud_acm::SharedAcmState,
     pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
@@ -746,6 +748,7 @@ impl CloudFormationService {
             ec2_state: self.deps.ec2.clone(),
             autoscaling_state: self.deps.autoscaling.clone(),
             batch_state: self.deps.batch.clone(),
+            pipes_state: self.deps.pipes.clone(),
             ecs_state: self.deps.ecs.clone(),
             acm_state: self.deps.acm.clone(),
             elasticache_state: self.deps.elasticache.clone(),
@@ -2834,6 +2837,7 @@ mod tests {
                 fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),
             batch: Arc::new(RwLock::new(fakecloud_batch::BatchAccounts::new())),
+            pipes: Arc::new(RwLock::new(fakecloud_pipes::PipesAccounts::new())),
             ecs: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
