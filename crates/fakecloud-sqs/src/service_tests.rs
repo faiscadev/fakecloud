@@ -2813,3 +2813,172 @@ async fn resume_message_move_tasks_drains_orphaned_running_task() {
     }
     assert!(completed, "orphaned move task should resume and complete");
 }
+
+// ── FIFO DeduplicationScope + SequenceNumber shape ──
+
+fn create_fifo_queue_with_attrs(svc: &SqsService, name: &str, attrs: Value) -> String {
+    let mut merged = serde_json::Map::new();
+    merged.insert("FifoQueue".to_string(), json!("true"));
+    if let Some(obj) = attrs.as_object() {
+        for (k, v) in obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    let resp = svc
+        .create_queue(&make_request(
+            "CreateQueue",
+            json!({ "QueueName": name, "Attributes": Value::Object(merged) }),
+        ))
+        .unwrap();
+    body_json(resp)["QueueUrl"].as_str().unwrap().to_string()
+}
+
+fn send_fifo(svc: &SqsService, url: &str, body: &str, group: &str, dedup: &str) -> Value {
+    let resp = svc
+        .send_message(&make_request(
+            "SendMessage",
+            json!({
+                "QueueUrl": url,
+                "MessageBody": body,
+                "MessageGroupId": group,
+                "MessageDeduplicationId": dedup,
+            }),
+        ))
+        .unwrap();
+    body_json(resp)
+}
+
+/// DeduplicationScope=messageGroup scopes dedup per group: the SAME
+/// MessageDeduplicationId in two DIFFERENT groups is not a duplicate, so
+/// both messages must be delivered.
+#[test]
+fn fifo_dedup_scope_message_group_delivers_same_id_across_groups() {
+    let svc = make_service();
+    let url = create_fifo_queue_with_attrs(
+        &svc,
+        "scope-mg.fifo",
+        json!({ "DeduplicationScope": "messageGroup" }),
+    );
+
+    let first = send_fifo(&svc, &url, "from-g1", "g1", "shared-dedup");
+    let second = send_fifo(&svc, &url, "from-g2", "g2", "shared-dedup");
+    // Distinct groups -> distinct messages (no dedup replay).
+    assert_ne!(
+        first["MessageId"].as_str().unwrap(),
+        second["MessageId"].as_str().unwrap(),
+        "same dedup id in different groups must not be deduped under messageGroup scope"
+    );
+
+    let msgs = receive_msgs(&svc, &url, 10);
+    let bodies: std::collections::HashSet<&str> =
+        msgs.iter().filter_map(|m| m["Body"].as_str()).collect();
+    assert!(bodies.contains("from-g1"));
+    assert!(bodies.contains("from-g2"));
+    assert_eq!(bodies.len(), 2, "both group messages delivered");
+}
+
+/// Default (queue) DeduplicationScope still dedupes queue-wide: the same
+/// dedup id in different groups collapses to the first message.
+#[test]
+fn fifo_dedup_scope_queue_dedupes_across_groups() {
+    let svc = make_service();
+    // No DeduplicationScope attr -> AWS default "queue".
+    let url = create_fifo_queue_with_attrs(&svc, "scope-q.fifo", json!({}));
+
+    let first = send_fifo(&svc, &url, "from-g1", "g1", "shared-dedup");
+    let second = send_fifo(&svc, &url, "from-g2", "g2", "shared-dedup");
+    // Queue-wide dedup: the second send replays the first message id.
+    assert_eq!(
+        first["MessageId"].as_str().unwrap(),
+        second["MessageId"].as_str().unwrap(),
+        "same dedup id queue-wide replays the original message id"
+    );
+
+    let msgs = receive_msgs(&svc, &url, 10);
+    assert_eq!(msgs.len(), 1, "queue-scope dedup keeps only one message");
+    assert_eq!(msgs[0]["Body"].as_str().unwrap(), "from-g1");
+}
+
+/// FIFO SequenceNumber is a large ~20-digit value (like AWS), and strictly
+/// increases per queue with send order.
+#[test]
+fn fifo_sequence_number_is_20_digits_and_monotonic() {
+    let svc = make_service();
+    let url = create_fifo_queue_with_attrs(&svc, "seq.fifo", json!({}));
+
+    let a = send_fifo(&svc, &url, "a", "g1", "d1");
+    let b = send_fifo(&svc, &url, "b", "g1", "d2");
+
+    let seq_a = a["SequenceNumber"].as_str().unwrap();
+    let seq_b = b["SequenceNumber"].as_str().unwrap();
+
+    assert_eq!(
+        seq_a.len(),
+        20,
+        "SequenceNumber should be ~20 digits: {seq_a}"
+    );
+    assert_eq!(
+        seq_b.len(),
+        20,
+        "SequenceNumber should be ~20 digits: {seq_b}"
+    );
+    assert!(seq_a.chars().all(|c| c.is_ascii_digit()));
+    // Monotonic: parse as u128 and compare (lexical also works at equal len).
+    let na: u128 = seq_a.parse().unwrap();
+    let nb: u128 = seq_b.parse().unwrap();
+    assert!(nb > na, "SequenceNumber must increase: {na} -> {nb}");
+}
+
+/// ListQueues pagination cursor is stable across a concurrent delete
+/// between page fetches: it carries the last queue URL, not a positional
+/// offset, so the next page neither skips nor duplicates queues.
+#[test]
+fn list_queues_token_survives_interleaved_delete() {
+    let svc = make_service();
+    // Names sort as q0..q4 (URLs share a common prefix, so sort by suffix).
+    for i in 0..5 {
+        create_queue(&svc, &format!("q{i}"));
+    }
+
+    // Page 1: first two (q0, q1).
+    let resp = svc
+        .list_queues(&make_request("ListQueues", json!({ "MaxResults": 2 })))
+        .unwrap();
+    let page1 = body_json(resp);
+    let urls1: Vec<String> = page1["QueueUrls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(urls1.len(), 2);
+    assert!(urls1[0].ends_with("/q0"));
+    assert!(urls1[1].ends_with("/q1"));
+    let token = page1["NextToken"].as_str().unwrap().to_string();
+
+    // Interleave: delete a queue BEFORE the marker (q0). A positional-offset
+    // token would now skip q2; the URL marker resumes correctly past q1.
+    svc.delete_queue(&make_request(
+        "DeleteQueue",
+        json!({ "QueueUrl": urls1[0].clone() }),
+    ))
+    .unwrap();
+
+    // Page 2 with the marker: must return q2, q3 (nothing skipped).
+    let resp = svc
+        .list_queues(&make_request(
+            "ListQueues",
+            json!({ "MaxResults": 2, "NextToken": token }),
+        ))
+        .unwrap();
+    let page2 = body_json(resp);
+    let urls2: Vec<String> = page2["QueueUrls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(urls2.len(), 2, "no queues skipped after interleaved delete");
+    assert!(urls2[0].ends_with("/q2"), "resumed at q2, got {}", urls2[0]);
+    assert!(urls2[1].ends_with("/q3"));
+}

@@ -3690,6 +3690,56 @@ async fn list_objects_v1_basic() {
     assert!(body.contains("<Key>b</Key>"));
 }
 
+/// ListObjects v1: a truncated listing WITHOUT a delimiter must NOT emit
+/// NextMarker (the client resumes from the last key itself). AWS only
+/// returns NextMarker when a delimiter is supplied.
+#[tokio::test]
+async fn list_objects_v1_truncated_no_delimiter_omits_next_marker() {
+    let svc = make_service();
+    seed_bucket(&svc, "nm1");
+    for k in &["k0", "k1", "k2"] {
+        let req = make_request(Method::PUT, &format!("/nm1/{k}"), &[], b"x");
+        svc.put_object("123456789012", &req, "nm1", k)
+            .await
+            .unwrap();
+    }
+    let req = make_request(Method::GET, "/nm1", &[("max-keys", "1")], b"");
+    let resp = svc.list_objects_v1("123456789012", &req, "nm1").unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+    assert!(
+        !body.contains("<NextMarker>"),
+        "NextMarker must be omitted without a delimiter: {body}"
+    );
+}
+
+/// ListObjects v1: a truncated listing WITH a delimiter includes NextMarker
+/// so the client can resume past the whole common-prefix group.
+#[tokio::test]
+async fn list_objects_v1_truncated_with_delimiter_includes_next_marker() {
+    let svc = make_service();
+    seed_bucket(&svc, "nm2");
+    for k in &["p1/a", "p2/b", "p3/c"] {
+        let req = make_request(Method::PUT, &format!("/nm2/{k}"), &[], b"x");
+        svc.put_object("123456789012", &req, "nm2", k)
+            .await
+            .unwrap();
+    }
+    let req = make_request(
+        Method::GET,
+        "/nm2",
+        &[("max-keys", "1"), ("delimiter", "/")],
+        b"",
+    );
+    let resp = svc.list_objects_v1("123456789012", &req, "nm2").unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+    assert!(
+        body.contains("<NextMarker>p1/</NextMarker>"),
+        "NextMarker should carry the common-prefix cursor: {body}"
+    );
+}
+
 #[test]
 fn get_object_key_not_found() {
     let svc = make_service();

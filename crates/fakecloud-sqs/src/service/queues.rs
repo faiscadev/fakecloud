@@ -249,10 +249,12 @@ impl SqsService {
             .map(|n| n.clamp(1, 1000) as usize)
             .unwrap_or(1000);
 
-        let offset = body["NextToken"]
-            .as_str()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
+        // The pagination cursor carries the last queue URL emitted, not a
+        // positional offset. A positional offset shifts when a queue is
+        // created or deleted between page fetches, so the next page would
+        // skip or duplicate queues; a URL marker is stable across those
+        // mutations because the list is deterministically sorted.
+        let after_marker = body["NextToken"].as_str().map(decode_list_queues_token);
 
         let mut all_urls: Vec<String> = state
             .queues
@@ -262,17 +264,26 @@ impl SqsService {
             .collect();
         all_urls.sort();
 
-        let total = all_urls.len();
-        let page: Vec<String> = all_urls
-            .into_iter()
-            .skip(offset)
-            .take(max_results)
-            .collect();
-        let next_offset = offset + page.len();
+        // Resume just past the marker. `partition_point` finds the first URL
+        // strictly greater than the marker in O(log n).
+        let start_idx = match &after_marker {
+            Some(marker) => all_urls.partition_point(|u| u.as_str() <= marker.as_str()),
+            None => 0,
+        };
 
-        let mut result = json!({ "QueueUrls": page });
-        if next_offset < total {
-            result["NextToken"] = json!(next_offset.to_string());
+        let page: Vec<String> = all_urls
+            .iter()
+            .skip(start_idx)
+            .take(max_results)
+            .cloned()
+            .collect();
+        let has_more = start_idx + page.len() < all_urls.len();
+
+        let mut result = json!({ "QueueUrls": page.clone() });
+        if has_more {
+            if let Some(last) = page.last() {
+                result["NextToken"] = json!(encode_list_queues_token(last));
+            }
         }
 
         Ok(sqs_response(
