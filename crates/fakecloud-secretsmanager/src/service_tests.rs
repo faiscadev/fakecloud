@@ -2633,6 +2633,19 @@ async fn test_rotate_immediately_false_pending_not_persisted() {
     let snap: crate::SecretsManagerSnapshot = serde_json::from_slice(&bytes).unwrap();
     let accounts = snap.accounts.expect("multi-account snapshot");
     let persisted = &accounts.default_ref().secrets["rot-persist"];
+    // First prove we're inspecting the POST-RotateSecret snapshot (not the
+    // earlier CreateSecret one): the rotation config set by this RotateSecret
+    // call must be present. Otherwise "no AWSPENDING" would prove nothing.
+    assert_eq!(
+        persisted.rotation_enabled,
+        Some(true),
+        "snapshot must be the post-RotateSecret one (rotation enabled)"
+    );
+    assert_eq!(
+        persisted.rotation_lambda_arn.as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:function:rotator"),
+        "snapshot must be the post-RotateSecret one (rotation Lambda configured)"
+    );
     assert!(
         !persisted.versions.contains_key(token),
         "temporary AWSPENDING version must not be persisted"
