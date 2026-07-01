@@ -1043,39 +1043,17 @@ impl CloudFrontService {
             .values()
             .flat_map(|a| a.distributions.values().cloned())
             .collect();
-        dists.sort_by_key(|a| a.last_modified_time);
         drop(state);
+        dists.sort_by_key(|a| a.last_modified_time);
 
-        // CloudFront paginates with Marker (the next distribution Id) + MaxItems.
-        let max_items = req
-            .query_params
-            .get("MaxItems")
-            .or_else(|| req.query_params.get("maxitems"))
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(100);
-        let marker = req
-            .query_params
-            .get("Marker")
-            .or_else(|| req.query_params.get("marker"));
-        let start_idx = match marker {
-            Some(m) if !m.is_empty() => {
-                dists.iter().position(|d| &d.id == m).unwrap_or(dists.len())
-            }
-            _ => 0,
-        };
-        let page: Vec<StoredDistribution> = dists
-            .iter()
-            .skip(start_idx)
-            .take(max_items)
-            .cloned()
-            .collect();
-        let next_marker = dists.get(start_idx + page.len()).map(|d| d.id.clone());
+        // CloudFront paginates with an exclusive Marker (start after this id) +
+        // MaxItems; shared with the ListDistributionsBy* handlers.
+        let (marker, max_items, page, next_marker) = paginate_distributions(req, dists);
 
         let body = build_distribution_list_xml(
             &page,
             "DistributionList",
-            marker.map(String::as_str).unwrap_or(""),
+            &marker,
             max_items,
             next_marker.as_deref(),
         );
@@ -1895,13 +1873,16 @@ fn paginate_distributions(
         .or_else(|| req.query_params.get("marker"))
         .cloned()
         .unwrap_or_default();
+    // CloudFront markers are EXCLUSIVE: a supplied Marker means "start after
+    // this id". If the marker id isn't found, the page is empty (start past
+    // the end), matching AWS.
     let start_idx = if marker.is_empty() {
         0
     } else {
-        items
-            .iter()
-            .position(|d| d.id == marker)
-            .unwrap_or(items.len())
+        match items.iter().position(|d| d.id == marker) {
+            Some(pos) => pos + 1,
+            None => items.len(),
+        }
     };
     let page: Vec<StoredDistribution> = items
         .iter()
@@ -1909,7 +1890,15 @@ fn paginate_distributions(
         .take(max_items)
         .cloned()
         .collect();
-    let next_marker = items.get(start_idx + page.len()).map(|d| d.id.clone());
+    // Truncated when unread items remain after this page. NextMarker is the id
+    // of the LAST item on the current page (where listing left off), so the
+    // caller passes it back as the next Marker to resume strictly after it.
+    let has_more = start_idx + page.len() < items.len();
+    let next_marker = if has_more {
+        page.last().map(|d| d.id.clone())
+    } else {
+        None
+    };
     (marker, max_items, page, next_marker)
 }
 
@@ -2991,15 +2980,34 @@ mod tests {
         );
     }
 
+    fn only_distribution_id(xml: &str) -> String {
+        assert_eq!(
+            xml.matches("<DistributionId>").count(),
+            1,
+            "expected exactly one DistributionId: {xml}"
+        );
+        xml.split("<DistributionId>")
+            .nth(1)
+            .unwrap()
+            .split("</DistributionId>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
     #[tokio::test]
     async fn list_distributions_by_predicate_paginates() {
-        // Finding #3: Marker/MaxItems pagination applies to the filtered set.
+        // Finding #3: Marker/MaxItems pagination applies to the filtered set,
+        // with EXCLUSIVE markers (NextMarker = last id on the page; the next
+        // request resumes strictly after it).
         let svc = CloudFrontService::new(make_state());
         // Two distributions sharing the same cache policy.
-        create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-1", "cp-pg")).await;
-        create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-2", "cp-pg")).await;
+        let d1 =
+            create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-1", "cp-pg")).await;
+        let d2 =
+            create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-2", "cp-pg")).await;
 
-        // First page: MaxItems=1 -> one id, truncated, with a NextMarker.
+        // First page: MaxItems=1 -> one id, truncated, NextMarker == that id.
         let page1 = svc
             .handle(make_request_with_params(
                 "/2020-05-31/distributionsByCachePolicyId/cp-pg",
@@ -3010,7 +3018,7 @@ mod tests {
         let xml1 = std::str::from_utf8(page1.body.expect_bytes()).unwrap();
         assert!(xml1.contains("<MaxItems>1</MaxItems>"), "{xml1}");
         assert!(xml1.contains("<IsTruncated>true</IsTruncated>"), "{xml1}");
-        assert_eq!(xml1.matches("<DistributionId>").count(), 1, "{xml1}");
+        let first_id = only_distribution_id(xml1);
         let next = xml1
             .split("<NextMarker>")
             .nth(1)
@@ -3019,9 +3027,11 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
-        assert!(!next.is_empty(), "empty NextMarker: {xml1}");
+        // Exclusive marker: NextMarker is the LAST id on the current page.
+        assert_eq!(next, first_id, "NextMarker must be the last id on the page");
 
-        // Second page via the cursor: the remaining id, not truncated.
+        // Second page via the cursor: resumes AFTER the marker -> the other id,
+        // never the marker item again, and not truncated.
         let page2 = svc
             .handle(make_request_with_params(
                 "/2020-05-31/distributionsByCachePolicyId/cp-pg",
@@ -3032,9 +3042,16 @@ mod tests {
         let xml2 = std::str::from_utf8(page2.body.expect_bytes()).unwrap();
         assert!(xml2.contains(&format!("<Marker>{next}</Marker>")), "{xml2}");
         assert!(xml2.contains("<IsTruncated>false</IsTruncated>"), "{xml2}");
-        assert!(
-            xml2.contains(&format!("<DistributionId>{next}</DistributionId>")),
-            "cursor page should start at the marker id: {xml2}"
+        let second_id = only_distribution_id(xml2);
+        assert_ne!(
+            second_id, first_id,
+            "exclusive marker must not return the marker item again"
         );
+        // The two pages together cover both distributions exactly once.
+        let mut seen = [first_id, second_id];
+        seen.sort();
+        let mut expected = [d1, d2];
+        expected.sort();
+        assert_eq!(seen, expected, "pages did not cover both distributions");
     }
 }
