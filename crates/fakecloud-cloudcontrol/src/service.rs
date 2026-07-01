@@ -63,16 +63,27 @@ impl CloudControlService {
 
     async fn create_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        // Enforce the input members' Smithy @length/@pattern constraints before
+        // touching the provisioner.
+        validate_type_name(&body)?;
+        validate_len(&body, "DesiredState", 1, 262144)?;
+        validate_len(&body, "ClientToken", 1, 128)?;
+        validate_len(&body, "RoleArn", 20, 2048)?;
         let type_name = require_str(&body, "TypeName")?;
         let desired = require_str(&body, "DesiredState")?;
         let desired_state: Value = serde_json::from_str(desired)
             .map_err(|e| invalid_request(&format!("DesiredState is not valid JSON: {e}")))?;
         let client_token = opt_str(&body, "ClientToken");
+        let fingerprint =
+            fingerprint_of("CREATE", type_name, None, Some(&desired_state.to_string()));
 
-        // ClientToken idempotency: replay the original request's terminal event.
+        // ClientToken idempotency: replay the original terminal event when the
+        // parameters match, reject the reuse when they differ.
         if let Some(token) = &client_token {
-            if let Some(existing) = self.find_by_client_token(&req.account_id, token) {
-                return Ok(progress_event_response(&existing));
+            if let Some(resp) =
+                self.client_token_replay_or_conflict(&req.account_id, token, &fingerprint)
+            {
+                return resp;
             }
         }
 
@@ -106,6 +117,7 @@ impl CloudControlService {
                     "CREATE",
                     Some(desired_state),
                     client_token,
+                    Some(fingerprint),
                 )
             }
             Err(msg) => failed_request(
@@ -115,10 +127,16 @@ impl CloudControlService {
                 "CREATE",
                 &msg,
                 client_token,
+                Some(fingerprint),
             ),
         };
 
         self.store_request(&req.account_id, record.clone());
+        if record.operation_status == "SUCCESS" {
+            // Persist the backing service state the provisioner just mutated,
+            // so a restart doesn't leave this resource with no owning state.
+            self.cfn.cloudcontrol_persist_type(type_name).await;
+        }
         self.persist().await;
         Ok(progress_event_response(&record))
     }
@@ -127,6 +145,8 @@ impl CloudControlService {
 
     fn get_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_type_name(&body)?;
+        validate_len(&body, "Identifier", 1, 1024)?;
         let type_name = require_str(&body, "TypeName")?;
         let identifier = require_str(&body, "Identifier")?;
         let accounts = self.state.read();
@@ -150,16 +170,24 @@ impl CloudControlService {
 
     async fn update_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_type_name(&body)?;
+        validate_len(&body, "Identifier", 1, 1024)?;
+        validate_len(&body, "PatchDocument", 1, 262144)?;
+        validate_len(&body, "ClientToken", 1, 128)?;
+        validate_len(&body, "RoleArn", 20, 2048)?;
         let type_name = require_str(&body, "TypeName")?;
         let identifier = require_str(&body, "Identifier")?;
         let patch_str = require_str(&body, "PatchDocument")?;
         let patch: Value = serde_json::from_str(patch_str)
             .map_err(|e| invalid_request(&format!("PatchDocument is not valid JSON: {e}")))?;
         let client_token = opt_str(&body, "ClientToken");
+        let fingerprint = fingerprint_of("UPDATE", type_name, Some(identifier), Some(patch_str));
 
         if let Some(token) = &client_token {
-            if let Some(existing) = self.find_by_client_token(&req.account_id, token) {
-                return Ok(progress_event_response(&existing));
+            if let Some(resp) =
+                self.client_token_replay_or_conflict(&req.account_id, token, &fingerprint)
+            {
+                return resp;
             }
         }
 
@@ -189,19 +217,37 @@ impl CloudControlService {
 
         let record = match outcome {
             Ok(res) => {
+                let new_id = res.physical_id.clone();
                 let mut accounts = self.state.write();
                 let st = accounts.get_or_create(&req.account_id);
-                if let Some(managed) = st.resources.get_mut(&key) {
+                if new_id != identifier {
+                    // Replacement update: the provisioner assigned a new
+                    // physical id. Re-key the managed resource so subsequent
+                    // Get/Delete track the new identity instead of the stale one.
+                    let mut managed = st.resources.remove(&key).unwrap_or(ManagedResource {
+                        type_name: type_name.to_string(),
+                        identifier: new_id.clone(),
+                        properties: properties.clone(),
+                        attributes: res.attributes.clone(),
+                        created_at: Utc::now(),
+                    });
+                    managed.identifier = new_id.clone();
+                    managed.properties = properties.clone();
+                    managed.attributes = res.attributes.clone();
+                    st.resources
+                        .insert(CloudControlState::resource_key(type_name, &new_id), managed);
+                } else if let Some(managed) = st.resources.get_mut(&key) {
                     managed.properties = properties.clone();
                     managed.attributes = res.attributes.clone();
                 }
                 success_request(
                     &request_token,
                     type_name,
-                    Some(identifier.to_string()),
+                    Some(new_id),
                     "UPDATE",
                     Some(properties),
                     client_token,
+                    Some(fingerprint),
                 )
             }
             Err(msg) => failed_request(
@@ -211,10 +257,14 @@ impl CloudControlService {
                 "UPDATE",
                 &msg,
                 client_token,
+                Some(fingerprint),
             ),
         };
 
         self.store_request(&req.account_id, record.clone());
+        if record.operation_status == "SUCCESS" {
+            self.cfn.cloudcontrol_persist_type(type_name).await;
+        }
         self.persist().await;
         Ok(progress_event_response(&record))
     }
@@ -223,13 +273,20 @@ impl CloudControlService {
 
     async fn delete_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_type_name(&body)?;
+        validate_len(&body, "Identifier", 1, 1024)?;
+        validate_len(&body, "ClientToken", 1, 128)?;
+        validate_len(&body, "RoleArn", 20, 2048)?;
         let type_name = require_str(&body, "TypeName")?;
         let identifier = require_str(&body, "Identifier")?;
         let client_token = opt_str(&body, "ClientToken");
+        let fingerprint = fingerprint_of("DELETE", type_name, Some(identifier), None);
 
         if let Some(token) = &client_token {
-            if let Some(existing) = self.find_by_client_token(&req.account_id, token) {
-                return Ok(progress_event_response(&existing));
+            if let Some(resp) =
+                self.client_token_replay_or_conflict(&req.account_id, token, &fingerprint)
+            {
+                return resp;
             }
         }
 
@@ -264,6 +321,7 @@ impl CloudControlService {
                     "DELETE",
                     None,
                     client_token,
+                    Some(fingerprint),
                 )
             }
             Err(msg) => failed_request(
@@ -273,10 +331,14 @@ impl CloudControlService {
                 "DELETE",
                 &msg,
                 client_token,
+                Some(fingerprint),
             ),
         };
 
         self.store_request(&req.account_id, record.clone());
+        if record.operation_status == "SUCCESS" {
+            self.cfn.cloudcontrol_persist_type(type_name).await;
+        }
         self.persist().await;
         Ok(progress_event_response(&record))
     }
@@ -293,21 +355,25 @@ impl CloudControlService {
         validate_len(&body, "ResourceModel", 1, 262144)?;
         validate_max_results(&body)?;
         let type_name = require_str(&body, "TypeName")?;
-        let accounts = self.state.read();
-        let descriptions: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.resources
-                    .values()
-                    .filter(|m| m.type_name == type_name)
-                    .map(resource_description)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(AwsResponse::json_value(
-            StatusCode::OK,
-            json!({ "TypeName": type_name, "ResourceDescriptions": descriptions }),
-        ))
+        let all: Vec<Value> = {
+            let accounts = self.state.read();
+            accounts
+                .get(&req.account_id)
+                .map(|s| {
+                    s.resources
+                        .values()
+                        .filter(|m| m.type_name == type_name)
+                        .map(resource_description)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (page, next) = paginate(all, &body);
+        let mut resp = json!({ "TypeName": type_name, "ResourceDescriptions": page });
+        if let Some(nt) = next {
+            resp["NextToken"] = json!(nt);
+        }
+        Ok(AwsResponse::json_value(StatusCode::OK, resp))
     }
 
     // --- Request ledger ops -----------------------------------------------
@@ -324,7 +390,7 @@ impl CloudControlService {
     }
 
     fn list_requests(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body = parse_json(&req.body).unwrap_or_else(|_| json!({}));
+        let body = parse_json(&req.body)?;
         validate_len(&body, "NextToken", 1, 2048)?;
         validate_max_results(&body)?;
         let filter_statuses: Vec<String> = body
@@ -347,24 +413,29 @@ impl CloudControlService {
                     .collect()
             })
             .unwrap_or_default();
-        let accounts = self.state.read();
-        let summaries: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.requests
-                    .values()
-                    .filter(|r| {
-                        filter_statuses.is_empty() || filter_statuses.contains(&r.operation_status)
-                    })
-                    .filter(|r| filter_ops.is_empty() || filter_ops.contains(&r.operation))
-                    .map(progress_event_json)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(AwsResponse::json_value(
-            StatusCode::OK,
-            json!({ "ResourceRequestStatusSummaries": summaries }),
-        ))
+        let all: Vec<Value> = {
+            let accounts = self.state.read();
+            accounts
+                .get(&req.account_id)
+                .map(|s| {
+                    s.requests
+                        .values()
+                        .filter(|r| {
+                            filter_statuses.is_empty()
+                                || filter_statuses.contains(&r.operation_status)
+                        })
+                        .filter(|r| filter_ops.is_empty() || filter_ops.contains(&r.operation))
+                        .map(progress_event_json)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (page, next) = paginate(all, &body);
+        let mut resp = json!({ "ResourceRequestStatusSummaries": page });
+        if let Some(nt) = next {
+            resp["NextToken"] = json!(nt);
+        }
+        Ok(AwsResponse::json_value(StatusCode::OK, resp))
     }
 
     async fn cancel_request(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -414,6 +485,23 @@ impl CloudControlService {
                 .cloned()
         })
     }
+
+    /// Resolve a `ClientToken` against the request ledger: `Some(Ok(..))` to
+    /// replay the original terminal event (same parameters), `Some(Err(..))` to
+    /// reject conflicting reuse, or `None` when the token is unseen.
+    fn client_token_replay_or_conflict(
+        &self,
+        account_id: &str,
+        token: &str,
+        fingerprint: &str,
+    ) -> Option<Result<AwsResponse, AwsServiceError>> {
+        let existing = self.find_by_client_token(account_id, token)?;
+        if existing.fingerprint.as_deref() == Some(fingerprint) {
+            Some(Ok(progress_event_response(&existing)))
+        } else {
+            Some(Err(client_token_conflict(token)))
+        }
+    }
 }
 
 #[async_trait]
@@ -449,6 +537,7 @@ impl AwsService for CloudControlService {
 // Request-record + response builders
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn success_request(
     token: &str,
     type_name: &str,
@@ -456,6 +545,7 @@ fn success_request(
     operation: &str,
     resource_model: Option<Value>,
     client_token: Option<String>,
+    fingerprint: Option<String>,
 ) -> ResourceRequest {
     ResourceRequest {
         request_token: token.to_string(),
@@ -468,6 +558,7 @@ fn success_request(
         status_message: None,
         error_code: None,
         client_token,
+        fingerprint,
     }
 }
 
@@ -478,6 +569,7 @@ fn failed_request(
     operation: &str,
     message: &str,
     client_token: Option<String>,
+    fingerprint: Option<String>,
 ) -> ResourceRequest {
     ResourceRequest {
         request_token: token.to_string(),
@@ -490,7 +582,23 @@ fn failed_request(
         status_message: Some(message.to_string()),
         error_code: Some("GeneralServiceException".to_string()),
         client_token,
+        fingerprint,
     }
+}
+
+/// Stable fingerprint of a mutating request's parameters, used to distinguish
+/// an idempotent `ClientToken` replay from a conflicting reuse.
+fn fingerprint_of(
+    operation: &str,
+    type_name: &str,
+    identifier: Option<&str>,
+    payload: Option<&str>,
+) -> String {
+    format!(
+        "{operation}\u{1f}{type_name}\u{1f}{}\u{1f}{}",
+        identifier.unwrap_or(""),
+        payload.unwrap_or(""),
+    )
 }
 
 fn progress_event_json(record: &ResourceRequest) -> Value {
@@ -609,6 +717,33 @@ fn validate_max_results(body: &Value) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// Slice a full result list by `MaxResults`/`NextToken`. The `NextToken` is an
+/// opaque zero-based offset into the (stably ordered) full list; a continuation
+/// token is returned only when more results remain.
+fn paginate(items: Vec<Value>, body: &Value) -> (Vec<Value>, Option<String>) {
+    let max = body
+        .get("MaxResults")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as usize)
+        .unwrap_or(100);
+    let start = body
+        .get("NextToken")
+        .and_then(|v| v.as_str())
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0);
+    let total = items.len();
+    if start >= total {
+        return (Vec::new(), None);
+    }
+    let end = start.saturating_add(max).min(total);
+    let next = if end < total {
+        Some(end.to_string())
+    } else {
+        None
+    };
+    (items[start..end].to_vec(), next)
+}
+
 fn invalid_request(msg: &str) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidRequestException", msg)
 }
@@ -618,6 +753,14 @@ fn resource_not_found(type_name: &str, identifier: &str) -> AwsServiceError {
         StatusCode::NOT_FOUND,
         "ResourceNotFoundException",
         format!("Resource of type '{type_name}' with identifier '{identifier}' was not found."),
+    )
+}
+
+fn client_token_conflict(token: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ClientTokenConflictException",
+        format!("The client token '{token}' is already in use with different request parameters."),
     )
 }
 

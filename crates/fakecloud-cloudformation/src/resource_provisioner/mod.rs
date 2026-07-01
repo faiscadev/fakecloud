@@ -951,6 +951,15 @@ pub struct ResourceProvisioner {
     pub account_id: String,
     pub region: String,
     pub stack_id: String,
+    /// When `true`, `create_resource`'s fallback arm for unmodeled resource
+    /// types returns an error instead of recording a phantom resource with no
+    /// backing state. Cloud Control API sets this so `CreateResource` rejects a
+    /// `TypeName` fakecloud has no provisioner for, rather than reporting
+    /// success for a resource `Get`/`List` would then surface with no owning
+    /// service state. `CreateStack` leaves it `false` to keep accepting full
+    /// templates (SAM/CDK output routinely includes types fakecloud does not
+    /// model).
+    pub strict_unknown_types: bool,
 }
 
 /// A container-backed resource the synchronous provisioning pass inserted as a
@@ -1295,6 +1304,15 @@ impl ResourceProvisioner {
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
+            other if self.strict_unknown_types => {
+                // Cloud Control API path: reject a resource type fakecloud has
+                // no provisioner for instead of recording a phantom resource.
+                // Otherwise `GetResource`/`ListResources` would report a
+                // resource whose owning service never created any backing state.
+                return Err(format!(
+                    "Resource type '{other}' is not supported by Cloud Control API on fakecloud."
+                ));
+            }
             other => {
                 // No provisioner for this type. Real CloudFormation provisions
                 // many resource types fakecloud doesn't model, and SAM/CDK
@@ -6340,6 +6358,7 @@ mod tests {
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/00000000-0000-0000-0000-000000000000".to_string(),
+            strict_unknown_types: false,
         }
     }
 

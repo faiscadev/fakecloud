@@ -819,6 +819,9 @@ impl CloudFormationService {
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),
+            // CreateStack + changeset/update/delete accept unmodeled types; only
+            // the Cloud Control bridge flips this on to reject them.
+            strict_unknown_types: false,
         }
     }
 
@@ -844,7 +847,10 @@ impl CloudFormationService {
         region: &str,
     ) -> Result<CloudControlOutcome, String> {
         let stack_id = format!("cloudcontrol-{}", uuid::Uuid::new_v4());
-        let provisioner = self.provisioner(&stack_id, account_id, region);
+        let mut provisioner = self.provisioner(&stack_id, account_id, region);
+        // Reject a TypeName fakecloud has no provisioner for, so Cloud Control
+        // never records a resource with no backing service state.
+        provisioner.strict_unknown_types = true;
         let backing = ContainerBackingHandles::from_provisioner(&provisioner);
         let spawns = provisioner.pending_container_spawns.clone();
         let def = template::ResourceDefinition {
@@ -873,7 +879,8 @@ impl CloudFormationService {
         region: &str,
     ) -> Result<CloudControlOutcome, String> {
         let stack_id = format!("cloudcontrol-{}", uuid::Uuid::new_v4());
-        let provisioner = self.provisioner(&stack_id, account_id, region);
+        let mut provisioner = self.provisioner(&stack_id, account_id, region);
+        provisioner.strict_unknown_types = true;
         let existing = reconstruct_stack_resource(type_name, physical_id, prior_attributes);
         let def = template::ResourceDefinition {
             logical_id: "Resource".to_string(),
@@ -905,6 +912,16 @@ impl CloudFormationService {
         ContainerBackingHandles::from_provisioner(&provisioner)
             .spawn_teardown_intents(std::mem::take(&mut *teardowns.lock()));
         Ok(())
+    }
+
+    /// Flush the backing service state a Cloud Control op just mutated to disk,
+    /// using the SAME snapshot hooks `CreateStack`/`ExecuteChangeSet` fire. A
+    /// CCAPI create/update/delete goes straight through the provisioner without
+    /// touching the stack handlers, so without this the provisioned SQS queue
+    /// (etc.) would never be persisted and a restart would leave Cloud Control
+    /// listing a resource whose owning service lost its backing state.
+    pub async fn cloudcontrol_persist_type(&self, type_name: &str) {
+        persist_touched_services(&self.snapshot_hooks, [type_name.to_string()]).await;
     }
 
     /// Build a provisioner for the changeset/update/delete paths, which run

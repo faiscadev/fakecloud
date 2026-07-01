@@ -43,6 +43,11 @@ pub struct ResourceRequest {
     pub error_code: Option<String>,
     /// The `ClientToken` that created this request, for idempotency.
     pub client_token: Option<String>,
+    /// A fingerprint of the request parameters (operation + type + identity +
+    /// desired state / patch). Used to reject reuse of a `ClientToken` with
+    /// different parameters (`ClientTokenConflictException`), matching AWS.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

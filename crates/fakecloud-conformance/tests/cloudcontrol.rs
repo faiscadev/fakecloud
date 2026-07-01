@@ -185,3 +185,113 @@ async fn cloudcontrol_cancel_resource_request() {
         token
     );
 }
+
+// The tests below are behavioral (not conformance-variant) checks for the
+// Cubic-flagged semantics: ClientToken idempotency-vs-conflict, rejection of
+// unsupported resource types, and List pagination.
+
+#[tokio::test]
+async fn cloudcontrol_client_token_idempotency_and_conflict() {
+    let server = TestServer::start().await;
+    let client = server.cloudcontrol_client().await;
+
+    // Same token + same params -> idempotent replay (same identifier, no dup).
+    let first = client
+        .create_resource()
+        .type_name("AWS::SQS::Queue")
+        .desired_state(r#"{"QueueName":"cc-tok"}"#)
+        .client_token("tok-1")
+        .send()
+        .await
+        .unwrap();
+    let id1 = first
+        .progress_event()
+        .unwrap()
+        .identifier()
+        .unwrap()
+        .to_string();
+    let replay = client
+        .create_resource()
+        .type_name("AWS::SQS::Queue")
+        .desired_state(r#"{"QueueName":"cc-tok"}"#)
+        .client_token("tok-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.progress_event().unwrap().identifier().unwrap(), id1);
+
+    // Same token + different params -> ClientTokenConflictException.
+    let err = client
+        .create_resource()
+        .type_name("AWS::SQS::Queue")
+        .desired_state(r#"{"QueueName":"cc-tok-different"}"#)
+        .client_token("tok-1")
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "reused ClientToken with different params must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn cloudcontrol_rejects_unsupported_type() {
+    let server = TestServer::start().await;
+    let client = server.cloudcontrol_client().await;
+    // Well-formed TypeName that fakecloud has no provisioner for: must NOT be
+    // recorded as a phantom resource.
+    let resp = client
+        .create_resource()
+        .type_name("AWS::Fake::Thing")
+        .desired_state(r#"{"Name":"x"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.progress_event()
+            .unwrap()
+            .operation_status()
+            .unwrap()
+            .as_str(),
+        "FAILED"
+    );
+    // And it is not retrievable.
+    let got = client
+        .get_resource()
+        .type_name("AWS::Fake::Thing")
+        .identifier("Resource")
+        .send()
+        .await;
+    assert!(got.is_err());
+}
+
+#[tokio::test]
+async fn cloudcontrol_list_resources_paginates() {
+    let server = TestServer::start().await;
+    let client = server.cloudcontrol_client().await;
+    create_queue(&client, "cc-page-a").await;
+    create_queue(&client, "cc-page-b").await;
+
+    let page1 = client
+        .list_resources()
+        .type_name("AWS::SQS::Queue")
+        .max_results(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1.resource_descriptions().len(), 1);
+    let next = page1
+        .next_token()
+        .expect("next token when more remain")
+        .to_string();
+
+    let page2 = client
+        .list_resources()
+        .type_name("AWS::SQS::Queue")
+        .max_results(1)
+        .next_token(next)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.resource_descriptions().len(), 1);
+}

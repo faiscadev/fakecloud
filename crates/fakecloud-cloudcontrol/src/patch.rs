@@ -28,7 +28,7 @@ fn apply_one(doc: &mut Value, op: &Value) -> Result<(), String> {
     match kind {
         "add" => {
             let path = path_of(op)?;
-            let value = op.get("value").cloned().unwrap_or(Value::Null);
+            let value = require_value(op)?;
             add(doc, &path, value)
         }
         "remove" => {
@@ -37,7 +37,7 @@ fn apply_one(doc: &mut Value, op: &Value) -> Result<(), String> {
         }
         "replace" => {
             let path = path_of(op)?;
-            let value = op.get("value").cloned().unwrap_or(Value::Null);
+            let value = require_value(op)?;
             // replace requires the target to exist.
             get(doc, &path)
                 .ok_or_else(|| format!("replace target does not exist: /{}", path.join("/")))?;
@@ -60,7 +60,7 @@ fn apply_one(doc: &mut Value, op: &Value) -> Result<(), String> {
         }
         "test" => {
             let path = path_of(op)?;
-            let expected = op.get("value").cloned().unwrap_or(Value::Null);
+            let expected = require_value(op)?;
             let actual = get(doc, &path)
                 .ok_or_else(|| format!("test target does not exist: /{}", path.join("/")))?;
             if *actual != expected {
@@ -72,6 +72,14 @@ fn apply_one(doc: &mut Value, op: &Value) -> Result<(), String> {
     }
 }
 
+/// Require the `value` member on `add`/`replace`/`test`. A missing member is a
+/// malformed patch, not an implicit `null` (RFC 6902 s4.1/4.3/4.6).
+fn require_value(op: &Value) -> Result<Value, String> {
+    op.get("value")
+        .cloned()
+        .ok_or_else(|| "patch operation missing 'value'".to_string())
+}
+
 fn path_of(op: &Value) -> Result<Vec<String>, String> {
     pointer_of(op, "path")
 }
@@ -81,19 +89,26 @@ fn pointer_of(op: &Value, field: &str) -> Result<Vec<String>, String> {
         .get(field)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("patch operation missing '{field}'"))?;
-    Ok(parse_pointer(raw))
+    parse_pointer(raw)
 }
 
-/// Parse an RFC 6901 JSON Pointer into decoded reference tokens.
-fn parse_pointer(pointer: &str) -> Vec<String> {
+/// Parse an RFC 6901 JSON Pointer into decoded reference tokens. A non-empty
+/// pointer that does not begin with `/` is malformed (RFC 6901 s3) and is
+/// rejected rather than silently targeting the whole document.
+fn parse_pointer(pointer: &str) -> Result<Vec<String>, String> {
     if pointer.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    pointer
+    if !pointer.starts_with('/') {
+        return Err(format!(
+            "invalid JSON Pointer '{pointer}': must be empty or begin with '/'"
+        ));
+    }
+    Ok(pointer
         .split('/')
         .skip(1) // leading empty segment before the first '/'
         .map(|t| t.replace("~1", "/").replace("~0", "~"))
-        .collect()
+        .collect())
 }
 
 fn get<'a>(doc: &'a Value, path: &[String]) -> Option<&'a Value> {
@@ -236,6 +251,31 @@ mod tests {
     fn test_op_mismatch_errors() {
         let mut doc = json!({"A": 1});
         assert!(apply_json_patch(&mut doc, &json!([{"op":"test","path":"/A","value":2}])).is_err());
+    }
+
+    #[test]
+    fn missing_value_is_rejected() {
+        // `add`/`replace`/`test` must carry a `value` member; a missing one is a
+        // malformed patch, not an implicit null that mutates the document.
+        let mut doc = json!({"A": 1});
+        assert!(apply_json_patch(&mut doc, &json!([{"op":"add","path":"/B"}])).is_err());
+        assert!(apply_json_patch(&mut doc, &json!([{"op":"replace","path":"/A"}])).is_err());
+        assert!(apply_json_patch(&mut doc, &json!([{"op":"test","path":"/A"}])).is_err());
+        // Document is untouched by the rejected patches.
+        assert_eq!(doc, json!({"A": 1}));
+    }
+
+    #[test]
+    fn malformed_pointer_is_rejected() {
+        // A non-empty pointer that does not start with '/' is invalid and must
+        // not silently target the whole document.
+        let mut doc = json!({"BucketName": "old"});
+        assert!(apply_json_patch(
+            &mut doc,
+            &json!([{"op":"replace","path":"BucketName","value":"new"}])
+        )
+        .is_err());
+        assert_eq!(doc, json!({"BucketName": "old"}));
     }
 
     #[test]
