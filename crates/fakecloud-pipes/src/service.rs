@@ -94,6 +94,30 @@ pub fn ensure_source_param_defaults(pipe: &mut Map<String, Value>, source_arn: &
     }
 }
 
+/// AWS treats an empty `InputTemplate` as "no transform": DescribePipe omits
+/// it rather than echoing `""`. The terraform-provider-aws resource clears a
+/// target transform by sending `TargetParameters.InputTemplate = ""` (see its
+/// update code: "have to set the input to an empty string otherwise it doesn't
+/// get overwritten"), and then asserts the attribute is absent. Strip an empty
+/// `InputTemplate` from the target/enrichment parameter blocks, and drop a
+/// block that becomes empty so it reads back as absent.
+pub fn normalize_empty_input_templates(pipe: &mut Map<String, Value>) {
+    for key in ["TargetParameters", "EnrichmentParameters"] {
+        let drop = match pipe.get_mut(key).and_then(Value::as_object_mut) {
+            Some(params) => {
+                if params.get("InputTemplate").and_then(Value::as_str) == Some("") {
+                    params.remove("InputTemplate");
+                }
+                params.is_empty()
+            }
+            None => false,
+        };
+        if drop {
+            pipe.remove(key);
+        }
+    }
+}
+
 pub struct PipesService {
     state: SharedPipesState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
@@ -286,6 +310,7 @@ impl PipesService {
         pipe.insert("CreationTime".into(), json!(now));
         pipe.insert("LastModifiedTime".into(), json!(now));
         ensure_source_param_defaults(&mut pipe, &source);
+        normalize_empty_input_templates(&mut pipe);
 
         let tags = tag_map_from(body.get("Tags"));
 
@@ -431,9 +456,20 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // UpdatePipe is a full replace of the updatable fields: a field the
+            // client omits is cleared, not left at its previous value. AWS does
+            // this (e.g. dropping `TargetParameters.InputTemplate` on a later
+            // apply must make DescribePipe stop reporting it), and the
+            // terraform-provider-aws resource asserts the omitted attribute is
+            // gone.
             for field in PIPE_UPDATE_FIELDS {
-                if let Some(v) = body.get(*field) {
-                    obj.insert((*field).into(), v.clone());
+                match body.get(*field) {
+                    Some(v) => {
+                        obj.insert((*field).into(), v.clone());
+                    }
+                    None => {
+                        obj.remove(*field);
+                    }
                 }
             }
             let desired = if body.get("DesiredState").is_some() {
@@ -456,6 +492,7 @@ impl PipesService {
             {
                 ensure_source_param_defaults(obj, &source);
             }
+            normalize_empty_input_templates(obj);
             let arn = obj
                 .get("Arn")
                 .and_then(Value::as_str)
@@ -932,5 +969,34 @@ mod tests {
         let mut pipe = Map::new();
         ensure_source_param_defaults(&mut pipe, "arn:aws:kinesis:us-east-1:000000000000:stream/s");
         assert!(pipe.get("SourceParameters").is_none());
+    }
+
+    #[test]
+    fn empty_input_template_only_block_is_dropped() {
+        let mut pipe = Map::new();
+        pipe.insert("TargetParameters".into(), json!({"InputTemplate": ""}));
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe.get("TargetParameters").is_none());
+    }
+
+    #[test]
+    fn empty_input_template_stripped_but_siblings_kept() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "TargetParameters".into(),
+            json!({"InputTemplate": "", "KinesisStreamParameters": {"PartitionKey": "pk"}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        let tp = &pipe["TargetParameters"];
+        assert!(tp.get("InputTemplate").is_none());
+        assert_eq!(tp["KinesisStreamParameters"]["PartitionKey"], "pk");
+    }
+
+    #[test]
+    fn non_empty_input_template_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert("TargetParameters".into(), json!({"InputTemplate": "<$.x>"}));
+        normalize_empty_input_templates(&mut pipe);
+        assert_eq!(pipe["TargetParameters"]["InputTemplate"], "<$.x>");
     }
 }

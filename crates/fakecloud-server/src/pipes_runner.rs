@@ -205,6 +205,16 @@ impl PipesRunner {
 
     async fn process_sqs_pipe(&self, pipe: &RunningPipe) {
         let now = Utc::now();
+        // Cheap read-locked pre-check: only escalate to the SQS *write* lock
+        // (which `pick_messages` takes, and which contends with every SQS
+        // request handler) when the source queue actually has a visible
+        // message. An idle SQS-source pipe is the common case — polled every
+        // 500ms — and a per-pipe write-lock storm on the global SQS state
+        // starves the request loop under load (SQS/DescribePipe calls time out,
+        // the tfacc suite hangs). With no work to do, take only the read lock.
+        if !self.sqs_source_has_visible_messages(&pipe.source_arn, now) {
+            return;
+        }
         // Pull up to BatchSize visible messages and hide them for the queue's
         // visibility window so a slow delivery doesn't re-pull the same batch.
         let picked = self.pick_messages(&pipe.source_arn, pipe.batch_size, now);
@@ -234,6 +244,24 @@ impl PipesRunner {
         if !ack_ids.is_empty() {
             self.delete_messages(&pipe.source_arn, &ack_ids);
         }
+    }
+
+    /// Read-locked check for whether the source queue has at least one visible
+    /// message right now. Used to gate the write-locking `pick_messages` so an
+    /// idle pipe never contends on the global SQS write lock.
+    fn sqs_source_has_visible_messages(&self, source_arn: &str, now: DateTime<Utc>) -> bool {
+        let sqs_mas = self.sqs_state.read();
+        let acct = source_arn.split(':').nth(4).unwrap_or("");
+        let Some(sqs) = sqs_mas.get(acct) else {
+            return false;
+        };
+        let Some(queue) = sqs.queues.values().find(|q| q.arn == source_arn) else {
+            return false;
+        };
+        queue
+            .messages
+            .iter()
+            .any(|m| m.visible_at.map(|v| v <= now).unwrap_or(true))
     }
 
     /// Pull up to `limit` currently-visible messages from the source queue and

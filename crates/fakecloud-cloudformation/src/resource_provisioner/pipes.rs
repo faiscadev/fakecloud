@@ -87,6 +87,7 @@ impl ResourceProvisioner {
         // just like the direct CreatePipe handler, so a CFN-created pipe reads
         // back identically on DescribePipe.
         fakecloud_pipes::ensure_source_param_defaults(&mut pipe, &source);
+        fakecloud_pipes::normalize_empty_input_templates(&mut pipe);
 
         // Tags: AWS::Pipes::Pipe carries a JSON map; mirror the direct handler,
         // which both embeds the Tags map on the pipe and indexes it in the tag
