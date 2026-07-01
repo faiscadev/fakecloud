@@ -5901,9 +5901,27 @@ async fn ec2_describe_transit_gateway_vpc_attachments() {
 async fn ec2_modify_transit_gateway_vpc_attachment() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // ModifyTransitGatewayVpcAttachment now validates the attachment exists
+    // (returns InvalidTransitGatewayAttachmentID.NotFound otherwise), so create
+    // one first and modify that id rather than a hardcoded (non-existent) id.
+    let t = make_tgw(&c).await;
+    let created = c
+        .create_transit_gateway_vpc_attachment()
+        .transit_gateway_id(&t)
+        .vpc_id("vpc-1")
+        .subnet_ids("subnet-1")
+        .send()
+        .await
+        .unwrap();
+    let id = created
+        .transit_gateway_vpc_attachment()
+        .unwrap()
+        .transit_gateway_attachment_id()
+        .unwrap()
+        .to_string();
     let r = c
         .modify_transit_gateway_vpc_attachment()
-        .transit_gateway_attachment_id("tgw-attach-1")
+        .transit_gateway_attachment_id(id)
         .send()
         .await
         .unwrap();
