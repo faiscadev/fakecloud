@@ -155,6 +155,12 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
+        let claims = crate::service::token_claims_for(
+            state,
+            &input.pool_id,
+            &input.username,
+            &input.client_id,
+        );
         let tokens = generate_tokens(
             &input.pool_id,
             &input.client_id,
@@ -162,6 +168,7 @@ impl CognitoService {
             &input.username,
             region,
             signing,
+            &claims,
         );
 
         state.refresh_tokens.insert(

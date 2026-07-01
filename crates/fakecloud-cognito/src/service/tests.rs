@@ -525,12 +525,19 @@ fn filter_matches_user_status() {
         mfa_options: Vec::new(),
     };
 
+    // `cognito:user_status` filters the confirmation status.
     let filter =
         parse_filter_expression(r#"cognito:user_status = "FORCE_CHANGE_PASSWORD""#).unwrap();
     assert!(matches_filter(&user, &filter));
 
-    let filter = parse_filter_expression(r#"status = "FORCE_CHANGE_PASSWORD""#).unwrap();
+    // `status` filters Enabled/Disabled, NOT the confirmation status
+    // (bug-hunt batch 4, finding 5): an enabled user matches "Enabled" and
+    // must NOT match a confirmation-status value.
+    let filter = parse_filter_expression(r#"status = "Enabled""#).unwrap();
     assert!(matches_filter(&user, &filter));
+
+    let filter = parse_filter_expression(r#"status = "FORCE_CHANGE_PASSWORD""#).unwrap();
+    assert!(!matches_filter(&user, &filter));
 }
 
 #[test]
@@ -619,6 +626,7 @@ fn jwt_format_three_base64url_segments() {
         "user1",
         "us-east-1",
         None,
+        &TokenClaims::default(),
     );
     // Each token should have 3 dot-separated segments
     for (name, token) in [("id", &tokens.id_token), ("access", &tokens.access_token)] {
@@ -671,6 +679,7 @@ fn jwt_id_token_payload_contains_required_fields() {
         "user1",
         "us-east-1",
         None,
+        &TokenClaims::default(),
     );
     let parts: Vec<&str> = tokens.id_token.split('.').collect();
     let header: Value = serde_json::from_slice(&b64url.decode(parts[0]).unwrap()).unwrap();
@@ -709,6 +718,7 @@ fn jwt_access_token_payload_contains_required_fields() {
         "user1",
         "us-east-1",
         None,
+        &TokenClaims::default(),
     );
     let parts: Vec<&str> = tokens.access_token.split('.').collect();
     let payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
@@ -7821,6 +7831,7 @@ fn pretoken_overrides_merge_into_id_and_access_tokens() {
         None,
         None,
         Some(&overrides),
+        &crate::service::TokenClaims::default(),
     );
 
     let parts: Vec<&str> = tokens.id_token.split('.').collect();
@@ -7871,6 +7882,7 @@ fn pretoken_v1_claims_override_details_shape() {
         None,
         None,
         Some(&overrides),
+        &crate::service::TokenClaims::default(),
     );
 
     let parts: Vec<&str> = tokens.id_token.split('.').collect();
@@ -8219,4 +8231,394 @@ fn admin_create_user_validates_temporary_password_against_policy() {
         &format!(r#"{{"UserPoolId":"{pool_id}","Username":"u2","TemporaryPassword":"Strong123"}}"#),
     );
     block_on(svc.admin_create_user(&strong)).unwrap();
+}
+
+// ── bug-hunt batch 4 (Cognito correctness) ──────────────────────────────
+
+/// Decode a JWT's payload (2nd segment) into a JSON value.
+fn decode_jwt_payload(token: &str) -> Value {
+    use base64::Engine;
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let part = token.split('.').nth(1).expect("jwt has a payload segment");
+    serde_json::from_slice(&b64url.decode(part).unwrap()).unwrap()
+}
+
+/// Create a pool + ADMIN_USER_PASSWORD_AUTH client + user (with the given
+/// UserAttributes) and set a permanent password. Returns (svc, pool_id,
+/// client_id). Extra client body fields can be supplied via `client_extra`.
+fn setup_signin(user_attrs: Value, client_extra: Value) -> (CognitoService, String, String) {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let mut client_body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "c",
+        "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH"],
+    });
+    for (k, v) in client_extra.as_object().cloned().unwrap_or_default() {
+        client_body[k] = v;
+    }
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &client_body.to_string()))
+        .unwrap();
+    let cb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let client_id = cb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let create = json!({
+        "UserPoolId": pool_id,
+        "Username": "signinuser",
+        "TemporaryPassword": "TempP@ss1!",
+        "UserAttributes": user_attrs,
+    });
+    block_on(svc.admin_create_user(&make_req("AdminCreateUser", &create.to_string()))).unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": "signinuser",
+            "Password": "P@ssw0rd!",
+            "Permanent": true,
+        })
+        .to_string(),
+    ))
+    .unwrap();
+    (svc, pool_id, client_id)
+}
+
+fn admin_signin(svc: &CognitoService, pool_id: &str, client_id: &str, username: &str) -> Value {
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": username, "PASSWORD": "P@ssw0rd!"},
+    });
+    let resp = block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())))
+        .unwrap();
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+#[test]
+fn id_token_carries_identity_claims_but_access_token_does_not() {
+    // Finding 1: standard OIDC + custom:* claims must be injected into the id
+    // token (never the access token) from the user's attributes.
+    let (svc, pool_id, client_id) = setup_signin(
+        json!([
+            {"Name": "email", "Value": "alice@example.com"},
+            {"Name": "email_verified", "Value": "true"},
+            {"Name": "name", "Value": "Alice"},
+            {"Name": "custom:tier", "Value": "gold"},
+        ]),
+        json!({}),
+    );
+    let result = admin_signin(&svc, &pool_id, &client_id, "signinuser");
+    let id = decode_jwt_payload(result["AuthenticationResult"]["IdToken"].as_str().unwrap());
+    assert_eq!(id["email"], "alice@example.com");
+    assert_eq!(id["email_verified"], Value::Bool(true), "must be a bool");
+    assert_eq!(id["name"], "Alice");
+    assert_eq!(id["custom:tier"], "gold");
+    assert_eq!(id["token_use"], "id");
+
+    let access = decode_jwt_payload(
+        result["AuthenticationResult"]["AccessToken"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(
+        access.get("email").is_none(),
+        "access token must not carry email"
+    );
+    assert!(access.get("name").is_none());
+    assert_eq!(access["token_use"], "access");
+}
+
+#[test]
+fn tokens_reflect_real_group_membership_ordered_by_precedence() {
+    // Finding 3: cognito:groups must come from real AdminAddUserToGroup
+    // membership on BOTH tokens, ordered by precedence then creation.
+    let (svc, pool_id, client_id) = setup_signin(json!([]), json!({}));
+    // Two groups: "low" precedence 1 (higher priority), "high" precedence 10.
+    for (name, prec) in [("high", 10), ("low", 1)] {
+        svc.create_group(&make_req(
+            "CreateGroup",
+            &json!({"UserPoolId": pool_id, "GroupName": name, "Precedence": prec}).to_string(),
+        ))
+        .unwrap();
+        svc.admin_add_user_to_group(&make_req(
+            "AdminAddUserToGroup",
+            &json!({"UserPoolId": pool_id, "Username": "signinuser", "GroupName": name})
+                .to_string(),
+        ))
+        .unwrap();
+    }
+    let result = admin_signin(&svc, &pool_id, &client_id, "signinuser");
+    let id = decode_jwt_payload(result["AuthenticationResult"]["IdToken"].as_str().unwrap());
+    assert_eq!(
+        id["cognito:groups"],
+        json!(["low", "high"]),
+        "groups ordered by precedence asc"
+    );
+    let access = decode_jwt_payload(
+        result["AuthenticationResult"]["AccessToken"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(access["cognito:groups"], json!(["low", "high"]));
+}
+
+#[test]
+fn token_validity_honored_from_client_config() {
+    // Finding 7: client AccessTokenValidity + TokenValidityUnits drive exp and
+    // ExpiresIn; defaults stay 3600s.
+    let (svc, pool_id, client_id) = setup_signin(
+        json!([]),
+        json!({
+            "AccessTokenValidity": 2,
+            "IdTokenValidity": 30,
+            "TokenValidityUnits": {"AccessToken": "hours", "IdToken": "minutes"},
+        }),
+    );
+    let result = admin_signin(&svc, &pool_id, &client_id, "signinuser");
+    assert_eq!(result["AuthenticationResult"]["ExpiresIn"], 7200);
+    let access = decode_jwt_payload(
+        result["AuthenticationResult"]["AccessToken"]
+            .as_str()
+            .unwrap(),
+    );
+    let ttl = access["exp"].as_i64().unwrap() - access["iat"].as_i64().unwrap();
+    assert_eq!(ttl, 7200, "AccessTokenValidity=2 hours");
+    let id = decode_jwt_payload(result["AuthenticationResult"]["IdToken"].as_str().unwrap());
+    let id_ttl = id["exp"].as_i64().unwrap() - id["iat"].as_i64().unwrap();
+    assert_eq!(id_ttl, 1800, "IdTokenValidity=30 minutes");
+}
+
+#[test]
+fn token_validity_defaults_to_one_hour() {
+    let (svc, pool_id, client_id) = setup_signin(json!([]), json!({}));
+    let result = admin_signin(&svc, &pool_id, &client_id, "signinuser");
+    assert_eq!(result["AuthenticationResult"]["ExpiresIn"], 3600);
+    let access = decode_jwt_payload(
+        result["AuthenticationResult"]["AccessToken"]
+            .as_str()
+            .unwrap(),
+    );
+    let ttl = access["exp"].as_i64().unwrap() - access["iat"].as_i64().unwrap();
+    assert_eq!(ttl, 3600);
+}
+
+#[test]
+fn get_user_response_matches_aws_shape() {
+    // Finding 2: GetUser (access token) must not leak UserStatus /
+    // UserCreateDate / UserLastModifiedDate, and must report MFA settings.
+    let (svc, pool_id, username) = setup_svc_with_pool_and_user();
+    // Give the user an MFA preference + a fresh access token.
+    let token = "acc-token-getuser".to_string();
+    {
+        let mut mas = svc.state.write();
+        let st = mas.default_mut();
+        let user = st
+            .users
+            .get_mut(&pool_id)
+            .unwrap()
+            .get_mut(&username)
+            .unwrap();
+        user.mfa_preferences = Some(crate::state::MfaPreferences {
+            sms_enabled: false,
+            sms_preferred: false,
+            software_token_enabled: true,
+            software_token_preferred: true,
+        });
+        st.access_tokens.insert(
+            token.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: username.clone(),
+                client_id: "c".to_string(),
+                issued_at: Utc::now(),
+            },
+        );
+    }
+    let resp = svc
+        .get_user(&make_req(
+            "GetUser",
+            &json!({"AccessToken": token}).to_string(),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Username"], username);
+    assert!(body["UserAttributes"].is_array());
+    assert!(body.get("UserStatus").is_none(), "must not leak UserStatus");
+    assert!(body.get("UserCreateDate").is_none());
+    assert!(body.get("UserLastModifiedDate").is_none());
+    assert_eq!(body["PreferredMfaSetting"], "SOFTWARE_TOKEN_MFA");
+    assert_eq!(body["UserMFASettingList"], json!(["SOFTWARE_TOKEN_MFA"]));
+}
+
+#[test]
+fn list_users_malformed_filter_errors_not_whole_pool() {
+    // Finding 4: a non-empty malformed filter is InvalidParameterException,
+    // not a silent "return everything". An empty/absent filter returns all.
+    let (svc, pool_id) = setup_svc_with_pool();
+    for u in ["u1", "u2"] {
+        block_on(
+            svc.admin_create_user(&make_req(
+                "AdminCreateUser",
+                &json!({"UserPoolId": pool_id, "Username": u, "TemporaryPassword": "TempP@ss1!"})
+                    .to_string(),
+            )),
+        )
+        .unwrap();
+    }
+    // Malformed (no operator) -> error.
+    match svc.list_users(&make_req(
+        "ListUsers",
+        &json!({"UserPoolId": pool_id, "Filter": "email"}).to_string(),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+        Ok(_) => panic!("malformed filter must error"),
+    }
+    // Empty filter -> all users.
+    let resp = svc
+        .list_users(&make_req(
+            "ListUsers",
+            &json!({"UserPoolId": pool_id, "Filter": ""}).to_string(),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Users"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn list_users_status_and_user_status_are_distinct_filters() {
+    // Finding 5: `status` filters Enabled/Disabled; `cognito:user_status`
+    // filters the confirmation status.
+    let (svc, pool_id) = setup_svc_with_pool();
+    for u in ["enabled_user", "disabled_user"] {
+        block_on(
+            svc.admin_create_user(&make_req(
+                "AdminCreateUser",
+                &json!({"UserPoolId": pool_id, "Username": u, "TemporaryPassword": "TempP@ss1!"})
+                    .to_string(),
+            )),
+        )
+        .unwrap();
+    }
+    svc.admin_disable_user(&make_req(
+        "AdminDisableUser",
+        &json!({"UserPoolId": pool_id, "Username": "disabled_user"}).to_string(),
+    ))
+    .unwrap();
+
+    // status = "Disabled" -> only the disabled user.
+    let resp = svc
+        .list_users(&make_req(
+            "ListUsers",
+            &json!({"UserPoolId": pool_id, "Filter": "status = \"Disabled\""}).to_string(),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let users = body["Users"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["Username"], "disabled_user");
+
+    // cognito:user_status = "FORCE_CHANGE_PASSWORD" -> both (admin-created).
+    let resp = svc
+        .list_users(&make_req(
+            "ListUsers",
+            &json!({"UserPoolId": pool_id, "Filter": "cognito:user_status = \"FORCE_CHANGE_PASSWORD\""})
+                .to_string(),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Users"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn admin_create_user_virtualizes_username_for_username_attributes_pool() {
+    // Finding 6: a UsernameAttributes=["email"] pool mints a UUID username and
+    // stores the email as an alias; AdminGetUser by the email resolves.
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        &json!({"PoolName": "emailpool", "UsernameAttributes": ["email"]}).to_string(),
+    )))
+    .unwrap();
+    let pb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pool_id = pb["UserPool"]["Id"].as_str().unwrap().to_string();
+
+    let resp = block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "bob@example.com"}).to_string(),
+    )))
+    .unwrap();
+    let cb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let minted = cb["User"]["Username"].as_str().unwrap();
+    assert_ne!(minted, "bob@example.com", "Username must be a minted UUID");
+    assert!(
+        minted.contains('-'),
+        "minted username looks like a UUID: {minted}"
+    );
+    let attrs = cb["User"]["Attributes"].as_array().unwrap();
+    assert!(
+        attrs
+            .iter()
+            .any(|a| a["Name"] == "email" && a["Value"] == "bob@example.com"),
+        "email alias attribute stored"
+    );
+
+    // AdminGetUser by the email alias resolves to the minted user.
+    let resp = svc
+        .admin_get_user(&make_req(
+            "AdminGetUser",
+            &json!({"UserPoolId": pool_id, "Username": "bob@example.com"}).to_string(),
+        ))
+        .unwrap();
+    let gb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(gb["Username"], minted);
+
+    // A second user with the same email alias -> AliasExistsException.
+    match block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "bob@example.com"}).to_string(),
+    ))) {
+        Err(e) => assert_eq!(e.code(), "AliasExistsException"),
+        Ok(_) => panic!("duplicate alias must be AliasExists"),
+    }
+}
+
+#[test]
+fn admin_create_user_keeps_username_verbatim_without_username_attributes() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let resp = block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "plainuser"}).to_string(),
+    )))
+    .unwrap();
+    let cb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(cb["User"]["Username"], "plainuser");
+}
+
+#[test]
+fn sub_is_immutable_via_update_attributes() {
+    // Verify: sub must not be writable via AdminUpdateUserAttributes.
+    let (svc, pool_id, username) = setup_svc_with_pool_and_user();
+    match svc.admin_update_user_attributes(&make_req(
+        "AdminUpdateUserAttributes",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": username,
+            "UserAttributes": [{"Name": "sub", "Value": "hacked"}],
+        })
+        .to_string(),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+        Ok(_) => panic!("sub must be read-only"),
+    }
 }

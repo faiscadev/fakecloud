@@ -7,7 +7,15 @@ impl CognitoService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let input = AdminAuthInput::from_request(&req.json_body())?;
+        let mut input = AdminAuthInput::from_request(&req.json_body())?;
+        // Resolve an email/phone alias to the stored username for pools with
+        // UsernameAttributes / AliasAttributes.
+        input.username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, &input.pool_id, &input.username)
+        };
         let lookup = self.admin_auth_lookup(&input, req)?;
 
         if let Some(ctx) = self.delivery_ctx.as_ref() {
@@ -78,7 +86,7 @@ impl CognitoService {
                 "IdToken": tokens.id_token,
                 "RefreshToken": tokens.refresh_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }
@@ -354,6 +362,16 @@ impl CognitoService {
             ));
         }
 
+        // Resolve an email/phone alias to the stored (possibly UUID) username
+        // so SRP handshakes work for UsernameAttributes pools too.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        let username = resolved_username.as_str();
+
         let password = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);
@@ -489,8 +507,21 @@ impl CognitoService {
             })?;
 
         // When the app client has a secret, the request must present a
-        // valid SECRET_HASH (matches the OAuth /token enforcement).
+        // valid SECRET_HASH (matches the OAuth /token enforcement). This is
+        // computed against the username the client actually sent, so it must
+        // run BEFORE we resolve an email/phone alias to the stored username.
         self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
+
+        // Pools with UsernameAttributes / AliasAttributes let users sign in
+        // with their email/phone while the stored username is a UUID. Resolve
+        // the supplied identifier to the real username for all lookups below.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        let username = resolved_username.as_str();
 
         // CompromisedCredentialsRiskConfiguration: when the pool has a
         // risk config with `EventAction = BLOCK` for sign-in events and
@@ -682,6 +713,8 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
+        let claims =
+            crate::service::collect_token_claims(&self.state, pool_id, username, client_id);
         let tokens = crate::service::generate_tokens_with_overrides(
             pool_id,
             client_id,
@@ -692,6 +725,7 @@ impl CognitoService {
             None,
             None,
             pretoken_overrides.as_ref(),
+            &claims,
         );
 
         {
@@ -754,7 +788,7 @@ impl CognitoService {
                 "IdToken": tokens.id_token,
                 "RefreshToken": tokens.refresh_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }
@@ -1054,6 +1088,8 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
+        let claims =
+            crate::service::token_claims_for(state, &token_pool_id, &token_username, client_id);
         let tokens = generate_tokens(
             &token_pool_id,
             client_id,
@@ -1061,6 +1097,7 @@ impl CognitoService {
             &token_username,
             &region,
             signing,
+            &claims,
         );
 
         state.access_tokens.insert(
@@ -1078,7 +1115,7 @@ impl CognitoService {
                 "AccessToken": tokens.access_token,
                 "IdToken": tokens.id_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }

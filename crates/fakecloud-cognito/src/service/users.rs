@@ -69,14 +69,53 @@ impl CognitoService {
                 }
             }
 
-            // Check username doesn't already exist
+            // Pools configured with UsernameAttributes (email / phone_number)
+            // mint a UUID as the real Username and store the supplied value as
+            // an alias attribute; sign-in / AdminGetUser then resolve the alias
+            // back to the UUID. Without UsernameAttributes the Username is used
+            // verbatim.
+            let username_attributes: Vec<String> = state
+                .user_pools
+                .get(pool_id)
+                .and_then(|p| p.username_attributes.clone())
+                .unwrap_or_default();
+            let virtualize = !username_attributes.is_empty();
+            let alias_attr = if virtualize {
+                Some(pick_alias_attribute(&username_attributes, username))
+            } else {
+                None
+            };
+            let stored_username = if virtualize {
+                Uuid::new_v4().to_string()
+            } else {
+                username.to_string()
+            };
+
             let pool_users = state.users.entry(pool_id.to_string()).or_default();
-            if pool_users.contains_key(username) {
+
+            // A literal-username collision is UsernameExists; an alias-value
+            // collision (another user already owns this email/phone) is
+            // AliasExists.
+            if !virtualize && pool_users.contains_key(username) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "UsernameExistsException",
                     "User account already exists.",
                 ));
+            }
+            if let Some(ref attr) = alias_attr {
+                let taken = pool_users.values().any(|u| {
+                    u.attributes
+                        .iter()
+                        .any(|a| &a.name == attr && a.value == username)
+                });
+                if taken {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "AliasExistsException",
+                        "An account with the given email already exists.",
+                    ));
+                }
             }
 
             let now = Utc::now();
@@ -84,6 +123,19 @@ impl CognitoService {
 
             // Parse user attributes
             let mut attributes = parse_user_attributes(&body["UserAttributes"]);
+
+            // Store the supplied identifier as its alias attribute so sign-in
+            // by email/phone resolves.
+            if let Some(ref attr) = alias_attr {
+                if let Some(existing) = attributes.iter_mut().find(|a| &a.name == attr) {
+                    existing.value = username.to_string();
+                } else {
+                    attributes.push(UserAttribute {
+                        name: attr.clone(),
+                        value: username.to_string(),
+                    });
+                }
+            }
 
             // Ensure sub attribute is present
             if !attributes.iter().any(|a| a.name == "sub") {
@@ -96,7 +148,7 @@ impl CognitoService {
             let temporary_password = body["TemporaryPassword"].as_str().map(|s| s.to_string());
 
             let user = crate::state::User {
-                username: username.to_string(),
+                username: stored_username.clone(),
                 sub: sub_val,
                 attributes,
                 enabled: true,
@@ -117,7 +169,7 @@ impl CognitoService {
 
             let resp = user_to_json(&user);
             let uc = user.clone();
-            pool_users.insert(username.to_string(), user);
+            pool_users.insert(stored_username.clone(), user);
 
             let region = state.region.clone();
             let account_id = state.account_id.clone();
@@ -128,7 +180,7 @@ impl CognitoService {
                 region,
                 account_id,
                 pool_id.to_string(),
-                username.to_string(),
+                stored_username,
             )
         };
 
@@ -200,10 +252,14 @@ impl CognitoService {
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Allow AdminGetUser by an email/phone alias for UsernameAttributes
+        // pools (the stored username may be a UUID).
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+
         let user = state
             .users
             .get(pool_id)
-            .and_then(|users| users.get(username))
+            .and_then(|users| users.get(&resolved))
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -413,6 +469,16 @@ impl CognitoService {
 
         let new_attrs = parse_user_attributes(&body["UserAttributes"]);
 
+        // `sub` is a Cognito-reserved read-only attribute; it must not be
+        // mutable via AdminUpdateUserAttributes.
+        if new_attrs.iter().any(|a| a.name == "sub") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Cannot modify the value of a read-only attribute: sub",
+            ));
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -569,9 +635,19 @@ impl CognitoService {
         let mut users: Vec<&crate::state::User> = pool_users.values().collect();
         users.sort_by_key(|u| u.user_create_date);
 
-        // Apply filter if present
+        // Apply filter if present. An empty/whitespace Filter means "no
+        // filter" (return all); a non-empty but malformed filter (e.g.
+        // `email` with no operator) is an InvalidParameterException in real
+        // Cognito, NOT a silent "return the whole pool".
         if let Some(filter) = filter_str {
-            if let Some(parsed) = parse_filter_expression(filter) {
+            if !filter.trim().is_empty() {
+                let parsed = parse_filter_expression(filter).ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "Invalid filter expression",
+                    )
+                })?;
                 users.retain(|u| matches_filter(u, &parsed));
             }
         }
@@ -719,19 +795,27 @@ impl CognitoService {
                 )
             })?;
 
-        let response = json!({
+        // Real GetUser (access-token, self-service) returns ONLY Username,
+        // UserAttributes, MFAOptions (deprecated), PreferredMfaSetting and
+        // UserMFASettingList. It does NOT leak UserStatus / UserCreateDate /
+        // UserLastModifiedDate — those belong to AdminGetUser.
+        let mut response = json!({
             "Username": user.username,
             "UserAttributes": user.attributes.iter().map(|a| {
                 json!({ "Name": a.name, "Value": a.value })
             }).collect::<Vec<Value>>(),
-            "UserCreateDate": user.user_create_date.timestamp() as f64,
-            "UserLastModifiedDate": user.user_last_modified_date.timestamp() as f64,
-            "UserStatus": user.user_status,
             "MFAOptions": user.mfa_options.iter().map(|o| json!({
                 "DeliveryMedium": o.delivery_medium,
                 "AttributeName": o.attribute_name,
             })).collect::<Vec<Value>>(),
         });
+        let (mfa_settings, preferred) = user_mfa_settings(user);
+        if !mfa_settings.is_empty() {
+            response["UserMFASettingList"] = json!(mfa_settings);
+        }
+        if let Some(pref) = preferred {
+            response["PreferredMfaSetting"] = json!(pref);
+        }
 
         Ok(AwsResponse::ok_json(response))
     }
@@ -800,6 +884,16 @@ impl CognitoService {
         let body = req.json_body();
         let access_token = require_str(&body, "AccessToken")?;
         let new_attrs = parse_user_attributes(&body["UserAttributes"]);
+
+        // `sub` is a Cognito-reserved read-only attribute and cannot be
+        // changed by the user either.
+        if new_attrs.iter().any(|a| a.name == "sub") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Cannot modify the value of a read-only attribute: sub",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1168,4 +1262,45 @@ impl CognitoService {
             }
         })))
     }
+}
+
+/// Choose which alias attribute a supplied `UsernameAttributes` value maps
+/// to. Emails (containing `@`) map to `email`, `+`-prefixed values to
+/// `phone_number`, when those are configured; otherwise the first configured
+/// attribute wins.
+fn pick_alias_attribute(username_attributes: &[String], value: &str) -> String {
+    let has = |name: &str| username_attributes.iter().any(|a| a == name);
+    if value.contains('@') && has("email") {
+        "email".to_string()
+    } else if value.starts_with('+') && has("phone_number") {
+        "phone_number".to_string()
+    } else {
+        username_attributes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "email".to_string())
+    }
+}
+
+/// Derive a user's `(UserMFASettingList, PreferredMfaSetting)` from stored
+/// MFA preferences. Shared by GetUser / AdminGetUser so both report MFA the
+/// same way real Cognito does.
+fn user_mfa_settings(user: &crate::state::User) -> (Vec<&'static str>, Option<&'static str>) {
+    let mut settings = Vec::new();
+    let mut preferred = None;
+    if let Some(prefs) = &user.mfa_preferences {
+        if prefs.sms_enabled {
+            settings.push("SMS_MFA");
+            if prefs.sms_preferred {
+                preferred = Some("SMS_MFA");
+            }
+        }
+        if prefs.software_token_enabled {
+            settings.push("SOFTWARE_TOKEN_MFA");
+            if prefs.software_token_preferred {
+                preferred = Some("SOFTWARE_TOKEN_MFA");
+            }
+        }
+    }
+    (settings, preferred)
 }
