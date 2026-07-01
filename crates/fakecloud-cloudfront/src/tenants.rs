@@ -27,9 +27,11 @@ pub struct StoredDistributionTenant {
     /// WebAcl / Certificate / GeoRestrictions overrides.
     #[serde(default)]
     pub customizations: Option<TenantCustomizations>,
-    /// The managed-certificate request captured at create/update time.
-    #[serde(default)]
-    pub managed_certificate_request: Option<TenantManagedCertificateRequest>,
+    // Note: ManagedCertificateRequest is intentionally NOT stored. It is an
+    // input-only member on Create/UpdateDistributionTenant (it drives managed
+    // cert provisioning); the DistributionTenant / DistributionTenantSummary
+    // output shapes never echo it, so keeping it would be dead write-only
+    // state. We accept and ignore it, matching AWS's output.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -55,13 +57,6 @@ pub struct TenantWebAclCustomization {
 pub struct TenantGeoRestrictionCustomization {
     pub restriction_type: String,
     pub locations: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct TenantManagedCertificateRequest {
-    pub validation_token_host: Option<String>,
-    pub primary_domain_name: Option<String>,
-    pub certificate_transparency_logging_preference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

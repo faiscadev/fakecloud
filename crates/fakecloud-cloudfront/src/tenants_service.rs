@@ -20,8 +20,7 @@ use crate::service::{
 use crate::state::Tag;
 use crate::tenants::{
     StoredDistributionTenant, StoredTenantInvalidation, TenantCustomizations,
-    TenantGeoRestrictionCustomization, TenantManagedCertificateRequest, TenantParameter,
-    TenantWebAclCustomization,
+    TenantGeoRestrictionCustomization, TenantParameter, TenantWebAclCustomization,
 };
 use crate::xml_io;
 
@@ -43,8 +42,9 @@ struct CreateDistributionTenantRequest {
     pub parameters: Option<ParametersReq>,
     #[serde(default)]
     pub customizations: Option<CustomizationsReq>,
-    #[serde(default)]
-    pub managed_certificate_request: Option<ManagedCertificateRequestReq>,
+    // ManagedCertificateRequest is accepted (any <ManagedCertificateRequest>
+    // element is ignored by the deserializer) but not stored: it is an
+    // input-only member that AWS never echoes back.
     #[serde(default)]
     pub tags: Option<TagsReq>,
 }
@@ -64,8 +64,6 @@ struct UpdateDistributionTenantRequest {
     pub parameters: Option<ParametersReq>,
     #[serde(default)]
     pub customizations: Option<CustomizationsReq>,
-    #[serde(default)]
-    pub managed_certificate_request: Option<ManagedCertificateRequestReq>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -124,17 +122,6 @@ struct GeoRestrictionsReq {
 struct LocationsReq {
     #[serde(default, rename = "Location")]
     pub location: Vec<String>,
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct ManagedCertificateRequestReq {
-    #[serde(default)]
-    pub validation_token_host: Option<String>,
-    #[serde(default)]
-    pub primary_domain_name: Option<String>,
-    #[serde(default)]
-    pub certificate_transparency_logging_preference: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -260,9 +247,6 @@ impl CloudFrontService {
             last_modified_time: now,
             parameters: convert_parameters(parsed.parameters),
             customizations,
-            managed_certificate_request: parsed
-                .managed_certificate_request
-                .map(convert_managed_cert_request),
         };
         account
             .distribution_tenants
@@ -378,9 +362,6 @@ impl CloudFrontService {
                 .and_then(|w| w.arn.clone())
                 .or_else(|| t.web_acl_arn.clone());
             t.customizations = Some(converted);
-        }
-        if let Some(m) = parsed.managed_certificate_request {
-            t.managed_certificate_request = Some(convert_managed_cert_request(m));
         }
         t.etag = generate_id_with_prefix("E");
         t.last_modified_time = Utc::now();
@@ -761,17 +742,6 @@ fn convert_customizations(req: CustomizationsReq) -> TenantCustomizations {
     }
 }
 
-fn convert_managed_cert_request(
-    req: ManagedCertificateRequestReq,
-) -> TenantManagedCertificateRequest {
-    TenantManagedCertificateRequest {
-        validation_token_host: req.validation_token_host,
-        primary_domain_name: req.primary_domain_name,
-        certificate_transparency_logging_preference: req
-            .certificate_transparency_logging_preference,
-    }
-}
-
 fn render_tenant_list(items: &[StoredDistributionTenant], wrapper: &str) -> String {
     let mut out = String::with_capacity(512);
     out.push_str(XML_DECL);
@@ -1021,14 +991,13 @@ mod tests {
                 .any(|t| t.key == "env" && t.value.as_deref() == Some("prod")),
             "tenant tags dropped: {tags:?}"
         );
-        // Managed certificate request persisted.
-        let mcr = guard
-            .get(DEFAULT_ACCOUNT)
-            .and_then(|a| a.distribution_tenants.get(&id))
-            .and_then(|t| t.managed_certificate_request.clone());
-        assert_eq!(
-            mcr.and_then(|m| m.primary_domain_name),
-            Some("acme.example.com".to_string())
+        drop(guard);
+        // ManagedCertificateRequest is input-only: AWS accepts it (create did
+        // not fail) but never echoes it on the output shapes, so it must not
+        // appear in the GetDistributionTenant response.
+        assert!(
+            !xml.contains("ManagedCertificateRequest"),
+            "ManagedCertificateRequest must not be echoed: {xml}"
         );
     }
 

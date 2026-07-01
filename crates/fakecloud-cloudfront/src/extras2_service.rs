@@ -269,40 +269,48 @@ impl CloudFrontService {
         if parsed.domain.is_empty() {
             return Err(invalid_argument("Domain is required"));
         }
-        let target_tenant = parsed
+        let tenant_id = parsed
             .target_resource
             .as_ref()
             .and_then(|t| t.distribution_tenant_id.clone())
             .filter(|s| !s.is_empty());
-        let target_distribution = parsed
+        let distribution_id = parsed
             .target_resource
             .as_ref()
             .and_then(|t| t.distribution_id.clone())
             .filter(|s| !s.is_empty());
-        let target = target_distribution
-            .clone()
-            .or_else(|| target_tenant.clone())
-            .unwrap_or_default();
-        if target.is_empty() {
-            return Err(invalid_argument(
-                "TargetResource must specify DistributionId or DistributionTenantId",
-            ));
-        }
+        // TargetResource is a mutually-exclusive union: AWS requires exactly
+        // one of DistributionId / DistributionTenantId. Resolve to a single
+        // target and use it for validation, mutation, and the response so the
+        // three can never disagree.
+        let target = match (distribution_id, tenant_id) {
+            (Some(_), Some(_)) => {
+                return Err(invalid_argument(
+                    "TargetResource must specify exactly one of DistributionId or DistributionTenantId, not both",
+                ));
+            }
+            (Some(did), None) => Target::Distribution(did),
+            (None, Some(tid)) => Target::Tenant(tid),
+            (None, None) => {
+                return Err(invalid_argument(
+                    "TargetResource must specify DistributionId or DistributionTenantId",
+                ));
+            }
+        };
 
         let mut state = self.state.write();
         let account = state.entry(DEFAULT_ACCOUNT);
 
         // The target must exist, otherwise AWS returns EntityNotFound.
-        let target_ok = match (&target_tenant, &target_distribution) {
-            (Some(tid), _) => account.distribution_tenants.contains_key(tid),
-            (_, Some(did)) => account.distributions.contains_key(did),
-            _ => false,
+        let target_ok = match &target {
+            Target::Tenant(tid) => account.distribution_tenants.contains_key(tid),
+            Target::Distribution(did) => account.distributions.contains_key(did),
         };
         if !target_ok {
             return Err(aws_error(
                 StatusCode::NOT_FOUND,
                 "EntityNotFound",
-                format!("The target resource {target} was not found"),
+                format!("The target resource {} was not found", target.id()),
             ));
         }
 
@@ -315,15 +323,18 @@ impl CloudFrontService {
         for d in account.distributions.values_mut() {
             remove_alias(&mut d.config, &parsed.domain);
         }
-        if let Some(tid) = &target_tenant {
-            if let Some(t) = account.distribution_tenants.get_mut(tid) {
-                t.domains.push(parsed.domain.clone());
-                t.last_modified_time = Utc::now();
+        match &target {
+            Target::Tenant(tid) => {
+                if let Some(t) = account.distribution_tenants.get_mut(tid) {
+                    t.domains.push(parsed.domain.clone());
+                    t.last_modified_time = Utc::now();
+                }
             }
-        } else if let Some(did) = &target_distribution {
-            if let Some(d) = account.distributions.get_mut(did) {
-                add_alias(&mut d.config, &parsed.domain);
-                d.last_modified_time = Utc::now();
+            Target::Distribution(did) => {
+                if let Some(d) = account.distributions.get_mut(did) {
+                    add_alias(&mut d.config, &parsed.domain);
+                    d.last_modified_time = Utc::now();
+                }
             }
         }
         drop(state);
@@ -333,7 +344,7 @@ impl CloudFrontService {
         body.push_str(XML_DECL);
         body.push_str(&format!("<UpdateDomainAssociationResult xmlns=\"{NS}\">"));
         body.push_str(&format!("<Domain>{}</Domain>", esc(&parsed.domain)));
-        body.push_str(&format!("<ResourceId>{}</ResourceId>", esc(&target)));
+        body.push_str(&format!("<ResourceId>{}</ResourceId>", esc(target.id())));
         body.push_str("</UpdateDomainAssociationResult>");
         Ok(xml_with_etag(StatusCode::OK, body, &etag, None))
     }
@@ -444,6 +455,22 @@ impl CloudFrontService {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
+
+/// A single resolved UpdateDomainAssociation target. Resolving to one value
+/// up front guarantees validation, mutation, and the response all reference
+/// the same resource.
+enum Target {
+    Tenant(String),
+    Distribution(String),
+}
+
+impl Target {
+    fn id(&self) -> &str {
+        match self {
+            Target::Tenant(id) | Target::Distribution(id) => id,
+        }
+    }
+}
 
 /// Add `domain` to a distribution's alias (CNAME) set, keeping Quantity in
 /// sync. No-op if the alias is already present.
@@ -685,5 +712,41 @@ mod tests {
         };
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.code(), "EntityNotFound");
+    }
+
+    #[tokio::test]
+    async fn update_domain_association_rejects_both_targets() {
+        // TargetResource is mutually exclusive: supplying both a DistributionId
+        // and a DistributionTenantId is an InvalidArgument (prevents the
+        // response and the mutation from disagreeing on the target).
+        let svc = svc();
+        let tid = create_tenant(&svc, "dual-tenant", "d.example.com").await;
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>d.example.com</Domain>
+  <TargetResource>
+    <DistributionId>E123</DistributionId>
+    <DistributionTenantId>{tid}</DistributionTenantId>
+  </TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let err = match svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/domain-association",
+                &body,
+            ))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected InvalidArgument when both targets supplied"),
+        };
+        assert_eq!(err.code(), "InvalidArgument");
+        // The tenant's domain must be untouched (no mutation happened).
+        assert!(
+            get_tenant_xml(&svc, &tid).await.contains("d.example.com"),
+            "domain should be unchanged after a rejected request"
+        );
     }
 }
