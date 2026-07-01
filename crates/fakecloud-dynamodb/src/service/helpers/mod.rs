@@ -146,26 +146,33 @@ pub(crate) fn eval_begins_with(
     let actual = resolve_path(attr_ref.trim(), item, expr_attr_names);
     let expected = expr_attr_values.get(val_ref.trim());
     match (actual.as_ref(), expected) {
-        (Some(a), Some(e)) => {
-            // begins_with works on String OR Binary (bug-hunt 2026-07-01).
-            if let (Some(a), Some(e)) = (
-                a.get("S").and_then(|v| v.as_str()),
-                e.get("S").and_then(|v| v.as_str()),
-            ) {
-                a.starts_with(e)
-            } else if let (Some(a), Some(e)) = (
-                a.get("B").and_then(|v| v.as_str()),
-                e.get("B").and_then(|v| v.as_str()),
-            ) {
-                use base64::Engine;
-                let dec = |s: &str| base64::engine::general_purpose::STANDARD.decode(s).ok();
-                matches!((dec(a), dec(e)), (Some(a), Some(e)) if a.starts_with(&e))
-            } else {
-                false
-            }
-        }
+        (Some(a), Some(e)) => attribute_begins_with(a, e),
         _ => false,
     }
+}
+
+/// `begins_with` operand comparison shared by ConditionExpression and
+/// KeyConditionExpression so both stay in sync (Cubic P3, 2026-07-01). Matches
+/// on a String prefix, or a Binary prefix comparing the base64-DECODED bytes
+/// (base64 pads in 3-byte groups, so a raw-string prefix would be wrong across
+/// boundaries). Any other/malformed operand pairing is silently false, which is
+/// the shape DynamoDB returns for a malformed predicate.
+pub(crate) fn attribute_begins_with(actual: &Value, expected: &Value) -> bool {
+    if let (Some(a), Some(e)) = (
+        actual.get("S").and_then(|v| v.as_str()),
+        expected.get("S").and_then(|v| v.as_str()),
+    ) {
+        return a.starts_with(e);
+    }
+    if let (Some(a), Some(e)) = (
+        actual.get("B").and_then(|v| v.as_str()),
+        expected.get("B").and_then(|v| v.as_str()),
+    ) {
+        use base64::Engine;
+        let dec = |s: &str| base64::engine::general_purpose::STANDARD.decode(s).ok();
+        return matches!((dec(a), dec(e)), (Some(a), Some(e)) if a.starts_with(&e));
+    }
+    false
 }
 
 /// `contains(path, :val)` — substring check on S, set membership on

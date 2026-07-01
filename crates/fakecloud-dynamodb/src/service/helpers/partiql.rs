@@ -11,13 +11,18 @@ use super::*;
 /// unparseable. Handles exponent notation and negative zero.
 fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // A malformed Number string (unparseable) must NOT compare Equal to a valid
+    // one -- otherwise `{"N":"abc"}` would match any stored numeric key on the
+    // primary-key lookup path (DeleteItem/GetItem), mutating the wrong item.
+    // Fall back to a lexical comparison so a malformed operand only ever equals
+    // a byte-identical string (bug-hunt 2026-07-01, Cubic P1).
     let (xn, xd) = match normalize_decimal(x) {
         Some(v) => v,
-        None => return Ordering::Equal,
+        None => return x.cmp(y),
     };
     let (yn, yd) = match normalize_decimal(y) {
         Some(v) => v,
-        None => return Ordering::Equal,
+        None => return x.cmp(y),
     };
     // (is_negative_x, is_negative_y): a negative value is always less than a
     // non-negative one. Only decide by sign when the signs actually differ.
@@ -32,6 +37,13 @@ fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
     } else {
         mag
     }
+}
+
+/// Whether `s` is a well-formed DynamoDB Number literal (a decimal string that
+/// `normalize_decimal` can parse). Used to reject malformed `{"N":...}` operands
+/// before they are persisted (ADD on a new attribute, bug-hunt 2026-07-01).
+pub(crate) fn is_valid_number(s: &str) -> bool {
+    normalize_decimal(s).is_some()
 }
 
 /// Decompose a decimal string into `(is_negative, (int_digits, frac_digits))`

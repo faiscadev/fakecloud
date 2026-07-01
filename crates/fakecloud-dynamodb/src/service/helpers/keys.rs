@@ -12,7 +12,13 @@ pub(crate) fn keys_equal(
 ) -> bool {
     use super::partiql::values_equal;
     let hash_key = table.hash_key_name();
-    if !values_equal(a.get(hash_key), b.get(hash_key)) {
+    // values_equal(None, None) is true, so require the hash key to actually be
+    // present on both keys -- otherwise two keys both missing it would compare
+    // equal (matches find_item_index's guard; Cubic P2, 2026-07-01).
+    if !(values_equal(a.get(hash_key), b.get(hash_key))
+        && a.get(hash_key).is_some()
+        && b.get(hash_key).is_some())
+    {
         return false;
     }
     match table.range_key_name() {

@@ -700,6 +700,21 @@ mod tests {
     }
 
     #[test]
+    fn find_item_index_malformed_number_key_does_not_match_valid() {
+        // A malformed Number operand must not compare equal to a valid stored
+        // numeric key -- otherwise DeleteItem{"N":"abc"} could delete the wrong
+        // row (Cubic P1, 2026-07-01).
+        let mut t = table_with_hash_key("pk");
+        let mut item = HashMap::new();
+        item.insert("pk".to_string(), json!({"N": "5"}));
+        t.items.push(item);
+
+        let mut bad = HashMap::new();
+        bad.insert("pk".to_string(), json!({"N": "abc"}));
+        assert_eq!(t.find_item_index(&bad), None);
+    }
+
+    #[test]
     fn top_contributors_returns_sorted() {
         let mut t = table_with_hash_key("pk");
         t.contributor_insights_counters.insert("a".to_string(), 3);

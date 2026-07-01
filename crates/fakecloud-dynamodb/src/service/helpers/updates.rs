@@ -225,10 +225,12 @@ pub(crate) fn apply_add_assignment(
                 return Err(add_type_mismatch(&attr));
             }
         } else {
-            // New attribute: ADD only allows Number or Set values.
-            let is_addable =
-                add_val.get("N").is_some() || set_types.iter().any(|t| add_val.get(*t).is_some());
-            if !is_addable {
+            // New attribute: ADD only allows a WELL-FORMED Number or Set value.
+            // A bare type-tag check (`get("N").is_some()`) would persist
+            // malformed AttributeValues like {"N":5} (not a string),
+            // {"N":"abc"} (unparseable) or {"SS":"x"} (not an array). AWS
+            // rejects these with ValidationException (Cubic P2, 2026-07-01).
+            if !is_wellformed_add_operand(add_val) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "ValidationException",
@@ -240,6 +242,41 @@ pub(crate) fn apply_add_assignment(
     }
 
     Ok(())
+}
+
+/// Whether an ADD operand for a brand-new attribute is a well-formed Number or
+/// Set. Number: `{"N": "<decimal>"}` with a parseable string. String set:
+/// `{"SS": [strings]}`. Number set: `{"NS": [decimal strings]}`. Binary set:
+/// `{"BS": [base64 strings]}`. Anything else is rejected so malformed
+/// AttributeValues never reach storage.
+fn is_wellformed_add_operand(v: &Value) -> bool {
+    use crate::service::helpers::partiql::is_valid_number;
+    if let Some(n) = v.get("N") {
+        return n.as_str().map(is_valid_number).unwrap_or(false);
+    }
+    if let Some(ss) = v.get("SS") {
+        return ss
+            .as_array()
+            .map(|a| !a.is_empty() && a.iter().all(|e| e.is_string()))
+            .unwrap_or(false);
+    }
+    if let Some(ns) = v.get("NS") {
+        return ns
+            .as_array()
+            .map(|a| {
+                !a.is_empty()
+                    && a.iter()
+                        .all(|e| e.as_str().map(is_valid_number).unwrap_or(false))
+            })
+            .unwrap_or(false);
+    }
+    if let Some(bs) = v.get("BS") {
+        return bs
+            .as_array()
+            .map(|a| !a.is_empty() && a.iter().all(|e| e.is_string()))
+            .unwrap_or(false);
+    }
+    false
 }
 
 /// ADD requires the operand type to match the existing attribute (Number to a
@@ -371,6 +408,27 @@ mod remove_path_tests {
         )
         .unwrap_err();
         assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    #[test]
+    fn add_malformed_number_to_new_attribute_is_rejected() {
+        // {"N": 5} is not a string, {"N":"abc"} is unparseable, {"SS":"x"} is
+        // not an array -- none may reach storage (Cubic P2, 2026-07-01).
+        for bad in [json!({"N": 5}), json!({"N": "abc"}), json!({"SS": "x"})] {
+            let mut item: HashMap<String, AttributeValue> = HashMap::new();
+            let err = apply_add_assignment(
+                &mut item,
+                "note :v",
+                &names(),
+                &vals(&[(":v", bad.clone())]),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:?}").contains("ValidationException"),
+                "expected rejection for {bad:?}"
+            );
+            assert!(item.is_empty(), "malformed operand persisted: {bad:?}");
+        }
     }
 
     #[test]
