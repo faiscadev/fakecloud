@@ -155,6 +155,12 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
+        let claims = crate::service::token_claims_for(
+            state,
+            &input.pool_id,
+            &input.username,
+            &input.client_id,
+        );
         let tokens = generate_tokens(
             &input.pool_id,
             &input.client_id,
@@ -162,6 +168,7 @@ impl CognitoService {
             &input.username,
             region,
             signing,
+            &claims,
         );
 
         state.refresh_tokens.insert(
@@ -181,6 +188,7 @@ impl CognitoService {
                 username: input.username.clone(),
                 client_id: input.client_id.clone(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
 
@@ -245,6 +253,11 @@ impl CognitoService {
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let user = state
             .users
             .get_mut(pool_id)
@@ -303,6 +316,11 @@ impl CognitoService {
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let user = state
             .users
             .get_mut(pool_id)
@@ -336,6 +354,11 @@ impl CognitoService {
 
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         // Validate user exists
         if !state

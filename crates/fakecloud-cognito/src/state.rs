@@ -232,10 +232,19 @@ impl CognitoState {
     /// 2026-06-24, 5.3).
     pub fn valid_access_token(&self, token: &str) -> Option<&AccessTokenData> {
         let data = self.access_tokens.get(token)?;
-        let age = Utc::now()
-            .signed_duration_since(data.issued_at)
-            .num_seconds();
-        if age > ACCESS_TOKEN_TTL_SECS {
+        let now = Utc::now();
+        // The JWT's real `exp` is persisted on the token (honoring the app
+        // client's AccessTokenValidity). Older snapshots that predate the
+        // field fall back to the fixed 1h TTL from `issued_at`. Per JWT
+        // semantics a token is invalid AT OR AFTER `exp`, so equality counts
+        // as expired (`>=`), not still-valid.
+        let expired = match data.expires_at {
+            Some(exp) => now >= exp,
+            None => {
+                now.signed_duration_since(data.issued_at).num_seconds() >= ACCESS_TOKEN_TTL_SECS
+            }
+        };
+        if expired {
             None
         } else {
             Some(data)
@@ -348,6 +357,11 @@ pub struct AccessTokenData {
     pub username: String,
     pub client_id: String,
     pub issued_at: DateTime<Utc>,
+    /// Absolute expiry, matching the issued JWT's `exp` (issued_at +
+    /// AccessTokenValidity). `None` on legacy snapshots -> callers fall back
+    /// to the fixed 1h TTL from `issued_at`.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -923,6 +937,7 @@ mod tests {
             username: "u".to_string(),
             client_id: "c".to_string(),
             issued_at,
+            expires_at: None,
         };
         // Fresh token: accepted.
         state
@@ -937,6 +952,57 @@ mod tests {
         assert!(state.valid_access_token("stale").is_none());
         // Unknown token: rejected.
         assert!(state.valid_access_token("nope").is_none());
+
+        // Persisted expires_at overrides the 1h fallback in BOTH directions
+        // (bug-hunt batch 4 / Cubic 1): a token issued >1h ago but whose
+        // configured TTL is 2h is still valid...
+        let long = AccessTokenData {
+            user_pool_id: "pool".to_string(),
+            username: "u".to_string(),
+            client_id: "c".to_string(),
+            issued_at: Utc::now() - chrono::Duration::hours(2),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(2)),
+        };
+        state.access_tokens.insert("long".to_string(), long);
+        assert!(state.valid_access_token("long").is_some());
+        // ...and a freshly-issued token whose short TTL already elapsed is
+        // rejected even though issued_at is recent.
+        let short = AccessTokenData {
+            user_pool_id: "pool".to_string(),
+            username: "u".to_string(),
+            client_id: "c".to_string(),
+            issued_at: Utc::now(),
+            expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+        };
+        state.access_tokens.insert("short".to_string(), short);
+        assert!(state.valid_access_token("short").is_none());
+
+        // A token is invalid AT its exp instant, not just after (Cubic P3):
+        // `exp` set to "now" is already expired by the time the `>=` check
+        // runs. A far-future exp of the same token would be valid, proving it
+        // is the boundary — not a stale field — that rejects it.
+        let at_expiry = AccessTokenData {
+            user_pool_id: "pool".to_string(),
+            username: "u".to_string(),
+            client_id: "c".to_string(),
+            issued_at: Utc::now(),
+            expires_at: Some(Utc::now()),
+        };
+        state
+            .access_tokens
+            .insert("at_expiry".to_string(), at_expiry);
+        assert!(
+            state.valid_access_token("at_expiry").is_none(),
+            "token must be invalid at (not only after) its exp instant"
+        );
+
+        // Fallback path: a token whose age exactly equals the 1h TTL is
+        // likewise expired at the boundary (`>=`).
+        state.access_tokens.insert(
+            "at_ttl".to_string(),
+            mk(Utc::now() - chrono::Duration::seconds(ACCESS_TOKEN_TTL_SECS)),
+        );
+        assert!(state.valid_access_token("at_ttl").is_none());
     }
 
     #[test]

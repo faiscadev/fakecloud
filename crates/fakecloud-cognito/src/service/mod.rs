@@ -1306,33 +1306,44 @@ enum FilterOp {
     StartsWith,
 }
 
-/// Parse a Cognito ListUsers filter expression like `email = "foo@bar.com"` or `email ^= "foo"`.
+/// Parse a Cognito ListUsers filter expression like `email = "foo@bar.com"` or
+/// `email ^= "foo"`. Returns `None` for any malformed input (missing operator,
+/// empty attribute, or a value that is not a non-empty double-quoted string);
+/// callers surface `None` as `InvalidParameterException`.
 fn parse_filter_expression(filter: &str) -> Option<FilterExpression> {
     let filter = filter.trim();
 
-    // Try ^= first (starts with)
-    if let Some((attr, val)) = filter.split_once("^=") {
-        let attribute = attr.trim().trim_matches('"').to_string();
-        let value = val.trim().trim_matches('"').to_string();
-        return Some(FilterExpression {
-            attribute,
-            operator: FilterOp::StartsWith,
-            value,
-        });
+    // `^=` (starts-with) must be tried before `=`.
+    let (attr_raw, value_raw, operator) = if let Some((attr, val)) = filter.split_once("^=") {
+        (attr, val, FilterOp::StartsWith)
+    } else if let Some((attr, val)) = filter.split_once('=') {
+        (attr, val, FilterOp::Equals)
+    } else {
+        return None;
+    };
+
+    // Attribute: non-empty (optional surrounding quotes tolerated).
+    let attribute = attr_raw.trim().trim_matches('"').trim().to_string();
+    if attribute.is_empty() {
+        return None;
     }
 
-    // Try = (equals)
-    if let Some((attr, val)) = filter.split_once('=') {
-        let attribute = attr.trim().trim_matches('"').to_string();
-        let value = val.trim().trim_matches('"').to_string();
-        return Some(FilterExpression {
-            attribute,
-            operator: FilterOp::Equals,
-            value,
-        });
+    // Value MUST be a non-empty, properly double-quoted string. Reject
+    // `email = ` (empty), `email = x` (unquoted), and `email = "` (unterminated).
+    let value_raw = value_raw.trim();
+    if value_raw.len() < 2 || !value_raw.starts_with('"') || !value_raw.ends_with('"') {
+        return None;
+    }
+    let value = value_raw[1..value_raw.len() - 1].to_string();
+    if value.is_empty() {
+        return None;
     }
 
-    None
+    Some(FilterExpression {
+        attribute,
+        operator,
+        value,
+    })
 }
 
 /// Check if a user matches a filter expression.
@@ -1340,7 +1351,11 @@ fn matches_filter(user: &User, filter: &FilterExpression) -> bool {
     let user_value = match filter.attribute.as_str() {
         "username" => Some(user.username.as_str()),
         "sub" => Some(user.sub.as_str()),
-        "cognito:user_status" | "status" => Some(user.user_status.as_str()),
+        // `cognito:user_status` is the account confirmation status
+        // (CONFIRMED / UNCONFIRMED / ...); `status` is the Enabled/Disabled
+        // flag. They are distinct filter attributes in real Cognito.
+        "cognito:user_status" => Some(user.user_status.as_str()),
+        "status" => Some(if user.enabled { "Enabled" } else { "Disabled" }),
         attr => user
             .attributes
             .iter()
@@ -1696,6 +1711,245 @@ struct TokenSet {
     id_token: String,
     access_token: String,
     refresh_token: String,
+    /// Access-token lifetime in seconds, honoring the app client's
+    /// `AccessTokenValidity` + `TokenValidityUnits`. Callers surface this as
+    /// `AuthenticationResult.ExpiresIn` and the OAuth `expires_in` field.
+    expires_in: i64,
+}
+
+/// OIDC standard claims that Cognito copies from a user's attributes into
+/// the **id** token (never the access token). `custom:*` attributes are
+/// handled separately and always pass through.
+const STANDARD_ID_TOKEN_CLAIMS: &[&str] = &[
+    "email",
+    "email_verified",
+    "phone_number",
+    "phone_number_verified",
+    "name",
+    "given_name",
+    "family_name",
+    "nickname",
+    "preferred_username",
+    "picture",
+    "locale",
+    "zoneinfo",
+    "birthdate",
+    "gender",
+    "middle_name",
+    "profile",
+    "website",
+    "updated_at",
+    "address",
+];
+
+/// Per-user, per-client context threaded into the token generator so issued
+/// id/access tokens carry real identity claims + group memberships and honor
+/// the app client's configured token validity. Built by [`token_claims_for`]
+/// (holding an account) or [`collect_token_claims`] (holding the shared lock).
+#[derive(Default, Clone)]
+pub(crate) struct TokenClaims {
+    /// The signed-in user's stored attributes (standard OIDC + `custom:*`),
+    /// injected into the id token.
+    pub attributes: Vec<UserAttribute>,
+    /// Group names the user belongs to, ordered by Precedence then creation.
+    /// Emitted as `cognito:groups` on both tokens.
+    pub groups: Vec<String>,
+    /// Access-token lifetime in seconds, already resolved from the client's
+    /// `AccessTokenValidity` + unit. `None` -> AWS default of 3600s.
+    pub access_validity_secs: Option<i64>,
+    /// Id-token lifetime in seconds. `None` -> AWS default of 3600s.
+    pub id_validity_secs: Option<i64>,
+}
+
+impl TokenClaims {
+    fn access_ttl(&self) -> i64 {
+        self.access_validity_secs.filter(|s| *s > 0).unwrap_or(3600)
+    }
+
+    fn id_ttl(&self) -> i64 {
+        self.id_validity_secs.filter(|s| *s > 0).unwrap_or(3600)
+    }
+}
+
+/// Multiplier (in seconds) for a `TokenValidityUnits` value. Cognito
+/// defaults access/id units to `hours`, refresh to `days`.
+fn token_validity_unit_secs(unit: Option<&str>, default: &str) -> i64 {
+    match unit.unwrap_or(default).to_ascii_lowercase().as_str() {
+        "seconds" => 1,
+        "minutes" => 60,
+        "hours" => 3600,
+        "days" => 86400,
+        _ => 3600,
+    }
+}
+
+/// Resolve an app client's (access, id) token lifetimes to seconds, applying
+/// `TokenValidityUnits` (default `hours`) to the raw validity integers.
+fn client_token_validity(client: &UserPoolClient) -> (Option<i64>, Option<i64>) {
+    let units = client.token_validity_units.as_ref();
+    let access = client.access_token_validity.map(|v| {
+        v * token_validity_unit_secs(units.and_then(|u| u.access_token.as_deref()), "hours")
+    });
+    let id = client
+        .id_token_validity
+        .map(|v| v * token_validity_unit_secs(units.and_then(|u| u.id_token.as_deref()), "hours"));
+    (access, id)
+}
+
+/// Group names a user belongs to, ordered by Precedence (ascending; groups
+/// without a precedence sort last) then creation date — matching how Cognito
+/// orders `cognito:groups`.
+fn ordered_user_groups(
+    account: &crate::state::CognitoState,
+    pool_id: &str,
+    username: &str,
+) -> Vec<String> {
+    let Some(names) = account
+        .user_groups
+        .get(pool_id)
+        .and_then(|m| m.get(username))
+    else {
+        return Vec::new();
+    };
+    let pool_groups = account.groups.get(pool_id);
+    let mut with_meta: Vec<(&String, Option<i64>, chrono::DateTime<Utc>)> = names
+        .iter()
+        .map(|n| {
+            let g = pool_groups.and_then(|pg| pg.get(n));
+            (
+                n,
+                g.and_then(|g| g.precedence),
+                g.map(|g| g.creation_date).unwrap_or_else(Utc::now),
+            )
+        })
+        .collect();
+    with_meta.sort_by(|a, b| {
+        match (a.1, b.1) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then(a.2.cmp(&b.2))
+    });
+    with_meta.into_iter().map(|(n, _, _)| n.clone()).collect()
+}
+
+/// Assemble the identity claims + validity for `(pool_id, username,
+/// client_id)` from a single account's state. Missing user/client fall back
+/// to empty defaults so token minting never fails.
+pub(crate) fn token_claims_for(
+    account: &crate::state::CognitoState,
+    pool_id: &str,
+    username: &str,
+    client_id: &str,
+) -> TokenClaims {
+    let attributes = account
+        .users
+        .get(pool_id)
+        .and_then(|u| u.get(username))
+        .map(|u| u.attributes.clone())
+        .unwrap_or_default();
+    let groups = ordered_user_groups(account, pool_id, username);
+    let (access_validity_secs, id_validity_secs) = account
+        .user_pool_clients
+        .get(client_id)
+        .map(client_token_validity)
+        .unwrap_or((None, None));
+    TokenClaims {
+        attributes,
+        groups,
+        access_validity_secs,
+        id_validity_secs,
+    }
+}
+
+/// Resolve a client-supplied sign-in identifier to the stored username key.
+/// With `UsernameAttributes` / `AliasAttributes`, the stored username may be a
+/// UUID while callers sign in with their email / phone / preferred_username.
+/// Returns the matching user's real username, or the input unchanged when it
+/// already is a username or no alias matches.
+pub(crate) fn resolve_alias_username(
+    account: &crate::state::CognitoState,
+    pool_id: &str,
+    supplied: &str,
+) -> String {
+    let Some(pool_users) = account.users.get(pool_id) else {
+        return supplied.to_string();
+    };
+    // A literal username always wins over alias resolution.
+    if pool_users.contains_key(supplied) {
+        return supplied.to_string();
+    }
+    // Attributes that act as sign-in aliases for this pool.
+    let mut alias_attrs: Vec<&str> = Vec::new();
+    if let Some(pool) = account.user_pools.get(pool_id) {
+        if let Some(ua) = &pool.username_attributes {
+            alias_attrs.extend(ua.iter().map(String::as_str));
+        }
+        if let Some(aa) = &pool.alias_attributes {
+            alias_attrs.extend(aa.iter().map(String::as_str));
+        }
+    }
+    if alias_attrs.is_empty() {
+        return supplied.to_string();
+    }
+    for (uname, user) in pool_users {
+        if user
+            .attributes
+            .iter()
+            .any(|attr| alias_attrs.contains(&attr.name.as_str()) && attr.value == supplied)
+        {
+            return uname.clone();
+        }
+    }
+    supplied.to_string()
+}
+
+/// Read-lock variant of [`token_claims_for`] used by the OAuth2 grant
+/// handlers, which search every account for the pool.
+fn collect_token_claims(
+    state: &SharedCognitoState,
+    pool_id: &str,
+    username: &str,
+    client_id: &str,
+) -> TokenClaims {
+    let mas = state.read();
+    for (_, account) in mas.iter() {
+        if account.user_pools.contains_key(pool_id) {
+            return token_claims_for(account, pool_id, username, client_id);
+        }
+    }
+    TokenClaims::default()
+}
+
+/// Inject a user's identity attributes into an **id** token payload. Standard
+/// OIDC claims are type-coerced (booleans for the `*_verified` claims, a
+/// number for `updated_at`); `custom:*` attributes pass through as strings.
+/// `sub` is never overwritten (already set from the user record).
+fn inject_identity_claims(map: &mut serde_json::Map<String, Value>, attributes: &[UserAttribute]) {
+    for attr in attributes {
+        let name = attr.name.as_str();
+        if name == "sub" {
+            continue;
+        }
+        if name.starts_with("custom:") {
+            map.insert(name.to_string(), Value::String(attr.value.clone()));
+        } else if STANDARD_ID_TOKEN_CLAIMS.contains(&name) {
+            let value = match name {
+                "email_verified" | "phone_number_verified" => {
+                    Value::Bool(attr.value.eq_ignore_ascii_case("true"))
+                }
+                "updated_at" => attr
+                    .value
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .unwrap_or_else(|_| Value::String(attr.value.clone())),
+                _ => Value::String(attr.value.clone()),
+            };
+            map.insert(name.to_string(), value);
+        }
+    }
 }
 
 /// Generate Cognito ID/Access/Refresh tokens. `signing` is the pool's
@@ -1705,6 +1959,9 @@ struct TokenSet {
 /// (only reachable from in-process unit tests that intentionally skip
 /// keygen for speed), we synthesize a one-shot keypair so the resulting
 /// JWT still has a real RS256 signature — never a placeholder.
+///
+/// `claims` carries the signed-in user's attributes + group memberships and
+/// the client's token-validity config; see [`TokenClaims`].
 fn generate_tokens(
     pool_id: &str,
     client_id: &str,
@@ -1712,9 +1969,10 @@ fn generate_tokens(
     username: &str,
     region: &str,
     signing: Option<(&str, &str)>,
+    claims: &TokenClaims,
 ) -> TokenSet {
     generate_tokens_with_scope(
-        pool_id, client_id, sub, username, region, signing, None, None,
+        pool_id, client_id, sub, username, region, signing, None, None, claims,
     )
 }
 
@@ -1732,9 +1990,10 @@ fn generate_tokens_with_scope(
     signing: Option<(&str, &str)>,
     scope: Option<&str>,
     nonce: Option<&str>,
+    claims: &TokenClaims,
 ) -> TokenSet {
     generate_tokens_with_overrides(
-        pool_id, client_id, sub, username, region, signing, scope, nonce, None,
+        pool_id, client_id, sub, username, region, signing, scope, nonce, None, claims,
     )
 }
 
@@ -1757,11 +2016,14 @@ fn generate_tokens_with_overrides(
     scope: Option<&str>,
     nonce: Option<&str>,
     overrides: Option<&Value>,
+    claims: &TokenClaims,
 ) -> TokenSet {
     let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
+    let access_ttl = claims.access_ttl();
+    let id_ttl = claims.id_ttl();
 
     let owned_signing = signing
         .map(|(p, k)| (p.to_string(), k.to_string()))
@@ -1780,15 +2042,19 @@ fn generate_tokens_with_overrides(
         "cognito:username": username,
         "token_use": "id",
         "auth_time": now,
-        "exp": now + 3600,
+        "exp": now + id_ttl,
         "iat": now,
         "jti": jti,
     });
-    if let Some(n) = nonce {
-        id_payload
+    {
+        let map = id_payload
             .as_object_mut()
-            .expect("id_payload is always a JSON object")
-            .insert("nonce".to_string(), Value::String(n.to_string()));
+            .expect("id_payload is always a JSON object");
+        // Standard OIDC + custom:* identity claims live on the id token only.
+        inject_identity_claims(map, &claims.attributes);
+        if let Some(n) = nonce {
+            map.insert("nonce".to_string(), Value::String(n.to_string()));
+        }
     }
 
     let access_jti = Uuid::new_v4().to_string();
@@ -1800,12 +2066,26 @@ fn generate_tokens_with_overrides(
         "sub": sub,
         "iss": iss,
         "client_id": client_id,
+        "username": username,
         "token_use": "access",
         "scope": access_scope,
         "jti": access_jti,
-        "exp": now + 3600,
+        "exp": now + access_ttl,
         "iat": now,
     });
+
+    // Real group membership (AdminAddUserToGroup) surfaces as `cognito:groups`
+    // on BOTH tokens. A PreTokenGeneration `groupsToOverride` replaces this
+    // below.
+    if !claims.groups.is_empty() {
+        let groups: Vec<Value> = claims
+            .groups
+            .iter()
+            .map(|g| Value::String(g.clone()))
+            .collect();
+        id_payload["cognito:groups"] = Value::Array(groups.clone());
+        access_payload["cognito:groups"] = Value::Array(groups);
+    }
 
     // PreTokenGeneration trigger merge. Schema (v2):
     //   claimsAndScopeOverrideDetails: {
@@ -1834,9 +2114,19 @@ fn generate_tokens_with_overrides(
         };
         apply_claim_overrides(id_payload.as_object_mut().unwrap(), id_block);
         apply_claim_overrides(access_payload.as_object_mut().unwrap(), access_block);
+        // An explicit `groupsToOverride` (even an empty array) REPLACES the
+        // real-membership groups: a present-but-empty list clears
+        // `cognito:groups`, matching real Cognito. Only a fully absent
+        // `groupOverrideDetails` leaves the real membership untouched.
         if let Some(arr) = group_block["groupsToOverride"].as_array() {
             let groups: Vec<Value> = arr.iter().filter(|v| v.is_string()).cloned().collect();
-            if !groups.is_empty() {
+            if groups.is_empty() {
+                id_payload.as_object_mut().unwrap().remove("cognito:groups");
+                access_payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("cognito:groups");
+            } else {
                 id_payload["cognito:groups"] = Value::Array(groups.clone());
                 access_payload["cognito:groups"] = Value::Array(groups);
             }
@@ -1866,6 +2156,7 @@ fn generate_tokens_with_overrides(
         id_token,
         access_token,
         refresh_token,
+        expires_in: access_ttl,
     }
 }
 
@@ -2336,6 +2627,7 @@ async fn handle_authorization_code_grant(
     } else {
         Some(consumed.scopes.join(" "))
     };
+    let claims = collect_token_claims(state, pool_id, &consumed.username, client_id);
     let tokens = generate_tokens_with_scope(
         pool_id,
         client_id,
@@ -2345,6 +2637,7 @@ async fn handle_authorization_code_grant(
         signing_ref,
         scope_str.as_deref(),
         consumed.nonce.as_deref(),
+        &claims,
     );
 
     {
@@ -2369,6 +2662,7 @@ async fn handle_authorization_code_grant(
                     username: consumed.username.clone(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
                 },
             );
             break;
@@ -2379,7 +2673,7 @@ async fn handle_authorization_code_grant(
         access_token: tokens.access_token,
         id_token: Some(tokens.id_token),
         refresh_token: Some(tokens.refresh_token),
-        expires_in: 3600,
+        expires_in: tokens.expires_in,
         token_type: "Bearer".to_string(),
     })
 }
@@ -2418,7 +2712,16 @@ async fn handle_refresh_token_grant(
     };
     let signing = ensure_pool_signing_key(state, pool_id).await;
     let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
-    let tokens = generate_tokens(pool_id, client_id, &sub, &username, region, signing_ref);
+    let claims = collect_token_claims(state, pool_id, &username, client_id);
+    let tokens = generate_tokens(
+        pool_id,
+        client_id,
+        &sub,
+        &username,
+        region,
+        signing_ref,
+        &claims,
+    );
     let rotated_refresh = {
         let mut mas = state.write();
         let mut new_rt = None;
@@ -2455,6 +2758,7 @@ async fn handle_refresh_token_grant(
                     username: username.clone(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
                 },
             );
             break;
@@ -2465,7 +2769,7 @@ async fn handle_refresh_token_grant(
         access_token: tokens.access_token,
         id_token: Some(tokens.id_token),
         refresh_token: rotated_refresh,
-        expires_in: 3600,
+        expires_in: tokens.expires_in,
         token_type: "Bearer".to_string(),
     })
 }
@@ -2521,12 +2825,16 @@ async fn handle_client_credentials_grant(
 
     let signing = ensure_pool_signing_key(state, pool_id).await;
     let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+    // client_credentials has no user, but still honors the client's
+    // AccessTokenValidity.
+    let access_ttl = collect_token_claims(state, pool_id, client_id, client_id).access_ttl();
     let access_token = build_client_credentials_access_token(
         pool_id,
         client_id,
         Some(&granted),
         region,
         signing_ref,
+        access_ttl,
     );
 
     {
@@ -2545,6 +2853,7 @@ async fn handle_client_credentials_grant(
                     username: client_id.to_string(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(access_ttl)),
                 },
             );
             break;
@@ -2555,7 +2864,7 @@ async fn handle_client_credentials_grant(
         access_token,
         id_token: None,
         refresh_token: None,
-        expires_in: 3600,
+        expires_in: access_ttl,
         token_type: "Bearer".to_string(),
     })
 }
@@ -2586,6 +2895,7 @@ fn build_client_credentials_access_token(
     scope: Option<&str>,
     region: &str,
     signing: Option<(&str, &str)>,
+    ttl_secs: i64,
 ) -> String {
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
@@ -2612,7 +2922,7 @@ fn build_client_credentials_access_token(
         "token_use": "access",
         "scope": scope.unwrap_or(""),
         "jti": jti,
-        "exp": now + 3600,
+        "exp": now + ttl_secs,
         "iat": now,
     });
     sign_jwt(&header, &payload, pem)
@@ -3092,6 +3402,7 @@ pub async fn handle_oauth2_authorize(
             };
             let signing = ensure_pool_signing_key(state, &pool_id).await;
             let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+            let claims = collect_token_claims(state, &pool_id, username, &req.client_id);
             let tokens = generate_tokens_with_scope(
                 &pool_id,
                 &req.client_id,
@@ -3101,6 +3412,7 @@ pub async fn handle_oauth2_authorize(
                 signing_ref,
                 scope_str.as_deref(),
                 req.nonce.as_deref(),
+                &claims,
             );
             // Persist the access_token so /oauth2/userInfo and
             // /oauth2/revoke can resolve it back to the user.
@@ -3117,15 +3429,19 @@ pub async fn handle_oauth2_authorize(
                             username: username.to_string(),
                             client_id: req.client_id.clone(),
                             issued_at: Utc::now(),
+                            expires_at: Some(
+                                Utc::now() + chrono::Duration::seconds(tokens.expires_in),
+                            ),
                         },
                     );
                     break;
                 }
             }
             let mut fragment = format!(
-                "access_token={}&id_token={}&token_type=Bearer&expires_in=3600",
+                "access_token={}&id_token={}&token_type=Bearer&expires_in={}",
                 urlencoding_encode(&tokens.access_token),
                 urlencoding_encode(&tokens.id_token),
+                tokens.expires_in,
             );
             if let Some(s) = req.state.as_deref() {
                 fragment.push_str("&state=");

@@ -167,6 +167,11 @@ impl CognitoService {
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let users = state.users.get(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -209,6 +214,11 @@ impl CognitoService {
         let accounts = self.state.read();
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         let users = state.users.get(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -268,6 +278,11 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let users = state.users.get_mut(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -309,6 +324,11 @@ impl CognitoService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         let users = state.users.get_mut(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -702,7 +722,10 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let tokens = super::generate_tokens(&pool_id, client_id, &sub, &username, &region, signing);
+        let claims = super::token_claims_for(state, &pool_id, &username, client_id);
+        let tokens = super::generate_tokens(
+            &pool_id, client_id, &sub, &username, &region, signing, &claims,
+        );
 
         let rotation_enabled = state
             .user_pool_clients
@@ -736,6 +759,7 @@ impl CognitoService {
                 username,
                 client_id: client_id.to_string(),
                 issued_at: now,
+                expires_at: Some(now + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
 
@@ -743,7 +767,7 @@ impl CognitoService {
             "AccessToken": tokens.access_token,
             "IdToken": tokens.id_token,
             "TokenType": "Bearer",
-            "ExpiresIn": 3600
+            "ExpiresIn": tokens.expires_in
         });
         if let Some(ref rt) = rotated_refresh {
             auth["RefreshToken"] = json!(rt);

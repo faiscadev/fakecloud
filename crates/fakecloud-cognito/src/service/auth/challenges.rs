@@ -38,7 +38,8 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing);
+        let claims = crate::service::token_claims_for(state, pool_id, username, client_id);
+        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing, &claims);
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
@@ -56,6 +57,7 @@ impl CognitoService {
                 username: username.to_string(),
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
         state.auth_events.push(AuthEvent {
@@ -75,7 +77,7 @@ impl CognitoService {
                 "IdToken": tokens.id_token,
                 "RefreshToken": tokens.refresh_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }
@@ -517,7 +519,10 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let tokens = generate_tokens(&pool_id, client_id, &sub, &username, &region, signing);
+        let claims = crate::service::token_claims_for(state, &pool_id, &username, client_id);
+        let tokens = generate_tokens(
+            &pool_id, client_id, &sub, &username, &region, signing, &claims,
+        );
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
@@ -536,6 +541,7 @@ impl CognitoService {
                 username,
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
 
@@ -545,7 +551,7 @@ impl CognitoService {
                 "IdToken": tokens.id_token,
                 "RefreshToken": tokens.refresh_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }
@@ -856,7 +862,8 @@ impl CognitoService {
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing);
+        let claims = crate::service::token_claims_for(state, pool_id, username, client_id);
+        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing, &claims);
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
@@ -874,6 +881,7 @@ impl CognitoService {
                 username: username.to_string(),
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
         state.auth_events.push(AuthEvent {
@@ -893,7 +901,7 @@ impl CognitoService {
                 "IdToken": tokens.id_token,
                 "RefreshToken": tokens.refresh_token,
                 "TokenType": "Bearer",
-                "ExpiresIn": 3600
+                "ExpiresIn": tokens.expires_in
             }
         })))
     }
