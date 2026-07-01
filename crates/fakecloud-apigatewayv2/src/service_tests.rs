@@ -2706,3 +2706,507 @@ async fn create_domain_name_reports_available_status() {
     assert_eq!(cfg0["ipAddressType"], "ipv4");
     assert!(cfg0["apiGatewayDomainName"].as_str().is_some());
 }
+
+// ── Batch 6: field-drop + stub fixes ──
+
+/// Route Create/Update round-trips the previously dropped optional members.
+#[tokio::test]
+async fn route_persists_extended_fields() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "routeKey": "GET /items",
+        "apiKeyRequired": true,
+        "authorizationScopes": ["scope.a", "scope.b"],
+        "modelSelectionExpression": "$request.body.action",
+        "operationName": "ListItems",
+        "requestModels": {"application/json": "MyModel"},
+        "requestParameters": {"route.request.header.x": {"required": true}},
+        "routeResponseSelectionExpression": "$default",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let b = body_json(&resp);
+    let route_id = b["routeId"].as_str().unwrap().to_string();
+    assert_eq!(b["apiKeyRequired"], true);
+
+    // Read back via GetRoute — the fields must survive the store.
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/routes/{route_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["apiKeyRequired"], true);
+    assert_eq!(b["authorizationScopes"][1], "scope.b");
+    assert_eq!(b["modelSelectionExpression"], "$request.body.action");
+    assert_eq!(b["operationName"], "ListItems");
+    assert_eq!(b["requestModels"]["application/json"], "MyModel");
+    assert_eq!(
+        b["requestParameters"]["route.request.header.x"]["required"],
+        true
+    );
+    assert_eq!(b["routeResponseSelectionExpression"], "$default");
+
+    // Arbitrary-key maps must be stored verbatim — no synthetic
+    // first-letter-swapped sibling keys ("Application/json", etc).
+    assert_eq!(b["requestModels"].as_object().unwrap().len(), 1);
+    assert!(b["requestModels"].get("Application/json").is_none());
+    let params = b["requestParameters"].as_object().unwrap();
+    assert_eq!(params.len(), 1);
+    assert!(params.get("Route.request.header.x").is_none());
+    // ...but the nested modeled struct's member is still case-normalized.
+    assert_eq!(params["route.request.header.x"]["required"], true);
+
+    // Update one field; the rest must stay.
+    let body = serde_json::json!({"operationName": "Renamed"});
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/routes/{route_id}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/routes/{route_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["operationName"], "Renamed");
+    assert_eq!(b["apiKeyRequired"], true);
+}
+
+/// Stage Create/Update round-trips ClientCertificateId / DefaultRouteSettings /
+/// RouteSettings / Tags.
+#[tokio::test]
+async fn stage_persists_extended_fields() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "clientCertificateId": "cert-123",
+        "defaultRouteSettings": {"throttlingBurstLimit": 100, "throttlingRateLimit": 50.0},
+        "routeSettings": {"GET /items": {"throttlingBurstLimit": 5}},
+        "tags": {"team": "platform"},
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["clientCertificateId"], "cert-123");
+    assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
+    assert_eq!(b["routeSettings"]["GET /items"]["throttlingBurstLimit"], 5);
+    assert_eq!(b["tags"]["team"], "platform");
+
+    // Update tags + client cert.
+    let body = serde_json::json!({
+        "clientCertificateId": "cert-999",
+        "tags": {"env": "staging"},
+    });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/stages/prod"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["clientCertificateId"], "cert-999");
+    assert_eq!(b["tags"]["env"], "staging");
+    // Untouched field preserved.
+    assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
+    // routeSettings map key ("GET /items") is arbitrary and kept verbatim.
+    let rs = b["routeSettings"].as_object().unwrap();
+    assert_eq!(rs.len(), 1);
+    assert!(rs.contains_key("GET /items"));
+
+    // Explicit null routeSettings clears them; absent field preserves.
+    let body = serde_json::json!({ "routeSettings": null });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/stages/prod"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("routeSettings").is_none());
+    // A subsequent patch that omits routeSettings must not resurrect them.
+    let body = serde_json::json!({ "description": "d" });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/stages/prod"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("routeSettings").is_none());
+    // defaultRouteSettings untouched by the routeSettings clears.
+    assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
+}
+
+/// Authorizer Create/Update round-trips AuthorizerCredentialsArn /
+/// IdentityValidationExpression.
+#[tokio::test]
+async fn authorizer_persists_extended_fields() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "my-auth",
+        "authorizerType": "REQUEST",
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:auth/invocations",
+        "identitySource": ["$request.header.Authorization"],
+        "authorizerCredentialsArn": "arn:aws:iam::123456789012:role/invoke",
+        "identityValidationExpression": "^Bearer .+$",
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let auth_id = b["authorizerId"].as_str().unwrap().to_string();
+
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/authorizers/{auth_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(
+        b["authorizerCredentialsArn"],
+        "arn:aws:iam::123456789012:role/invoke"
+    );
+    assert_eq!(b["identityValidationExpression"], "^Bearer .+$");
+
+    let body = serde_json::json!({"identityValidationExpression": "^Token .+$"});
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/authorizers/{auth_id}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/authorizers/{auth_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["identityValidationExpression"], "^Token .+$");
+    assert_eq!(
+        b["authorizerCredentialsArn"],
+        "arn:aws:iam::123456789012:role/invoke"
+    );
+}
+
+fn petstore_spec() -> String {
+    serde_json::json!({
+        "openapi": "3.0.1",
+        "info": {"title": "petstore", "version": "2.5", "description": "pets"},
+        "paths": {
+            "/pets": {
+                "get": {"responses": {"200": {"description": "ok"}}},
+                "post": {"responses": {"200": {"description": "ok"}}}
+            },
+            "/pets/{id}": {
+                "get": {
+                    "x-amazon-apigateway-integration": {
+                        "type": "http_proxy",
+                        "uri": "https://backend.example.com/pets",
+                        "httpMethod": "GET",
+                        "payloadFormatVersion": "1.0"
+                    },
+                    "responses": {"200": {"description": "ok"}}
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+/// ImportApi parses the spec, creates a real API, and synthesizes routes +
+/// integrations that GetApi/GetRoutes read back.
+#[tokio::test]
+async fn import_api_creates_real_api_and_routes() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+
+    let body = serde_json::json!({"body": petstore_spec()});
+    let req = make_request(Method::PUT, "/v2/apis", &body.to_string());
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let api_id = b["apiId"].as_str().unwrap().to_string();
+    assert_eq!(b["name"], "petstore");
+    assert_eq!(b["version"], "2.5");
+    assert_eq!(b["protocolType"], "HTTP");
+
+    // GetApi must find it (not a discarded constant).
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["name"], "petstore");
+
+    // Three routes: GET/POST /pets and GET /pets/{id}.
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/routes"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let keys: Vec<String> = b["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["routeKey"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys.len(), 3);
+    assert!(keys.contains(&"GET /pets".to_string()));
+    assert!(keys.contains(&"POST /pets".to_string()));
+    assert!(keys.contains(&"GET /pets/{id}".to_string()));
+
+    // The integration on GET /pets/{id} is wired as the route target.
+    let integrated = b["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["routeKey"] == "GET /pets/{id}")
+        .unwrap();
+    assert!(integrated["target"]
+        .as_str()
+        .unwrap()
+        .starts_with("integrations/"));
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/integrations"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        b["items"][0]["integrationUri"],
+        "https://backend.example.com/pets"
+    );
+}
+
+/// ImportApi accepts a YAML document too.
+#[tokio::test]
+async fn import_api_accepts_yaml() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let yaml = "openapi: 3.0.1\ninfo:\n  title: yamlapi\n  version: '1.0'\npaths:\n  /ping:\n    get:\n      responses:\n        '200':\n          description: ok\n";
+    let body = serde_json::json!({"body": yaml});
+    let req = make_request(Method::PUT, "/v2/apis", &body.to_string());
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let api_id = b["apiId"].as_str().unwrap().to_string();
+    assert_eq!(b["name"], "yamlapi");
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/routes"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["items"][0]["routeKey"], "GET /ping");
+}
+
+/// ReimportApi replaces the routes of an existing API and 404s on unknown ids.
+#[tokio::test]
+async fn reimport_api_replaces_routes() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+
+    // Seed via import.
+    let body = serde_json::json!({"body": petstore_spec()});
+    let req = make_request(Method::PUT, "/v2/apis", &body.to_string());
+    let api_id = body_json(&svc.handle(req).await.unwrap())["apiId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Reimport a smaller spec.
+    let spec2 = serde_json::json!({
+        "openapi": "3.0.1",
+        "info": {"title": "petstore-v2", "version": "3.0"},
+        "paths": {"/health": {"get": {"responses": {"200": {"description": "ok"}}}}}
+    })
+    .to_string();
+    let body = serde_json::json!({"body": spec2});
+    let req = make_request(
+        Method::PUT,
+        &format!("/v2/apis/{api_id}"),
+        &body.to_string(),
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["name"], "petstore-v2");
+    assert_eq!(b["version"], "3.0");
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/routes"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let items = b["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["routeKey"], "GET /health");
+
+    // Unknown API id 404s.
+    let body = serde_json::json!({"body": petstore_spec()});
+    let req = make_request(Method::PUT, "/v2/apis/does-not-exist", &body.to_string());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
+}
+
+/// ExportApi emits a real OpenAPI document derived from the API's routes.
+#[tokio::test]
+async fn export_api_generates_openapi_from_routes() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let body = serde_json::json!({"body": petstore_spec()});
+    let req = make_request(Method::PUT, "/v2/apis", &body.to_string());
+    let api_id = body_json(&svc.handle(req).await.unwrap())["apiId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut req = make_request(Method::GET, &format!("/v2/apis/{api_id}/exports/OAS30"), "");
+    req.query_params
+        .insert("outputType".to_string(), "JSON".to_string());
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let doc: Value = serde_json::from_str(b["body"].as_str().unwrap()).unwrap();
+    assert_eq!(doc["openapi"], "3.0.1");
+    assert_eq!(doc["info"]["title"], "petstore");
+    assert!(doc["paths"]["/pets"].get("get").is_some());
+    assert!(doc["paths"]["/pets"].get("post").is_some());
+    assert!(doc["paths"]["/pets/{id}"].get("get").is_some());
+}
+
+/// ExportApi 404s on an unknown API and requires OutputType.
+#[tokio::test]
+async fn export_api_validates() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    // Missing OutputType. The apigatewayv2 model marks OutputType
+    // @required (the clientOptional trait only nulls it in the generated
+    // SDK; the server still rejects it), so this is a 400 BadRequestException
+    // rather than a defaulted export.
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/exports/OAS30"), "");
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+
+    // Unknown API.
+    let mut req = make_request(Method::GET, "/v2/apis/nope/exports/OAS30", "");
+    req.query_params
+        .insert("outputType".to_string(), "JSON".to_string());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
+}
+
+/// DeleteCorsConfiguration clears the stored CORS config and persists it.
+#[tokio::test]
+async fn delete_cors_configuration_clears_config() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let body = serde_json::json!({
+        "name": "cors-api",
+        "protocolType": "HTTP",
+        "corsConfiguration": {"allowOrigins": ["*"], "allowMethods": ["GET"]},
+    });
+    let req = make_request(Method::POST, "/v2/apis", &body.to_string());
+    let api_id = body_json(&svc.create_api(&req).unwrap())["apiId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("corsConfiguration").is_some());
+
+    let req = make_request(Method::DELETE, &format!("/v2/apis/{api_id}/cors"), "");
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("corsConfiguration").is_none());
+
+    // Unknown API 404s.
+    let req = make_request(Method::DELETE, "/v2/apis/missing/cors", "");
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
+}
+
+/// DeleteAccessLogSettings clears the stage's access log settings.
+#[tokio::test]
+async fn delete_access_log_settings_clears_settings() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "accessLogSettings": {
+            "destinationArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigw:*",
+            "format": "$context.requestId"
+        }
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("accessLogSettings").is_some());
+
+    let req = make_request(
+        Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/prod/accesslogsettings"),
+        "",
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("accessLogSettings").is_none());
+}
+
+/// GetModelTemplate derives a template from the model schema instead of a
+/// fixed constant.
+#[tokio::test]
+async fn get_model_template_derives_from_schema() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "count": {"type": "integer"},
+            "active": {"type": "boolean"}
+        }
+    })
+    .to_string();
+    let body = serde_json::json!({"name": "Widget", "schema": schema});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/models"),
+        &body.to_string(),
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let model_id = b["modelId"].as_str().unwrap().to_string();
+
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/models/{model_id}/template"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    // Not the old {"value":"{}"} constant — reflects the schema shape.
+    let tmpl: Value = serde_json::from_str(b["value"].as_str().unwrap()).unwrap();
+    assert_eq!(tmpl["id"], "");
+    assert_eq!(tmpl["count"], 0);
+    assert_eq!(tmpl["active"], false);
+}

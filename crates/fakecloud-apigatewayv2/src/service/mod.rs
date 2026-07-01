@@ -330,6 +330,9 @@ impl ApiGatewayV2Service {
         if let Some(b) = body["disableExecuteApiEndpoint"].as_bool() {
             api.disable_execute_api_endpoint = b;
         }
+        if let Some(v) = body["version"].as_str() {
+            api.version = Some(v.to_string());
+        }
 
         Ok(AwsResponse::ok_json(json!(api)))
     }
@@ -710,31 +713,109 @@ fn normalize_request_body_keys(mut req: AwsRequest) -> AwsRequest {
     req
 }
 
-/// Walk the body and, for every map key that starts with an uppercase
-/// ASCII letter, insert a sibling entry whose first letter is lowercased
-/// (and vice versa for camelCase keys). This is purely additive — the
-/// original key is preserved — so handlers that read either case keep
-/// working through the same body. The size cost is negligible compared
-/// to the wins in handler portability.
+/// Members whose values are maps with *arbitrary, user-supplied keys*
+/// (`map<string, ...>` in the Smithy model). The `@jsonName` first-letter
+/// normalization applies to modeled member names only — it must NOT rewrite
+/// the keys of these maps (content types, request-parameter expressions,
+/// route keys, tag names, ...), or a request like
+/// `requestModels: {"application/json": "M"}` would gain a corrupt
+/// `Application/json` sibling. Their *values* are still normalized so that a
+/// nested modeled struct (e.g. `requestParameters`'
+/// `ParameterConstraints.required`) keeps working in either case.
+const ARBITRARY_KEY_MAPS: &[&str] = &[
+    "requestModels",
+    "responseModels",
+    "requestParameters",
+    "responseParameters",
+    "requestTemplates",
+    "responseTemplates",
+    "routeSettings",
+    "stageVariables",
+    "tags",
+    "variables",
+];
+
+/// Whether `field` (in either case) names an arbitrary-key map member.
+fn is_arbitrary_key_map(field: &str) -> bool {
+    let mut chars = field.chars();
+    let camel = match chars.next() {
+        Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => return false,
+    };
+    ARBITRARY_KEY_MAPS.contains(&camel.as_str())
+}
+
+/// Walk the body and, for every *modeled* map key that starts with an
+/// uppercase ASCII letter, insert a sibling entry whose first letter is
+/// lowercased (and vice versa for camelCase keys). This is purely additive —
+/// the original key is preserved — so handlers that read either case keep
+/// working through the same body. Keys of arbitrary-key maps (see
+/// `ARBITRARY_KEY_MAPS`) are left exactly as sent.
 fn lowercase_first_letter_keys(v: serde_json::Value) -> serde_json::Value {
+    normalize_member_keys(v, false)
+}
+
+/// `keys_are_arbitrary` is true when the current object's own keys are
+/// user-supplied (a `map<string, ...>` value) and must be preserved verbatim.
+fn normalize_member_keys(v: serde_json::Value, keys_are_arbitrary: bool) -> serde_json::Value {
     match v {
         serde_json::Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len() * 2);
             for (k, val) in map {
-                let normalized = lowercase_first_letter_keys(val);
-                let alt_key = swap_first_letter_case(&k);
-                if alt_key != k && !out.contains_key(&alt_key) {
-                    out.insert(alt_key, normalized.clone());
+                // A child is an arbitrary-key map iff *this* member name says
+                // so — regardless of the current level being arbitrary.
+                let child_arbitrary = is_arbitrary_key_map(&k);
+                let normalized = normalize_member_keys(val, child_arbitrary);
+                if !keys_are_arbitrary {
+                    let alt_key = swap_first_letter_case(&k);
+                    if alt_key != k && !out.contains_key(&alt_key) {
+                        out.insert(alt_key, normalized.clone());
+                    }
                 }
                 out.insert(k, normalized);
             }
             serde_json::Value::Object(out)
         }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(lowercase_first_letter_keys).collect())
-        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|x| normalize_member_keys(x, false))
+                .collect(),
+        ),
         other => other,
     }
+}
+
+/// Parse a JSON array of strings into `Vec<String>`, or `None` when the
+/// value is not an array.
+pub(crate) fn parse_string_array(v: &serde_json::Value) -> Option<Vec<String>> {
+    v.as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect()
+    })
+}
+
+/// Parse a JSON object of `string -> string` into a `BTreeMap`, or `None`
+/// when the value is not an object.
+pub(crate) fn parse_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    v.as_object().map(|obj| {
+        obj.iter()
+            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    })
+}
+
+/// Parse a JSON object of `string -> Value` into a `BTreeMap`, preserving
+/// each value verbatim, or `None` when the value is not an object.
+pub(crate) fn parse_value_map(
+    v: &serde_json::Value,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    v.as_object().map(|obj| {
+        obj.iter()
+            .map(|(k, val)| (k.clone(), val.clone()))
+            .collect()
+    })
 }
 
 fn swap_first_letter_case(s: &str) -> String {

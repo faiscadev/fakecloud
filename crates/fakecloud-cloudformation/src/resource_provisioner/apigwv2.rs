@@ -5,6 +5,57 @@
 
 use super::*;
 
+/// Lowercase the first ASCII letter of a key.
+fn lower_first_ascii(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Convert a `RouteSettings` JSON object's PascalCase CloudFormation member
+/// names (`ThrottlingBurstLimit`, `LoggingLevel`, ...) to the camelCase
+/// wire/response names (`throttlingBurstLimit`, `loggingLevel`, ...) so that
+/// GetStage returns the modeled fields rather than PascalCase nested keys.
+fn route_settings_to_wire(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, val)| (lower_first_ascii(k), val.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Parse a CloudFormation `Tags` property in either the documented map form
+/// (`{"Key": "Value"}`) or the Key/Value array form
+/// (`[{"Key": .., "Value": ..}]`). Returns `None` when the property is absent
+/// or neither shape.
+fn parse_cfn_tag_map(v: Option<&serde_json::Value>) -> Option<BTreeMap<String, String>> {
+    let v = v?;
+    if let Some(obj) = v.as_object() {
+        return Some(
+            obj.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+        );
+    }
+    if let Some(arr) = v.as_array() {
+        return Some(
+            arr.iter()
+                .filter_map(|entry| {
+                    let k = entry.get("Key").and_then(|x| x.as_str())?;
+                    let val = entry.get("Value").and_then(|x| x.as_str())?;
+                    Some((k.to_string(), val.to_string()))
+                })
+                .collect(),
+        );
+    }
+    None
+}
+
 impl ResourceProvisioner {
     // --- API Gateway v2 (HTTP/WebSocket APIs) ---
 
@@ -160,6 +211,39 @@ impl ResourceProvisioner {
                 .map(String::from),
             authorizer_id: props
                 .get("AuthorizerId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            api_key_required: props.get("ApiKeyRequired").and_then(|v| v.as_bool()),
+            authorization_scopes: props
+                .get("AuthorizationScopes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+            model_selection_expression: props
+                .get("ModelSelectionExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            operation_name: props
+                .get("OperationName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            request_models: props
+                .get("RequestModels")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
+            request_parameters: props
+                .get("RequestParameters")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            route_response_selection_expression: props
+                .get("RouteResponseSelectionExpression")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         };
@@ -463,6 +547,22 @@ impl ResourceProvisioner {
             web_acl_arn: None,
             stage_variables,
             access_log_settings,
+            client_certificate_id: props
+                .get("ClientCertificateId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            default_route_settings: props
+                .get("DefaultRouteSettings")
+                .map(route_settings_to_wire),
+            route_settings: props
+                .get("RouteSettings")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .map(|(k, v)| (k.clone(), route_settings_to_wire(v)))
+                        .collect()
+                }),
+            tags: parse_cfn_tag_map(props.get("Tags")),
         };
 
         let mut accounts = self.apigatewayv2_state.write();
@@ -620,6 +720,14 @@ impl ResourceProvisioner {
                 .get("AuthorizerResultTtlInSeconds")
                 .and_then(|v| v.as_i64()),
             enable_simple_responses: props.get("EnableSimpleResponses").and_then(|v| v.as_bool()),
+            authorizer_credentials_arn: props
+                .get("AuthorizerCredentialsArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            identity_validation_expression: props
+                .get("IdentityValidationExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
         let mut accounts = self.apigatewayv2_state.write();
         let state = accounts.get_or_create(&self.account_id);
@@ -1392,5 +1500,58 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone())
             .with("ModelId", id)
             .with("ApiId", api_id))
+    }
+}
+
+#[cfg(test)]
+mod apigwv2_helper_tests {
+    use super::{parse_cfn_tag_map, route_settings_to_wire};
+    use serde_json::json;
+
+    #[test]
+    fn route_settings_translated_to_camel_wire_names() {
+        // CloudFormation uses PascalCase RouteSettings members; GetStage must
+        // return the camelCase wire fields.
+        let cfn = json!({
+            "ThrottlingBurstLimit": 100,
+            "ThrottlingRateLimit": 50.0,
+            "DetailedMetricsEnabled": true,
+            "LoggingLevel": "INFO",
+            "DataTraceEnabled": false
+        });
+        let wire = route_settings_to_wire(&cfn);
+        assert_eq!(wire["throttlingBurstLimit"], 100);
+        assert_eq!(wire["throttlingRateLimit"], 50.0);
+        assert_eq!(wire["detailedMetricsEnabled"], true);
+        assert_eq!(wire["loggingLevel"], "INFO");
+        assert_eq!(wire["dataTraceEnabled"], false);
+        // No PascalCase members leak through.
+        assert!(wire.get("ThrottlingBurstLimit").is_none());
+    }
+
+    #[test]
+    fn cfn_tags_parsed_from_map_shape() {
+        let tags =
+            parse_cfn_tag_map(Some(&json!({"Environment": "prod", "team": "core"}))).unwrap();
+        assert_eq!(tags.get("Environment").map(String::as_str), Some("prod"));
+        assert_eq!(tags.get("team").map(String::as_str), Some("core"));
+    }
+
+    #[test]
+    fn cfn_tags_parsed_from_key_value_array_shape() {
+        // AWS templates may carry Tags as the [{Key, Value}] array form; these
+        // must not be silently dropped.
+        let tags = parse_cfn_tag_map(Some(&json!([
+            {"Key": "Environment", "Value": "prod"},
+            {"Key": "team", "Value": "core"}
+        ])))
+        .unwrap();
+        assert_eq!(tags.get("Environment").map(String::as_str), Some("prod"));
+        assert_eq!(tags.get("team").map(String::as_str), Some("core"));
+    }
+
+    #[test]
+    fn cfn_tags_absent_is_none() {
+        assert!(parse_cfn_tag_map(None).is_none());
     }
 }

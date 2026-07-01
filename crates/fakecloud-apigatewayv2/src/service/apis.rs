@@ -80,6 +80,7 @@ impl ApiGatewayV2Service {
         let mut api = HttpApi::new(api_id, name, description, tags, region);
         api.cors_configuration = cors_configuration;
         api.protocol_type = protocol_type.clone();
+        api.version = body["version"].as_str().map(|s| s.to_string());
         if let Some(ip) = requested_ip_type {
             api.ip_address_type = ip;
         }

@@ -44,6 +44,17 @@ impl ApiGatewayV2Service {
             target,
             authorization_type,
             authorizer_id,
+            api_key_required: body["apiKeyRequired"].as_bool(),
+            authorization_scopes: parse_string_array(&body["authorizationScopes"]),
+            model_selection_expression: body["modelSelectionExpression"]
+                .as_str()
+                .map(|s| s.to_string()),
+            operation_name: body["operationName"].as_str().map(|s| s.to_string()),
+            request_models: parse_string_map(&body["requestModels"]),
+            request_parameters: parse_value_map(&body["requestParameters"]),
+            route_response_selection_expression: body["routeResponseSelectionExpression"]
+                .as_str()
+                .map(|s| s.to_string()),
         };
 
         let mut accounts = self.state.write();
@@ -205,6 +216,34 @@ impl ApiGatewayV2Service {
 
         if let Some(authorizer_id) = body["authorizerId"].as_str() {
             route.authorizer_id = Some(authorizer_id.to_string());
+        }
+
+        if let Some(api_key_required) = body["apiKeyRequired"].as_bool() {
+            route.api_key_required = Some(api_key_required);
+        }
+
+        if let Some(scopes) = parse_string_array(&body["authorizationScopes"]) {
+            route.authorization_scopes = Some(scopes);
+        }
+
+        if let Some(expr) = body["modelSelectionExpression"].as_str() {
+            route.model_selection_expression = Some(expr.to_string());
+        }
+
+        if let Some(name) = body["operationName"].as_str() {
+            route.operation_name = Some(name.to_string());
+        }
+
+        if let Some(models) = parse_string_map(&body["requestModels"]) {
+            route.request_models = Some(models);
+        }
+
+        if let Some(params) = parse_value_map(&body["requestParameters"]) {
+            route.request_parameters = Some(params);
+        }
+
+        if let Some(expr) = body["routeResponseSelectionExpression"].as_str() {
+            route.route_response_selection_expression = Some(expr.to_string());
         }
 
         Ok(AwsResponse::ok_json(json!(route)))

@@ -77,6 +77,12 @@ impl ApiGatewayV2Service {
                 .map(|s| s.to_string()),
             authorizer_result_ttl_in_seconds: body["authorizerResultTtlInSeconds"].as_i64(),
             enable_simple_responses: body["enableSimpleResponses"].as_bool(),
+            authorizer_credentials_arn: body["authorizerCredentialsArn"]
+                .as_str()
+                .map(|s| s.to_string()),
+            identity_validation_expression: body["identityValidationExpression"]
+                .as_str()
+                .map(|s| s.to_string()),
         };
 
         let mut accounts = self.state.write();
@@ -272,6 +278,14 @@ impl ApiGatewayV2Service {
 
         if let Some(v) = body["enableSimpleResponses"].as_bool() {
             authorizer.enable_simple_responses = Some(v);
+        }
+
+        if let Some(v) = body["authorizerCredentialsArn"].as_str() {
+            authorizer.authorizer_credentials_arn = Some(v.to_string());
+        }
+
+        if let Some(v) = body["identityValidationExpression"].as_str() {
+            authorizer.identity_validation_expression = Some(v.to_string());
         }
 
         Ok(AwsResponse::ok_json(json!(authorizer)))

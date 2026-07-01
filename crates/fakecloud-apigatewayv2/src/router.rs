@@ -174,9 +174,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "GET /pets".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);
@@ -192,9 +190,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "GET /pets/{id}".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);
@@ -213,9 +209,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "GET /api/{proxy+}".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);
@@ -235,16 +229,12 @@ mod tests {
             Route {
                 route_id: "r1".to_string(),
                 route_key: "GET /pets/{id}".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
             Route {
                 route_id: "r2".to_string(),
                 route_key: "GET /pets/special".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
         ];
 
@@ -261,16 +251,12 @@ mod tests {
             Route {
                 route_id: "r1".to_string(),
                 route_key: "GET /api/{proxy+}".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
             Route {
                 route_id: "r2".to_string(),
                 route_key: "GET /api/{version}/users".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
         ];
 
@@ -286,9 +272,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "ANY /pets".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);
@@ -303,16 +287,12 @@ mod tests {
             Route {
                 route_id: "any".to_string(),
                 route_key: "ANY /pets".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
             Route {
                 route_id: "get".to_string(),
                 route_key: "GET /pets".to_string(),
-                target: None,
-                authorization_type: None,
-                authorizer_id: None,
+                ..Default::default()
             },
         ];
 
@@ -327,9 +307,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "GET /pets".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);
@@ -342,9 +320,7 @@ mod tests {
         let routes = vec![Route {
             route_id: "r1".to_string(),
             route_key: "GET /users/{userId}/posts/{postId}".to_string(),
-            target: None,
-            authorization_type: None,
-            authorizer_id: None,
+            ..Default::default()
         }];
 
         let router = Router::new(routes);

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -217,6 +218,10 @@ pub struct HttpApi {
     /// `ipv4` (default) or `dualstack`. Real AWS always returns this on
     /// GetApi and Terraform's provider asserts on it.
     pub ip_address_type: String,
+    /// User-supplied API version string. AWS echoes it on GetApi and it is
+    /// carried through from an imported OpenAPI spec's `info.version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl HttpApi {
@@ -243,6 +248,7 @@ impl HttpApi {
             route_selection_expression: "$request.method $request.path".to_string(),
             disable_execute_api_endpoint: false,
             ip_address_type: "ipv4".to_string(),
+            version: None,
         }
     }
 }
@@ -264,7 +270,7 @@ pub struct CorsConfiguration {
     pub max_age: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route {
     pub route_id: String,
@@ -275,6 +281,28 @@ pub struct Route {
     pub authorization_type: Option<String>, // "NONE", "JWT", "CUSTOM"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorizer_id: Option<String>,
+    /// Whether an API key is required for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_required: Option<bool>,
+    /// OAuth scopes required when the route uses a JWT authorizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_scopes: Option<Vec<String>>,
+    /// Model selection expression (WebSocket APIs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection_expression: Option<String>,
+    /// Friendly operation name for the route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_name: Option<String>,
+    /// Request models keyed by content type (WebSocket APIs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_models: Option<BTreeMap<String, String>>,
+    /// Request parameters keyed by `$request.*` expression; each value is a
+    /// `ParameterConstraints` object (`{"required": bool}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_parameters: Option<BTreeMap<String, Value>>,
+    /// Route response selection expression (WebSocket APIs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_response_selection_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +365,19 @@ pub struct Stage {
     /// Access log destination + format for this stage.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub access_log_settings: Option<AccessLogSettings>,
+    /// Client certificate id used when calling backend integrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_certificate_id: Option<String>,
+    /// Default throttling/logging settings applied to every route in the
+    /// stage. Stored verbatim as the Smithy `RouteSettings` shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_route_settings: Option<serde_json::Value>,
+    /// Per-route-key throttling/logging settings overriding the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_settings: Option<BTreeMap<String, serde_json::Value>>,
+    /// Tags attached to the stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +428,13 @@ pub struct Authorizer {
     /// Whether a `2.0` Lambda authorizer returns a simple boolean response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_simple_responses: Option<bool>,
+    /// IAM role ARN the gateway assumes when invoking a REQUEST authorizer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorizer_credentials_arn: Option<String>,
+    /// Regular expression the incoming identity source must match before the
+    /// authorizer is invoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_validation_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
