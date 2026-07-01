@@ -716,6 +716,50 @@ async fn put_metric_alarm_persists_metrics_and_tags() {
     assert!(tag_xml.contains("<Value>obs</Value>"));
 }
 
+/// AWS ignores the inline `Tags` param when PutMetricAlarm updates an existing
+/// alarm; tags are only applied on create. TagResource/UntagResource manage
+/// tags on an existing alarm.
+#[tokio::test]
+async fn put_metric_alarm_update_ignores_inline_tags() {
+    let svc = service();
+    let base = &[
+        ("AlarmName", "cpu"),
+        ("ComparisonOperator", "GreaterThanThreshold"),
+        ("EvaluationPeriods", "1"),
+        ("Threshold", "10"),
+        ("MetricName", "CPUUtilization"),
+        ("Namespace", "AWS/EC2"),
+    ];
+    // Create with an inline tag.
+    let mut create = base.to_vec();
+    create.push(("Tags.member.1.Key", "team"));
+    create.push(("Tags.member.1.Value", "obs"));
+    call(&svc, "PutMetricAlarm", &create).await;
+
+    // Update the SAME alarm with different inline tags -> must be ignored.
+    let mut update = base.to_vec();
+    update.push(("Threshold", "20"));
+    update.push(("Tags.member.1.Key", "team"));
+    update.push(("Tags.member.1.Value", "changed"));
+    update.push(("Tags.member.2.Key", "env"));
+    update.push(("Tags.member.2.Value", "prod"));
+    call(&svc, "PutMetricAlarm", &update).await;
+
+    let arn = format!("arn:aws:cloudwatch:{REGION}:{ACCT}:alarm:cpu");
+    let tags = call(&svc, "ListTagsForResource", &[("ResourceARN", &arn)]).await;
+    let tag_xml = body_of(&tags);
+    // Original create-time tag survives unchanged; update tags are ignored.
+    assert!(tag_xml.contains("<Value>obs</Value>"), "tags: {tag_xml}");
+    assert!(
+        !tag_xml.contains("<Value>changed</Value>"),
+        "update inline tag must be ignored: {tag_xml}"
+    );
+    assert!(
+        !tag_xml.contains("<Key>env</Key>"),
+        "update inline tag must be ignored: {tag_xml}"
+    );
+}
+
 #[tokio::test]
 async fn put_anomaly_detector_persists_configuration() {
     let svc = service();

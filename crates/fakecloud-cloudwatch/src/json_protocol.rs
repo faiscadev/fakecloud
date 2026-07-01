@@ -43,6 +43,38 @@ const NUMERIC_TAGS: &[&str] = &[
     "ExtendedStatistics",
 ];
 
+/// Output tags that wrap an awsQuery list. When such a container is present but
+/// empty (no `<member>` children), it must serialize as an empty JSON array
+/// `[]` rather than being omitted, so JSON callers don't see a missing field
+/// where the XML explicitly carried an empty list.
+const LIST_TAGS: &[&str] = &[
+    "Datapoints",
+    "Metrics",
+    "Dimensions",
+    "MetricAlarms",
+    "CompositeAlarms",
+    "AnomalyDetectors",
+    "AnomalyDetectorTypes",
+    "InsightRules",
+    "ManagedRules",
+    "MetricStreams",
+    "Entries",
+    "MetricDataResults",
+    "Values",
+    "Counts",
+    "Timestamps",
+    "Tags",
+    "Messages",
+    "AlarmHistoryItems",
+    "DashboardEntries",
+    "ExcludedTimeRanges",
+    "OKActions",
+    "AlarmActions",
+    "InsufficientDataActions",
+    "MetricDataQueries",
+    "Datasets",
+];
+
 /// Output tags whose leaf text is a boolean.
 const BOOL_TAGS: &[&str] = &[
     "ActionsEnabled",
@@ -187,6 +219,14 @@ fn convert(el: &El, parent_tag: &str) -> Option<Value> {
     if el.children.is_empty() {
         let text = el.text.trim();
         if text.is_empty() {
+            // An empty list container (`<Datapoints></Datapoints>`) carries no
+            // `<member>` children, so it lands here rather than the list branch
+            // below. Emit `[]` for known list tags so JSON callers see an empty
+            // array instead of a missing field; a genuinely empty scalar is
+            // still omitted (awsJson drops null fields).
+            if LIST_TAGS.contains(&el.name.as_str()) {
+                return Some(Value::Array(Vec::new()));
+            }
             return None;
         }
         // A leaf's own tag drives typing, except unnamed `member`/`value`
@@ -348,5 +388,33 @@ mod tests {
         let v = json("GetMetricData", inner);
         assert_eq!(v["MetricDataResults"][0]["Timestamps"][0], 1577836800.0);
         assert_eq!(v["MetricDataResults"][0]["Values"][0], 1.5);
+    }
+
+    #[test]
+    fn empty_list_container_becomes_empty_array() {
+        // An explicitly-empty list in the XML must serialize as [], not be
+        // dropped. A genuinely empty scalar (NextToken) stays omitted.
+        let inner = "<Label>cpu</Label><Datapoints></Datapoints><NextToken></NextToken>";
+        let v = json("GetMetricStatistics", inner);
+        assert_eq!(v["Label"], "cpu");
+        assert_eq!(v["Datapoints"], serde_json::json!([]));
+        assert!(v["Datapoints"].is_array());
+        assert!(
+            v.get("NextToken").is_none(),
+            "empty scalar should be omitted, got {v}"
+        );
+    }
+
+    #[test]
+    fn empty_tags_and_messages_lists_become_empty_arrays() {
+        let tags = json("ListTagsForResource", "<Tags></Tags>");
+        assert_eq!(tags["Tags"], serde_json::json!([]));
+
+        // Nested empty list inside a member.
+        let inner = "<MetricDataResults><member><Id>m1</Id>\
+            <Messages></Messages><Values></Values></member></MetricDataResults>";
+        let v = json("GetMetricData", inner);
+        assert_eq!(v["MetricDataResults"][0]["Messages"], serde_json::json!([]));
+        assert_eq!(v["MetricDataResults"][0]["Values"], serde_json::json!([]));
     }
 }

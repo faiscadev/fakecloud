@@ -1404,9 +1404,11 @@ impl CloudWatchService {
         let created = existing.is_none();
         alarms.insert(alarm_name, alarm);
 
-        // Persist inline Tags into the ARN-keyed tag store (AWS applies inline
-        // tags on create; TagResource / UntagResource manage them thereafter).
-        if !inline_tags.is_empty() {
+        // Persist inline Tags into the ARN-keyed tag store, but ONLY on create.
+        // AWS ignores the inline Tags param when PutMetricAlarm updates an
+        // existing alarm; tags on an existing alarm are managed via
+        // TagResource / UntagResource.
+        if created && !inline_tags.is_empty() {
             let bucket = acct.tags.entry(alarm_arn).or_default();
             for (k, v) in inline_tags {
                 bucket.insert(k, v);
