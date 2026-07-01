@@ -758,6 +758,50 @@ fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
     }
 }
 
+/// Rescue any pipe that has been sitting in a transient state (CREATING /
+/// UPDATING / STARTING / STOPPING / DELETING) for at least `min_age_secs`,
+/// settling it the same way its per-request `spawn_settle` task would.
+///
+/// Each lifecycle call spawns a one-shot task that sleeps `SETTLE_DELAY` and
+/// then settles the pipe. On a CPU-starved runner (e.g. a 2-core CI box under
+/// several concurrent terraform applies) those spawned tasks can be delayed
+/// long enough that the provider's delete/update waiter times out first — a
+/// pipe stuck in DELETING never gets removed and the waiter blocks for its full
+/// 30-minute budget. The Pipes runner already ticks on a persistent task, so it
+/// drains overdue transients as a backstop that doesn't depend on fresh task
+/// spawns landing promptly. The `min_age_secs` gate keeps this off the fast
+/// path: under normal load the spawned task settles within `SETTLE_DELAY` and
+/// the pipe is gone before it ages past the threshold, so this rescues only
+/// genuinely-starved settles.
+pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64) {
+    let now = now_epoch_secs();
+    let mut accounts = state.write();
+    for st in accounts.accounts.values_mut() {
+        let due: Vec<String> = st
+            .pipes
+            .iter()
+            .filter(|(_, pipe)| {
+                let cur = pipe
+                    .get("CurrentState")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !is_transient_state(cur) {
+                    return false;
+                }
+                let last = pipe
+                    .get("LastModifiedTime")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                now - last >= min_age_secs
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in due {
+            settle_pipe(st, &name);
+        }
+    }
+}
+
 /// Build a `Pipe` list summary (a subset of the full describe object).
 fn pipe_summary(pipe: &Value) -> Value {
     let mut out = Map::new();

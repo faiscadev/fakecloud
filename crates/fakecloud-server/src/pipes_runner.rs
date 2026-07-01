@@ -120,6 +120,13 @@ impl PipesRunner {
     }
 
     async fn poll(&self) {
+        // Backstop the per-request `spawn_settle` tasks: rescue any pipe that
+        // has been transient for over a second, so a DELETING/UPDATING pipe
+        // still settles even when a CPU-starved runner delays its spawned
+        // settle task past the provider's waiter timeout. Cheap (a single
+        // write lock over the pipe map) and a no-op under normal load.
+        fakecloud_pipes::drain_overdue_transient_pipes(&self.pipes_state, 1.0);
+
         let pipes = self.collect_running_pipes();
         for pipe in pipes {
             match pipe.source_kind {
