@@ -820,6 +820,13 @@ fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
     if cur == STATE_DELETING {
         if let Some(arn) = pipe.get("Arn").and_then(Value::as_str) {
             st.tags.remove(arn);
+            // Purge this pipe's source checkpoints. They're keyed by the pipe
+            // ARN, so leaving them behind lets a later same-name pipe (which
+            // gets the same ARN) resume from a dead pipe's cursor and silently
+            // skip its own backlog (bug-hunt 2026-07-01 M2/L1).
+            let prefix = format!("{arn}#");
+            st.source_checkpoints
+                .retain(|k, _| k != arn && !k.starts_with(&prefix));
         }
         st.pipes.remove(name);
         return;
@@ -1211,6 +1218,31 @@ mod tests {
         let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
         svc.settle_if_overdue("123456789012", "p1");
         assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
+    }
+
+    #[test]
+    fn deleting_pipe_purges_its_source_checkpoints() {
+        // A same-name recreate reuses the ARN, so stale checkpoints must not
+        // survive the delete (bug-hunt 2026-07-01 M2/L1).
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let arn = "arn:aws:pipes:us-east-1:123456789012:pipe/p1";
+        {
+            let mut st = state.write();
+            let s = st.get_or_create("123456789012");
+            s.source_checkpoints
+                .insert(format!("{arn}#shardId-000000000000"), "42".into());
+            s.source_checkpoints.insert(arn.to_string(), "seq-9".into());
+            // An unrelated pipe's checkpoint must be left intact.
+            s.source_checkpoints.insert(
+                "arn:aws:pipes:us-east-1:123456789012:pipe/other".into(),
+                "x".into(),
+            );
+        }
+        svc.settle_if_overdue("123456789012", "p1");
+        let st = state.read();
+        let cps = &st.get("123456789012").unwrap().source_checkpoints;
+        assert!(!cps.keys().any(|k| k.starts_with(arn)));
+        assert!(cps.contains_key("arn:aws:pipes:us-east-1:123456789012:pipe/other"));
     }
 
     #[test]
