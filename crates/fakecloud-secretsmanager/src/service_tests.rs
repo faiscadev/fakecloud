@@ -2458,3 +2458,106 @@ async fn batch_get_secret_value_returns_plaintext_not_ciphertext() {
         "BatchGetSecretValue must return plaintext, not ciphertext"
     );
 }
+
+#[tokio::test]
+async fn test_rotate_secret_rotate_immediately_false_does_not_rotate_value() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-defer", "SecretString": "original"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let original_vid = body["VersionId"].as_str().unwrap().to_string();
+
+    // Rotate with RotateImmediately=false: config saved, value untouched.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-defer",
+        "RotationRules": { "AutomaticallyAfterDays": 30 },
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    let req = make_request("RotateSecret", &rot.to_string());
+    svc.handle(req).await.unwrap();
+
+    let accts = state.read();
+    let s = accts.default_ref();
+    let secret = s.secrets.get("rot-defer").unwrap();
+    // Rotation config is saved and enabled.
+    assert_eq!(secret.rotation_enabled, Some(true));
+    assert!(secret.rotation_rules.is_some());
+    // But the value was NOT rotated: no new version, current unchanged,
+    // and LastRotatedDate is not set (no rotation happened).
+    assert!(!secret.versions.contains_key(token));
+    assert_eq!(
+        secret.current_version_id.as_deref(),
+        Some(original_vid.as_str())
+    );
+    assert!(secret.last_rotated_at.is_none());
+}
+
+#[tokio::test]
+async fn test_rotate_secret_rotate_immediately_default_true_rotates() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-now", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-now",
+        "ClientRequestToken": token,
+    });
+    svc.handle(make_request("RotateSecret", &rot.to_string()))
+        .await
+        .unwrap();
+
+    let accts = state.read();
+    let s = accts.default_ref();
+    let secret = s.secrets.get("rot-now").unwrap();
+    // Default (RotateImmediately omitted == true): value rotated.
+    assert_eq!(secret.current_version_id.as_deref(), Some(token));
+    assert!(secret.last_rotated_at.is_some());
+}
+
+#[tokio::test]
+async fn test_create_secret_with_add_replica_regions() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "replicated", "SecretString": "v1",
+            "AddReplicaRegions": [{"Region": "us-west-2"}, {"Region": "eu-west-1"}]}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let statuses = body["ReplicationStatus"].as_array().unwrap();
+    let regions: Vec<&str> = statuses
+        .iter()
+        .map(|s| s["Region"].as_str().unwrap())
+        .collect();
+    assert!(regions.contains(&"us-west-2"));
+    assert!(regions.contains(&"eu-west-1"));
+
+    // Persisted: DescribeSecret echoes ReplicationStatus too.
+    let req = make_request("DescribeSecret", r#"{"SecretId": "replicated"}"#);
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let dregions: Vec<&str> = body["ReplicationStatus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["Region"].as_str().unwrap())
+        .collect();
+    assert!(dregions.contains(&"us-west-2"));
+    assert!(dregions.contains(&"eu-west-1"));
+}

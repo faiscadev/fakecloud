@@ -395,6 +395,10 @@ struct PutParameterInput {
     /// only overwrite an existing parameter's ``data_type`` when this is true.
     data_type_explicit: bool,
     tier: String,
+    /// Whether the caller explicitly included ``Tier`` in the request. On
+    /// overwrite we only change an existing parameter's tier when this is
+    /// true; otherwise the existing tier is preserved (matching AWS).
+    tier_explicit: bool,
     policies: Option<String>,
     /// Pre-parsed `policies` view, populated by ``from_body`` when the
     /// caller supplied a non-empty Policies array. Notification policies
@@ -468,28 +472,23 @@ impl PutParameterInput {
                 .collect()
         });
 
+        let tier_explicit = body["Tier"].as_str().is_some();
         let tier = body["Tier"].as_str().unwrap_or("Standard").to_string();
 
         // Parse + validate the Policies JSON up front so PutParameter
         // can return InvalidPolicyAttributeException without touching
         // state. Empty/absent Policies -> empty list -> no-op.
+        //
+        // Note: the "Policies require Advanced tier" check is NOT done
+        // here because the effective tier depends on whether this is a
+        // create (uses the request tier) or an overwrite (may preserve
+        // the existing parameter's tier). Both paths enforce it against
+        // the effective tier.
         let policies = body["Policies"].as_str().map(|s| s.to_string());
         let parsed_policies = match policies.as_deref() {
             Some(s) if !s.trim().is_empty() => parse_policies(s)?,
             _ => Vec::new(),
         };
-
-        // AWS only allows policies on Advanced-tier parameters. The
-        // real API rejects this with ValidationException; we mirror
-        // that.
-        if !parsed_policies.is_empty() && tier != "Advanced" {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Policies are only supported on Advanced-tier parameters. \
-                 Set Tier=Advanced when including Policies.",
-            ));
-        }
 
         Ok(Self {
             name,
@@ -502,6 +501,7 @@ impl PutParameterInput {
             data_type,
             data_type_explicit,
             tier,
+            tier_explicit,
             policies,
             parsed_policies,
             tags,
@@ -530,6 +530,37 @@ fn apply_overwrite(
             StatusCode::BAD_REQUEST,
             "ValidationException",
             "Invalid request: tags and overwrite can't be used together.",
+        ));
+    }
+
+    // Derive the effective tier: an explicit Tier in the request wins,
+    // otherwise the existing parameter's tier is preserved across the
+    // overwrite (AWS never silently downgrades a tier when Tier is
+    // omitted). Validate before mutating so a rejection leaves the
+    // parameter untouched.
+    let effective_tier = if input.tier_explicit {
+        input.tier.clone()
+    } else {
+        existing.tier.clone()
+    };
+    // Policies are Advanced-tier only. Compute whether policies will be
+    // attached after this overwrite: a non-empty Policies set in the
+    // request replaces the old one; omitting Policies preserves whatever
+    // is already attached. Either way, an Advanced-only policy must not
+    // end up on a non-Advanced parameter.
+    let policies_present_after = match input.policies.as_deref() {
+        Some(s) => !s.trim().is_empty(),
+        None => existing
+            .policies
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty()),
+    };
+    if policies_present_after && effective_tier != "Advanced" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Policies are only supported on Advanced-tier parameters. \
+             Set Tier=Advanced when including Policies.",
         ));
     }
 
@@ -605,6 +636,10 @@ fn apply_overwrite(
     if input.policies.is_some() {
         existing.policies = input.policies;
     }
+    // Apply the effective tier computed (and validated) above so the
+    // response echoes the correct tier and a Tier upgrade actually
+    // takes effect on the stored parameter.
+    existing.tier = effective_tier;
     existing.expiration_notified = false;
     existing.no_change_notified = false;
 
@@ -628,6 +663,21 @@ fn create_new_parameter(
             "A parameter type is required when you create a parameter.",
         )
     })?;
+
+    // Policies are Advanced-tier only; a brand-new parameter's effective
+    // tier is exactly the request tier.
+    let policies_present = input
+        .policies
+        .as_deref()
+        .is_some_and(|p| !p.trim().is_empty());
+    if policies_present && input.tier != "Advanced" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Policies are only supported on Advanced-tier parameters. \
+             Set Tier=Advanced when including Policies.",
+        ));
+    }
 
     let tag_map = input
         .tags

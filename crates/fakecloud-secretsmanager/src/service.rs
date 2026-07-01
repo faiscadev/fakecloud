@@ -264,6 +264,7 @@ impl SecretsManagerService {
         };
 
         let tags_ever_set = !input.tags.is_empty();
+        let replica_regions = input.add_replica_regions.clone();
         let secret = Secret {
             name: input.name.clone(),
             arn: arn.clone(),
@@ -283,7 +284,7 @@ impl SecretsManagerService {
             rotation_rules: None,
             last_rotated_at: None,
             resource_policy: None,
-            replica_regions: Vec::new(),
+            replica_regions,
         };
 
         state.secrets.insert(input.name.clone(), secret);
@@ -294,6 +295,11 @@ impl SecretsManagerService {
         });
         if let Some(vid) = version_id_for_response {
             response["VersionId"] = json!(vid);
+        }
+        // CreateSecret echoes ReplicationStatus when replica regions were
+        // requested via AddReplicaRegions.
+        if !input.add_replica_regions.is_empty() {
+            response["ReplicationStatus"] = replication_status_json(&input.add_replica_regions);
         }
 
         Ok(AwsResponse::ok_json(response))
@@ -1366,8 +1372,14 @@ impl SecretsManagerService {
 
         secret.rotation_enabled = Some(true);
         let now = Utc::now();
-        secret.last_rotated_at = Some(now);
         secret.last_changed_at = now;
+
+        // RotateImmediately defaults to true. When false, Secrets Manager
+        // saves the rotation configuration and schedules the next rotation
+        // for the upcoming window WITHOUT rotating the value now (and
+        // without invoking the rotation Lambda). LastRotatedDate is only
+        // set when a rotation actually happens.
+        let rotate_immediately = body["RotateImmediately"].as_bool().unwrap_or(true);
 
         let version_id = body["ClientRequestToken"]
             .as_str()
@@ -1378,44 +1390,49 @@ impl SecretsManagerService {
             body["RotationLambdaARN"].as_str().is_some() || secret.rotation_lambda_arn.is_some();
         let lambda_arn = secret.rotation_lambda_arn.clone();
 
-        // If the secret has a value, perform rotation
+        // If the secret has a value, perform rotation (only when
+        // RotateImmediately is true; otherwise the config is saved and the
+        // value is left untouched until the next scheduled window).
         let mut invocation = None;
-        if let Some(current_vid) = secret.current_version_id.clone() {
-            let current_value = secret.versions.get(&current_vid).cloned();
+        if rotate_immediately {
+            secret.last_rotated_at = Some(now);
+            if let Some(current_vid) = secret.current_version_id.clone() {
+                let current_value = secret.versions.get(&current_vid).cloned();
 
-            if let Some(cv) = current_value {
-                if has_lambda {
-                    // With Lambda: do NOT pre-create the AWSPENDING version. The
-                    // rotation Lambda is responsible for putting the new value via
-                    // PutSecretValue with VersionStages=[AWSPENDING] during the
-                    // createSecret step (matching real AWS Secrets Manager behavior).
+                if let Some(cv) = current_value {
+                    if has_lambda {
+                        // With Lambda: do NOT pre-create the AWSPENDING version. The
+                        // rotation Lambda is responsible for putting the new value via
+                        // PutSecretValue with VersionStages=[AWSPENDING] during the
+                        // createSecret step (matching real AWS Secrets Manager behavior).
 
-                    // Schedule Lambda invocation
-                    if let Some(ref arn) = lambda_arn {
-                        invocation = Some(RotationInvocation {
-                            lambda_arn: arn.clone(),
-                            secret_id: secret.arn.clone(),
-                            client_request_token: version_id.clone(),
-                        });
-                    }
-                } else {
-                    // Without Lambda: simple rotation - new version becomes AWSCURRENT
-                    // Move old version to AWSPREVIOUS
-                    if let Some(old_v) = secret.versions.get_mut(&current_vid) {
-                        old_v.stages.retain(|s| s != "AWSCURRENT");
-                        if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
-                            old_v.stages.push("AWSPREVIOUS".to_string());
+                        // Schedule Lambda invocation
+                        if let Some(ref arn) = lambda_arn {
+                            invocation = Some(RotationInvocation {
+                                lambda_arn: arn.clone(),
+                                secret_id: secret.arn.clone(),
+                                client_request_token: version_id.clone(),
+                            });
                         }
+                    } else {
+                        // Without Lambda: simple rotation - new version becomes AWSCURRENT
+                        // Move old version to AWSPREVIOUS
+                        if let Some(old_v) = secret.versions.get_mut(&current_vid) {
+                            old_v.stages.retain(|s| s != "AWSCURRENT");
+                            if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
+                                old_v.stages.push("AWSPREVIOUS".to_string());
+                            }
+                        }
+                        let version = SecretVersion {
+                            version_id: version_id.clone(),
+                            secret_string: cv.secret_string.clone(),
+                            secret_binary: cv.secret_binary.clone(),
+                            stages: vec!["AWSCURRENT".to_string()],
+                            created_at: now,
+                        };
+                        secret.versions.insert(version_id.clone(), version);
+                        secret.current_version_id = Some(version_id.clone());
                     }
-                    let version = SecretVersion {
-                        version_id: version_id.clone(),
-                        secret_string: cv.secret_string.clone(),
-                        secret_binary: cv.secret_binary.clone(),
-                        stages: vec!["AWSCURRENT".to_string()],
-                        created_at: now,
-                    };
-                    secret.versions.insert(version_id.clone(), version);
-                    secret.current_version_id = Some(version_id.clone());
                 }
             }
         }
@@ -2035,6 +2052,10 @@ struct CreateSecretInput {
     secret_string: Option<String>,
     secret_binary: Option<Vec<u8>>,
     tags: Vec<(String, String)>,
+    /// Regions requested via CreateSecret's `AddReplicaRegions`. Persisted
+    /// as replica regions so DescribeSecret and the CreateSecret response
+    /// both report `ReplicationStatus`.
+    add_replica_regions: Vec<String>,
 }
 
 impl CreateSecretInput {
@@ -2069,6 +2090,14 @@ impl CreateSecretInput {
             secret_string: body["SecretString"].as_str().map(|s| s.to_string()),
             secret_binary: body["SecretBinary"].as_str().and_then(base64_decode),
             tags: parse_tags(&body["Tags"]),
+            add_replica_regions: body["AddReplicaRegions"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|r| r["Region"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 }

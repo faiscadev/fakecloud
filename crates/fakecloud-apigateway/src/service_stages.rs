@@ -177,19 +177,31 @@ impl ApiGatewayService {
                 "/webAclArn" => s.web_acl_arn = value.as_str().map(String::from),
                 // Per-method settings: AWS PATCHes them at
                 // `/{resourcePath}/{httpMethod}/{setting}` (e.g.
-                // `/~1pets/GET/throttling/rateLimit`). Store each under
-                // method_settings keyed by its path so DescribeStage reflects
-                // the change instead of silently dropping it.
+                // `/~1pets/GET/throttling/rateLimit`, or `/*/*/logging/loglevel`
+                // for all methods). AWS's GetStage returns `methodSettings` as a
+                // map keyed by `"{resourcePath}/{httpMethod}"` whose value is a
+                // MethodSetting object (metricsEnabled / loggingLevel /
+                // throttlingRateLimit / ...). Storing the raw patch path with the
+                // raw string value produced the wrong shape and a perpetual
+                // Terraform diff on aws_api_gateway_method_settings.
                 _ if path.contains("/throttling/")
                     || path.contains("/logging/")
                     || path.contains("/metrics/")
                     || path.contains("/caching/") =>
                 {
-                    let key = path.trim_start_matches('/').to_string();
-                    if op == "remove" {
-                        s.method_settings.remove(&key);
-                    } else {
-                        s.method_settings.insert(key, value.clone());
+                    if let Some((map_key, field)) = method_setting_key_and_field(path) {
+                        let entry = s
+                            .method_settings
+                            .entry(map_key)
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(m) = entry.as_object_mut() {
+                            if op == "remove" {
+                                m.remove(&field);
+                            } else if let Some(coerced) = coerce_method_setting_value(&field, value)
+                            {
+                                m.insert(field, coerced);
+                            }
+                        }
                     }
                 }
                 _ if path.starts_with("/variables/") => {
@@ -234,6 +246,76 @@ impl ApiGatewayService {
         });
         s.last_updated_date = chrono::Utc::now();
         ok(stage_to_json(s))
+    }
+}
+
+/// Map a method-settings PATCH setting sub-path to its AWS MethodSetting field
+/// name. Returns `None` for unrecognized setting paths.
+fn method_setting_field(setting: &str) -> Option<&'static str> {
+    Some(match setting {
+        "metrics/enabled" => "metricsEnabled",
+        "logging/loglevel" => "loggingLevel",
+        "logging/dataTrace" => "dataTraceEnabled",
+        "throttling/burstLimit" => "throttlingBurstLimit",
+        "throttling/rateLimit" => "throttlingRateLimit",
+        "caching/enabled" => "cachingEnabled",
+        "caching/ttlInSeconds" => "cacheTtlInSeconds",
+        "caching/dataEncrypted" => "cacheDataEncrypted",
+        "caching/requireAuthorizationForCacheControl" => "requireAuthorizationForCacheControl",
+        "caching/unauthorizedCacheControlHeaderStrategy" => {
+            "unauthorizedCacheControlHeaderStrategy"
+        }
+        _ => return None,
+    })
+}
+
+/// Parse a stage method-settings PATCH path (e.g. `/~1pets/GET/throttling/rateLimit`
+/// or `/*/*/logging/loglevel`) into the AWS `methodSettings` map key
+/// (`pets/GET`, `*/*`) plus the MethodSetting field name. API Gateway escapes
+/// `/` as `~1` and `~` as `~0` in the resource-path segment.
+fn method_setting_key_and_field(path: &str) -> Option<(String, String)> {
+    let trimmed = path.trim_start_matches('/');
+    let mut parts = trimmed.splitn(3, '/');
+    let resource_token = parts.next()?;
+    let http_method = parts.next()?;
+    let setting = parts.next()?;
+    let field = method_setting_field(setting)?;
+    let resource_path = resource_token.replace("~1", "/").replace("~0", "~");
+    let resource_path = resource_path.trim_start_matches('/');
+    Some((format!("{resource_path}/{http_method}"), field.to_string()))
+}
+
+/// Coerce a PATCH string value into the JSON type AWS reports for the given
+/// MethodSetting field. Patch operation values arrive as strings, so numeric
+/// and boolean fields must be parsed.
+fn coerce_method_setting_value(field: &str, value: &Value) -> Option<Value> {
+    match field {
+        "metricsEnabled"
+        | "dataTraceEnabled"
+        | "cachingEnabled"
+        | "cacheDataEncrypted"
+        | "requireAuthorizationForCacheControl" => {
+            let b = value
+                .as_bool()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<bool>().ok()))?;
+            Some(Value::Bool(b))
+        }
+        "throttlingBurstLimit" | "cacheTtlInSeconds" => {
+            let n = value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))?;
+            Some(serde_json::json!(n))
+        }
+        "throttlingRateLimit" => {
+            let n = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))?;
+            Some(serde_json::json!(n))
+        }
+        "loggingLevel" | "unauthorizedCacheControlHeaderStrategy" => {
+            value.as_str().map(|s| Value::String(s.to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -323,8 +405,89 @@ mod patch_tests {
         assert!(s.cache_cluster_enabled);
         assert_eq!(s.cache_cluster_size.as_deref(), Some("0.5"));
         assert_eq!(s.web_acl_arn.as_deref(), Some("arn:aws:wafv2:::webacl/x"));
-        assert!(s
-            .method_settings
-            .contains_key("~1pets/GET/throttling/rateLimit"));
+        // Method settings are keyed by "{resourcePath}/{httpMethod}" with a
+        // MethodSetting object value (not the raw patch path / raw string).
+        let ms = s.method_settings.get("pets/GET").expect("pets/GET key");
+        assert_eq!(ms["throttlingRateLimit"], serde_json::json!(10.0));
+    }
+
+    #[test]
+    fn update_stage_method_settings_use_aws_shape() {
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create("123456789012");
+            st.stages.entry("api1".to_string()).or_default().insert(
+                "prod".to_string(),
+                Stage {
+                    stage_name: "prod".into(),
+                    deployment_id: "d1".into(),
+                    description: None,
+                    cache_cluster_enabled: false,
+                    cache_cluster_size: None,
+                    variables: Default::default(),
+                    method_settings: Default::default(),
+                    created_date: chrono::Utc::now(),
+                    last_updated_date: chrono::Utc::now(),
+                    tracing_enabled: false,
+                    web_acl_arn: None,
+                    canary_settings: None,
+                    access_log_settings: None,
+                    tags: Default::default(),
+                },
+            );
+        }
+        let svc = ApiGatewayService::new(state.clone());
+        let params: BTreeMap<String, String> = [
+            ("restApiId".to_string(), "api1".to_string()),
+            ("stageName".to_string(), "prod".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // Apply a full set of `*/*` (all-methods) settings, the exact shape
+        // Terraform's aws_api_gateway_method_settings sends.
+        let resp = svc
+            .update_stage(
+                &patch_req(json!([
+                    { "op": "replace", "path": "/*/*/metrics/enabled", "value": "true" },
+                    { "op": "replace", "path": "/*/*/logging/loglevel", "value": "INFO" },
+                    { "op": "replace", "path": "/*/*/logging/dataTrace", "value": "true" },
+                    { "op": "replace", "path": "/*/*/throttling/burstLimit", "value": "5000" },
+                    { "op": "replace", "path": "/*/*/throttling/rateLimit", "value": "10000" },
+                    { "op": "replace", "path": "/*/*/caching/ttlInSeconds", "value": "300" },
+                ])),
+                &params,
+            )
+            .unwrap();
+
+        // GetStage / UpdateStage round-trip the correct MethodSetting shape.
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let ms = &body["methodSettings"]["*/*"];
+        assert_eq!(ms["metricsEnabled"], json!(true));
+        assert_eq!(ms["loggingLevel"], json!("INFO"));
+        assert_eq!(ms["dataTraceEnabled"], json!(true));
+        assert_eq!(ms["throttlingBurstLimit"], json!(5000));
+        assert_eq!(ms["throttlingRateLimit"], json!(10000.0));
+        assert_eq!(ms["cacheTtlInSeconds"], json!(300));
+
+        // A subsequent remove drops just that field, keeping the rest.
+        svc.update_stage(
+            &patch_req(json!([
+                { "op": "remove", "path": "/*/*/logging/loglevel" },
+            ])),
+            &params,
+        )
+        .unwrap();
+        let accounts = state.read();
+        let s = &accounts.get("123456789012").unwrap().stages["api1"]["prod"];
+        let ms = s.method_settings.get("*/*").unwrap();
+        assert!(ms.get("loggingLevel").is_none());
+        assert_eq!(ms["metricsEnabled"], json!(true));
     }
 }

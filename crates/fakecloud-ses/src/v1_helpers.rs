@@ -1329,6 +1329,50 @@ pub(crate) fn parse_member_list(params: &HashMap<String, String>, prefix: &str) 
     result
 }
 
+/// Parse the `EventDestination.KinesisFirehoseDestination.*` query params (SES
+/// v1 CreateConfigurationSetEventDestination). Returns `None` when neither
+/// field is present so we don't attach an empty destination.
+fn parse_kinesis_firehose_destination(
+    params: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let role = params.get("EventDestination.KinesisFirehoseDestination.IAMRoleARN");
+    let stream = params.get("EventDestination.KinesisFirehoseDestination.DeliveryStreamARN");
+    if role.is_none() && stream.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "IAMRoleARN": role.cloned().unwrap_or_default(),
+        "DeliveryStreamARN": stream.cloned().unwrap_or_default(),
+    }))
+}
+
+/// Parse the `EventDestination.CloudWatchDestination.DimensionConfigurations.*`
+/// query params (SES v1). Returns `None` when no dimension configurations were
+/// supplied.
+fn parse_cloudwatch_destination(params: &HashMap<String, String>) -> Option<serde_json::Value> {
+    let mut configs = Vec::new();
+    for i in 1.. {
+        let prefix =
+            format!("EventDestination.CloudWatchDestination.DimensionConfigurations.member.{i}");
+        let name = params.get(&format!("{prefix}.DimensionName"));
+        let source = params.get(&format!("{prefix}.DimensionValueSource"));
+        let default = params.get(&format!("{prefix}.DefaultDimensionValue"));
+        if name.is_none() && source.is_none() && default.is_none() {
+            break;
+        }
+        configs.push(serde_json::json!({
+            "DimensionName": name.cloned().unwrap_or_default(),
+            "DimensionValueSource": source.cloned().unwrap_or_default(),
+            "DefaultDimensionValue": default.cloned().unwrap_or_default(),
+        }));
+    }
+    if configs.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "DimensionConfigurations": configs }))
+    }
+}
+
 pub(crate) fn send_email(
     state: &SharedSesState,
     req: &AwsRequest,
@@ -2059,7 +2103,46 @@ pub(crate) fn describe_configuration_set(
             for et in &dest.matching_event_types {
                 inner.push_str(&format!("<member>{}</member>", xml_escape(et)));
             }
-            inner.push_str("</MatchingEventTypes></member>");
+            inner.push_str("</MatchingEventTypes>");
+            // Echo the configured destination target(s). Previously the
+            // describe response dropped these entirely, so a Kinesis /
+            // CloudWatch / SNS destination created against the set was
+            // invisible on read.
+            if let Some(k) = &dest.kinesis_firehose_destination {
+                inner.push_str(&format!(
+                    "<KinesisFirehoseDestination>\
+                     <IAMRoleARN>{}</IAMRoleARN>\
+                     <DeliveryStreamARN>{}</DeliveryStreamARN>\
+                     </KinesisFirehoseDestination>",
+                    xml_escape(k["IAMRoleARN"].as_str().unwrap_or("")),
+                    xml_escape(k["DeliveryStreamARN"].as_str().unwrap_or("")),
+                ));
+            }
+            if let Some(cw) = &dest.cloud_watch_destination {
+                inner.push_str("<CloudWatchDestination><DimensionConfigurations>");
+                if let Some(arr) = cw["DimensionConfigurations"].as_array() {
+                    for dc in arr {
+                        inner.push_str(&format!(
+                            "<member>\
+                             <DimensionName>{}</DimensionName>\
+                             <DimensionValueSource>{}</DimensionValueSource>\
+                             <DefaultDimensionValue>{}</DefaultDimensionValue>\
+                             </member>",
+                            xml_escape(dc["DimensionName"].as_str().unwrap_or("")),
+                            xml_escape(dc["DimensionValueSource"].as_str().unwrap_or("")),
+                            xml_escape(dc["DefaultDimensionValue"].as_str().unwrap_or("")),
+                        ));
+                    }
+                }
+                inner.push_str("</DimensionConfigurations></CloudWatchDestination>");
+            }
+            if let Some(sns) = &dest.sns_destination {
+                inner.push_str(&format!(
+                    "<SNSDestination><TopicARN>{}</TopicARN></SNSDestination>",
+                    xml_escape(sns["TopicArn"].as_str().unwrap_or("")),
+                ));
+            }
+            inner.push_str("</member>");
         }
         inner.push_str("</EventDestinations>");
     }
@@ -2122,8 +2205,8 @@ pub(crate) fn create_configuration_set_event_destination(
         name: dest_name.to_string(),
         enabled,
         matching_event_types: event_types,
-        kinesis_firehose_destination: None,
-        cloud_watch_destination: None,
+        kinesis_firehose_destination: parse_kinesis_firehose_destination(&req.query_params),
+        cloud_watch_destination: parse_cloudwatch_destination(&req.query_params),
         sns_destination: req
             .query_params
             .get("EventDestination.SNSDestination.TopicARN")
@@ -2180,6 +2263,21 @@ pub(crate) fn update_configuration_set_event_destination(
     let event_types = parse_member_list(&req.query_params, "EventDestination.MatchingEventTypes");
     if !event_types.is_empty() {
         dest.matching_event_types = event_types;
+    }
+    // Apply destination-target changes when supplied so an update that
+    // switches or (re)configures Kinesis/CloudWatch/SNS destinations is
+    // reflected on the read side.
+    if let Some(k) = parse_kinesis_firehose_destination(&req.query_params) {
+        dest.kinesis_firehose_destination = Some(k);
+    }
+    if let Some(cw) = parse_cloudwatch_destination(&req.query_params) {
+        dest.cloud_watch_destination = Some(cw);
+    }
+    if let Some(arn) = req
+        .query_params
+        .get("EventDestination.SNSDestination.TopicARN")
+    {
+        dest.sns_destination = Some(serde_json::json!({ "TopicArn": arn }));
     }
 
     Ok(xml_metadata_only(

@@ -303,7 +303,7 @@ pub(crate) fn validate_pattern_values(value: &Value, path: &str) -> Result<(), A
 }
 
 pub(crate) fn build_auth_params_response(auth_type: &str, params: &Value) -> Value {
-    match auth_type {
+    let mut resp = match auth_type {
         "API_KEY" => {
             let mut resp = json!({});
             if let Some(api_key) = params.get("ApiKeyAuthParameters") {
@@ -335,8 +335,54 @@ pub(crate) fn build_auth_params_response(auth_type: &str, params: &Value) -> Val
             }
             resp
         }
-        _ => params.clone(),
+        _ => return params.clone(),
+    };
+
+    // Echo the connection-level InvocationHttpParameters (additional custom
+    // headers / query-string / body parameters merged into every invocation).
+    // Previously dropped, which made DescribeConnection lose everything the
+    // caller configured beyond the auth block. Secret values are hidden on
+    // describe (matching AWS), but keys + IsValueSecret flags round-trip.
+    if let Some(inv) = params.get("InvocationHttpParameters") {
+        resp["InvocationHttpParameters"] = sanitize_invocation_http_params(inv);
     }
+    resp
+}
+
+/// Redact secret values from a connection's `InvocationHttpParameters` for
+/// read responses. Each parameter keeps its `Key` and `IsValueSecret` flag;
+/// the `Value` is only echoed when the parameter is explicitly non-secret.
+fn sanitize_invocation_http_params(inv: &Value) -> Value {
+    let mut out = json!({});
+    for field in [
+        "HeaderParameters",
+        "QueryStringParameters",
+        "BodyParameters",
+    ] {
+        if let Some(arr) = inv.get(field).and_then(|v| v.as_array()) {
+            let sanitized: Vec<Value> = arr
+                .iter()
+                .map(|p| {
+                    let is_secret = p
+                        .get("IsValueSecret")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let mut entry = json!({
+                        "Key": p.get("Key").cloned().unwrap_or(Value::Null),
+                        "IsValueSecret": is_secret,
+                    });
+                    if !is_secret {
+                        if let Some(val) = p.get("Value") {
+                            entry["Value"] = val.clone();
+                        }
+                    }
+                    entry
+                })
+                .collect();
+            out[field] = json!(sanitized);
+        }
+    }
+    out
 }
 
 /// Match an event against an EventBridge event pattern.

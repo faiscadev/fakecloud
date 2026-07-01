@@ -262,6 +262,69 @@ fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", msg)
 }
 
+/// Apply a partial `*S3DestinationUpdate` block onto an existing destination.
+/// Every field in the `*Update` shape is optional, so only the members the
+/// caller supplied are changed; the destination's stable `DestinationId` is
+/// preserved. Buffering values are validated when present.
+fn apply_s3_update(dest: &mut S3Destination, val: &Value) -> Result<(), AwsServiceError> {
+    let buf = &val["BufferingHints"];
+    let size = buf["SizeInMBs"].as_i64();
+    let interval = buf["IntervalInSeconds"].as_i64();
+    validate_buffering(size, interval)?;
+
+    if let Some(v) = val["RoleARN"].as_str() {
+        dest.role_arn = v.to_string();
+    }
+    if let Some(v) = val["BucketARN"].as_str() {
+        dest.bucket_arn = v.to_string();
+    }
+    if let Some(v) = val["Prefix"].as_str() {
+        dest.prefix = Some(v.to_string());
+    }
+    if let Some(v) = val["ErrorOutputPrefix"].as_str() {
+        dest.error_output_prefix = Some(v.to_string());
+    }
+    if size.is_some() {
+        dest.buffering_size_mb = size;
+    }
+    if interval.is_some() {
+        dest.buffering_interval_seconds = interval;
+    }
+    if let Some(v) = val["CompressionFormat"].as_str() {
+        dest.compression_format = Some(v.to_string());
+    }
+    if val["ProcessingConfiguration"].is_object() {
+        dest.processing_configuration = Some(val["ProcessingConfiguration"].clone());
+    }
+    if val["DataFormatConversionConfiguration"].is_object() {
+        dest.data_format_conversion_configuration =
+            Some(val["DataFormatConversionConfiguration"].clone());
+    }
+    if val["CloudWatchLoggingOptions"].is_object() {
+        dest.cloudwatch_logging_options = Some(val["CloudWatchLoggingOptions"].clone());
+    }
+    if let Some(v) = val["CustomTimeZone"].as_str() {
+        dest.custom_time_zone = Some(v.to_string());
+    }
+    if let Some(v) = val["S3BackupMode"].as_str() {
+        dest.s3_backup_mode = Some(v.to_string());
+    }
+    if let Some(v) = val["FileExtension"].as_str() {
+        dest.file_extension = Some(v.to_string());
+    }
+    Ok(())
+}
+
+/// Increment a Firehose delivery-stream version id. AWS version ids are
+/// numeric strings that advance by one on every successful configuration
+/// change (UpdateDestination, Start/StopEncryption, ...).
+fn next_version_id(current: &str) -> String {
+    current
+        .parse::<u64>()
+        .map(|n| (n + 1).to_string())
+        .unwrap_or_else(|_| current.to_string())
+}
+
 /// Validate a delivery-stream name against the Firehose model constraints:
 /// length 1..=64 and pattern `^[a-zA-Z0-9_.-]+$`. AWS rejects violations with
 /// an InvalidArgumentException before any resource lookup.
@@ -716,24 +779,63 @@ impl FirehoseService {
         let name = body["DeliveryStreamName"]
             .as_str()
             .ok_or_else(|| missing("DeliveryStreamName"))?;
+        let current_version = body["CurrentDeliveryStreamVersionId"].as_str();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         let stream = state
             .streams_mut(&req.region)
             .get_mut(name)
             .ok_or_else(|| not_found(name))?;
-        let updated = match parse_s3_destination(&body["S3DestinationUpdate"])? {
-            Some(d) => Some(d),
-            None => parse_s3_destination(&body["ExtendedS3DestinationUpdate"])?,
-        };
-        if let Some(d) = updated {
-            stream.destination = Some(d);
+
+        // AWS requires CurrentDeliveryStreamVersionId to match the stream's
+        // current version and rejects a mismatch with a concurrent-modification
+        // error. Validate only when supplied so callers that omit it still work.
+        if let Some(cur) = current_version {
+            if cur != stream.version_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ConcurrentModificationException",
+                    format!(
+                        "The current delivery stream version {} does not match \
+                         the supplied version {cur}.",
+                        stream.version_id
+                    ),
+                ));
+            }
         }
+
+        // Apply the S3 / ExtendedS3 update. The `*Update` shapes make every
+        // member optional, so a partial update (e.g. only BufferingHints) must
+        // merge onto the existing destination rather than being dropped, and
+        // the destination keeps its stable DestinationId across updates.
+        let s3_update = if body["S3DestinationUpdate"].is_object() {
+            Some(&body["S3DestinationUpdate"])
+        } else if body["ExtendedS3DestinationUpdate"].is_object() {
+            Some(&body["ExtendedS3DestinationUpdate"])
+        } else {
+            None
+        };
+        if let Some(update) = s3_update {
+            match stream.destination.as_mut() {
+                Some(existing) => apply_s3_update(existing, update)?,
+                // No existing S3 destination: fall back to a full parse
+                // (RoleARN + BucketARN required to materialize one).
+                None => {
+                    if let Some(d) = parse_s3_destination(update)? {
+                        stream.destination = Some(d);
+                    }
+                }
+            }
+        }
+
         // Non-S3 destinations (Redshift/OpenSearch/Splunk/HTTP/...) were
         // previously dropped on update; merge any supplied ones in.
         for (key, value) in extract_extra_destinations(&body, "Update") {
             stream.extra_destinations.insert(key, value);
         }
+
+        // A successful update advances the stream version.
+        stream.version_id = next_version_id(&stream.version_id);
         stream.last_update = Utc::now();
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -1102,5 +1204,101 @@ mod tests {
             ext["ProcessingConfiguration"]["Processors"][0]["Type"],
             "Lambda"
         );
+    }
+
+    fn describe(svc: &FirehoseService, name: &str) -> Value {
+        let resp = svc
+            .describe_delivery_stream(&request(
+                "DescribeDeliveryStream",
+                json!({ "DeliveryStreamName": name }),
+            ))
+            .unwrap();
+        serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()
+            ["DeliveryStreamDescription"]
+            .clone()
+    }
+
+    #[test]
+    fn update_destination_keeps_destination_id_stable_and_bumps_version() {
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "upd-stream",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": "arn:aws:s3:::bucket",
+                    "Prefix": "before/"
+                }
+            }),
+        ))
+        .unwrap();
+
+        let before = describe(&svc, "upd-stream");
+        let original_dest_id = before["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(before["VersionId"], "1");
+
+        // Partial update: only change the Prefix (no RoleARN/BucketARN).
+        svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "upd-stream",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": original_dest_id,
+                "ExtendedS3DestinationUpdate": { "Prefix": "after/" }
+            }),
+        ))
+        .unwrap();
+
+        let after = describe(&svc, "upd-stream");
+        // DestinationId is stable across the update.
+        assert_eq!(
+            after["Destinations"][0]["DestinationId"].as_str().unwrap(),
+            original_dest_id
+        );
+        // Partial update applied: Prefix changed, BucketARN preserved.
+        assert_eq!(
+            after["Destinations"][0]["ExtendedS3DestinationDescription"]["Prefix"],
+            "after/"
+        );
+        assert_eq!(
+            after["Destinations"][0]["ExtendedS3DestinationDescription"]["BucketARN"],
+            "arn:aws:s3:::bucket"
+        );
+        // Version advanced from 1 -> 2.
+        assert_eq!(after["VersionId"], "2");
+    }
+
+    #[test]
+    fn update_destination_rejects_stale_version() {
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "ver-stream",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": "arn:aws:s3:::bucket"
+                }
+            }),
+        ))
+        .unwrap();
+
+        // Wrong CurrentDeliveryStreamVersionId -> ConcurrentModificationException.
+        let err = match svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "ver-stream",
+                "CurrentDeliveryStreamVersionId": "99",
+                "ExtendedS3DestinationUpdate": { "Prefix": "x/" }
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("stale version must be rejected"),
+        };
+        assert_eq!(err.code(), "ConcurrentModificationException");
     }
 }

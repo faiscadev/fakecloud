@@ -2474,6 +2474,53 @@ fn connection_create_list_describe_deauthorize() {
     .unwrap();
 }
 
+#[test]
+fn describe_connection_echoes_invocation_http_parameters() {
+    let svc = make_service();
+
+    svc.create_connection(&make_request(
+        "CreateConnection",
+        json!({
+            "Name": "conn-http",
+            "AuthorizationType": "API_KEY",
+            "AuthParameters": {
+                "ApiKeyAuthParameters": {"ApiKeyName": "x-key", "ApiKeyValue": "secret"},
+                "InvocationHttpParameters": {
+                    "HeaderParameters": [
+                        {"Key": "X-Custom", "Value": "public", "IsValueSecret": false},
+                        {"Key": "X-Token", "Value": "hush", "IsValueSecret": true}
+                    ],
+                    "QueryStringParameters": [
+                        {"Key": "q", "Value": "v", "IsValueSecret": false}
+                    ]
+                }
+            }
+        }),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .describe_connection(&make_request(
+            "DescribeConnection",
+            json!({"Name": "conn-http"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let inv = &body["AuthParameters"]["InvocationHttpParameters"];
+    let headers = inv["HeaderParameters"].as_array().unwrap();
+    assert_eq!(headers.len(), 2);
+    // Non-secret header echoes its value; keys + IsValueSecret always present.
+    let public = headers.iter().find(|h| h["Key"] == "X-Custom").unwrap();
+    assert_eq!(public["Value"], "public");
+    assert_eq!(public["IsValueSecret"], false);
+    // Secret header keeps its key + flag but hides the value.
+    let secret = headers.iter().find(|h| h["Key"] == "X-Token").unwrap();
+    assert_eq!(secret["IsValueSecret"], true);
+    assert!(secret.get("Value").is_none(), "secret value must be hidden");
+    // Query string parameters echoed too.
+    assert_eq!(inv["QueryStringParameters"][0]["Key"], "q");
+}
+
 // ── Event bus list ──
 
 #[test]

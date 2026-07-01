@@ -1564,6 +1564,113 @@ fn test_configuration_set_event_destination_lifecycle() {
         .is_empty());
 }
 
+#[test]
+fn test_event_destination_kinesis_and_cloudwatch_persist_and_describe() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs2")],
+        ),
+    )
+    .unwrap();
+
+    // Kinesis Firehose destination.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                ("EventDestination.Name", "firehose-dest"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/ses-firehose",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/ses-stream",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // CloudWatch destination with a dimension configuration.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                ("EventDestination.Name", "cw-dest"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "bounce"),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DimensionName",
+                    "ses:configuration-set",
+                ),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DimensionValueSource",
+                    "messageTag",
+                ),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DefaultDimensionValue",
+                    "default",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // Persisted on the state.
+    {
+        let mas = state.read();
+        let st = mas.default_ref();
+        let dests = st.event_destinations.get("cs2").unwrap();
+        let fh = dests.iter().find(|d| d.name == "firehose-dest").unwrap();
+        let k = fh.kinesis_firehose_destination.as_ref().unwrap();
+        assert_eq!(
+            k["DeliveryStreamARN"],
+            "arn:aws:firehose:us-east-1:123456789012:deliverystream/ses-stream"
+        );
+        let cw = dests.iter().find(|d| d.name == "cw-dest").unwrap();
+        let cwd = cw.cloud_watch_destination.as_ref().unwrap();
+        assert_eq!(
+            cwd["DimensionConfigurations"][0]["DimensionName"],
+            "ses:configuration-set"
+        );
+    }
+
+    // DescribeConfigurationSet echoes the destination targets.
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "DescribeConfigurationSet",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                (
+                    "ConfigurationSetAttributeNames.member.1",
+                    "eventDestinations",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        xml.contains("<KinesisFirehoseDestination>") && xml.contains("deliverystream/ses-stream"),
+        "describe must echo Kinesis destination, got: {xml}"
+    );
+    assert!(
+        xml.contains("<CloudWatchDestination>") && xml.contains("ses:configuration-set"),
+        "describe must echo CloudWatch destination, got: {xml}"
+    );
+}
+
 // ── Account / Quota tests ──
 
 #[test]

@@ -13,8 +13,6 @@ use super::{
 };
 use fakecloud_core::query::required_param;
 
-use fakecloud_aws::xml::xml_escape;
-
 use crate::policy_validation::validate_policy_document;
 
 /// IAM ``ListPolicies`` ``Scope`` filter.
@@ -390,6 +388,9 @@ impl IamService {
 
         policy.versions.push(version.clone());
 
+        // AWS omits the policy Document from the CreatePolicyVersion response;
+        // only GetPolicyVersion returns it. Emitting it here diverged from the
+        // real API's PolicyVersion shape.
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <CreatePolicyVersionResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
@@ -397,7 +398,6 @@ impl IamService {
     <PolicyVersion>
       <VersionId>{}</VersionId>
       <IsDefaultVersion>{}</IsDefaultVersion>
-      <Document>{}</Document>
       <CreateDate>{}</CreateDate>
     </PolicyVersion>
   </CreatePolicyVersionResult>
@@ -407,7 +407,6 @@ impl IamService {
 </CreatePolicyVersionResponse>"#,
             version.version_id,
             version.is_default,
-            xml_escape(&version.document),
             version.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             req.request_id
         );
@@ -487,15 +486,17 @@ impl IamService {
             )
         })?;
 
+        // AWS omits the policy Document from ListPolicyVersions members; the
+        // document is only returned by GetPolicyVersion. Emitting it here
+        // caused clients to see a document where the real API sends none.
         let members: String = policy
             .versions
             .iter()
             .map(|v| {
                 format!(
-                    "      <member>\n        <VersionId>{}</VersionId>\n        <IsDefaultVersion>{}</IsDefaultVersion>\n        <Document>{}</Document>\n        <CreateDate>{}</CreateDate>\n      </member>",
+                    "      <member>\n        <VersionId>{}</VersionId>\n        <IsDefaultVersion>{}</IsDefaultVersion>\n        <CreateDate>{}</CreateDate>\n      </member>",
                     v.version_id,
                     v.is_default,
-                    url_encode(&v.document),
                     v.created_at.format("%Y-%m-%dT%H:%M:%SZ")
                 )
             })

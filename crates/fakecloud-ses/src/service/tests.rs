@@ -4556,3 +4556,92 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[tokio::test]
+async fn test_create_email_identity_byodkim() {
+    let state = make_state();
+    let svc = SesV2Service::new(state.clone());
+
+    // BYODKIM: caller supplies selector + private key.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/identities",
+        r#"{"EmailIdentity": "byo.example.com",
+            "DkimSigningAttributes": {
+                "DomainSigningSelector": "myselector",
+                "DomainSigningPrivateKey": "myprivatekeybase64"
+            }}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["DkimAttributes"]["SigningAttributesOrigin"], "EXTERNAL",
+        "BYODKIM must report EXTERNAL origin"
+    );
+    assert_eq!(
+        body["DkimAttributes"]["DomainSigningSelector"],
+        "myselector"
+    );
+
+    // Persisted: the caller's private key + selector are stored, not a
+    // freshly generated Easy-DKIM keypair.
+    {
+        let accts = state.read();
+        let s = accts.default_ref();
+        let id = s.identities.get("byo.example.com").unwrap();
+        assert_eq!(id.dkim_signing_attributes_origin, "EXTERNAL");
+        assert_eq!(
+            id.dkim_domain_signing_selector.as_deref(),
+            Some("myselector")
+        );
+        assert_eq!(
+            id.dkim_domain_signing_private_key.as_deref(),
+            Some("myprivatekeybase64")
+        );
+    }
+
+    // GetEmailIdentity round-trips EXTERNAL origin + selector.
+    let req = make_request(Method::GET, "/v2/email/identities/byo.example.com", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["DkimAttributes"]["SigningAttributesOrigin"],
+        "EXTERNAL"
+    );
+    assert_eq!(
+        body["DkimAttributes"]["DomainSigningSelector"],
+        "myselector"
+    );
+}
+
+#[tokio::test]
+async fn test_create_email_identity_easy_dkim_key_length() {
+    let state = make_state();
+    let svc = SesV2Service::new(state.clone());
+
+    // Easy DKIM with an explicit NextSigningKeyLength.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/identities",
+        r#"{"EmailIdentity": "easy.example.com",
+            "DkimSigningAttributes": { "NextSigningKeyLength": "RSA_1024_BIT" }}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["DkimAttributes"]["SigningAttributesOrigin"], "AWS_SES");
+    assert_eq!(
+        body["DkimAttributes"]["NextSigningKeyLength"],
+        "RSA_1024_BIT"
+    );
+
+    let accts = state.read();
+    let s = accts.default_ref();
+    let id = s.identities.get("easy.example.com").unwrap();
+    assert_eq!(
+        id.dkim_next_signing_key_length.as_deref(),
+        Some("RSA_1024_BIT")
+    );
+    // Easy DKIM still auto-provisions a keypair.
+    assert!(id.dkim_domain_signing_private_key.is_some());
+}
