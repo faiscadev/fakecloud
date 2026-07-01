@@ -63,6 +63,89 @@ const PIPE_UPDATE_FIELDS: &[&str] = &[
     "KmsKeyIdentifier",
 ];
 
+/// AWS always echoes the source-typed parameter sub-block on DescribePipe,
+/// populated with defaults, even when the caller sent no `SourceParameters`.
+/// For an SQS source that block is `SqsQueueParameters` with `BatchSize=10`
+/// and `MaximumBatchingWindowInSeconds=0`; the terraform-provider-aws
+/// `aws_pipes_pipe` resource reads it back unconditionally, so a pipe created
+/// without source parameters must still report these defaults. Existing
+/// values (e.g. a caller-supplied batch size, or a `FilterCriteria` alongside)
+/// are preserved.
+pub fn ensure_source_param_defaults(pipe: &mut Map<String, Value>, source_arn: &str) {
+    if !source_arn.contains(":sqs:") {
+        return;
+    }
+    let source_params = pipe
+        .entry("SourceParameters".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(source_params) = source_params.as_object_mut() else {
+        return;
+    };
+    let sqs_params = source_params
+        .entry("SqsQueueParameters".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(sqs_params) = sqs_params.as_object_mut() {
+        sqs_params
+            .entry("BatchSize".to_string())
+            .or_insert_with(|| json!(10));
+        sqs_params
+            .entry("MaximumBatchingWindowInSeconds".to_string())
+            .or_insert_with(|| json!(0));
+    }
+}
+
+/// AWS treats an empty `InputTemplate` as "no transform": DescribePipe omits
+/// it rather than echoing `""`. The terraform-provider-aws resource clears a
+/// target transform by sending `TargetParameters.InputTemplate = ""` (see its
+/// update code: "have to set the input to an empty string otherwise it doesn't
+/// get overwritten"), and then asserts the attribute is absent. Strip an empty
+/// `InputTemplate` from the target/enrichment parameter blocks, and drop a
+/// block that becomes empty so it reads back as absent.
+///
+/// The same "empty to overwrite" pattern applies to the source filter: to clear
+/// `filter_criteria` the provider sends `SourceParameters.FilterCriteria = {}`
+/// (an empty `FilterCriteria` with no `Filters`; see `expandUpdatePipeSourceParameters`),
+/// and AWS's flatten emits a `filter_criteria` block only when `FilterCriteria`
+/// is non-nil. So a FilterCriteria carrying no filters must read back as absent —
+/// strip it, or the provider sees one (empty) block where it expects zero.
+pub fn normalize_empty_input_templates(pipe: &mut Map<String, Value>) {
+    for key in ["TargetParameters", "EnrichmentParameters"] {
+        let drop = match pipe.get_mut(key).and_then(Value::as_object_mut) {
+            Some(params) => {
+                if params.get("InputTemplate").and_then(Value::as_str) == Some("") {
+                    params.remove("InputTemplate");
+                }
+                params.is_empty()
+            }
+            None => false,
+        };
+        if drop {
+            pipe.remove(key);
+        }
+    }
+
+    // Drop an empty `SourceParameters.FilterCriteria` (Filters absent or empty)
+    // so it reads back as no filter at all. Leave the surrounding
+    // SourceParameters block in place — it still carries the source-typed
+    // parameter defaults (e.g. SqsQueueParameters).
+    if let Some(sp) = pipe
+        .get_mut("SourceParameters")
+        .and_then(Value::as_object_mut)
+    {
+        let drop_fc = match sp.get("FilterCriteria").and_then(Value::as_object) {
+            Some(fc) => fc
+                .get("Filters")
+                .and_then(Value::as_array)
+                .map(|f| f.is_empty())
+                .unwrap_or(true),
+            None => false,
+        };
+        if drop_fc {
+            sp.remove("FilterCriteria");
+        }
+    }
+}
+
 pub struct PipesService {
     state: SharedPipesState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
@@ -254,6 +337,8 @@ impl PipesService {
         pipe.insert("StateReason".into(), json!("Pipe is being created"));
         pipe.insert("CreationTime".into(), json!(now));
         pipe.insert("LastModifiedTime".into(), json!(now));
+        ensure_source_param_defaults(&mut pipe, &source);
+        normalize_empty_input_templates(&mut pipe);
 
         let tags = tag_map_from(body.get("Tags"));
 
@@ -292,12 +377,56 @@ impl PipesService {
 
     fn describe_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
+        // Lazy settle: if the pipe is transient and has been so for longer than
+        // SETTLE_DELAY, advance it now (removing it if it was DELETING). The
+        // per-request `spawn_settle` task and the runner drain normally do this,
+        // but both depend on a background task getting scheduled promptly; on a
+        // heavily oversubscribed CI runner that can lag past the provider's
+        // delete/create waiter budget, hanging a pipe in DELETING. Driving the
+        // settle from the client's own DescribePipe poll makes the lifecycle
+        // converge on the poll cadence with no dependency on background
+        // scheduling — the waiter that is asking "is it gone yet?" is exactly
+        // what finishes the deletion.
+        self.settle_if_overdue(&req.account_id, &name);
         let accounts = self.state.read();
         let pipe = accounts
             .get(&req.account_id)
             .and_then(|st| st.pipes.get(&name))
             .ok_or_else(|| not_found(&name))?;
         Ok(AwsResponse::ok_json(pipe.clone()))
+    }
+
+    /// Advance a single pipe to its settled state if it has sat in a transient
+    /// state longer than `SETTLE_DELAY`. Read-locks to check first and only
+    /// takes the write lock when there is actually work to do, so the common
+    /// case (a settled pipe) stays on the read path.
+    fn settle_if_overdue(&self, account_id: &str, name: &str) {
+        let now = now_epoch_secs();
+        let overdue = {
+            let accounts = self.state.read();
+            accounts
+                .get(account_id)
+                .and_then(|st| st.pipes.get(name))
+                .map(|pipe| {
+                    let cur = pipe
+                        .get("CurrentState")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let last = pipe
+                        .get("LastModifiedTime")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    is_transient_state(cur) && now - last >= SETTLE_DELAY.as_secs_f64()
+                })
+                .unwrap_or(false)
+        };
+        if !overdue {
+            return;
+        }
+        let mut accounts = self.state.write();
+        if let Some(st) = accounts.accounts.get_mut(account_id) {
+            settle_pipe(st, name);
+        }
     }
 
     fn list_pipes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -399,9 +528,20 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // UpdatePipe is a full replace of the updatable fields: a field the
+            // client omits is cleared, not left at its previous value. AWS does
+            // this (e.g. dropping `TargetParameters.InputTemplate` on a later
+            // apply must make DescribePipe stop reporting it), and the
+            // terraform-provider-aws resource asserts the omitted attribute is
+            // gone.
             for field in PIPE_UPDATE_FIELDS {
-                if let Some(v) = body.get(*field) {
-                    obj.insert((*field).into(), v.clone());
+                match body.get(*field) {
+                    Some(v) => {
+                        obj.insert((*field).into(), v.clone());
+                    }
+                    None => {
+                        obj.remove(*field);
+                    }
                 }
             }
             let desired = if body.get("DesiredState").is_some() {
@@ -417,6 +557,14 @@ impl PipesService {
             obj.insert("CurrentState".into(), json!(STATE_UPDATING));
             obj.insert("StateReason".into(), json!("Pipe is being updated"));
             obj.insert("LastModifiedTime".into(), json!(now));
+            if let Some(source) = obj
+                .get("Source")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                ensure_source_param_defaults(obj, &source);
+            }
+            normalize_empty_input_templates(obj);
             let arn = obj
                 .get("Arn")
                 .and_then(Value::as_str)
@@ -654,6 +802,64 @@ fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
     }
 }
 
+/// Rescue any pipe that has been sitting in a transient state (CREATING /
+/// UPDATING / STARTING / STOPPING / DELETING) for at least `min_age_secs`,
+/// settling it the same way its per-request `spawn_settle` task would.
+///
+/// Each lifecycle call spawns a one-shot task that sleeps `SETTLE_DELAY` and
+/// then settles the pipe. On a CPU-starved runner (e.g. a 2-core CI box under
+/// several concurrent terraform applies) those spawned tasks can be delayed
+/// long enough that the provider's delete/update waiter times out first — a
+/// pipe stuck in DELETING never gets removed and the waiter blocks for its full
+/// 30-minute budget. The Pipes runner already ticks on a persistent task, so it
+/// drains overdue transients as a backstop that doesn't depend on fresh task
+/// spawns landing promptly. The `min_age_secs` gate keeps this off the fast
+/// path: under normal load the spawned task settles within `SETTLE_DELAY` and
+/// the pipe is gone before it ages past the threshold, so this rescues only
+/// genuinely-starved settles.
+pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64) {
+    let now = now_epoch_secs();
+
+    // Read-lock-first: collect the overdue `(account, name)` pairs under a
+    // shared read lock, and only escalate to the write lock when there is
+    // actually something to settle. The common case — no transient pipe past
+    // the age gate — takes only the read lock, so the runner's per-tick drain
+    // does not convoy against the provider's DescribePipe read flood.
+    let overdue: Vec<(String, String)> = {
+        let accounts = state.read();
+        let mut out = Vec::new();
+        for (account_id, st) in &accounts.accounts {
+            for (name, pipe) in &st.pipes {
+                let cur = pipe
+                    .get("CurrentState")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !is_transient_state(cur) {
+                    continue;
+                }
+                let last = pipe
+                    .get("LastModifiedTime")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                if now - last >= min_age_secs {
+                    out.push((account_id.clone(), name.clone()));
+                }
+            }
+        }
+        out
+    };
+    if overdue.is_empty() {
+        return;
+    }
+
+    let mut accounts = state.write();
+    for (account_id, name) in overdue {
+        if let Some(st) = accounts.accounts.get_mut(&account_id) {
+            settle_pipe(st, &name);
+        }
+    }
+}
+
 /// Build a `Pipe` list summary (a subset of the full describe object).
 fn pipe_summary(pipe: &Value) -> Value {
     let mut out = Map::new();
@@ -848,5 +1054,181 @@ async fn save_snapshot_static(
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(%err, "failed to write pipes snapshot"),
         Err(err) => tracing::error!(%err, "pipes snapshot task panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SQS: &str = "arn:aws:sqs:us-east-1:000000000000:src";
+
+    /// A `PipesService` whose account holds one pipe in `state` with the given
+    /// CurrentState/DesiredState and a LastModifiedTime `age_secs` in the past.
+    fn service_with_pipe(
+        current: &str,
+        desired: &str,
+        age_secs: f64,
+    ) -> (PipesService, SharedPipesState) {
+        use parking_lot::RwLock;
+        let state: SharedPipesState = Arc::new(RwLock::new(crate::state::PipesAccounts::new()));
+        {
+            let mut acc = state.write();
+            let st = acc.get_or_create("123456789012");
+            st.pipes.insert(
+                "p1".into(),
+                json!({
+                    "Name": "p1",
+                    "Arn": "arn:aws:pipes:us-east-1:123456789012:pipe/p1",
+                    "CurrentState": current,
+                    "DesiredState": desired,
+                    "LastModifiedTime": now_epoch_secs() - age_secs,
+                }),
+            );
+        }
+        (PipesService::new(state.clone()), state)
+    }
+
+    #[test]
+    fn lazy_settle_removes_overdue_deleting_pipe() {
+        // A DELETING pipe older than SETTLE_DELAY is removed by a describe-time
+        // settle, so the provider's delete waiter converges on its own poll.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
+    }
+
+    #[test]
+    fn lazy_settle_advances_overdue_creating_pipe() {
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 5.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_RUNNING
+        );
+    }
+
+    #[test]
+    fn lazy_settle_leaves_fresh_transient_pipe() {
+        // Within SETTLE_DELAY the transient state is still observable.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING
+        );
+    }
+
+    #[test]
+    fn sqs_source_gets_default_sqs_queue_parameters() {
+        let mut pipe = Map::new();
+        ensure_source_param_defaults(&mut pipe, SQS);
+        let sqp = &pipe["SourceParameters"]["SqsQueueParameters"];
+        assert_eq!(sqp["BatchSize"], json!(10));
+        assert_eq!(sqp["MaximumBatchingWindowInSeconds"], json!(0));
+    }
+
+    #[test]
+    fn existing_values_and_sibling_params_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({
+                "FilterCriteria": {"Filters": [{"Pattern": "{}"}]},
+                "SqsQueueParameters": {"BatchSize": 5}
+            }),
+        );
+        ensure_source_param_defaults(&mut pipe, SQS);
+        let sp = &pipe["SourceParameters"];
+        // A caller-supplied batch size is kept; only the missing window default
+        // is filled, and the sibling FilterCriteria is untouched.
+        assert_eq!(sp["SqsQueueParameters"]["BatchSize"], json!(5));
+        assert_eq!(
+            sp["SqsQueueParameters"]["MaximumBatchingWindowInSeconds"],
+            json!(0)
+        );
+        assert!(sp["FilterCriteria"]["Filters"].is_array());
+    }
+
+    #[test]
+    fn non_sqs_source_untouched() {
+        let mut pipe = Map::new();
+        ensure_source_param_defaults(&mut pipe, "arn:aws:kinesis:us-east-1:000000000000:stream/s");
+        assert!(pipe.get("SourceParameters").is_none());
+    }
+
+    #[test]
+    fn empty_input_template_only_block_is_dropped() {
+        let mut pipe = Map::new();
+        pipe.insert("TargetParameters".into(), json!({"InputTemplate": ""}));
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe.get("TargetParameters").is_none());
+    }
+
+    #[test]
+    fn empty_input_template_stripped_but_siblings_kept() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "TargetParameters".into(),
+            json!({"InputTemplate": "", "KinesisStreamParameters": {"PartitionKey": "pk"}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        let tp = &pipe["TargetParameters"];
+        assert!(tp.get("InputTemplate").is_none());
+        assert_eq!(tp["KinesisStreamParameters"]["PartitionKey"], "pk");
+    }
+
+    #[test]
+    fn non_empty_input_template_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert("TargetParameters".into(), json!({"InputTemplate": "<$.x>"}));
+        normalize_empty_input_templates(&mut pipe);
+        assert_eq!(pipe["TargetParameters"]["InputTemplate"], "<$.x>");
+    }
+
+    #[test]
+    fn empty_filter_criteria_stripped_defaults_kept() {
+        // Clearing a source filter sends FilterCriteria = {} alongside the
+        // source-typed defaults. The empty FilterCriteria must be dropped so it
+        // reads back as absent, but SqsQueueParameters must survive.
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({
+                "SqsQueueParameters": {"BatchSize": 10, "MaximumBatchingWindowInSeconds": 0},
+                "FilterCriteria": {},
+            }),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe["SourceParameters"].get("FilterCriteria").is_none());
+        assert_eq!(
+            pipe["SourceParameters"]["SqsQueueParameters"]["BatchSize"],
+            10
+        );
+    }
+
+    #[test]
+    fn empty_filters_array_filter_criteria_stripped() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({"FilterCriteria": {"Filters": []}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe["SourceParameters"].get("FilterCriteria").is_none());
+    }
+
+    #[test]
+    fn non_empty_filter_criteria_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({"FilterCriteria": {"Filters": [{"Pattern": "{\"x\":[1]}"}]}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert_eq!(
+            pipe["SourceParameters"]["FilterCriteria"]["Filters"][0]["Pattern"],
+            "{\"x\":[1]}"
+        );
     }
 }

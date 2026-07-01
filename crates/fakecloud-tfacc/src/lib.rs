@@ -11,6 +11,7 @@
 //! an *allow*-list rather than a deny-list to match fakecloud's
 //! parity-per-implemented-service invariant.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -147,6 +148,24 @@ pub struct GoTestRunner<'a> {
     pub endpoint: String,
 }
 
+/// Go `-parallel` degree for a service's `go test` invocation. Defaults to 4.
+///
+/// `pipes` is special: unlike every other service it runs a persistent
+/// background execution loop (the Pipes runner) on the fakecloud side. That
+/// constant load *on top of* four concurrent terraform applies oversubscribes a
+/// 2-core CI runner badly enough that the server stops serving the provider's
+/// delete/`gone` poll requests promptly — a pipe hangs in DELETING and even
+/// unrelated SQS DeleteQueue waiters time out. Other services have no such loop,
+/// so parallel-4 is fine for them. Run the pipes acceptance tests serially so
+/// they don't oversubscribe the box; the suite is small and its behaviour is
+/// unchanged, this only bounds concurrency on constrained runners.
+fn parallelism_for(service: &str) -> u32 {
+    match service {
+        "pipes" => 1,
+        _ => 4,
+    }
+}
+
 impl<'a> GoTestRunner<'a> {
     pub fn run_service(&self, service: &Service) -> GoTestResult {
         self.run_go_tests(service.name, service.run_regex, service.deny)
@@ -168,13 +187,21 @@ impl<'a> GoTestRunner<'a> {
             format!("^({})$", deny.join("|"))
         };
 
-        // `-parallel 4` lets Go's test runner execute up to 4 `t.Parallel()`
+        // `-parallel N` lets Go's test runner execute up to N `t.Parallel()`
         // subtests concurrently within a single `go test` invocation. We use 4
         // (rather than 8 or runner core count) because some upstream tests
         // poll fakecloud aggressively under parallel load and can starve the
         // request loop, surfacing as suite-wide hangs. CI fan-out across
         // services is handled by the GitHub Actions matrix, so wall time
         // scales with the slowest single service, not their sum.
+        //
+        // A few services drive a fakecloud-side background loop plus multi-step
+        // create/update/delete lifecycle waiters, and on a constrained 2-core CI
+        // runner four of those in parallel saturate the CPU enough that the
+        // lifecycle settle tasks starve and the provider's delete/update waiters
+        // time out (observed as a 30-minute stuck DELETING pipe). Those run at a
+        // lower parallelism; see `parallelism_for`.
+        let parallel = parallelism_for(service);
         let mut cmd = Command::new("go");
         let mut args: Vec<String> = vec![
             "test".into(),
@@ -186,7 +213,7 @@ impl<'a> GoTestRunner<'a> {
             "90m".into(),
             "-count=1".into(),
             "-parallel".into(),
-            "4".into(),
+            parallel.to_string(),
         ];
         if !skip_re.is_empty() {
             args.push("-skip".into());
@@ -209,12 +236,59 @@ impl<'a> GoTestRunner<'a> {
             cmd.env(key, &self.endpoint);
         }
 
-        let output = cmd.output().expect("run go test");
+        // Stream `go test` output live (echo each line to our own stdout/stderr
+        // as it arrives) instead of buffering until exit. `go test -v` can run
+        // for many minutes; if a single subtest hangs and CI kills the job on
+        // its timeout, a buffered `cmd.output()` would discard everything and
+        // the CI log would show no `=== RUN` / `--- PASS` lines — leaving the
+        // culprit invisible (exactly the blind spot a pipes-shard hang hit).
+        // Streaming means the last un-paired `=== RUN` in the job log names the
+        // hung test even when the process is killed mid-run. We still collect
+        // the bytes so `assert_pass` can parse the failure summary.
+        let mut child = cmd.spawn().expect("spawn go test");
+        let child_stdout = child.stdout.take().expect("piped stdout");
+        let child_stderr = child.stderr.take().expect("piped stderr");
+        let stdout_handle = std::thread::spawn(move || tee(child_stdout, false));
+        let stderr_handle = std::thread::spawn(move || tee(child_stderr, true));
+        let status = child.wait().expect("wait for go test");
+        let stdout = stdout_handle.join().unwrap_or_default();
+        let stderr = stderr_handle.join().unwrap_or_default();
         GoTestResult {
-            success: output.status.success(),
-            output,
+            success: status.success(),
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
         }
     }
+}
+
+/// Read a child pipe line by line, echoing each line to the parent's stdout
+/// (or stderr) as it arrives so the output survives a timeout-kill, while
+/// accumulating the raw bytes for later parsing.
+fn tee<R: std::io::Read>(pipe: R, is_stderr: bool) -> Vec<u8> {
+    let mut collected = Vec::new();
+    let mut reader = BufReader::new(pipe);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                collected.extend_from_slice(&line);
+                if is_stderr {
+                    let _ = std::io::stderr().write_all(&line);
+                    let _ = std::io::stderr().flush();
+                } else {
+                    let _ = std::io::stdout().write_all(&line);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    collected
 }
 
 pub struct GoTestResult {
@@ -309,6 +383,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_BATCH", "batch"),
     ("AWS_ENDPOINT_URL_COGNITO_IDENTITY", "cognito-identity"),
     ("AWS_ENDPOINT_URL_SCHEDULER", "scheduler"),
+    ("AWS_ENDPOINT_URL_PIPES", "pipes"),
     ("AWS_ENDPOINT_URL_WAFV2", "wafv2"),
     ("AWS_ENDPOINT_URL_FIREHOSE", "firehose"),
     ("AWS_ENDPOINT_URL_CLOUDWATCH", "monitoring"),

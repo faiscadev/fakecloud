@@ -603,6 +603,17 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "pipes",
+        // EventBridge Pipes: the control-plane smokes for aws_pipes_pipe — basic
+        // SQS source->target, disappears, description, desired_state, role ARN,
+        // generated/prefixed names, target update, source filter criteria, and
+        // the target InputTemplate transform. Real-only surfaces (Kafka/MSK/MQ
+        // sources, Redshift/SageMaker/Batch/ECS targets, KMS, CloudWatch-Logs
+        // log configuration) are left out of the smoke.
+        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState|roleARN|nameGenerated|namePrefix|tags|targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
+        deny: &[],
+    },
+    Service {
         name: "sesv2",
         // SES v2: the `_basic` smoke for configuration sets (+ event destination
         // + data source), dedicated IP pools (+ data source), and email identity
@@ -1143,6 +1154,32 @@ pub const SHARDS: &[Shard] = &[
         name: "scheduler",
         service: "scheduler",
         run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    // EventBridge Pipes is split across three shards, each a fresh fakecloud
+    // handling at most four pipe-lifecycle tests. Pipes is the only service that
+    // runs a persistent execution loop, and a single process that drives ~6+ of
+    // these create/transition/destroy tests back-to-back on a constrained 2-core
+    // CI runner degrades until the provider's delete/"gone" waiters stop
+    // converging (a pipe or its SQS source/target queue lingers past the waiter
+    // budget). Keeping each shard small holds every run well under that point;
+    // the union of the three equals the original single-shard selection.
+    Shard {
+        name: "pipes-a",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "pipes-b",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(roleARN|nameGenerated|namePrefix|tags)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "pipes-c",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
         extra_deny: &[],
     },
     Shard {

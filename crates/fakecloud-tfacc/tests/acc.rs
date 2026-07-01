@@ -253,6 +253,21 @@ async fn scheduler_acceptance() {
 }
 
 #[tokio::test]
+async fn pipes_a_acceptance() {
+    run_shard("pipes-a").await;
+}
+
+#[tokio::test]
+async fn pipes_b_acceptance() {
+    run_shard("pipes-b").await;
+}
+
+#[tokio::test]
+async fn pipes_c_acceptance() {
+    run_shard("pipes-c").await;
+}
+
+#[tokio::test]
 async fn sesv2_acceptance() {
     run_shard("sesv2").await;
 }
