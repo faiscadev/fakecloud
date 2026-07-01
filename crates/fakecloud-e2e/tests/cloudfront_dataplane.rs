@@ -1,10 +1,13 @@
 // crates/fakecloud-e2e/tests/cloudfront_dataplane.rs
-//! CloudFront data-plane scaffolding E2E tests.
-//!
-//! Task 1 only covers `StoredDistribution.bound_port` state plus the
-//! `/_fakecloud/cloudfront/distributions` discovery route. No supervisor
-//! exists yet, so `boundPort` is expected to be `null` here — it's wired
-//! up in a later task.
+//! CloudFront data-plane E2E tests: distribution discovery
+//! (`/_fakecloud/cloudfront/distributions`) and the in-process data plane
+//! (listener lifecycle: bind on enable, tear down on disable/delete, rebind on
+//! startup in persistent mode). Origin routing + CustomErrorResponses are added
+//! by later tasks.
+
+// The SPA distribution config uses `ForwardedValues` (legacy, pre-cache-policy),
+// which the AWS SDK marks deprecated in favor of CachePolicyId. It is the
+// minimal valid shape for these tests, so allow the deprecation here.
 #![allow(deprecated)]
 
 mod helpers;
@@ -26,6 +29,33 @@ pub async fn make_spa_distribution(
     default_origin_domain: &str,
     api_origin_domain: Option<&str>,
 ) -> aws_sdk_cloudfront::types::Distribution {
+    let config = spa_config(
+        default_origin_domain,
+        api_origin_domain,
+        &format!("spa-{}", uuid_like()),
+        true,
+    );
+    let create = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .expect("create_distribution");
+    create
+        .distribution()
+        .expect("distribution returned")
+        .clone()
+}
+
+/// Build the SPA distribution config. Shared by create (enabled=true) and the
+/// disable-via-update path (enabled=false) so both use an identical shape; the
+/// `caller_reference` must be preserved across an UpdateDistribution.
+fn spa_config(
+    default_origin_domain: &str,
+    api_origin_domain: Option<&str>,
+    caller_reference: &str,
+    enabled: bool,
+) -> DistributionConfig {
     let mut origins_items = vec![Origin::builder()
         .id("o1")
         .domain_name(default_origin_domain)
@@ -77,9 +107,9 @@ pub async fn make_spa_distribution(
     let cache_behaviors_len = cache_behaviors_items.len() as i32;
 
     let mut config_builder = DistributionConfig::builder()
-        .caller_reference(format!("spa-{}", uuid_like()))
+        .caller_reference(caller_reference)
         .comment("spa e2e")
-        .enabled(true)
+        .enabled(enabled)
         .origins(
             Origins::builder()
                 .quantity(origins_len)
@@ -132,18 +162,7 @@ pub async fn make_spa_distribution(
         );
     }
 
-    let config = config_builder.build().unwrap();
-
-    let create = cf
-        .create_distribution()
-        .distribution_config(config)
-        .send()
-        .await
-        .expect("create_distribution");
-    create
-        .distribution()
-        .expect("distribution returned")
-        .clone()
+    config_builder.build().unwrap()
 }
 
 /// Cheap unique-enough suffix so repeated calls within a test don't collide
@@ -160,7 +179,6 @@ fn uuid_like() -> String {
 }
 
 /// Poll the introspection route until the distribution reports a bound port.
-#[allow(dead_code)]
 async fn wait_for_bound_port(
     server: &TestServer,
     dist_id: &str,
@@ -210,4 +228,131 @@ async fn introspection_route_lists_distributions() {
         .unwrap();
     let arr = v["distributions"].as_array().unwrap();
     assert!(arr.iter().any(|d| d["id"].as_str() == Some(dist.id())));
+}
+
+/// Disable a distribution: fetch its config + ETag, flip `enabled` to false,
+/// and update. (Real CloudFront requires a distribution be disabled before it
+/// can be deleted; the data plane must stop serving it either way.)
+async fn disable_distribution(
+    cf: &aws_sdk_cloudfront::Client,
+    id: &str,
+    default_origin_domain: &str,
+    api_origin_domain: Option<&str>,
+) {
+    let got = cf
+        .get_distribution_config()
+        .id(id)
+        .send()
+        .await
+        .expect("get_distribution_config");
+    let etag = got.e_tag().expect("etag").to_string();
+    let caller_reference = got
+        .distribution_config()
+        .expect("config")
+        .caller_reference()
+        .to_string();
+    // Rebuild the same config shape with enabled=false (UpdateDistribution
+    // requires the CallerReference be preserved).
+    let cfg = spa_config(
+        default_origin_domain,
+        api_origin_domain,
+        &caller_reference,
+        false,
+    );
+    cf.update_distribution()
+        .id(id)
+        .if_match(etag)
+        .distribution_config(cfg)
+        .send()
+        .await
+        .expect("update_distribution");
+}
+
+/// Poll until the distribution is no longer reporting a bound port (listener
+/// torn down). Returns false if it never unbinds within the deadline.
+async fn wait_for_unbound(server: &TestServer, dist_id: &str, deadline: Duration) -> bool {
+    let url = format!("{}/_fakecloud/cloudfront/distributions", server.endpoint());
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        if let Ok(r) = client.get(&url).send().await {
+            if let Ok(v) = r.json::<serde_json::Value>().await {
+                if let Some(arr) = v.get("distributions").and_then(|x| x.as_array()) {
+                    let still_bound = arr.iter().any(|d| {
+                        d.get("id").and_then(|x| x.as_str()) == Some(dist_id)
+                            && d.get("boundPort").and_then(|x| x.as_u64()).is_some()
+                    });
+                    if !still_bound {
+                        return true;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn binds_on_enable_and_stops_on_disable() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(
+        &cf,
+        "example-bucket.s3-website-us-east-1.amazonaws.com",
+        None,
+    )
+    .await;
+
+    // Bind on enable: the supervisor allocates a listener and records the port.
+    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
+        .await
+        .expect("data plane should bind a port for the enabled distribution");
+
+    // It serves (fixed 200 at this stage).
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect("request to bound listener");
+    assert!(resp.status().is_success());
+
+    // Disable -> supervisor tears the listener down and clears bound_port.
+    disable_distribution(
+        &cf,
+        dist.id(),
+        "example-bucket.s3-website-us-east-1.amazonaws.com",
+        None,
+    )
+    .await;
+    assert!(
+        wait_for_unbound(&server, dist.id(), Duration::from_secs(10)).await,
+        "disabled distribution should stop serving / clear bound_port"
+    );
+}
+
+#[tokio::test]
+async fn rebinds_enabled_distribution_on_restart_persistent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(
+        &cf,
+        "example-bucket.s3-website-us-east-1.amazonaws.com",
+        None,
+    )
+    .await;
+    let id = dist.id().to_string();
+
+    wait_for_bound_port(&server, &id, Duration::from_secs(10))
+        .await
+        .expect("distribution should bind before restart");
+
+    // Restart from the same data dir: the persisted enabled distribution must
+    // re-bind on the first supervisor tick (startup rebind).
+    server.restart().await;
+
+    wait_for_bound_port(&server, &id, Duration::from_secs(10))
+        .await
+        .expect("enabled distribution should rebind on startup in persistent mode");
 }

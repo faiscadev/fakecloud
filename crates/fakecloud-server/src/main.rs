@@ -2741,6 +2741,9 @@ async fn main() {
     cloudfront_inner.rearm_in_progress();
     let cloudfront_service = Arc::new(cloudfront_inner);
     registry.register(cloudfront_service.clone());
+    // Start the in-process data plane: enabled distributions bind a listener
+    // and serve viewer traffic (discovered via /_fakecloud/cloudfront/*).
+    cloudfront_service.start_dataplane();
     let cloudfront_introspection_state = cloudfront_state.clone();
     let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

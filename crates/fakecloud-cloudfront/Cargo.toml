@@ -17,7 +17,11 @@ boa_engine = "0.21"
 bytes = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
+http-body-util = "0.1"
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
 parking_lot = { workspace = true }
+reqwest = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

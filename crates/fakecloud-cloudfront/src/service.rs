@@ -263,6 +263,15 @@ impl CloudFrontService {
         }
     }
 
+    /// Start the in-process data-plane supervisor (opt-in). `new` constructs
+    /// the service without a data plane; the server calls this once after
+    /// wiring so that enabled distributions actually serve viewer traffic. A
+    /// no-op when disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`. Must be
+    /// called from within a Tokio runtime (it spawns the supervisor task).
+    pub fn start_dataplane(&self) {
+        crate::dataplane::spawn_dataplane(self.state.clone());
+    }
+
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
