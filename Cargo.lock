@@ -747,6 +747,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-dsql"
+version = "1.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a2bae031b14c8a80c00197ee4852240d6fd75ce6197414c90d4412722be5663"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "aws-sdk-dynamodb"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3117,6 +3143,7 @@ dependencies = [
  "fakecloud-cloudwatch",
  "fakecloud-cognito",
  "fakecloud-core",
+ "fakecloud-dsql",
  "fakecloud-dynamodb",
  "fakecloud-ec2",
  "fakecloud-ecr",
@@ -3565,6 +3592,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
+ "aws-sdk-dsql",
  "aws-sdk-dynamodb",
  "aws-sdk-ec2",
  "aws-sdk-ecr",
@@ -3643,6 +3671,26 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-dsql"
+version = "0.29.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4474,6 +4522,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
+ "aws-sdk-dsql",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",
  "aws-sdk-ec2",

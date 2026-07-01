@@ -35,6 +35,7 @@ fakecloud-cognito = { workspace = true }
 fakecloud-kinesis = { workspace = true }
 fakecloud-rds = { workspace = true }
 fakecloud-rds-data = { workspace = true }
+fakecloud-dsql = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-elbv2 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }

@@ -41,6 +41,7 @@ sdk-clients = [
     "dep:aws-sdk-bedrockagentruntime",
     "dep:aws-sdk-bedrockruntime",
     "dep:aws-sdk-scheduler",
+    "dep:aws-sdk-dsql",
     "dep:aws-sdk-ecr",
     "dep:aws-sdk-ecs",
     "dep:aws-sdk-elasticloadbalancingv2",
@@ -96,6 +97,7 @@ aws-sdk-bedrockagent = { version = "1", optional = true }
 aws-sdk-bedrockagentruntime = { version = "1", optional = true }
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-sdk-scheduler = { version = "1", optional = true }
+aws-sdk-dsql = { version = "1", optional = true }
 aws-sdk-ecr = { version = "1", optional = true }
 aws-sdk-ecs = { version = "1", optional = true }
 aws-sdk-elasticloadbalancingv2 = { version = "1", optional = true }

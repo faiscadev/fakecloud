@@ -1557,6 +1557,25 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ExecuteStatement`
 - `RollbackTransaction`
 
+## [Aurora DSQL](@/docs/services/dsql.md)
+
+- `CreateCluster`
+- `CreateStream`
+- `DeleteCluster`
+- `DeleteClusterPolicy`
+- `DeleteStream`
+- `GetCluster`
+- `GetClusterPolicy`
+- `GetStream`
+- `GetVpcEndpointServiceName`
+- `ListClusters`
+- `ListStreams`
+- `ListTagsForResource`
+- `PutClusterPolicy`
+- `TagResource`
+- `UntagResource`
+- `UpdateCluster`
+
 ## [ElastiCache](@/docs/services/elasticache.md)
 
 - `AddTagsToResource`

@@ -75,6 +75,10 @@
         "repo_dir": "rds-data",
         "service_name": "rds-data"
     },
+    "dsql": {
+        "repo_dir": "dsql",
+        "service_name": "dsql"
+    },
     "elasticache": {
         "repo_dir": "elasticache",
         "service_name": "elasticache"

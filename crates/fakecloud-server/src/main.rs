@@ -55,6 +55,7 @@ use fakecloud_bedrock_agent_runtime::BedrockAgentRuntimeService;
 use fakecloud_cloudformation::CloudFormationService;
 use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::CognitoService;
+use fakecloud_dsql::DsqlService;
 use fakecloud_dynamodb::DynamoDbService;
 use fakecloud_ec2::{Ec2Service, SharedEc2State};
 use fakecloud_ecr::EcrService;
@@ -444,6 +445,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let dsql_state: fakecloud_dsql::SharedDsqlState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let rds_runtime = if fakecloud_k8s::backend_choice("FAKECLOUD_RDS_BACKEND")
         == fakecloud_k8s::Backend::K8s
     {
@@ -3761,6 +3769,42 @@ async fn main() {
         cfn_snapshot_hooks.insert("scheduler", h);
     }
     registry.register(Arc::new(scheduler_service));
+
+    // Aurora DSQL control plane.
+    let dsql_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("dsql").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_dsql::persistence::load_into(&store, &dsql_state) {
+                Ok(fakecloud_dsql::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded dsql persistence snapshot");
+                }
+                Ok(fakecloud_dsql::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no dsql persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut dsql_service = DsqlService::new(dsql_state.clone());
+    if let Some(store) = dsql_snapshot_store {
+        dsql_service = dsql_service.with_snapshot_store(store);
+    }
+    if let Some(h) = dsql_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("dsql", h);
+    }
+    // Advance CREATING -> ACTIVE / DELETING -> DELETED out of band so waiters
+    // converge; the ticker owns its own snapshot write-through.
+    dsql_service.start_ticker();
+    registry.register(Arc::new(dsql_service));
+
     let cloudformation_service = cloudformation_service
         .with_s3_store(s3_store.clone())
         .with_snapshot_hooks(cfn_snapshot_hooks);

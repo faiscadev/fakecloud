@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 42 AWS services with 3,704 total operations. 124,508/124,508 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 43 AWS services with 3,742 total operations. 124,999/124,999 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -30,6 +30,7 @@ fakecloud implements 42 AWS services with 3,704 total operations. 124,508/124,50
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | RDS Data API           |   6 | Real SQL on the backing Postgres/MySQL container; typed params/results incl. `bytea`/`BLOB`, transactions, batch |
+| Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
