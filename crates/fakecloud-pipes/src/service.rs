@@ -377,12 +377,56 @@ impl PipesService {
 
     fn describe_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
+        // Lazy settle: if the pipe is transient and has been so for longer than
+        // SETTLE_DELAY, advance it now (removing it if it was DELETING). The
+        // per-request `spawn_settle` task and the runner drain normally do this,
+        // but both depend on a background task getting scheduled promptly; on a
+        // heavily oversubscribed CI runner that can lag past the provider's
+        // delete/create waiter budget, hanging a pipe in DELETING. Driving the
+        // settle from the client's own DescribePipe poll makes the lifecycle
+        // converge on the poll cadence with no dependency on background
+        // scheduling — the waiter that is asking "is it gone yet?" is exactly
+        // what finishes the deletion.
+        self.settle_if_overdue(&req.account_id, &name);
         let accounts = self.state.read();
         let pipe = accounts
             .get(&req.account_id)
             .and_then(|st| st.pipes.get(&name))
             .ok_or_else(|| not_found(&name))?;
         Ok(AwsResponse::ok_json(pipe.clone()))
+    }
+
+    /// Advance a single pipe to its settled state if it has sat in a transient
+    /// state longer than `SETTLE_DELAY`. Read-locks to check first and only
+    /// takes the write lock when there is actually work to do, so the common
+    /// case (a settled pipe) stays on the read path.
+    fn settle_if_overdue(&self, account_id: &str, name: &str) {
+        let now = now_epoch_secs();
+        let overdue = {
+            let accounts = self.state.read();
+            accounts
+                .get(account_id)
+                .and_then(|st| st.pipes.get(name))
+                .map(|pipe| {
+                    let cur = pipe
+                        .get("CurrentState")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let last = pipe
+                        .get("LastModifiedTime")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    is_transient_state(cur) && now - last >= SETTLE_DELAY.as_secs_f64()
+                })
+                .unwrap_or(false)
+        };
+        if !overdue {
+            return;
+        }
+        let mut accounts = self.state.write();
+        if let Some(st) = accounts.accounts.get_mut(account_id) {
+            settle_pipe(st, name);
+        }
     }
 
     fn list_pipes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1018,6 +1062,62 @@ mod tests {
     use super::*;
 
     const SQS: &str = "arn:aws:sqs:us-east-1:000000000000:src";
+
+    /// A `PipesService` whose account holds one pipe in `state` with the given
+    /// CurrentState/DesiredState and a LastModifiedTime `age_secs` in the past.
+    fn service_with_pipe(
+        current: &str,
+        desired: &str,
+        age_secs: f64,
+    ) -> (PipesService, SharedPipesState) {
+        use parking_lot::RwLock;
+        let state: SharedPipesState = Arc::new(RwLock::new(crate::state::PipesAccounts::new()));
+        {
+            let mut acc = state.write();
+            let st = acc.get_or_create("123456789012");
+            st.pipes.insert(
+                "p1".into(),
+                json!({
+                    "Name": "p1",
+                    "Arn": "arn:aws:pipes:us-east-1:123456789012:pipe/p1",
+                    "CurrentState": current,
+                    "DesiredState": desired,
+                    "LastModifiedTime": now_epoch_secs() - age_secs,
+                }),
+            );
+        }
+        (PipesService::new(state.clone()), state)
+    }
+
+    #[test]
+    fn lazy_settle_removes_overdue_deleting_pipe() {
+        // A DELETING pipe older than SETTLE_DELAY is removed by a describe-time
+        // settle, so the provider's delete waiter converges on its own poll.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
+    }
+
+    #[test]
+    fn lazy_settle_advances_overdue_creating_pipe() {
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 5.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_RUNNING
+        );
+    }
+
+    #[test]
+    fn lazy_settle_leaves_fresh_transient_pipe() {
+        // Within SETTLE_DELAY the transient state is still observable.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
+        svc.settle_if_overdue("123456789012", "p1");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING
+        );
+    }
 
     #[test]
     fn sqs_source_gets_default_sqs_queue_parameters() {
