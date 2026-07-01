@@ -3228,6 +3228,9 @@ async fn main() {
     // Re-drive any pipe left mid-transition by a restart so it doesn't stay
     // stuck in CREATING/UPDATING/etc forever.
     pipes_service.recover_persisted_pipes().await;
+    // Capture the pipes snapshot hook for the runner so its checkpoint advances
+    // are flushed to disk (M1), in addition to the CFN provisioner path.
+    let pipes_persist_hook = pipes_service.snapshot_hook();
     if let Some(h) = pipes_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("pipes", h);
     }
@@ -4020,7 +4023,7 @@ async fn main() {
         if let Some(ref ld) = lambda_delivery {
             pipes_bus = pipes_bus.with_lambda(ld.clone());
         }
-        let runner = pipes_runner::PipesRunner::new(
+        let mut runner = pipes_runner::PipesRunner::new(
             pipes_state.clone(),
             sqs_state.clone(),
             Arc::new(pipes_bus),
@@ -4028,6 +4031,9 @@ async fn main() {
         .with_kinesis_state(kinesis_state.clone())
         .with_dynamodb_state(dynamodb_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
+        if let Some(hook) = pipes_persist_hook.clone() {
+            runner = runner.with_persist_hook(hook);
+        }
         tokio::spawn(runner.run());
     }
     if let Some(ref rt) = container_runtime {
