@@ -231,6 +231,11 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         // Validate user exists
         if !state
             .users
@@ -286,6 +291,11 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         // Validate user exists
         if !state
             .users
@@ -339,6 +349,11 @@ impl CognitoService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
         ensure_user_pool_exists(state, pool_id)?;
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         // Validate user exists
         if !state

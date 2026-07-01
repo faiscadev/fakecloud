@@ -57,6 +57,7 @@ impl CognitoService {
                 username: username.to_string(),
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
         state.auth_events.push(AuthEvent {
@@ -540,6 +541,7 @@ impl CognitoService {
                 username,
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
 
@@ -879,6 +881,7 @@ impl CognitoService {
                 username: username.to_string(),
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
         state.auth_events.push(AuthEvent {

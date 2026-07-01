@@ -1306,33 +1306,44 @@ enum FilterOp {
     StartsWith,
 }
 
-/// Parse a Cognito ListUsers filter expression like `email = "foo@bar.com"` or `email ^= "foo"`.
+/// Parse a Cognito ListUsers filter expression like `email = "foo@bar.com"` or
+/// `email ^= "foo"`. Returns `None` for any malformed input (missing operator,
+/// empty attribute, or a value that is not a non-empty double-quoted string);
+/// callers surface `None` as `InvalidParameterException`.
 fn parse_filter_expression(filter: &str) -> Option<FilterExpression> {
     let filter = filter.trim();
 
-    // Try ^= first (starts with)
-    if let Some((attr, val)) = filter.split_once("^=") {
-        let attribute = attr.trim().trim_matches('"').to_string();
-        let value = val.trim().trim_matches('"').to_string();
-        return Some(FilterExpression {
-            attribute,
-            operator: FilterOp::StartsWith,
-            value,
-        });
+    // `^=` (starts-with) must be tried before `=`.
+    let (attr_raw, value_raw, operator) = if let Some((attr, val)) = filter.split_once("^=") {
+        (attr, val, FilterOp::StartsWith)
+    } else if let Some((attr, val)) = filter.split_once('=') {
+        (attr, val, FilterOp::Equals)
+    } else {
+        return None;
+    };
+
+    // Attribute: non-empty (optional surrounding quotes tolerated).
+    let attribute = attr_raw.trim().trim_matches('"').trim().to_string();
+    if attribute.is_empty() {
+        return None;
     }
 
-    // Try = (equals)
-    if let Some((attr, val)) = filter.split_once('=') {
-        let attribute = attr.trim().trim_matches('"').to_string();
-        let value = val.trim().trim_matches('"').to_string();
-        return Some(FilterExpression {
-            attribute,
-            operator: FilterOp::Equals,
-            value,
-        });
+    // Value MUST be a non-empty, properly double-quoted string. Reject
+    // `email = ` (empty), `email = x` (unquoted), and `email = "` (unterminated).
+    let value_raw = value_raw.trim();
+    if value_raw.len() < 2 || !value_raw.starts_with('"') || !value_raw.ends_with('"') {
+        return None;
+    }
+    let value = value_raw[1..value_raw.len() - 1].to_string();
+    if value.is_empty() {
+        return None;
     }
 
-    None
+    Some(FilterExpression {
+        attribute,
+        operator,
+        value,
+    })
 }
 
 /// Check if a user matches a filter expression.
@@ -2103,9 +2114,19 @@ fn generate_tokens_with_overrides(
         };
         apply_claim_overrides(id_payload.as_object_mut().unwrap(), id_block);
         apply_claim_overrides(access_payload.as_object_mut().unwrap(), access_block);
+        // An explicit `groupsToOverride` (even an empty array) REPLACES the
+        // real-membership groups: a present-but-empty list clears
+        // `cognito:groups`, matching real Cognito. Only a fully absent
+        // `groupOverrideDetails` leaves the real membership untouched.
         if let Some(arr) = group_block["groupsToOverride"].as_array() {
             let groups: Vec<Value> = arr.iter().filter(|v| v.is_string()).cloned().collect();
-            if !groups.is_empty() {
+            if groups.is_empty() {
+                id_payload.as_object_mut().unwrap().remove("cognito:groups");
+                access_payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("cognito:groups");
+            } else {
                 id_payload["cognito:groups"] = Value::Array(groups.clone());
                 access_payload["cognito:groups"] = Value::Array(groups);
             }
@@ -2641,6 +2662,7 @@ async fn handle_authorization_code_grant(
                     username: consumed.username.clone(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
                 },
             );
             break;
@@ -2736,6 +2758,7 @@ async fn handle_refresh_token_grant(
                     username: username.clone(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
                 },
             );
             break;
@@ -2830,6 +2853,7 @@ async fn handle_client_credentials_grant(
                     username: client_id.to_string(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(access_ttl)),
                 },
             );
             break;
@@ -3405,6 +3429,9 @@ pub async fn handle_oauth2_authorize(
                             username: username.to_string(),
                             client_id: req.client_id.clone(),
                             issued_at: Utc::now(),
+                            expires_at: Some(
+                                Utc::now() + chrono::Duration::seconds(tokens.expires_in),
+                            ),
                         },
                     );
                     break;

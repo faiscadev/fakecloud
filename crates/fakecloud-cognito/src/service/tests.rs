@@ -844,6 +844,7 @@ fn access_token_lookup() {
                 username: "testuser".to_string(),
                 client_id: "testclient123".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
     }
@@ -1182,6 +1183,7 @@ fn self_service_get_user_via_access_token() {
                 username: "selfuser".to_string(),
                 client_id: "test-client".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
     }
@@ -1312,6 +1314,7 @@ fn self_service_delete_user_cleans_up_tokens() {
                 username: "deluser".to_string(),
                 client_id: "test-client".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
         s.refresh_tokens.insert(
@@ -1434,6 +1437,7 @@ fn verify_user_attribute_with_correct_code() {
                 username: "verifyuser".to_string(),
                 client_id: "test-client".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
     }
@@ -6157,6 +6161,7 @@ fn issue_access_token(
             username: username.to_string(),
             client_id: client_id.to_string(),
             issued_at: chrono::Utc::now(),
+            expires_at: None,
         },
     );
     token
@@ -6395,6 +6400,7 @@ fn issue_access_token_for(
             username: username.to_string(),
             client_id: client_id.to_string(),
             issued_at: chrono::Utc::now(),
+            expires_at: None,
         },
     );
     token
@@ -6851,6 +6857,7 @@ fn issue_at_for_users(
             username: username.to_string(),
             client_id: client_id.to_string(),
             issued_at: chrono::Utc::now(),
+            expires_at: None,
         },
     );
     token
@@ -7237,6 +7244,7 @@ fn issue_at(
             username: username.to_string(),
             client_id: client_id.to_string(),
             issued_at: chrono::Utc::now(),
+            expires_at: None,
         },
     );
     token
@@ -8147,6 +8155,7 @@ fn oauth_token_maps_survive_snapshot_roundtrip() {
                 username: "alice".to_string(),
                 client_id: "client-1".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
         acct.authorization_codes.insert(
@@ -8435,6 +8444,7 @@ fn get_user_response_matches_aws_shape() {
                 username: username.clone(),
                 client_id: "c".to_string(),
                 issued_at: Utc::now(),
+                expires_at: None,
             },
         );
     }
@@ -8621,4 +8631,315 @@ fn sub_is_immutable_via_update_attributes() {
         Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
         Ok(_) => panic!("sub must be read-only"),
     }
+}
+
+// ── bug-hunt batch 4 — Cubic review follow-ups ──────────────────────────
+
+#[test]
+fn empty_group_override_clears_real_membership() {
+    // Cubic 2: an explicit empty `groupsToOverride` must CLEAR cognito:groups,
+    // not leave the real-membership groups in place.
+    use crate::service::{generate_tokens_with_overrides, TokenClaims};
+    let overrides = json!({
+        "claimsAndScopeOverrideDetails": {
+            "groupOverrideDetails": { "groupsToOverride": [] }
+        }
+    });
+    let claims = TokenClaims {
+        groups: vec!["admins".to_string(), "beta".to_string()],
+        ..Default::default()
+    };
+    let tokens = generate_tokens_with_overrides(
+        "us-east-1_abc",
+        "client1",
+        "sub-1",
+        "alice",
+        "us-east-1",
+        None,
+        None,
+        None,
+        Some(&overrides),
+        &claims,
+    );
+    let id = decode_jwt_payload(&tokens.id_token);
+    assert!(
+        id.get("cognito:groups").is_none(),
+        "empty override must clear cognito:groups: {id}"
+    );
+    let access = decode_jwt_payload(&tokens.access_token);
+    assert!(access.get("cognito:groups").is_none());
+}
+
+#[test]
+fn absent_group_override_keeps_real_membership() {
+    // Complementary to the above: NO groupOverrideDetails leaves real
+    // membership intact.
+    use crate::service::{generate_tokens_with_overrides, TokenClaims};
+    let overrides = json!({
+        "claimsAndScopeOverrideDetails": {
+            "idTokenGeneration": { "claimsToAddOrOverride": {"x": "y"} }
+        }
+    });
+    let claims = TokenClaims {
+        groups: vec!["admins".to_string()],
+        ..Default::default()
+    };
+    let tokens = generate_tokens_with_overrides(
+        "us-east-1_abc",
+        "client1",
+        "sub-1",
+        "alice",
+        "us-east-1",
+        None,
+        None,
+        None,
+        Some(&overrides),
+        &claims,
+    );
+    let id = decode_jwt_payload(&tokens.id_token);
+    assert_eq!(id["cognito:groups"], json!(["admins"]));
+}
+
+#[test]
+fn parse_filter_rejects_malformed_with_operator() {
+    // Cubic 4: filters that HAVE an operator but a bad value must be rejected.
+    for bad in [
+        r#"email = "#,   // empty value
+        r#"email = x"#,  // unquoted value
+        r#"email = """#, // empty quoted value
+        r#"email = "x"#, // unterminated quote
+        r#" = "x""#,     // empty attribute
+        r#"email"#,      // no operator
+    ] {
+        assert!(
+            parse_filter_expression(bad).is_none(),
+            "malformed filter must not parse: {bad:?}"
+        );
+    }
+    // Well-formed still parses.
+    assert!(parse_filter_expression(r#"email = "a@b.com""#).is_some());
+    assert!(parse_filter_expression(r#"email ^= "a""#).is_some());
+}
+
+#[test]
+fn list_users_malformed_filter_with_operator_errors() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    block_on(
+        svc.admin_create_user(&make_req(
+            "AdminCreateUser",
+            &json!({"UserPoolId": pool_id, "Username": "u1", "TemporaryPassword": "TempP@ss1!"})
+                .to_string(),
+        )),
+    )
+    .unwrap();
+    for bad in [r#"email = "#, r#"email = x"#] {
+        match svc.list_users(&make_req(
+            "ListUsers",
+            &json!({"UserPoolId": pool_id, "Filter": bad}).to_string(),
+        )) {
+            Err(e) => assert_eq!(e.code(), "InvalidParameterException", "filter {bad:?}"),
+            Ok(_) => panic!("malformed filter {bad:?} must error"),
+        }
+    }
+}
+
+#[test]
+fn sub_cannot_be_deleted_via_attribute_delete() {
+    // Cubic 5: both attribute-delete paths must reject removing `sub`.
+    let (svc, pool_id, username) = setup_svc_with_pool_and_user();
+    match svc.admin_delete_user_attributes(&make_req(
+        "AdminDeleteUserAttributes",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": username,
+            "UserAttributeNames": ["sub"],
+        })
+        .to_string(),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+        Ok(_) => panic!("AdminDeleteUserAttributes must reject deleting sub"),
+    }
+
+    // Self-service path (access token).
+    let token = "acc-token-delsub".to_string();
+    {
+        let mut mas = svc.state.write();
+        let st = mas.default_mut();
+        st.access_tokens.insert(
+            token.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: username.clone(),
+                client_id: "c".to_string(),
+                issued_at: Utc::now(),
+                expires_at: None,
+            },
+        );
+    }
+    match svc.delete_user_attributes(&make_req(
+        "DeleteUserAttributes",
+        &json!({"AccessToken": token, "UserAttributeNames": ["sub"]}).to_string(),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidParameterException"),
+        Ok(_) => panic!("DeleteUserAttributes must reject deleting sub"),
+    }
+}
+
+/// Create a UsernameAttributes=["email"] pool with a USER_AUTH-capable client
+/// and one user created by email. Returns (svc, pool_id, client_id, minted, email).
+fn setup_email_alias_pool() -> (CognitoService, String, String, String, String) {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        &json!({"PoolName": "emailpool", "UsernameAttributes": ["email"]}).to_string(),
+    )))
+    .unwrap();
+    let pb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pool_id = pb["UserPool"]["Id"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .create_user_pool_client(&make_req(
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": pool_id,
+                "ClientName": "c",
+                "ExplicitAuthFlows": [
+                    "ALLOW_USER_AUTH",
+                    "ALLOW_USER_PASSWORD_AUTH",
+                    "ALLOW_ADMIN_USER_PASSWORD_AUTH"
+                ],
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let cb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let client_id = cb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let email = "carol@example.com".to_string();
+    let resp = block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": email}).to_string(),
+    )))
+    .unwrap();
+    let ub: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let minted = ub["User"]["Username"].as_str().unwrap().to_string();
+    (svc, pool_id, client_id, minted, email)
+}
+
+#[test]
+fn user_auth_select_challenge_session_resolves_alias() {
+    // Cubic 3: USER_AUTH must resolve email/phone aliases before storing the
+    // SELECT_CHALLENGE session, so subsequent challenges find the user.
+    let (svc, pool_id, client_id, minted, email) = setup_email_alias_pool();
+    let resp = block_on(
+        svc.initiate_auth(&make_req(
+            "InitiateAuth",
+            &json!({
+                "ClientId": client_id,
+                "AuthFlow": "USER_AUTH",
+                "AuthParameters": {"USERNAME": email},
+            })
+            .to_string(),
+        )),
+    )
+    .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["ChallengeName"], "SELECT_CHALLENGE");
+    let session = body["Session"].as_str().unwrap();
+    // The stashed session must key the minted (UUID) username, not the email.
+    let mas = svc.state.read();
+    let st = mas.default_ref();
+    let sd = st.sessions.get(session).expect("session stored");
+    assert_eq!(sd.username, minted);
+    assert_eq!(sd.user_pool_id, pool_id);
+}
+
+#[test]
+fn admin_mutations_accept_email_alias() {
+    // Cubic 6: follow-up admin mutations addressed by the original email must
+    // resolve to the virtualized (UUID) user.
+    let (svc, pool_id, _client_id, minted, email) = setup_email_alias_pool();
+
+    // Create a group and add the user by email.
+    svc.create_group(&make_req(
+        "CreateGroup",
+        &json!({"UserPoolId": pool_id, "GroupName": "g1"}).to_string(),
+    ))
+    .unwrap();
+    svc.admin_add_user_to_group(&make_req(
+        "AdminAddUserToGroup",
+        &json!({"UserPoolId": pool_id, "Username": email, "GroupName": "g1"}).to_string(),
+    ))
+    .unwrap();
+
+    // Update attributes by email.
+    svc.admin_update_user_attributes(&make_req(
+        "AdminUpdateUserAttributes",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": email,
+            "UserAttributes": [{"Name": "name", "Value": "Carol"}],
+        })
+        .to_string(),
+    ))
+    .unwrap();
+
+    // Set a password by email.
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": email,
+            "Password": "P@ssw0rd!",
+            "Permanent": true,
+        })
+        .to_string(),
+    ))
+    .unwrap();
+
+    // Disable by email.
+    svc.admin_disable_user(&make_req(
+        "AdminDisableUser",
+        &json!({"UserPoolId": pool_id, "Username": email}).to_string(),
+    ))
+    .unwrap();
+
+    // Verify all mutations landed on the minted user.
+    {
+        let mas = svc.state.read();
+        let st = mas.default_ref();
+        let user = st.users.get(&pool_id).unwrap().get(&minted).unwrap();
+        assert!(!user.enabled, "disable resolved via alias");
+        assert!(user
+            .attributes
+            .iter()
+            .any(|a| a.name == "name" && a.value == "Carol"));
+        assert_eq!(user.password.as_deref(), Some("P@ssw0rd!"));
+        let groups = st.user_groups.get(&pool_id).unwrap().get(&minted).unwrap();
+        assert_eq!(
+            groups,
+            &vec!["g1".to_string()],
+            "group add resolved via alias"
+        );
+    }
+
+    // Finally delete by email.
+    svc.admin_delete_user(&make_req(
+        "AdminDeleteUser",
+        &json!({"UserPoolId": pool_id, "Username": email}).to_string(),
+    ))
+    .unwrap();
+    let mas = svc.state.read();
+    let st = mas.default_ref();
+    assert!(st.users.get(&pool_id).map(|u| u.is_empty()).unwrap_or(true));
 }

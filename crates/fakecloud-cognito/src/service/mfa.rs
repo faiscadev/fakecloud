@@ -165,6 +165,11 @@ impl CognitoService {
         // Verify pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let user = state
             .users
             .get_mut(pool_id)

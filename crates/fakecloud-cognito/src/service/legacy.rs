@@ -41,6 +41,10 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let username = crate::service::resolve_alias_username(state, &pool_id, &username);
+
         // Validate pool and user exist
         let users = state.users.get_mut(&pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -180,6 +184,14 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // For a Cognito destination the ProviderAttributeValue IS the username,
+        // which may be an email/phone alias in a UsernameAttributes pool.
+        let dest_username = if dest_provider == "Cognito" {
+            crate::service::resolve_alias_username(state, pool_id, dest_attr_value)
+        } else {
+            dest_attr_value.to_string()
+        };
+
         let users = state.users.get_mut(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -190,7 +202,7 @@ impl CognitoService {
 
         // Find the destination user (by Cognito username or provider attribute)
         let user = if dest_provider == "Cognito" {
-            users.get_mut(dest_attr_value)
+            users.get_mut(&dest_username)
         } else {
             users.values_mut().find(|u| {
                 u.linked_providers.iter().any(|lp| {
@@ -232,6 +244,11 @@ impl CognitoService {
         let accounts = self.state.read();
         let empty = CognitoState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         // Validate pool and user
         let users = state.users.get(pool_id).ok_or_else(|| {
@@ -312,6 +329,11 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         // Validate pool and user
         if !state
             .users
@@ -355,6 +377,11 @@ impl CognitoService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         // Validate pool and user
         if !state

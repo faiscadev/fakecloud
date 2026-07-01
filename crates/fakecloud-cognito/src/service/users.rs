@@ -317,6 +317,11 @@ impl CognitoService {
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let pool_users = state.users.get_mut(pool_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -372,6 +377,11 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let user = state
             .users
             .get_mut(pool_id)
@@ -420,6 +430,11 @@ impl CognitoService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         let user = state
             .users
@@ -482,6 +497,11 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+
         let user = state
             .users
             .get_mut(pool_id)
@@ -538,13 +558,27 @@ impl CognitoService {
 
         let attr_names = parse_string_array(&body["UserAttributeNames"]);
 
+        // `sub` is a Cognito-reserved read-only attribute; it cannot be
+        // deleted any more than it can be modified.
+        if attr_names.iter().any(|n| n == "sub") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Cannot modify the value of a read-only attribute: sub",
+            ));
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Resolve email/phone alias -> stored username for UsernameAttributes
+        // pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
 
         let user = state
             .users
             .get_mut(pool_id)
-            .and_then(|users| users.get_mut(username))
+            .and_then(|users| users.get_mut(&resolved))
             .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -738,6 +772,11 @@ impl CognitoService {
         })?;
 
         validate_password(password, &pool.policies.password_policy)?;
+
+        // Resolve an email/phone alias -> stored username for
+        // UsernameAttributes pools.
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
 
         let user = state
             .users
@@ -940,6 +979,15 @@ impl CognitoService {
         let body = req.json_body();
         let access_token = require_str(&body, "AccessToken")?;
         let attr_names = parse_string_array(&body["UserAttributeNames"]);
+
+        // `sub` is a Cognito-reserved read-only attribute; it cannot be deleted.
+        if attr_names.iter().any(|n| n == "sub") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Cannot modify the value of a read-only attribute: sub",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);

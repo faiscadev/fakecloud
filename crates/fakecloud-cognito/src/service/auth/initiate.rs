@@ -272,6 +272,18 @@ impl CognitoService {
             })?;
         self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
 
+        // Resolve an email/phone alias to the stored username BEFORE stashing
+        // the SELECT_CHALLENGE session, so every downstream challenge
+        // (PASSWORD, PASSWORD_SRP, ...) resolves the right user. SECRET_HASH is
+        // already validated against the client-supplied identifier above.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        let username = resolved_username.as_str();
+
         let preferred = auth_params
             .get("PREFERRED_CHALLENGE")
             .and_then(|v| v.as_str());
@@ -748,6 +760,7 @@ impl CognitoService {
                     username: username.to_string(),
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
+                    expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
                 },
             );
 
@@ -1107,6 +1120,7 @@ impl CognitoService {
                 username: token_username,
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(tokens.expires_in)),
             },
         );
 
