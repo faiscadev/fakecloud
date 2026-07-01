@@ -693,10 +693,10 @@ mod modify_tests {
 
     fn seed_snapshot(svc: &Ec2Service) {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create("000000000000")
-            .snapshots
-            .insert("snap-1".to_string(), build_snapshot("vol-1".into(), "d".into()));
+        accounts.get_or_create("000000000000").snapshots.insert(
+            "snap-1".to_string(),
+            build_snapshot("vol-1".into(), "d".into()),
+        );
     }
 
     fn describe_perms(svc: &Ec2Service) -> String {
@@ -704,7 +704,10 @@ mod modify_tests {
             svc,
             &req(
                 "DescribeSnapshotAttribute",
-                &[("SnapshotId", "snap-1"), ("Attribute", "createVolumePermission")],
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                ],
             ),
         )
         .unwrap();
@@ -762,17 +765,17 @@ mod modify_tests {
             &svc,
             &req(
                 "ResetSnapshotAttribute",
-                &[("SnapshotId", "snap-1"), ("Attribute", "createVolumePermission")],
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                ],
             ),
         )
         .unwrap();
-        assert!(svc
-            .state
-            .read()
-            .get("000000000000")
-            .unwrap()
-            .snapshots["snap-1"]
-            .create_volume_permissions
-            .is_empty());
+        assert!(
+            svc.state.read().get("000000000000").unwrap().snapshots["snap-1"]
+                .create_volume_permissions
+                .is_empty()
+        );
     }
 }

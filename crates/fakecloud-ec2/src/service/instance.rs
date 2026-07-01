@@ -1832,11 +1832,7 @@ pub(crate) fn modify_instance_metadata_defaults(
 ) -> Result<AwsResponse, AwsServiceError> {
     let p = &req.query_params;
     validate_enum(p, "HttpTokens", &["optional", "required", "no-preference"])?;
-    validate_enum(
-        p,
-        "HttpEndpoint",
-        &["disabled", "enabled", "no-preference"],
-    )?;
+    validate_enum(p, "HttpEndpoint", &["disabled", "enabled", "no-preference"])?;
     validate_enum(
         p,
         "InstanceMetadataTags",
@@ -1860,7 +1856,9 @@ pub(crate) fn modify_instance_metadata_defaults(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let d = state.instance_metadata_defaults.get_or_insert_with(Default::default);
+        let d = state
+            .instance_metadata_defaults
+            .get_or_insert_with(Default::default);
         apply(&mut d.http_tokens, "HttpTokens");
         apply(&mut d.http_endpoint, "HttpEndpoint");
         apply(&mut d.instance_metadata_tags, "InstanceMetadataTags");
@@ -2112,11 +2110,17 @@ mod modify_tests {
         let out = body(
             describe_instance_credit_specifications(
                 &svc,
-                &req("DescribeInstanceCreditSpecifications", &[("InstanceId.1", "i-1")]),
+                &req(
+                    "DescribeInstanceCreditSpecifications",
+                    &[("InstanceId.1", "i-1")],
+                ),
             )
             .unwrap(),
         );
-        assert!(out.contains("<cpuCredits>unlimited</cpuCredits>"), "got: {out}");
+        assert!(
+            out.contains("<cpuCredits>unlimited</cpuCredits>"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -2149,19 +2153,28 @@ mod modify_tests {
         let out = body(
             get_instance_metadata_defaults(&svc, &req("GetInstanceMetadataDefaults", &[])).unwrap(),
         );
-        assert!(out.contains("<httpTokens>required</httpTokens>"), "got: {out}");
+        assert!(
+            out.contains("<httpTokens>required</httpTokens>"),
+            "got: {out}"
+        );
         assert!(out.contains("<httpEndpoint>enabled</httpEndpoint>"));
 
         // `no-preference` drops the stored default.
         modify_instance_metadata_defaults(
             &svc,
-            &req("ModifyInstanceMetadataDefaults", &[("HttpTokens", "no-preference")]),
+            &req(
+                "ModifyInstanceMetadataDefaults",
+                &[("HttpTokens", "no-preference")],
+            ),
         )
         .unwrap();
         let out = body(
             get_instance_metadata_defaults(&svc, &req("GetInstanceMetadataDefaults", &[])).unwrap(),
         );
-        assert!(!out.contains("httpTokens"), "no-preference should clear it: {out}");
+        assert!(
+            !out.contains("httpTokens"),
+            "no-preference should clear it: {out}"
+        );
     }
 
     #[test]

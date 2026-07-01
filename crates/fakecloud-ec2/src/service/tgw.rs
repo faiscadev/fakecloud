@@ -946,17 +946,20 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            accounts.get_or_create("000000000000").tgw_attachments.insert(
-                "tgw-attach-1".to_string(),
-                crate::state::TgwAttachment {
-                    id: "tgw-attach-1".into(),
-                    tgw_id: "tgw-1".into(),
-                    resource_id: "vpc-1".into(),
-                    resource_type: "vpc".into(),
-                    subnet_ids: vec!["subnet-a".into()],
-                    state: "available".into(),
-                },
-            );
+            accounts
+                .get_or_create("000000000000")
+                .tgw_attachments
+                .insert(
+                    "tgw-attach-1".to_string(),
+                    crate::state::TgwAttachment {
+                        id: "tgw-attach-1".into(),
+                        tgw_id: "tgw-1".into(),
+                        resource_id: "vpc-1".into(),
+                        resource_type: "vpc".into(),
+                        subnet_ids: vec!["subnet-a".into()],
+                        state: "available".into(),
+                    },
+                );
         }
         modify_transit_gateway_vpc_attachment(
             &svc,

@@ -558,7 +558,10 @@ pub(crate) fn modify_security_group_rules(
                 if let Some(v) = p.get(&format!("{pre}.IpProtocol")) {
                     rule.ip_protocol = v.clone();
                 }
-                if let Some(v) = p.get(&format!("{pre}.FromPort")).and_then(|v| v.parse().ok()) {
+                if let Some(v) = p
+                    .get(&format!("{pre}.FromPort"))
+                    .and_then(|v| v.parse().ok())
+                {
                     rule.from_port = v;
                 }
                 if let Some(v) = p.get(&format!("{pre}.ToPort")).and_then(|v| v.parse().ok()) {
@@ -643,9 +646,7 @@ fn update_rule_descriptions(
                     }
                     let desc = p
                         .get(&format!("IpPermissions.{n}.IpRanges.{m}.Description"))
-                        .or_else(|| {
-                            p.get(&format!("IpPermissions.{n}.Ipv6Ranges.{m}.Description"))
-                        })
+                        .or_else(|| p.get(&format!("IpPermissions.{n}.Ipv6Ranges.{m}.Description")))
                         .cloned()
                         .unwrap_or_default();
                     for rule in sg.rules.iter_mut().filter(|r| {
@@ -653,7 +654,8 @@ fn update_rule_descriptions(
                             && r.ip_protocol == proto
                             && r.from_port == from
                             && r.to_port == to
-                            && ((cidr4.is_some() && r.cidr_ipv4.as_deref() == cidr4.map(|s| s.as_str()))
+                            && ((cidr4.is_some()
+                                && r.cidr_ipv4.as_deref() == cidr4.map(|s| s.as_str()))
                                 || (cidr6.is_some()
                                     && r.cidr_ipv6.as_deref() == cidr6.map(|s| s.as_str())))
                     }) {
@@ -665,7 +667,11 @@ fn update_rule_descriptions(
             }
         }
     }
-    Ok(Ec2Service::respond(action, &req.request_id, &ec2_return(true)))
+    Ok(Ec2Service::respond(
+        action,
+        &req.request_id,
+        &ec2_return(true),
+    ))
 }
 
 pub(crate) fn update_rule_descriptions_ingress(
@@ -860,7 +866,10 @@ mod modify_tests {
                     ("SecurityGroupRule.1.SecurityGroupRule.IpProtocol", "tcp"),
                     ("SecurityGroupRule.1.SecurityGroupRule.FromPort", "443"),
                     ("SecurityGroupRule.1.SecurityGroupRule.ToPort", "443"),
-                    ("SecurityGroupRule.1.SecurityGroupRule.CidrIpv4", "0.0.0.0/0"),
+                    (
+                        "SecurityGroupRule.1.SecurityGroupRule.CidrIpv4",
+                        "0.0.0.0/0",
+                    ),
                     ("SecurityGroupRule.1.SecurityGroupRule.Description", "https"),
                 ],
             ),
