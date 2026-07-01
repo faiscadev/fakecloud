@@ -483,3 +483,319 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+// ---------------------------------------------------------------------------
+// awsJson1_0 protocol support (CloudWatch advertises awsJson1_0 alongside the
+// legacy awsQuery protocol). A JSON body is flattened into the same flat-key
+// param map the handlers consume, and the XML response is re-serialized as
+// JSON for the JSON caller.
+// ---------------------------------------------------------------------------
+
+/// Build a JSON-protocol request: flatten the JSON body the way the central
+/// dispatcher does, and set the `X-Amz-Target` header that identifies a JSON
+/// caller.
+fn json_req(action: &str, body: serde_json::Value) -> AwsRequest {
+    let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+    let flat = fakecloud_core::protocol::flatten_json_to_query(&bytes);
+    let mut query_params = HashMap::new();
+    for (k, v) in flat {
+        query_params.insert(k, v);
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-amz-target",
+        format!("GraniteServiceVersion20100801.{action}")
+            .parse()
+            .unwrap(),
+    );
+    AwsRequest {
+        service: "monitoring".to_string(),
+        action: action.to_string(),
+        region: REGION.to_string(),
+        account_id: ACCT.to_string(),
+        request_id: "test-req".to_string(),
+        headers,
+        query_params,
+        body: bytes,
+        body_stream: Mutex::new(None),
+        path_segments: vec![],
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+async fn call_json(svc: &CloudWatchService, action: &str, body: serde_json::Value) -> AwsResponse {
+    svc.handle(json_req(action, body))
+        .await
+        .expect("handler ok")
+}
+
+fn json_body(resp: &AwsResponse) -> serde_json::Value {
+    serde_json::from_slice(resp.body.expect_bytes()).expect("valid json body")
+}
+
+#[tokio::test]
+async fn put_metric_data_json_and_query_roundtrip() {
+    let svc = service();
+    // JSON protocol PutMetricData.
+    let resp = call_json(
+        &svc,
+        "PutMetricData",
+        serde_json::json!({
+            "Namespace": "MyApp",
+            "MetricData": [{
+                "MetricName": "Latency",
+                "Value": 12.5,
+                "Dimensions": [{"Name": "Endpoint", "Value": "/api"}]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(resp.content_type, "application/x-amz-json-1.0");
+    assert_eq!(json_body(&resp), serde_json::json!({}));
+
+    // The data is readable back over BOTH protocols.
+    let json_list = call_json(
+        &svc,
+        "ListMetrics",
+        serde_json::json!({"Namespace": "MyApp"}),
+    )
+    .await;
+    let v = json_body(&json_list);
+    assert_eq!(v["Metrics"][0]["Namespace"], "MyApp");
+    assert_eq!(v["Metrics"][0]["MetricName"], "Latency");
+    assert_eq!(v["Metrics"][0]["Dimensions"][0]["Name"], "Endpoint");
+    assert_eq!(v["Metrics"][0]["Dimensions"][0]["Value"], "/api");
+
+    // Query protocol still returns XML for the same data.
+    let xml_list = call(&svc, "ListMetrics", &[("Namespace", "MyApp")]).await;
+    assert_eq!(xml_list.content_type, "text/xml");
+    assert!(body_of(&xml_list).contains("<MetricName>Latency</MetricName>"));
+}
+
+#[tokio::test]
+async fn get_metric_statistics_json_roundtrip() {
+    let svc = service();
+    // Publish a couple of points via JSON at a fixed timestamp so both land in
+    // the same 60s bucket deterministically.
+    for v in [10.0, 20.0] {
+        call_json(
+            &svc,
+            "PutMetricData",
+            serde_json::json!({
+                "Namespace": "MyApp",
+                "MetricData": [{
+                    "MetricName": "Latency",
+                    "Value": v,
+                    "Timestamp": "2020-06-01T12:00:00Z"
+                }]
+            }),
+        )
+        .await;
+    }
+    let resp = call_json(
+        &svc,
+        "GetMetricStatistics",
+        serde_json::json!({
+            "Namespace": "MyApp",
+            "MetricName": "Latency",
+            "StartTime": "2000-01-01T00:00:00Z",
+            "EndTime": "2100-01-01T00:00:00Z",
+            "Period": 60,
+            "Statistics": ["Average", "SampleCount"]
+        }),
+    )
+    .await;
+    assert_eq!(resp.content_type, "application/x-amz-json-1.0");
+    let v = json_body(&resp);
+    assert_eq!(v["Label"], "Latency");
+    // Average and SampleCount come back as JSON numbers, timestamp as epoch.
+    let dp = &v["Datapoints"][0];
+    assert_eq!(dp["Average"].as_f64(), Some(15.0));
+    assert_eq!(dp["SampleCount"].as_f64(), Some(2.0));
+    assert!(dp["Timestamp"].is_number());
+}
+
+#[tokio::test]
+async fn put_metric_alarm_json_roundtrip() {
+    let svc = service();
+    let resp = call_json(
+        &svc,
+        "PutMetricAlarm",
+        serde_json::json!({
+            "AlarmName": "cpu-high",
+            "ComparisonOperator": "GreaterThanThreshold",
+            "EvaluationPeriods": 2,
+            "Threshold": 80.0,
+            "MetricName": "CPUUtilization",
+            "Namespace": "AWS/EC2",
+            "Period": 60,
+            "Statistic": "Average"
+        }),
+    )
+    .await;
+    assert_eq!(resp.content_type, "application/x-amz-json-1.0");
+    assert_eq!(json_body(&resp), serde_json::json!({}));
+
+    let desc = call_json(
+        &svc,
+        "DescribeAlarms",
+        serde_json::json!({"AlarmNames": ["cpu-high"]}),
+    )
+    .await;
+    let v = json_body(&desc);
+    let alarm = &v["MetricAlarms"][0];
+    assert_eq!(alarm["AlarmName"], "cpu-high");
+    assert_eq!(alarm["Threshold"].as_f64(), Some(80.0));
+    assert_eq!(alarm["EvaluationPeriods"], 2);
+    assert_eq!(alarm["ActionsEnabled"], true);
+}
+
+#[tokio::test]
+async fn put_metric_alarm_persists_metrics_and_tags() {
+    let svc = service();
+    // Metric-math alarm with a Metrics list and inline Tags.
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "math-alarm"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("EvaluationPeriods", "1"),
+            ("Threshold", "10"),
+            ("Metrics.member.1.Id", "e1"),
+            ("Metrics.member.1.Expression", "m1 + m2"),
+            ("Metrics.member.1.Label", "sum"),
+            ("Metrics.member.1.ReturnData", "true"),
+            ("Metrics.member.2.Id", "m1"),
+            ("Metrics.member.2.MetricStat.Metric.Namespace", "AWS/EC2"),
+            (
+                "Metrics.member.2.MetricStat.Metric.MetricName",
+                "CPUUtilization",
+            ),
+            (
+                "Metrics.member.2.MetricStat.Metric.Dimensions.member.1.Name",
+                "InstanceId",
+            ),
+            (
+                "Metrics.member.2.MetricStat.Metric.Dimensions.member.1.Value",
+                "i-123",
+            ),
+            ("Metrics.member.2.MetricStat.Period", "300"),
+            ("Metrics.member.2.MetricStat.Stat", "Average"),
+            ("Metrics.member.2.ReturnData", "false"),
+            ("Tags.member.1.Key", "team"),
+            ("Tags.member.1.Value", "obs"),
+        ],
+    )
+    .await;
+
+    let desc = call(
+        &svc,
+        "DescribeAlarms",
+        &[("AlarmNames.member.1", "math-alarm")],
+    )
+    .await;
+    let xml = body_of(&desc);
+    assert!(xml.contains("<Metrics>"), "Metrics echoed: {xml}");
+    assert!(xml.contains("<Id>e1</Id>"));
+    assert!(xml.contains("<Expression>m1 + m2</Expression>"));
+    assert!(xml.contains("<MetricName>CPUUtilization</MetricName>"));
+    assert!(xml.contains("<Stat>Average</Stat>"));
+    assert!(xml.contains("<Value>i-123</Value>"));
+
+    // Inline Tags are queryable via ListTagsForResource.
+    let arn = format!("arn:aws:cloudwatch:{REGION}:{ACCT}:alarm:math-alarm");
+    let tags = call(&svc, "ListTagsForResource", &[("ResourceARN", &arn)]).await;
+    let tag_xml = body_of(&tags);
+    assert!(tag_xml.contains("<Key>team</Key>"), "tags: {tag_xml}");
+    assert!(tag_xml.contains("<Value>obs</Value>"));
+}
+
+/// AWS ignores the inline `Tags` param when PutMetricAlarm updates an existing
+/// alarm; tags are only applied on create. TagResource/UntagResource manage
+/// tags on an existing alarm.
+#[tokio::test]
+async fn put_metric_alarm_update_ignores_inline_tags() {
+    let svc = service();
+    let base = &[
+        ("AlarmName", "cpu"),
+        ("ComparisonOperator", "GreaterThanThreshold"),
+        ("EvaluationPeriods", "1"),
+        ("Threshold", "10"),
+        ("MetricName", "CPUUtilization"),
+        ("Namespace", "AWS/EC2"),
+    ];
+    // Create with an inline tag.
+    let mut create = base.to_vec();
+    create.push(("Tags.member.1.Key", "team"));
+    create.push(("Tags.member.1.Value", "obs"));
+    call(&svc, "PutMetricAlarm", &create).await;
+
+    // Update the SAME alarm with different inline tags -> must be ignored.
+    let mut update = base.to_vec();
+    update.push(("Threshold", "20"));
+    update.push(("Tags.member.1.Key", "team"));
+    update.push(("Tags.member.1.Value", "changed"));
+    update.push(("Tags.member.2.Key", "env"));
+    update.push(("Tags.member.2.Value", "prod"));
+    call(&svc, "PutMetricAlarm", &update).await;
+
+    let arn = format!("arn:aws:cloudwatch:{REGION}:{ACCT}:alarm:cpu");
+    let tags = call(&svc, "ListTagsForResource", &[("ResourceARN", &arn)]).await;
+    let tag_xml = body_of(&tags);
+    // Original create-time tag survives unchanged; update tags are ignored.
+    assert!(tag_xml.contains("<Value>obs</Value>"), "tags: {tag_xml}");
+    assert!(
+        !tag_xml.contains("<Value>changed</Value>"),
+        "update inline tag must be ignored: {tag_xml}"
+    );
+    assert!(
+        !tag_xml.contains("<Key>env</Key>"),
+        "update inline tag must be ignored: {tag_xml}"
+    );
+}
+
+#[tokio::test]
+async fn put_anomaly_detector_persists_configuration() {
+    let svc = service();
+    call(
+        &svc,
+        "PutAnomalyDetector",
+        &[
+            ("Namespace", "AWS/EC2"),
+            ("MetricName", "CPU"),
+            ("Stat", "Average"),
+            ("Configuration.MetricTimezone", "America/New_York"),
+            (
+                "Configuration.ExcludedTimeRanges.member.1.StartTime",
+                "2020-01-01T00:00:00Z",
+            ),
+            (
+                "Configuration.ExcludedTimeRanges.member.1.EndTime",
+                "2020-01-02T00:00:00Z",
+            ),
+            ("MetricCharacteristics.PeriodicSpikes", "true"),
+        ],
+    )
+    .await;
+
+    let desc = call(
+        &svc,
+        "DescribeAnomalyDetectors",
+        &[("Namespace", "AWS/EC2")],
+    )
+    .await;
+    let xml = body_of(&desc);
+    assert!(
+        xml.contains("<MetricTimezone>America/New_York</MetricTimezone>"),
+        "config echoed: {xml}"
+    );
+    assert!(xml.contains("<ExcludedTimeRanges>"));
+    assert!(xml.contains("<StartTime>2020-01-01T00:00:00Z</StartTime>"));
+    assert!(xml.contains("<PeriodicSpikes>true</PeriodicSpikes>"));
+}

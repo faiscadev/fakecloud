@@ -44,7 +44,9 @@ use fakecloud_cloudfront::{
     },
     SharedCloudFrontState, StoredDistribution,
 };
-use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
+use fakecloud_cloudwatch::{
+    AlarmMetricQuery, AlarmMetricStat, AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState,
+};
 use fakecloud_cognito::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
     CognitoIdentityProvider, CustomDomainConfig, EmailConfiguration, IdentityPool,
@@ -6372,6 +6374,93 @@ mod tests {
             resource_type: resource_type.to_string(),
             properties: props,
         }
+    }
+
+    #[test]
+    fn cloudwatch_alarm_provisions_and_updates_metrics() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::CloudWatch::Alarm",
+                "A",
+                serde_json::json!({
+                    "AlarmName": "math-alarm",
+                    "ComparisonOperator": "GreaterThanUpperThreshold",
+                    "EvaluationPeriods": 1,
+                    "ThresholdMetricId": "ad1",
+                    "Metrics": [
+                        {"Id": "e1", "Expression": "m1", "Label": "expr", "ReturnData": true},
+                        {"Id": "m1", "ReturnData": false, "MetricStat": {
+                            "Metric": {
+                                "Namespace": "AWS/EC2",
+                                "MetricName": "CPUUtilization",
+                                "Dimensions": [{"Name": "InstanceId", "Value": "i-123"}]
+                            },
+                            "Period": 300,
+                            "Stat": "Average"
+                        }}
+                    ]
+                }),
+            ))
+            .expect("alarm provisions");
+
+        {
+            let cw = prov.cloudwatch_state.read();
+            let acct = cw.get("123456789012").unwrap();
+            let alarm = acct
+                .alarms_in("us-east-1")
+                .unwrap()
+                .get("math-alarm")
+                .unwrap();
+            assert_eq!(alarm.metrics.len(), 2, "Metrics parsed on create");
+            assert_eq!(alarm.metrics[0].id, "e1");
+            assert_eq!(alarm.metrics[0].expression.as_deref(), Some("m1"));
+            assert_eq!(alarm.metrics[0].return_data, Some(true));
+            assert_eq!(alarm.threshold_metric_id.as_deref(), Some("ad1"));
+            let stat = alarm.metrics[1].metric_stat.as_ref().unwrap();
+            assert_eq!(stat.metric_name.as_deref(), Some("CPUUtilization"));
+            assert_eq!(
+                stat.dimensions.get("InstanceId").map(String::as_str),
+                Some("i-123")
+            );
+            assert_eq!(stat.stat.as_deref(), Some("Average"));
+            assert_eq!(stat.period, Some(300));
+        }
+
+        // Update replaces the Metrics list AND refreshes ThresholdMetricId.
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::CloudWatch::Alarm",
+                "A",
+                serde_json::json!({
+                    "AlarmName": "math-alarm",
+                    "ComparisonOperator": "GreaterThanUpperThreshold",
+                    "EvaluationPeriods": 1,
+                    "ThresholdMetricId": "ad2",
+                    "Metrics": [{"Id": "e2", "Expression": "m1*2", "ReturnData": true}]
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::CloudWatch::Alarm is updatable");
+
+        let cw = prov.cloudwatch_state.read();
+        let acct = cw.get("123456789012").unwrap();
+        let alarm = acct
+            .alarms_in("us-east-1")
+            .unwrap()
+            .get("math-alarm")
+            .unwrap();
+        assert_eq!(alarm.metrics.len(), 1, "Metrics re-parsed on update");
+        assert_eq!(alarm.metrics[0].id, "e2");
+        assert_eq!(alarm.metrics[0].expression.as_deref(), Some("m1*2"));
+        // ThresholdMetricId reflects the updated definition, not the stale one.
+        assert_eq!(
+            alarm.threshold_metric_id.as_deref(),
+            Some("ad2"),
+            "ThresholdMetricId refreshed on update"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub(crate) mod datasets;
 pub mod delivery;
 pub(crate) mod insight_rules;
 pub mod introspection;
+pub(crate) mod json_protocol;
 pub(crate) mod metric_math;
 pub(crate) mod metric_streams;
 pub(crate) mod mute_rules;
@@ -18,6 +19,7 @@ mod tests;
 pub use delivery::CloudwatchDeliveryImpl;
 pub use service::CloudWatchService;
 pub use state::{
-    AlarmState, CloudWatchAccounts, CloudWatchSnapshot, CloudWatchState, Dashboard, MetricAlarm,
-    MetricDatum, SharedCloudWatchState, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
+    AlarmMetricQuery, AlarmMetricStat, AlarmState, CloudWatchAccounts, CloudWatchSnapshot,
+    CloudWatchState, Dashboard, MetricAlarm, MetricDatum, SharedCloudWatchState,
+    CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };

@@ -5,6 +5,66 @@
 
 use super::*;
 
+/// Parse the `Metrics` property of an `AWS::CloudWatch::Alarm` template into the
+/// persisted [`AlarmMetricQuery`] form (metric-math / cross-account alarms).
+/// Returns an empty vec when the property is absent.
+fn parse_cfn_alarm_metrics(props: &serde_json::Value) -> Vec<AlarmMetricQuery> {
+    let Some(arr) = props.get("Metrics").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|m| {
+            let id = m.get("Id").and_then(|v| v.as_str())?.to_string();
+            let metric_stat = m.get("MetricStat").and_then(|v| v.as_object()).map(|ms| {
+                let metric = ms.get("Metric").and_then(|v| v.as_object());
+                let mut dimensions: BTreeMap<String, String> = BTreeMap::new();
+                if let Some(dims) = metric
+                    .and_then(|mo| mo.get("Dimensions"))
+                    .and_then(|v| v.as_array())
+                {
+                    for d in dims {
+                        if let (Some(k), Some(v)) = (
+                            d.get("Name").and_then(|x| x.as_str()),
+                            d.get("Value").and_then(|x| x.as_str()),
+                        ) {
+                            dimensions.insert(k.to_string(), v.to_string());
+                        }
+                    }
+                }
+                AlarmMetricStat {
+                    namespace: metric
+                        .and_then(|mo| mo.get("Namespace"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    metric_name: metric
+                        .and_then(|mo| mo.get("MetricName"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    dimensions,
+                    period: ms.get("Period").and_then(|v| v.as_i64()),
+                    stat: ms.get("Stat").and_then(|v| v.as_str()).map(String::from),
+                    unit: ms.get("Unit").and_then(|v| v.as_str()).map(String::from),
+                }
+            });
+            Some(AlarmMetricQuery {
+                id,
+                metric_stat,
+                expression: m
+                    .get("Expression")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                label: m.get("Label").and_then(|v| v.as_str()).map(String::from),
+                return_data: m.get("ReturnData").and_then(|v| v.as_bool()),
+                account_id: m
+                    .get("AccountId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                period: m.get("Period").and_then(|v| v.as_i64()),
+            })
+        })
+        .collect()
+}
+
 impl ResourceProvisioner {
     // --- CloudWatch ---
 
@@ -131,6 +191,7 @@ impl ResourceProvisioner {
                 .map(String::from),
             configuration_updated_timestamp: now,
             alarm_configuration_updated_timestamp: now,
+            metrics: parse_cfn_alarm_metrics(props),
         };
         let region_alarms = state.alarms_in_mut(&self.region);
         if region_alarms.contains_key(&alarm_name) {
@@ -318,6 +379,11 @@ impl ResourceProvisioner {
         alarm.comparison_operator = comparison_operator;
         alarm.treat_missing_data = treat_missing_data;
         alarm.evaluate_low_sample_count_percentile = evaluate_low_sample_count_percentile;
+        alarm.threshold_metric_id = props
+            .get("ThresholdMetricId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        alarm.metrics = parse_cfn_alarm_metrics(props);
         alarm.configuration_updated_timestamp = now;
         alarm.alarm_configuration_updated_timestamp = now;
 

@@ -268,6 +268,47 @@ pub struct MetricAlarm {
     pub threshold_metric_id: Option<String>,
     pub configuration_updated_timestamp: DateTime<Utc>,
     pub alarm_configuration_updated_timestamp: DateTime<Utc>,
+    /// `Metrics` — the metric-math / cross-account alarm definition (a list of
+    /// `MetricDataQuery`). Set instead of the single-metric fields when the
+    /// alarm evaluates an expression or a metric in another account.
+    #[serde(default)]
+    pub metrics: Vec<AlarmMetricQuery>,
+}
+
+/// A single `MetricDataQuery` entry in a `PutMetricAlarm` `Metrics` list.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlarmMetricQuery {
+    pub id: String,
+    #[serde(default)]
+    pub metric_stat: Option<AlarmMetricStat>,
+    #[serde(default)]
+    pub expression: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub return_data: Option<bool>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub period: Option<i64>,
+}
+
+/// The `MetricStat` of an [`AlarmMetricQuery`] (a metric plus how to aggregate
+/// it).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AlarmMetricStat {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub metric_name: Option<String>,
+    #[serde(default)]
+    pub dimensions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub period: Option<i64>,
+    #[serde(default)]
+    pub stat: Option<String>,
+    #[serde(default)]
+    pub unit: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -343,6 +384,31 @@ pub struct AnomalyDetector {
     pub dimensions: BTreeMap<String, String>,
     pub metric_math: bool,
     pub state_value: String,
+    /// `Configuration` (`MetricTimezone` + `ExcludedTimeRanges`) supplied on
+    /// PutAnomalyDetector; echoed back on DescribeAnomalyDetectors.
+    #[serde(default)]
+    pub configuration: Option<AnomalyDetectorConfiguration>,
+    /// `MetricCharacteristics.PeriodicSpikes`.
+    #[serde(default)]
+    pub periodic_spikes: Option<bool>,
+}
+
+/// The `Configuration` of an anomaly detector.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AnomalyDetectorConfiguration {
+    #[serde(default)]
+    pub excluded_time_ranges: Vec<ExcludedTimeRange>,
+    #[serde(default)]
+    pub metric_timezone: Option<String>,
+}
+
+/// A single `ExcludedTimeRanges` entry (`Range`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExcludedTimeRange {
+    #[serde(default)]
+    pub start_time: Option<String>,
+    #[serde(default)]
+    pub end_time: Option<String>,
 }
 
 /// A Contributor Insights rule.

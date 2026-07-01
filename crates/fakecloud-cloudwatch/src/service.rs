@@ -15,8 +15,9 @@ use fakecloud_persistence::SnapshotStore;
 use tokio::sync::Mutex;
 
 use crate::state::{
-    AlarmHistoryItem, AlarmState, CloudWatchSnapshot, Dashboard, MetricAlarm, MetricDatum,
-    SharedCloudWatchState, StatisticSet, CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
+    AlarmHistoryItem, AlarmMetricQuery, AlarmMetricStat, AlarmState, CloudWatchSnapshot, Dashboard,
+    MetricAlarm, MetricDatum, SharedCloudWatchState, StatisticSet,
+    CLOUDWATCH_SNAPSHOT_SCHEMA_VERSION,
 };
 
 pub(crate) const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
@@ -310,8 +311,20 @@ impl AwsService for CloudWatchService {
         if mutates && result.is_ok() {
             self.save_snapshot().await;
         }
+        // A JSON-protocol caller (awsJson1_0, identified by the X-Amz-Target
+        // header) expects a JSON response body; the handlers produce awsQuery
+        // XML, so convert it. Query-protocol callers keep the XML unchanged.
+        if request_is_json(&req) {
+            return result.map(crate::json_protocol::xml_response_to_json);
+        }
         result
     }
+}
+
+/// True when the request arrived over the awsJson1_0 protocol (CloudWatch
+/// advertises both awsJson1_0 and awsQuery). JSON callers set `X-Amz-Target`.
+fn request_is_json(req: &AwsRequest) -> bool {
+    req.headers.contains_key("x-amz-target")
 }
 
 pub(crate) fn xml_response(action: &str, inner: &str, request_id: &str) -> AwsResponse {
@@ -446,6 +459,44 @@ fn parse_dimensions(member: &HashMap<String, String>, prefix: &str) -> BTreeMap<
         if let (Some(n), Some(v)) = (name, value) {
             out.insert(n, v);
         }
+    }
+    out
+}
+
+/// Parse the `Metrics.member.N.*` list of a `PutMetricAlarm` request into the
+/// persisted [`AlarmMetricQuery`] form.
+fn parse_alarm_metrics(req: &AwsRequest) -> Vec<AlarmMetricQuery> {
+    let mut out = Vec::new();
+    for member in collect_indexed(req, "Metrics") {
+        let Some(id) = member.get("Id").cloned() else {
+            continue;
+        };
+        let metric_stat = if member.keys().any(|k| k.starts_with("MetricStat.")) {
+            let dimensions = parse_dimensions(&member, "MetricStat.Metric.Dimensions");
+            Some(AlarmMetricStat {
+                namespace: member.get("MetricStat.Metric.Namespace").cloned(),
+                metric_name: member.get("MetricStat.Metric.MetricName").cloned(),
+                dimensions,
+                period: member
+                    .get("MetricStat.Period")
+                    .and_then(|s| s.parse::<i64>().ok()),
+                stat: member.get("MetricStat.Stat").cloned(),
+                unit: member.get("MetricStat.Unit").cloned(),
+            })
+        } else {
+            None
+        };
+        out.push(AlarmMetricQuery {
+            id,
+            metric_stat,
+            expression: member.get("Expression").cloned(),
+            label: member.get("Label").cloned(),
+            return_data: member
+                .get("ReturnData")
+                .map(|s| s.eq_ignore_ascii_case("true")),
+            account_id: member.get("AccountId").cloned(),
+            period: member.get("Period").and_then(|s| s.parse::<i64>().ok()),
+        });
     }
     out
 }
@@ -1276,6 +1327,13 @@ impl CloudWatchService {
         // static Threshold; previously accepted then dropped (1.24).
         let threshold_metric_id = optional_query_param(req, "ThresholdMetricId");
         let dimensions = parse_dimensions_query(req, "Dimensions");
+        // `Metrics` — the metric-math / cross-account alarm definition. Parsed
+        // from the flat `Metrics.member.N.*` params and persisted so
+        // DescribeAlarms can echo it back (previously silently dropped).
+        let metrics = parse_alarm_metrics(req);
+        // Inline `Tags` on PutMetricAlarm land in the same ARN-keyed tag store
+        // as TagResource, so ListTagsForResource returns them.
+        let inline_tags = parse_tags(req, "Tags");
 
         let mut ok_actions = Vec::new();
         let mut alarm_actions = Vec::new();
@@ -1339,10 +1397,23 @@ impl CloudWatchService {
                 .map(|a| a.configuration_updated_timestamp)
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
+            metrics,
         };
+        let alarm_arn = alarm.alarm_arn.clone();
         let history_name = alarm_name.clone();
         let created = existing.is_none();
         alarms.insert(alarm_name, alarm);
+
+        // Persist inline Tags into the ARN-keyed tag store, but ONLY on create.
+        // AWS ignores the inline Tags param when PutMetricAlarm updates an
+        // existing alarm; tags on an existing alarm are managed via
+        // TagResource / UntagResource.
+        if created && !inline_tags.is_empty() {
+            let bucket = acct.tags.entry(alarm_arn).or_default();
+            for (k, v) in inline_tags {
+                bucket.insert(k, v);
+            }
+        }
 
         let summary = if created {
             format!("Alarm \"{history_name}\" created")
@@ -2008,8 +2079,60 @@ fn render_alarm(alarm: &MetricAlarm) -> String {
             .alarm_configuration_updated_timestamp
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     ));
+    render_alarm_metrics(&mut s, &alarm.metrics);
     s.push_str("</member>");
     s
+}
+
+/// Render the `Metrics` (metric-math / cross-account) list of a MetricAlarm.
+fn render_alarm_metrics(s: &mut String, metrics: &[AlarmMetricQuery]) {
+    if metrics.is_empty() {
+        return;
+    }
+    s.push_str("<Metrics>");
+    for q in metrics {
+        s.push_str("<member>");
+        s.push_str(&format!("<Id>{}</Id>", xml_escape(&q.id)));
+        if let Some(stat) = &q.metric_stat {
+            s.push_str("<MetricStat>");
+            s.push_str("<Metric>");
+            if let Some(ns) = &stat.namespace {
+                s.push_str(&format!("<Namespace>{}</Namespace>", xml_escape(ns)));
+            }
+            if let Some(mn) = &stat.metric_name {
+                s.push_str(&format!("<MetricName>{}</MetricName>", xml_escape(mn)));
+            }
+            s.push_str(&render_dimensions(&stat.dimensions));
+            s.push_str("</Metric>");
+            if let Some(p) = stat.period {
+                s.push_str(&format!("<Period>{p}</Period>"));
+            }
+            if let Some(st) = &stat.stat {
+                s.push_str(&format!("<Stat>{}</Stat>", xml_escape(st)));
+            }
+            if let Some(u) = &stat.unit {
+                s.push_str(&format!("<Unit>{}</Unit>", xml_escape(u)));
+            }
+            s.push_str("</MetricStat>");
+        }
+        if let Some(e) = &q.expression {
+            s.push_str(&format!("<Expression>{}</Expression>", xml_escape(e)));
+        }
+        if let Some(l) = &q.label {
+            s.push_str(&format!("<Label>{}</Label>", xml_escape(l)));
+        }
+        if let Some(rd) = q.return_data {
+            s.push_str(&format!("<ReturnData>{rd}</ReturnData>"));
+        }
+        if let Some(p) = q.period {
+            s.push_str(&format!("<Period>{p}</Period>"));
+        }
+        if let Some(acct) = &q.account_id {
+            s.push_str(&format!("<AccountId>{}</AccountId>", xml_escape(acct)));
+        }
+        s.push_str("</member>");
+    }
+    s.push_str("</Metrics>");
 }
 
 fn push_action_list(s: &mut String, name: &str, actions: &[String]) {
