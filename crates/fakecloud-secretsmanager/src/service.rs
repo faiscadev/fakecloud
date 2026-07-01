@@ -53,6 +53,35 @@ fn remove_rotation_test_pending(state: &SharedSecretsManagerState, cleanup: &Pen
     }
 }
 
+/// Invoke the rotation Lambda once per step, in order. Stops early if delivery
+/// is not configured for the target function.
+async fn run_rotation_steps(bus: &DeliveryBus, inv: &RotationInvocation) {
+    for step in &inv.steps {
+        let payload = serde_json::json!({
+            "SecretId": inv.secret_id,
+            "ClientRequestToken": inv.client_request_token,
+            "Step": step,
+        });
+        match bus
+            .invoke_lambda(&inv.lambda_arn, &payload.to_string())
+            .await
+        {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                tracing::warn!(step = step, error = %e, "rotation Lambda invocation failed");
+            }
+            None => {
+                tracing::warn!(
+                    lambda_arn = %inv.lambda_arn,
+                    step = step,
+                    "rotation Lambda delivery not configured; Lambda invocation skipped"
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Result of an idempotency check against an existing
 /// `ClientRequestToken` / version id.
 pub(crate) enum VersionIdempotency {
@@ -2200,47 +2229,28 @@ impl AwsService for SecretsManagerService {
             "RotateSecret" => {
                 let (response, invocation) = self.rotate_secret(&req)?;
                 if let Some(inv) = invocation {
-                    let bus = self.delivery_bus.clone();
-                    let state = self.state.clone();
-                    // AWS invokes the rotation Lambda asynchronously for each
-                    // step, then (for a test-only invocation) removes the
-                    // temporary AWSPENDING version.
-                    tokio::spawn(async move {
-                        if let Some(bus) = bus {
-                            for step in &inv.steps {
-                                let payload = serde_json::json!({
-                                    "SecretId": inv.secret_id,
-                                    "ClientRequestToken": inv.client_request_token,
-                                    "Step": step,
-                                });
-                                let payload_str = payload.to_string();
-                                match bus.invoke_lambda(&inv.lambda_arn, &payload_str).await {
-                                    Some(Ok(_)) => {}
-                                    Some(Err(e)) => {
-                                        tracing::warn!(
-                                            step = step,
-                                            error = %e,
-                                            "rotation Lambda invocation failed"
-                                        );
-                                    }
-                                    None => {
-                                        tracing::warn!(
-                                            lambda_arn = %inv.lambda_arn,
-                                            step = step,
-                                            "rotation Lambda delivery not configured; \
-                                             Lambda invocation skipped"
-                                        );
-                                        break;
-                                    }
-                                }
+                    if let Some(cleanup) = inv.cleanup_pending.as_ref() {
+                        // Test-only rotation (RotateImmediately=false): run the
+                        // testSecret invocation and remove the temporary
+                        // AWSPENDING version SYNCHRONOUSLY, inside the handler's
+                        // critical section, so the mutating-action snapshot
+                        // taken at the end of `handle` never captures (and can't
+                        // restore) the temporary version.
+                        if let Some(ref bus) = self.delivery_bus {
+                            run_rotation_steps(bus, &inv).await;
+                        }
+                        remove_rotation_test_pending(&self.state, cleanup);
+                    } else {
+                        // Full rotation: AWS invokes the rotation Lambda
+                        // asynchronously for each step. The Lambda's own
+                        // PutSecretValue calls persist their own snapshots.
+                        let bus = self.delivery_bus.clone();
+                        tokio::spawn(async move {
+                            if let Some(bus) = bus {
+                                run_rotation_steps(&bus, &inv).await;
                             }
-                        }
-                        // Clean up the temporary AWSPENDING version even when no
-                        // delivery bus is wired, so it never lingers.
-                        if let Some(cleanup) = inv.cleanup_pending {
-                            remove_rotation_test_pending(&state, &cleanup);
-                        }
-                    });
+                        });
+                    }
                 }
                 Ok(response)
             }

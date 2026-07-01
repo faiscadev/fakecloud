@@ -2568,6 +2568,84 @@ async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() 
     );
 }
 
+/// A RotateImmediately=false rotation must NOT persist the temporary
+/// AWSPENDING test version: the mutating-action snapshot taken by `handle`
+/// must capture the post-cleanup state so a restart never restores a stale
+/// AWSPENDING version.
+#[tokio::test]
+async fn test_rotate_immediately_false_pending_not_persisted() {
+    #[derive(Default)]
+    struct RecordingStore {
+        bytes: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for RecordingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.bytes.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    let state = make_state();
+    let store = Arc::new(RecordingStore::default());
+    let svc = SecretsManagerService::new(state.clone())
+        .with_snapshot_store(store.clone() as Arc<dyn fakecloud_persistence::SnapshotStore>);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-persist", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // RotateImmediately=false with a Lambda but no delivery bus: the testSecret
+    // step is skipped, but the temporary AWSPENDING version is staged and then
+    // cleaned up synchronously before the snapshot is taken.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-persist",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    svc.handle(make_request("RotateSecret", &rot.to_string()))
+        .await
+        .unwrap();
+
+    // In-memory state is already clean.
+    {
+        let accts = state.read();
+        let secret = accts.default_ref().secrets.get("rot-persist").unwrap();
+        assert!(!secret.versions.contains_key(token));
+        assert!(secret
+            .versions
+            .values()
+            .all(|v| !v.stages.contains(&"AWSPENDING".to_string())));
+    }
+
+    // The persisted snapshot (taken by the mutating-action save at the end of
+    // `handle`) must also be free of the temporary AWSPENDING version.
+    let bytes = fakecloud_persistence::SnapshotStore::load(store.as_ref())
+        .unwrap()
+        .expect("RotateSecret must persist a snapshot");
+    let snap: crate::SecretsManagerSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let accounts = snap.accounts.expect("multi-account snapshot");
+    let persisted = &accounts.default_ref().secrets["rot-persist"];
+    assert!(
+        !persisted.versions.contains_key(token),
+        "temporary AWSPENDING version must not be persisted"
+    );
+    assert!(
+        persisted
+            .versions
+            .values()
+            .all(|v| !v.stages.contains(&"AWSPENDING".to_string())),
+        "no AWSPENDING version may remain in the persisted snapshot"
+    );
+}
+
 #[tokio::test]
 async fn test_rotate_secret_immediately_with_lambda_runs_full_steps() {
     let state = make_state();
