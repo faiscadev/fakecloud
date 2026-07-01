@@ -23,6 +23,7 @@
 //! than faking delivery.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,7 @@ use fakecloud_core::delivery::{DeliveryBus, KmsHook};
 use fakecloud_dynamodb::SharedDynamoDbState;
 use fakecloud_kinesis::SharedKinesisState;
 use fakecloud_lambda::filter::FilterSet;
+use fakecloud_persistence::SnapshotHook;
 use fakecloud_pipes::SharedPipesState;
 use fakecloud_sqs::SharedSqsState;
 
@@ -78,6 +80,15 @@ pub struct PipesRunner {
     /// mirroring the SQS->Lambda poller: AWS consumers see plaintext, so a
     /// pipe must too rather than forward opaque envelope bytes.
     kms_hook: Option<Arc<dyn KmsHook>>,
+    /// Persists pipes state (source checkpoints) after a poll advances a
+    /// checkpoint. Without this the runner mutates `pipes_state` in memory but
+    /// the advance never reaches disk until an unrelated API mutation triggers
+    /// the pipes snapshot hook, so a restart re-replays the retained backlog
+    /// (bug-hunt 2026-07-01 M1). `None` in memory-only mode.
+    persist_hook: Option<SnapshotHook>,
+    /// Set by `set_checkpoint`; drained once per poll to flush at most one
+    /// snapshot per cycle rather than one per delivered record.
+    checkpoints_dirty: Arc<AtomicBool>,
 }
 
 impl PipesRunner {
@@ -93,7 +104,15 @@ impl PipesRunner {
             dynamodb_state: None,
             delivery,
             kms_hook: None,
+            persist_hook: None,
+            checkpoints_dirty: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Wire the pipes snapshot hook so checkpoint advances are flushed to disk.
+    pub fn with_persist_hook(mut self, hook: SnapshotHook) -> Self {
+        self.persist_hook = Some(hook);
+        self
     }
 
     pub fn with_kinesis_state(mut self, state: SharedKinesisState) -> Self {
@@ -121,26 +140,51 @@ impl PipesRunner {
         // within Pipes' delivery-latency tolerance and keeps the runner's
         // constant background load low so it doesn't tip a constrained runner
         // over when it runs alongside concurrent terraform applies.
+        let this = Arc::new(self);
         loop {
-            self.poll().await;
+            this.poll().await;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
-    async fn poll(&self) {
+    async fn poll(self: &Arc<Self>) {
         // Backstop the per-request `spawn_settle` tasks: rescue any pipe that
         // has been transient for over a second, so a DELETING/UPDATING pipe
         // still settles even when a CPU-starved runner delays its spawned
         // settle task past the provider's waiter timeout. Cheap (a single
         // write lock over the pipe map) and a no-op under normal load.
-        fakecloud_pipes::drain_overdue_transient_pipes(&self.pipes_state, 1.0);
+        // A settled DELETING pipe removes it and purges its checkpoints; mark
+        // dirty so the poll's snapshot flush persists that removal (otherwise a
+        // restart resurrects the pipe and its stale checkpoints).
+        if fakecloud_pipes::drain_overdue_transient_pipes(&self.pipes_state, 1.0) > 0 {
+            self.checkpoints_dirty.store(true, Ordering::Relaxed);
+        }
 
-        let pipes = self.collect_running_pipes();
-        for pipe in pipes {
-            match pipe.source_kind {
-                SourceKind::Sqs => self.process_sqs_pipe(&pipe).await,
-                SourceKind::Kinesis => self.process_kinesis_pipe(&pipe).await,
-                SourceKind::DynamoDbStream => self.process_ddb_pipe(&pipe).await,
+        // Process each pipe concurrently. Serially awaiting them let one pipe
+        // whose target is slow (or momentarily unreachable) stall delivery for
+        // every other pipe on the same tick — head-of-line blocking (bug-hunt
+        // 2026-07-01 L3). Each pipe keys its own checkpoints/acks, so the work
+        // is independent; per-pipe ordering is preserved because a single task
+        // drives each pipe.
+        let mut set = tokio::task::JoinSet::new();
+        for pipe in self.collect_running_pipes() {
+            let me = Arc::clone(self);
+            set.spawn(async move {
+                match pipe.source_kind {
+                    SourceKind::Sqs => me.process_sqs_pipe(&pipe).await,
+                    SourceKind::Kinesis => me.process_kinesis_pipe(&pipe).await,
+                    SourceKind::DynamoDbStream => me.process_ddb_pipe(&pipe).await,
+                }
+            });
+        }
+        while set.join_next().await.is_some() {}
+
+        // Flush at most one snapshot per poll cycle, and only when a checkpoint
+        // actually advanced, so a restart resumes from the delivered position
+        // instead of re-replaying the retained backlog (M1).
+        if self.checkpoints_dirty.swap(false, Ordering::Relaxed) {
+            if let Some(hook) = &self.persist_hook {
+                hook().await;
             }
         }
     }
@@ -387,9 +431,17 @@ impl PipesRunner {
         let region = arn_region(&pipe.source_arn);
 
         // Snapshot each shard's pending window and seed missing checkpoints.
+        //
+        // The checkpoint stores the *sequence number* of the last processed
+        // record (empty string = before the first record), NOT a raw index.
+        // Kinesis physically trims expired records off the front of a shard
+        // (`trim_expired_records`), which shifts every index — an index-based
+        // checkpoint would then skip or re-read records (silent data loss,
+        // bug-hunt 2026-07-01 H1). A sequence number is stable across trims, so
+        // resolving the window start by `seq > checkpoint` stays correct.
         struct ShardWindow {
             shard_id: String,
-            end: usize,
+            last_seq: String,
             records: Vec<fakecloud_kinesis::KinesisRecord>,
         }
         let windows: Vec<ShardWindow> = {
@@ -404,22 +456,32 @@ impl PipesRunner {
             else {
                 return;
             };
-            let mut seeds: Vec<(String, usize)> = Vec::new();
+            let mut seeds: Vec<(String, String)> = Vec::new();
             let mut windows = Vec::new();
             for shard in &stream.shards {
                 let key = format!("{}#{}", pipe.arn, shard.shard_id);
-                let start = match self.checkpoint(&account, &key) {
-                    Some(s) => s.parse::<usize>().unwrap_or(0),
+                let checkpoint = match self.checkpoint(&account, &key) {
+                    Some(cp) => cp,
                     None => {
+                        // First tick: resolve StartingPosition to an index, then
+                        // record the sequence number *just before* the first
+                        // record to deliver (empty for TRIM_HORIZON / empty
+                        // shard) so subsequent ticks resume by sequence number.
                         let init = kinesis_start_index(
                             &shard.records,
                             pipe.starting_position.as_deref(),
                             pipe.starting_position_timestamp,
                         );
-                        seeds.push((key.clone(), init));
-                        init
+                        let seed = if init == 0 {
+                            String::new()
+                        } else {
+                            shard.records[init - 1].sequence_number.clone()
+                        };
+                        seeds.push((key.clone(), seed.clone()));
+                        seed
                     }
                 };
+                let start = kinesis_window_start(&shard.records, &checkpoint);
                 if start >= shard.records.len() {
                     continue;
                 }
@@ -429,15 +491,15 @@ impl PipesRunner {
                     .min(start.saturating_add(pipe.batch_size));
                 windows.push(ShardWindow {
                     shard_id: shard.shard_id.clone(),
-                    end,
+                    last_seq: shard.records[end - 1].sequence_number.clone(),
                     records: shard.records[start..end].to_vec(),
                 });
             }
             drop(ks);
             // Persist the first-seen checkpoints so LATEST/AT_TIMESTAMP don't
             // re-resolve (and re-skip) on every subsequent tick.
-            for (key, init) in seeds {
-                self.set_checkpoint(&account, &key, init.to_string());
+            for (key, seed) in seeds {
+                self.set_checkpoint(&account, &key, seed);
             }
             windows
         };
@@ -450,7 +512,7 @@ impl PipesRunner {
                 .collect();
             let key = format!("{}#{}", pipe.arn, window.shard_id);
             if self.process_stream_window(pipe, events).await {
-                self.set_checkpoint(&account, &key, window.end.to_string());
+                self.set_checkpoint(&account, &key, window.last_seq);
             }
         }
     }
@@ -721,6 +783,7 @@ impl PipesRunner {
             .get_or_create(account)
             .source_checkpoints
             .insert(key.to_string(), value);
+        self.checkpoints_dirty.store(true, Ordering::Relaxed);
     }
 }
 
@@ -776,6 +839,16 @@ fn starting_position(
         .and_then(|p| p.get("StartingPositionTimestamp"))
         .and_then(Value::as_f64);
     (pos, ts)
+}
+
+/// Index of the first record strictly after `checkpoint` (the sequence number
+/// of the last delivered record; empty = before the first record). Records are
+/// stored in ascending, fixed-width, per-shard-monotonic sequence order, so a
+/// lexicographic compare equals a numeric compare and `partition_point` finds
+/// the boundary. Because the cursor is a sequence number rather than an index,
+/// it stays correct after Kinesis trims expired records off the front (H1).
+fn kinesis_window_start(records: &[fakecloud_kinesis::KinesisRecord], checkpoint: &str) -> usize {
+    records.partition_point(|r| r.sequence_number.as_str() <= checkpoint)
 }
 
 /// First record index a Kinesis pipe should read given its StartingPosition.
@@ -1063,5 +1136,43 @@ mod tests {
         assert_eq!(source_batch_size(Some(&params), &SourceKind::Sqs), 10);
         let params = json!({"KinesisStreamParameters": {"BatchSize": 500}});
         assert_eq!(source_batch_size(Some(&params), &SourceKind::Kinesis), 500);
+    }
+
+    fn rec(seq: &str) -> fakecloud_kinesis::KinesisRecord {
+        fakecloud_kinesis::KinesisRecord {
+            sequence_number: seq.to_string(),
+            partition_key: "pk".into(),
+            data: Vec::new(),
+            approximate_arrival_timestamp: chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn kinesis_window_start_resolves_by_sequence_number() {
+        // Fixed-width, per-shard-monotonic sequence numbers.
+        let records = vec![rec("00001"), rec("00002"), rec("00003")];
+        // Empty checkpoint => start at the beginning.
+        assert_eq!(kinesis_window_start(&records, ""), 0);
+        // After delivering up to "00002", resume at index 2 ("00003").
+        assert_eq!(kinesis_window_start(&records, "00002"), 2);
+        // Caught up.
+        assert_eq!(kinesis_window_start(&records, "00003"), 3);
+    }
+
+    #[test]
+    fn kinesis_window_start_survives_retention_trim() {
+        // A raw index checkpoint would skip/re-read after the front is trimmed;
+        // a sequence-number checkpoint stays correct (H1).
+        let before = vec![rec("00001"), rec("00002"), rec("00003"), rec("00004")];
+        // Delivered through "00002" => next is "00003" at index 2.
+        assert_eq!(kinesis_window_start(&before, "00002"), 2);
+        // Kinesis trims the first two expired records; same checkpoint now
+        // resolves to index 0 of the trimmed shard — still "00003", no loss.
+        let after = vec![rec("00003"), rec("00004")];
+        assert_eq!(kinesis_window_start(&after, "00002"), 0);
+        assert_eq!(
+            after[kinesis_window_start(&after, "00002")].sequence_number,
+            "00003"
+        );
     }
 }
