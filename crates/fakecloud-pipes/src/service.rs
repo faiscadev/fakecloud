@@ -567,15 +567,11 @@ impl PipesService {
 
     fn update_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
-        // Advance an overdue transient pipe first (its own lock) so a pipe that
-        // already finished its transition isn't wrongly rejected; the
-        // authoritative, race-free transient check runs under the write lock
-        // below, in the same critical section as the mutation.
-        self.settle_if_overdue(&req.account_id, &name);
         let body = req.json_body();
-        // Validate the request BEFORE touching any state, so a rejected
-        // UpdatePipe leaves the pipe untouched — otherwise force-settling a fresh
-        // transient pipe below would be a side effect of a failed call.
+        // Validate the request body at the VERY START, before any state is read
+        // or mutated — including before `settle_if_overdue`, which can settle or
+        // even remove an overdue transient pipe. A rejected UpdatePipe must leave
+        // state completely untouched for both fresh and overdue pipes.
         if body
             .get("RoleArn")
             .and_then(Value::as_str)
@@ -584,6 +580,11 @@ impl PipesService {
         {
             return Err(validation_error("RoleArn is required"));
         }
+        // Advance an overdue transient pipe (its own lock) so a pipe that already
+        // finished its transition isn't wrongly rejected; the authoritative,
+        // race-free transient check runs under the write lock below, in the same
+        // critical section as the mutation.
+        self.settle_if_overdue(&req.account_id, &name);
         let now = now_epoch_secs();
 
         let response = {
@@ -1528,6 +1529,46 @@ mod tests {
             state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
             STATE_CREATING,
             "a rejected UpdatePipe must not force-settle (state unchanged)"
+        );
+    }
+
+    #[test]
+    fn invalid_update_leaves_overdue_transient_pipe_untouched() {
+        // Request validation runs before settle_if_overdue, so an invalid
+        // UpdatePipe on an OVERDUE CREATING pipe returns ValidationException
+        // without settling it to RUNNING.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 5.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING,
+            "a rejected UpdatePipe must not settle an overdue pipe"
+        );
+    }
+
+    #[test]
+    fn invalid_update_does_not_remove_overdue_deleting_pipe() {
+        // The most damaging case: an overdue DELETING pipe would be REMOVED by
+        // settle_if_overdue. Request validation must run first, so a missing
+        // RoleArn returns ValidationException and the pipe still exists.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .pipes
+                .contains_key("p1"),
+            "a rejected UpdatePipe must not remove an overdue DELETING pipe"
         );
     }
 
