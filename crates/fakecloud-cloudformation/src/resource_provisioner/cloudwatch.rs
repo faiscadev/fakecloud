@@ -131,6 +131,7 @@ impl ResourceProvisioner {
                 .map(String::from),
             configuration_updated_timestamp: now,
             alarm_configuration_updated_timestamp: now,
+            metrics: Vec::new(),
         };
         let region_alarms = state.alarms_in_mut(&self.region);
         if region_alarms.contains_key(&alarm_name) {

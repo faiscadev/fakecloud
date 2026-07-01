@@ -441,6 +441,12 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("Firehose_") => "firehose",
         "AWSGlue" => "glue",
         "CloudApiService" => "cloudcontrolapi",
+        // CloudWatch advertises awsJson1_0 (target service shape
+        // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
+        // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with
+        // `X-Amz-Target: GraniteServiceVersion20100801.<Operation>` and a JSON
+        // body. The service registry key is `monitoring`.
+        s if s.starts_with("GraniteServiceVersion") => "monitoring",
         _ => return None,
     };
 
@@ -572,6 +578,64 @@ pub fn parse_query_body(body: &Bytes) -> HashMap<String, String> {
     decode_form_urlencoded(body)
 }
 
+/// Flatten an awsJson request body into the flat `awsQuery` key form that
+/// query-protocol handlers consume.
+///
+/// CloudWatch is served by handlers written against the awsQuery flat-key map
+/// (`MetricData.member.1.MetricName`, `StatisticValues.Sum`,
+/// `Dimensions.member.2.Value`, ...). Its Smithy model also advertises
+/// `awsJson1_0`, so modern SDKs send a nested JSON body instead. Rather than
+/// duplicate every parser, we flatten the JSON into the same map the awsQuery
+/// handlers already read:
+///
+/// - object field `K` -> key `K` (or `<parent>.K` when nested in a struct)
+/// - array element `i` (1-based) -> `<K>.member.<i>` (matching the awsQuery
+///   list wire convention)
+/// - scalars -> their string form (numbers/booleans stringified)
+///
+/// A body that is not a JSON object yields an empty map.
+pub fn flatten_json_to_query(body: &Bytes) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return out;
+    };
+    if value.is_object() {
+        flatten_json_value("", &value, &mut out);
+    }
+    out
+}
+
+fn flatten_json_value(prefix: &str, value: &serde_json::Value, out: &mut HashMap<String, String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let child = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json_value(&child, v, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                let child = format!("{prefix}.member.{}", i + 1);
+                flatten_json_value(&child, v, out);
+            }
+        }
+        serde_json::Value::Null => {}
+        serde_json::Value::String(s) => {
+            out.insert(prefix.to_string(), s.clone());
+        }
+        serde_json::Value::Bool(b) => {
+            out.insert(prefix.to_string(), b.to_string());
+        }
+        serde_json::Value::Number(n) => {
+            out.insert(prefix.to_string(), n.to_string());
+        }
+    }
+}
+
 fn decode_form_urlencoded(input: &[u8]) -> HashMap<String, String> {
     let s = std::str::from_utf8(input).unwrap_or("");
     let mut result = HashMap::new();
@@ -686,6 +750,59 @@ mod tests {
     fn parse_amz_target_invalid_returns_none() {
         assert!(parse_amz_target("NoDotHere").is_none());
         assert!(parse_amz_target("").is_none());
+    }
+
+    #[test]
+    fn parse_amz_target_cloudwatch_json() {
+        // CloudWatch's awsJson1_0 target service shape.
+        let result = parse_amz_target("GraniteServiceVersion20100801.PutMetricData").unwrap();
+        assert_eq!(result.service, "monitoring");
+        assert_eq!(result.action, "PutMetricData");
+        assert_eq!(result.protocol, AwsProtocol::Json);
+    }
+
+    #[test]
+    fn flatten_json_to_query_nested() {
+        let body = Bytes::from(
+            serde_json::json!({
+                "Namespace": "MyApp",
+                "MetricData": [{
+                    "MetricName": "Latency",
+                    "Value": 12.5,
+                    "StatisticValues": {"SampleCount": 3, "Sum": 10},
+                    "Dimensions": [{"Name": "Endpoint", "Value": "/api"}]
+                }]
+            })
+            .to_string(),
+        );
+        let flat = flatten_json_to_query(&body);
+        assert_eq!(flat.get("Namespace").unwrap(), "MyApp");
+        assert_eq!(
+            flat.get("MetricData.member.1.MetricName").unwrap(),
+            "Latency"
+        );
+        assert_eq!(flat.get("MetricData.member.1.Value").unwrap(), "12.5");
+        assert_eq!(
+            flat.get("MetricData.member.1.StatisticValues.SampleCount")
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            flat.get("MetricData.member.1.Dimensions.member.1.Name")
+                .unwrap(),
+            "Endpoint"
+        );
+        assert_eq!(
+            flat.get("MetricData.member.1.Dimensions.member.1.Value")
+                .unwrap(),
+            "/api"
+        );
+    }
+
+    #[test]
+    fn flatten_json_to_query_non_object_is_empty() {
+        assert!(flatten_json_to_query(&Bytes::from_static(b"[]")).is_empty());
+        assert!(flatten_json_to_query(&Bytes::from_static(b"not json")).is_empty());
     }
 
     #[test]

@@ -7,10 +7,32 @@ use fakecloud_core::query::optional_query_param;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
-    collect_member_values, invalid_param, parse_dimensions_query, render_dimensions, validate_len,
-    validate_range_i64, xml_escape, xml_response, CloudWatchService,
+    collect_indexed, collect_member_values, invalid_param, parse_dimensions_query,
+    render_dimensions, validate_len, validate_range_i64, xml_escape, xml_response,
+    CloudWatchService,
 };
-use crate::state::AnomalyDetector;
+use crate::state::{AnomalyDetector, AnomalyDetectorConfiguration, ExcludedTimeRange};
+
+/// Parse the optional `Configuration` (MetricTimezone + ExcludedTimeRanges)
+/// off a PutAnomalyDetector request, if present.
+fn parse_configuration(req: &AwsRequest) -> Option<AnomalyDetectorConfiguration> {
+    let metric_timezone = optional_query_param(req, "Configuration.MetricTimezone");
+    let excluded_time_ranges: Vec<ExcludedTimeRange> =
+        collect_indexed(req, "Configuration.ExcludedTimeRanges")
+            .into_iter()
+            .map(|m| ExcludedTimeRange {
+                start_time: m.get("StartTime").cloned(),
+                end_time: m.get("EndTime").cloned(),
+            })
+            .collect();
+    if metric_timezone.is_none() && excluded_time_ranges.is_empty() {
+        return None;
+    }
+    Some(AnomalyDetectorConfiguration {
+        excluded_time_ranges,
+        metric_timezone,
+    })
+}
 
 /// Build the stable key for a detector from its identifying fields. A
 /// metric-math detector keys off its serialized expression members; a
@@ -109,6 +131,9 @@ impl CloudWatchService {
             &id.dimensions,
             &id.math_id,
         );
+        let configuration = parse_configuration(req);
+        let periodic_spikes = optional_query_param(req, "MetricCharacteristics.PeriodicSpikes")
+            .map(|s| s.eq_ignore_ascii_case("true"));
         let detector = AnomalyDetector {
             key: key.clone(),
             namespace: id.namespace,
@@ -117,6 +142,8 @@ impl CloudWatchService {
             dimensions: id.dimensions,
             metric_math: id.math_id.is_some(),
             state_value: "TRAINED".to_string(),
+            configuration,
+            periodic_spikes,
         };
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
@@ -235,6 +262,35 @@ fn render_detector(d: &AnomalyDetector) -> String {
             s.push_str(&format!("<Stat>{}</Stat>", xml_escape(stat)));
         }
         s.push_str("</SingleMetricAnomalyDetector>");
+    }
+    if let Some(cfg) = &d.configuration {
+        s.push_str("<Configuration>");
+        if !cfg.excluded_time_ranges.is_empty() {
+            s.push_str("<ExcludedTimeRanges>");
+            for r in &cfg.excluded_time_ranges {
+                s.push_str("<member>");
+                if let Some(st) = &r.start_time {
+                    s.push_str(&format!("<StartTime>{}</StartTime>", xml_escape(st)));
+                }
+                if let Some(et) = &r.end_time {
+                    s.push_str(&format!("<EndTime>{}</EndTime>", xml_escape(et)));
+                }
+                s.push_str("</member>");
+            }
+            s.push_str("</ExcludedTimeRanges>");
+        }
+        if let Some(tz) = &cfg.metric_timezone {
+            s.push_str(&format!(
+                "<MetricTimezone>{}</MetricTimezone>",
+                xml_escape(tz)
+            ));
+        }
+        s.push_str("</Configuration>");
+    }
+    if let Some(ps) = d.periodic_spikes {
+        s.push_str(&format!(
+            "<MetricCharacteristics><PeriodicSpikes>{ps}</PeriodicSpikes></MetricCharacteristics>"
+        ));
     }
     s.push_str("</member>");
     s

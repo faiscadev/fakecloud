@@ -428,6 +428,17 @@ pub async fn dispatch(
         }
     }
 
+    // CloudWatch (`monitoring`) advertises awsJson1_0 alongside awsQuery. Its
+    // handlers all read the flat awsQuery param map, so when a client uses the
+    // JSON protocol we flatten the JSON body into that same map, leaving the
+    // handlers unchanged. The handler emits a JSON response for JSON callers.
+    if detected.protocol == AwsProtocol::Json && detected.service == "monitoring" {
+        let body_params = protocol::flatten_json_to_query(&body_bytes);
+        for (k, v) in body_params {
+            all_params.entry(k).or_insert(v);
+        }
+    }
+
     let aws_request = AwsRequest {
         service: detected.service.clone(),
         action: detected.action.clone(),

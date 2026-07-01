@@ -1,10 +1,10 @@
 +++
 title = "CloudWatch (Metrics & Alarms)"
-description = "Amazon CloudWatch metrics, alarms, dashboards, anomaly detectors, insight rules, and metric streams. awsQuery protocol."
+description = "Amazon CloudWatch metrics, alarms, dashboards, anomaly detectors, insight rules, and metric streams. awsQuery and awsJson1_0 protocols."
 weight = 33
 +++
 
-fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service, awsQuery protocol) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. All 49 operations are implemented with persisted in-memory state.
+fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. CloudWatch's Smithy model advertises both the legacy `awsQuery` protocol (XML) and `awsJson1_0`; fakecloud accepts either, so older SDKs and newer SDKs (aws-sdk-rust / js-v3 / go-v2) that send `X-Amz-Target: GraniteServiceVersion20100801.<Operation>` with a JSON body both work, and each caller receives a response in the protocol it used. All 49 operations are implemented with persisted in-memory state.
 
 **Status: full control plane. Metrics are stored in memory and do not persist across server restarts; alarm evaluation is driven by the metric data you publish, not by a background sampling loop.**
 
