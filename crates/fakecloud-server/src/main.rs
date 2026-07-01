@@ -30,13 +30,13 @@ mod stepfunctions_delivery;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
-    athena_named_query_response, ec2_instance_response, ecr_image_response,
-    ecr_pull_through_rule_response, ecr_repository_response, ecs_cluster_response,
-    ecs_lifecycle_event, ecs_task_metadata_response, ecs_task_response, elasticache_acls_response,
-    elasticache_cluster_response, elasticache_replication_group_response,
-    elasticache_serverless_cache_response, elbv2_listener_response, elbv2_load_balancer_response,
-    elbv2_rule_response, elbv2_target_group_response, organizations_accounts_snapshot,
-    rds_instance_response,
+    athena_named_query_response, cloudfront_distribution_response, ec2_instance_response,
+    ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
+    ecs_cluster_response, ecs_lifecycle_event, ecs_task_metadata_response, ecs_task_response,
+    elasticache_acls_response, elasticache_cluster_response,
+    elasticache_replication_group_response, elasticache_serverless_cache_response,
+    elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
+    elbv2_target_group_response, organizations_accounts_snapshot, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -2741,6 +2741,7 @@ async fn main() {
     cloudfront_inner.rearm_in_progress();
     let cloudfront_service = Arc::new(cloudfront_inner);
     registry.register(cloudfront_service.clone());
+    let cloudfront_introspection_state = cloudfront_state.clone();
     let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -7532,6 +7533,24 @@ async fn main() {
                         }
                         events.sort_by(|a, b| a.at.cmp(&b.at));
                         axum::Json(types::EcsEventsResponse { events })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cloudfront/distributions",
+            axum::routing::get({
+                let st = cloudfront_introspection_state.clone();
+                move || {
+                    let st = st.clone();
+                    async move {
+                        let accounts = st.read();
+                        let mut distributions: Vec<types::CloudFrontDistribution> = accounts
+                            .all_distributions()
+                            .map(|(_, d)| cloudfront_distribution_response(d))
+                            .collect();
+                        distributions.sort_by(|a, b| a.id.cmp(&b.id));
+                        axum::Json(types::CloudFrontDistributionsResponse { distributions })
                     }
                 }
             }),

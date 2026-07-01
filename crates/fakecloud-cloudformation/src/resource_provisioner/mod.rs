@@ -5093,6 +5093,7 @@ impl ResourceProvisioner {
             in_progress_invalidation_batches: 0,
             etag,
             config,
+            bound_port: None,
         };
 
         let mut accounts = self.cloudfront_state.write();

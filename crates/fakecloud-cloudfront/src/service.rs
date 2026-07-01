@@ -737,6 +737,7 @@ impl CloudFrontService {
             in_progress_invalidation_batches: 0,
             etag: etag.clone(),
             config,
+            bound_port: None,
         };
         account.distributions.insert(id.clone(), stored.clone());
         if !tags.is_empty() {
@@ -1291,6 +1292,7 @@ impl CloudFrontService {
             in_progress_invalidation_batches: 0,
             etag: etag.clone(),
             config,
+            bound_port: None,
         };
         account.distributions.insert(new_id.clone(), stored.clone());
         drop(state);
