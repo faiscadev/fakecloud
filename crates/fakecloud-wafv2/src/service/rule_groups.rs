@@ -213,9 +213,8 @@ impl Wafv2Service {
         rg.visibility_config = visibility_config;
         rg.rules = rules;
         rg.description = description;
-        if let Some(b) = body.get("CustomResponseBodies") {
-            rg.custom_response_bodies = parse_custom_response_bodies(Some(b));
-        }
+        // Update is full-replace: an omitted CustomResponseBodies clears it.
+        rg.custom_response_bodies = parse_custom_response_bodies(body.get("CustomResponseBodies"));
         rg.lock_token = synth_uuid();
         Ok(AwsResponse::ok_json(
             json!({ "NextLockToken": rg.lock_token }),
@@ -323,27 +322,59 @@ impl Wafv2Service {
         let body = req.json_body();
         let name = require_str_len(&body, "Name", 1, 128)?;
         let id = require_str_len(&body, "Id", 1, 36)?;
-        let _scope = require_scope(&body)?;
+        let scope = require_scope(&body)?;
+        // GetManagedRuleSet reads a set previously published via
+        // PutManagedRuleSetVersions. AWS returns WAFNonexistentItemException
+        // for an unknown (scope, name) or a mismatched Id.
+        let state = self.state.read();
+        let set = state
+            .accounts
+            .get(&req.account_id)
+            .and_then(|a| a.managed_rule_sets.get(&(scope, name.clone())))
+            .filter(|s| s.id == id)
+            .ok_or_else(|| not_found("ManagedRuleSet"))?;
+
+        // Build PublishedVersions from the authoritative version-name list,
+        // using the per-version detail when present. Snapshots written before
+        // published_version_details existed only carry the names, so synthesize
+        // a minimal detail for those rather than dropping the version.
+        let mut published = serde_json::Map::new();
+        for v in &set.published_versions {
+            let detail = set
+                .published_version_details
+                .get(v)
+                .cloned()
+                .unwrap_or_else(|| json!({ "Capacity": 50 }));
+            published.insert(v.clone(), detail);
+        }
+        // Include any detail-only entries (defensive) not in the name list.
+        for (v, d) in &set.published_version_details {
+            published.entry(v.clone()).or_insert_with(|| d.clone());
+        }
+        let mut managed = serde_json::Map::new();
+        managed.insert("Name".to_string(), json!(set.name));
+        managed.insert("Id".to_string(), json!(set.id));
+        managed.insert(
+            "ARN".to_string(),
+            json!(Arn::new(
+                "wafv2",
+                &req.region,
+                &req.account_id,
+                &format!("managedruleset/{}/{}", set.name, set.id)
+            )
+            .to_string()),
+        );
+        if let Some(d) = &set.description {
+            managed.insert("Description".to_string(), json!(d));
+        }
+        managed.insert("PublishedVersions".to_string(), Value::Object(published));
+        if let Some(rv) = &set.recommended_version {
+            managed.insert("RecommendedVersion".to_string(), json!(rv));
+        }
+        managed.insert("LabelNamespace".to_string(), json!(set.label_namespace));
         Ok(AwsResponse::ok_json(json!({
-            "ManagedRuleSet": {
-                "Name": name,
-                "Id": id,
-                "ARN": Arn::new("wafv2", &req.region, &req.account_id, &format!("managedruleset/{name}/{id}")).to_string(),
-                "Description": format!("Managed rule set {name}"),
-                "PublishedVersions": {
-                    "Version_1.0": {
-                        "AssociatedRuleGroupArn": Arn::new("wafv2", &req.region, "aws", &format!("managedrulegroup/{name}")).to_string(),
-                        "Capacity": 50,
-                        "ForecastedLifetime": 90,
-                        "PublishTimestamp": Utc::now().timestamp() as f64,
-                        "LastUpdateTimestamp": Utc::now().timestamp() as f64,
-                        "ExpiryTimestamp": (Utc::now() + chrono::Duration::days(365)).timestamp() as f64,
-                    }
-                },
-                "RecommendedVersion": "Version_1.0",
-                "LabelNamespace": format!("awswaf:managed::{name}:"),
-            },
-            "LockToken": synth_uuid(),
+            "ManagedRuleSet": Value::Object(managed),
+            "LockToken": set.lock_token,
         })))
     }
 
@@ -477,14 +508,15 @@ impl Wafv2Service {
             None => None,
         };
 
-        // Collect the version names being published (VersionsToPublish is a
-        // map of version-name -> {AssociatedRuleGroupArn, ForecastedLifetime}).
-        let mut published: Vec<String> = body
+        // VersionsToPublish is a map of version-name ->
+        // {AssociatedRuleGroupArn, ForecastedLifetime}. Persist both the
+        // version names and their detail so GetManagedRuleSet can read the
+        // full PublishedVersions back.
+        let versions_to_publish = body
             .get("VersionsToPublish")
             .and_then(Value::as_object)
-            .map(|m| m.keys().cloned().collect())
+            .cloned()
             .unwrap_or_default();
-        published.sort();
 
         let next_lock_token = synth_uuid();
         let mut state = self.state.write();
@@ -503,13 +535,40 @@ impl Wafv2Service {
                     label_namespace: format!("awswaf:managed:{name}"),
                     recommended_version: None,
                     published_versions: Vec::new(),
+                    published_version_details: std::collections::BTreeMap::new(),
                     created_time: Utc::now(),
                 });
-        for v in published {
-            if !entry.published_versions.contains(&v) {
-                entry.published_versions.push(v);
+        let now_ts = Utc::now().timestamp() as f64;
+        for (vname, cfg) in &versions_to_publish {
+            if !entry.published_versions.contains(vname) {
+                entry.published_versions.push(vname.clone());
             }
+            let mut detail = serde_json::Map::new();
+            if let Some(arn) = cfg.get("AssociatedRuleGroupArn") {
+                detail.insert("AssociatedRuleGroupArn".to_string(), arn.clone());
+            }
+            if let Some(fl) = cfg.get("ForecastedLifetime") {
+                detail.insert("ForecastedLifetime".to_string(), fl.clone());
+            }
+            detail.insert(
+                "Capacity".to_string(),
+                json!(cfg.get("Capacity").and_then(Value::as_i64).unwrap_or(50)),
+            );
+            // Preserve the original PublishTimestamp when republishing an
+            // existing version; only LastUpdateTimestamp advances.
+            let publish_ts = entry
+                .published_version_details
+                .get(vname)
+                .and_then(|d| d.get("PublishTimestamp"))
+                .and_then(Value::as_f64)
+                .unwrap_or(now_ts);
+            detail.insert("PublishTimestamp".to_string(), json!(publish_ts));
+            detail.insert("LastUpdateTimestamp".to_string(), json!(now_ts));
+            entry
+                .published_version_details
+                .insert(vname.clone(), Value::Object(detail));
         }
+        entry.published_versions.sort();
         if recommended_version.is_some() {
             entry.recommended_version = recommended_version;
         }

@@ -209,31 +209,16 @@ impl Wafv2Service {
         acl.capacity = compute_capacity(&rules);
         acl.rules = rules;
         acl.description = description;
-        if let Some(b) = body.get("CustomResponseBodies") {
-            acl.custom_response_bodies = parse_custom_response_bodies(Some(b));
-        }
-        if body.get("CaptchaConfig").is_some() {
-            acl.captcha_config = body.get("CaptchaConfig").cloned();
-        }
-        if body.get("ChallengeConfig").is_some() {
-            acl.challenge_config = body.get("ChallengeConfig").cloned();
-        }
-        if let Some(td) = body.get("TokenDomains") {
-            acl.token_domains = parse_string_list(Some(td));
-        }
-        if body.get("AssociationConfig").is_some() {
-            acl.association_config = body.get("AssociationConfig").cloned();
-        }
-        if body.get("DataProtectionConfig").is_some() {
-            acl.data_protection_config = body.get("DataProtectionConfig").cloned();
-        }
-        if body.get("OnSourceDDoSProtectionConfig").is_some() {
-            acl.on_source_d_do_s_protection_config =
-                body.get("OnSourceDDoSProtectionConfig").cloned();
-        }
-        if body.get("ApplicationConfig").is_some() {
-            acl.application_config = body.get("ApplicationConfig").cloned();
-        }
+        // AWS Update ops are full-replace: every optional member omitted from
+        // the request is cleared (not left at its previous value).
+        acl.custom_response_bodies = parse_custom_response_bodies(body.get("CustomResponseBodies"));
+        acl.captcha_config = body.get("CaptchaConfig").cloned();
+        acl.challenge_config = body.get("ChallengeConfig").cloned();
+        acl.token_domains = parse_string_list(body.get("TokenDomains"));
+        acl.association_config = body.get("AssociationConfig").cloned();
+        acl.data_protection_config = body.get("DataProtectionConfig").cloned();
+        acl.on_source_d_do_s_protection_config = body.get("OnSourceDDoSProtectionConfig").cloned();
+        acl.application_config = body.get("ApplicationConfig").cloned();
         acl.lock_token = synth_uuid();
         Ok(AwsResponse::ok_json(
             json!({ "NextLockToken": acl.lock_token }),

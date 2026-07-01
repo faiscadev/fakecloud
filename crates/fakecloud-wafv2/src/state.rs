@@ -106,6 +106,11 @@ pub struct ManagedRuleSet {
     pub recommended_version: Option<String>,
     /// Published version names (e.g. "Version_1.0").
     pub published_versions: Vec<String>,
+    /// Per-version detail (AssociatedRuleGroupArn / Capacity / lifetime /
+    /// timestamps) keyed by version name, as published via
+    /// PutManagedRuleSetVersions and read back by GetManagedRuleSet.
+    #[serde(default)]
+    pub published_version_details: BTreeMap<String, Value>,
     pub created_time: DateTime<Utc>,
 }
 

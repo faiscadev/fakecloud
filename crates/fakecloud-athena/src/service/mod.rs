@@ -1647,6 +1647,52 @@ mod tests {
         assert_eq!(executors[0]["ExecutorType"], json!("COORDINATOR"));
         assert_eq!(executors[0]["ExecutorState"], json!("CREATED"));
     }
+
+    // ListWorkGroups' summary EngineVersion reflects the workgroup's real
+    // stored EngineVersion rather than a hardcoded "AUTO".
+    #[test]
+    fn list_work_groups_reports_real_engine_version() {
+        let svc = AthenaService::default();
+        svc.create_work_group(&req(
+            "CreateWorkGroup",
+            json!({
+                "Name": "wg3",
+                "Configuration": {
+                    "EngineVersion": {"SelectedEngineVersion": "Athena engine version 3"}
+                }
+            }),
+        ))
+        .unwrap();
+
+        let find_engine = |svc: &AthenaService, name: &str| -> String {
+            let body = parse_json(
+                &svc.list_work_groups(&req("ListWorkGroups", json!({})))
+                    .unwrap(),
+            );
+            body["WorkGroups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["Name"] == json!(name))
+                .and_then(|w| w["EngineVersion"]["SelectedEngineVersion"].as_str())
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(find_engine(&svc, "wg3"), "Athena engine version 3");
+
+        // Updating the engine version via ConfigurationUpdates is reflected too.
+        svc.update_work_group(&req(
+            "UpdateWorkGroup",
+            json!({
+                "WorkGroup": "wg3",
+                "ConfigurationUpdates": {
+                    "EngineVersion": {"SelectedEngineVersion": "Athena engine version 2"}
+                }
+            }),
+        ))
+        .unwrap();
+        assert_eq!(find_engine(&svc, "wg3"), "Athena engine version 2");
+    }
 }
 
 #[cfg(test)]

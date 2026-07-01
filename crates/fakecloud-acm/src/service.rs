@@ -1214,30 +1214,6 @@ impl AcmService {
                 return Err(validation_error("Invalid SortOrder"));
             }
         }
-        // Filter values live under FilterStatement.Filter.<Key>; AWS ANDs the
-        // leaf filters and, within each leaf, keeps certs that match ANY listed
-        // value. Only KeyTypes was applied before (bug-audit 2026-05-28, 1.5).
-        let filter_values = |key: &str| -> Vec<String> {
-            body.get("FilterStatement")
-                .and_then(|f| f.get("Filter"))
-                .and_then(|f| f.get(key))
-                .and_then(Value::as_array)
-                .map(|v| {
-                    v.iter()
-                        .filter_map(|s| s.as_str().map(|s| s.to_ascii_uppercase()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let key_types = filter_values("KeyTypes");
-        // ExtendedKeyUsages / KeyUsage were silently dropped before (the
-        // comment claimed pass-through but nothing applied them — bug-audit
-        // 2026-06-13, 1.11). fakecloud-issued certs carry the canonical ACM
-        // EKU/KeyUsage sets (mirrored in the response JSON below), so a cert
-        // matches a leaf filter when its set intersects the requested values.
-        let extended_key_usages = filter_values("ExtendedKeyUsages");
-        let key_usage = filter_values("KeyUsage");
-
         // CertificateStatuses is a top-level filter on the certificate status.
         let statuses: Vec<String> = body
             .get("CertificateStatuses")
@@ -1257,34 +1233,13 @@ impl AcmService {
             .unwrap_or_default();
         drop(state);
 
-        if !key_types.is_empty() {
-            all.retain(|c| key_types.contains(&c.key_algorithm.to_ascii_uppercase()));
-        }
         if !statuses.is_empty() {
             all.retain(|c| statuses.contains(&c.status.to_ascii_uppercase()));
         }
-        // Canonical EKU/KeyUsage sets carried by every fakecloud-issued
-        // cert (kept in sync with certificate_search_result_json /
-        // describe output). A cert matches when the requested filter
-        // intersects its set; `ANY` is the AWS wildcard sentinel.
-        const CERT_EKUS: [&str; 2] = [
-            "TLS_WEB_SERVER_AUTHENTICATION",
-            "TLS_WEB_CLIENT_AUTHENTICATION",
-        ];
-        const CERT_KEY_USAGES: [&str; 2] = ["DIGITAL_SIGNATURE", "KEY_ENCIPHERMENT"];
-        if !extended_key_usages.is_empty() {
-            all.retain(|_| {
-                extended_key_usages
-                    .iter()
-                    .any(|f| f == "ANY" || CERT_EKUS.contains(&f.as_str()))
-            });
-        }
-        if !key_usage.is_empty() {
-            all.retain(|_| {
-                key_usage
-                    .iter()
-                    .any(|f| f == "ANY" || CERT_KEY_USAGES.contains(&f.as_str()))
-            });
+        // FilterStatement is a recursive And/Or/Not/Filter tree; evaluate it
+        // against each cert so composed filters (not just bare leaves) apply.
+        if let Some(stmt) = body.get("FilterStatement") {
+            all.retain(|c| cert_matches_statement(c, stmt));
         }
 
         // Apply SortBy/SortOrder (validated above but previously never applied,
@@ -1349,6 +1304,189 @@ impl AcmService {
 
 fn account_mut<'a>(state: &'a mut AcmAccounts, account_id: &str) -> &'a mut AccountState {
     state.accounts.entry(account_id.to_string()).or_default()
+}
+
+// Canonical EKU/KeyUsage sets carried by every fakecloud-issued cert (kept in
+// sync with certificate_search_result_json / describe output). A cert matches a
+// single-valued X509AttributeFilter.ExtendedKeyUsage / KeyUsage when the
+// requested value is a member of its set.
+const CERT_EKUS: [&str; 2] = [
+    "TLS_WEB_SERVER_AUTHENTICATION",
+    "TLS_WEB_CLIENT_AUTHENTICATION",
+];
+const CERT_KEY_USAGES: [&str; 2] = ["DIGITAL_SIGNATURE", "KEY_ENCIPHERMENT"];
+
+/// Evaluate a `CommonNameFilter` / `DnsNameFilter` (a `{Value,
+/// ComparisonOperator}` struct where the operator is `EQUALS` or `CONTAINS`)
+/// against a candidate string.
+fn string_filter_matches(filter: &Value, value: &str) -> bool {
+    let Some(target) = filter.get("Value").and_then(Value::as_str) else {
+        return true;
+    };
+    match filter.get("ComparisonOperator").and_then(Value::as_str) {
+        Some("CONTAINS") => value.contains(target),
+        // EQUALS (the only other documented operator) and any default.
+        _ => value == target,
+    }
+}
+
+/// Certificate common name, with the `CN=` prefix stripped to match how the
+/// search result surfaces it.
+fn cert_common_name(cert: &StoredCertificate) -> &str {
+    cert.subject
+        .strip_prefix("CN=")
+        .unwrap_or(cert.subject.as_str())
+}
+
+/// Whether an epoch (or RFC3339) timestamp lands within a `TimestampRange`
+/// (`{Start, End}`, both inclusive; either bound may be omitted).
+fn ts_in_range(range: &Value, ts: chrono::DateTime<Utc>) -> bool {
+    let bound = |key: &str| -> Option<i64> {
+        range.get(key).and_then(|v| {
+            v.as_f64()
+                .map(|f| f as i64)
+                .or_else(|| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<f64>().ok().map(|f| f as i64))
+                })
+                .or_else(|| {
+                    v.as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.timestamp())
+                })
+        })
+    };
+    let epoch = ts.timestamp();
+    bound("Start").is_none_or(|s| epoch >= s) && bound("End").is_none_or(|e| epoch <= e)
+}
+
+/// Evaluate an `X509AttributeFilter` union (exactly one member set) against a
+/// certificate.
+fn cert_matches_x509(cert: &StoredCertificate, x: &Value) -> bool {
+    if let Some(cn) = x.get("Subject").and_then(|s| s.get("CommonName")) {
+        return string_filter_matches(cn, cert_common_name(cert));
+    }
+    if let Some(dns) = x
+        .get("SubjectAlternativeName")
+        .and_then(|s| s.get("DnsName"))
+    {
+        return cert
+            .subject_alternative_names
+            .iter()
+            .any(|san| string_filter_matches(dns, san));
+    }
+    if let Some(eku) = x.get("ExtendedKeyUsage").and_then(Value::as_str) {
+        let eku = eku.to_ascii_uppercase();
+        // The `ANY` sentinel matches any cert that has at least one EKU;
+        // otherwise the specific value must be one the cert carries.
+        return match eku.as_str() {
+            "ANY" => !CERT_EKUS.is_empty(),
+            v => CERT_EKUS.contains(&v),
+        };
+    }
+    if let Some(ku) = x.get("KeyUsage").and_then(Value::as_str) {
+        let ku = ku.to_ascii_uppercase();
+        return match ku.as_str() {
+            "ANY" => !CERT_KEY_USAGES.is_empty(),
+            v => CERT_KEY_USAGES.contains(&v),
+        };
+    }
+    if let Some(alg) = x.get("KeyAlgorithm").and_then(Value::as_str) {
+        return cert.key_algorithm.eq_ignore_ascii_case(alg);
+    }
+    if let Some(serial) = x.get("SerialNumber").and_then(Value::as_str) {
+        return cert.serial == serial;
+    }
+    if let Some(range) = x.get("NotAfter") {
+        return ts_in_range(range, cert.not_after);
+    }
+    if let Some(range) = x.get("NotBefore") {
+        return ts_in_range(range, cert.not_before);
+    }
+    // No recognised member -> no constraint.
+    true
+}
+
+/// Evaluate an `AcmCertificateMetadataFilter` union against a certificate.
+fn cert_matches_metadata(cert: &StoredCertificate, md: &Value) -> bool {
+    if let Some(status) = md.get("Status").and_then(Value::as_str) {
+        return cert.status.eq_ignore_ascii_case(status);
+    }
+    if let Some(rs) = md.get("RenewalStatus").and_then(Value::as_str) {
+        return cert
+            .renewal_summary
+            .as_ref()
+            .is_some_and(|r| r.renewal_status.eq_ignore_ascii_case(rs));
+    }
+    if let Some(ty) = md.get("Type").and_then(Value::as_str) {
+        return cert.cert_type.eq_ignore_ascii_case(ty);
+    }
+    if let Some(in_use) = md.get("InUse").and_then(Value::as_bool) {
+        return cert.in_use_by.is_empty() != in_use;
+    }
+    if let Some(exported) = md.get("Exported").and_then(Value::as_bool) {
+        // fakecloud never exports certs (mirrored as Exported=false in output).
+        return !exported;
+    }
+    if let Some(opt) = md.get("ExportOption").and_then(Value::as_str) {
+        return cert.options.export.eq_ignore_ascii_case(opt);
+    }
+    if let Some(mb) = md.get("ManagedBy").and_then(Value::as_str) {
+        return cert
+            .managed_by
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case(mb));
+    }
+    if let Some(vm) = md.get("ValidationMethod").and_then(Value::as_str) {
+        return cert
+            .validation_method
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case(vm));
+    }
+    true
+}
+
+/// Evaluate a leaf `CertificateFilter` union (`CertificateArn` /
+/// `X509AttributeFilter` / `AcmCertificateMetadataFilter`) against a
+/// certificate, per the ACM SearchCertificates model.
+fn cert_matches_leaf(cert: &StoredCertificate, filter: &Value) -> bool {
+    if let Some(arn) = filter.get("CertificateArn").and_then(Value::as_str) {
+        return cert.arn == arn;
+    }
+    if let Some(x) = filter.get("X509AttributeFilter") {
+        return cert_matches_x509(cert, x);
+    }
+    if let Some(md) = filter.get("AcmCertificateMetadataFilter") {
+        return cert_matches_metadata(cert, md);
+    }
+    // Empty/unknown leaf imposes no constraint.
+    true
+}
+
+/// Recursively evaluate a `FilterStatement` (And / Or / Not / Filter) against a
+/// certificate. Present composition keys are AND'd together.
+fn cert_matches_statement(cert: &StoredCertificate, stmt: &Value) -> bool {
+    if let Some(and) = stmt.get("And").and_then(Value::as_array) {
+        if !and.iter().all(|s| cert_matches_statement(cert, s)) {
+            return false;
+        }
+    }
+    if let Some(or) = stmt.get("Or").and_then(Value::as_array) {
+        if !or.is_empty() && !or.iter().any(|s| cert_matches_statement(cert, s)) {
+            return false;
+        }
+    }
+    if let Some(not) = stmt.get("Not") {
+        if cert_matches_statement(cert, not) {
+            return false;
+        }
+    }
+    if let Some(filter) = stmt.get("Filter") {
+        if !cert_matches_leaf(cert, filter) {
+            return false;
+        }
+    }
+    true
 }
 
 fn require_certificate_arn(req: &AwsRequest) -> Result<String, AwsServiceError> {
@@ -2591,9 +2729,10 @@ mod tests {
 
     #[tokio::test]
     async fn search_certificates_extended_key_usage_filter() {
-        // EKU filtering was silently dropped (1.11). fakecloud certs carry
-        // the canonical TLS server/client auth EKUs, so a matching filter
-        // narrows to all certs and a non-matching one drops them all.
+        // EKU filtering uses the modeled X509AttributeFilter.ExtendedKeyUsage
+        // (a single value). fakecloud certs carry the canonical TLS
+        // server/client auth EKUs, so a matching filter keeps all certs and a
+        // non-matching one drops them all.
         let svc = AcmService::default();
         for d in ["a.example.com", "b.example.com"] {
             svc.handle(make_req("RequestCertificate", json!({ "DomainName": d })))
@@ -2609,7 +2748,11 @@ mod tests {
                 "SearchCertificates",
                 json!({
                     "FilterStatement": {
-                        "Filter": { "ExtendedKeyUsages": ["TLS_WEB_SERVER_AUTHENTICATION"] }
+                        "Filter": {
+                            "X509AttributeFilter": {
+                                "ExtendedKeyUsage": "TLS_WEB_SERVER_AUTHENTICATION"
+                            }
+                        }
                     }
                 }),
             ))
@@ -2624,7 +2767,9 @@ mod tests {
                 "SearchCertificates",
                 json!({
                     "FilterStatement": {
-                        "Filter": { "ExtendedKeyUsages": ["CODE_SIGNING"] }
+                        "Filter": {
+                            "X509AttributeFilter": { "ExtendedKeyUsage": "CODE_SIGNING" }
+                        }
                     }
                 }),
             ))
@@ -2632,5 +2777,192 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(count(&body), 0, "non-matching EKU should drop all certs");
+
+        // The `ANY` sentinel matches any cert that has at least one EKU.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "X509AttributeFilter": { "ExtendedKeyUsage": "ANY" } }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(count(&body), 2, "ANY EKU should match all certs with EKUs");
+
+        // Same `ANY` semantics for KeyUsage.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "X509AttributeFilter": { "KeyUsage": "ANY" } }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            count(&body),
+            2,
+            "ANY KeyUsage should match all certs with key usages"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_certificates_honors_and_or_not_composition() {
+        // Two certs with distinct key algorithms let us exercise the recursive
+        // And/Or/Not FilterStatement composition (previously ignored).
+        let svc = AcmService::default();
+        svc.handle(make_req(
+            "RequestCertificate",
+            json!({ "DomainName": "rsa.example.com", "KeyAlgorithm": "RSA_2048" }),
+        ))
+        .await
+        .unwrap();
+        svc.handle(make_req(
+            "RequestCertificate",
+            json!({ "DomainName": "ec.example.com", "KeyAlgorithm": "EC_prime256v1" }),
+        ))
+        .await
+        .unwrap();
+
+        let search = |stmt: Value| {
+            let svc = &svc;
+            async move {
+                let resp = svc
+                    .handle(make_req(
+                        "SearchCertificates",
+                        json!({ "FilterStatement": stmt }),
+                    ))
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+                body["Results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        c["X509Attributes"]["KeyAlgorithm"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Leaf uses the modeled X509AttributeFilter.KeyAlgorithm (single value).
+        let key_alg =
+            |alg: &str| json!({ "Filter": { "X509AttributeFilter": { "KeyAlgorithm": alg } } });
+
+        // Not RSA -> only the EC cert.
+        let got = search(json!({ "Not": key_alg("RSA_2048") })).await;
+        assert_eq!(got, vec!["EC_prime256v1"]);
+
+        // Or of both key algorithms -> both certs.
+        let mut got =
+            search(json!({ "Or": [key_alg("RSA_2048"), key_alg("EC_prime256v1")] })).await;
+        got.sort();
+        assert_eq!(got, vec!["EC_prime256v1", "RSA_2048"]);
+
+        // And of key algorithm + matching EKU -> just the RSA cert.
+        let got = search(json!({
+            "And": [
+                key_alg("RSA_2048"),
+                { "Filter": { "X509AttributeFilter": { "ExtendedKeyUsage": "TLS_WEB_SERVER_AUTHENTICATION" } } },
+            ]
+        }))
+        .await;
+        assert_eq!(got, vec!["RSA_2048"]);
+
+        // And of two contradictory key algorithms -> nothing.
+        let got = search(json!({ "And": [key_alg("RSA_2048"), key_alg("EC_prime256v1")] })).await;
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_certificates_leaf_filter_shapes_apply() {
+        // Cover the real CertificateFilter union leaves: CertificateArn,
+        // X509AttributeFilter (CommonName / DnsName / SerialNumber), and
+        // AcmCertificateMetadataFilter (Status).
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({
+                    "DomainName": "primary.example.com",
+                    "SubjectAlternativeNames": ["alt.example.org"],
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+        svc.handle(make_req(
+            "RequestCertificate",
+            json!({ "DomainName": "other.example.com" }),
+        ))
+        .await
+        .unwrap();
+
+        let arns = |stmt: Value| {
+            let svc = &svc;
+            async move {
+                let resp = svc
+                    .handle(make_req(
+                        "SearchCertificates",
+                        json!({ "FilterStatement": stmt }),
+                    ))
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+                body["Results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["CertificateArn"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // CertificateArn leaf -> exactly that cert.
+        let got = arns(json!({ "Filter": { "CertificateArn": arn } })).await;
+        assert_eq!(got.len(), 1);
+
+        // Subject.CommonName EQUALS -> the primary cert only.
+        let got = arns(json!({
+            "Filter": { "X509AttributeFilter": { "Subject": {
+                "CommonName": { "Value": "primary.example.com", "ComparisonOperator": "EQUALS" }
+            } } }
+        }))
+        .await;
+        assert_eq!(got.len(), 1);
+
+        // SubjectAlternativeName.DnsName CONTAINS -> the primary cert (its SAN).
+        let got = arns(json!({
+            "Filter": { "X509AttributeFilter": { "SubjectAlternativeName": {
+                "DnsName": { "Value": "example.org", "ComparisonOperator": "CONTAINS" }
+            } } }
+        }))
+        .await;
+        assert_eq!(got.len(), 1);
+
+        // Metadata Status filter: both start PENDING_VALIDATION, so both match;
+        // a bogus status matches none.
+        let got = arns(json!({
+            "Filter": { "AcmCertificateMetadataFilter": { "Status": "PENDING_VALIDATION" } }
+        }))
+        .await;
+        assert_eq!(got.len(), 2);
+        let got = arns(json!({
+            "Filter": { "AcmCertificateMetadataFilter": { "Status": "EXPIRED" } }
+        }))
+        .await;
+        assert!(got.is_empty());
     }
 }
