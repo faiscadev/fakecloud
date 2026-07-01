@@ -2567,6 +2567,9 @@ mod tests {
             batch: Arc::new(parking_lot::RwLock::new(
                 fakecloud_batch::BatchAccounts::new(),
             )),
+            pipes: Arc::new(parking_lot::RwLock::new(
+                fakecloud_pipes::PipesAccounts::new(),
+            )),
             ecs: shared::<fakecloud_ecs::EcsState>(),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             elasticache: shared::<fakecloud_elasticache::ElastiCacheState>(),

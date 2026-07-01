@@ -44,6 +44,7 @@ fakecloud-ses = { workspace = true }
 fakecloud-application-autoscaling = { workspace = true }
 fakecloud-autoscaling = { workspace = true }
 fakecloud-batch = { workspace = true }
+fakecloud-pipes = { workspace = true }
 fakecloud-athena = { workspace = true }
 fakecloud-firehose = { workspace = true }
 fakecloud-glue = { workspace = true }
