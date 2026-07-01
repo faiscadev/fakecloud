@@ -5,12 +5,13 @@
 
 use http::StatusCode;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::service::ApiGatewayV2Service;
-use crate::state::ApiGatewayV2State;
+use crate::service::{generate_id, ApiGatewayV2Service};
+use crate::state::{ApiGatewayV2State, HttpApi, Integration, Route};
 
 /// Lowercase the first letter of a key — Smithy's `@jsonName` default for
 /// apigatewayv2 shapes (e.g. `ApiId` -> `apiId`).
@@ -292,6 +293,194 @@ fn rand_id() -> String {
     )
 }
 
+/// Parse an OpenAPI/Swagger spec body as JSON, falling back to YAML. Both
+/// `ImportApi` and `ReimportApi` accept either representation.
+fn parse_openapi_spec(raw: &str) -> Result<Value, AwsServiceError> {
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if v.is_object() {
+            return Ok(v);
+        }
+    }
+    serde_yaml::from_str::<Value>(raw)
+        .ok()
+        .filter(|v| v.is_object())
+        .ok_or_else(|| bad_request("Body", "not a valid OpenAPI/Swagger document"))
+}
+
+/// HTTP method keys recognized inside an OpenAPI `paths.<path>` object.
+const OPENAPI_HTTP_METHODS: &[&str] = &[
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "ANY",
+];
+
+/// Build an `HttpApi` plus synthesized routes and integrations from an
+/// OpenAPI/Swagger document. Each `paths.<path>.<method>` entry becomes a
+/// route keyed `"<METHOD> <path>"`; an `x-amazon-apigateway-integration`
+/// extension on the operation becomes an `Integration` wired as the route
+/// target. Shared by `ImportApi` and `ReimportApi`.
+fn build_api_from_spec(
+    spec: &Value,
+    api_id: String,
+    region: &str,
+) -> (
+    HttpApi,
+    BTreeMap<String, Route>,
+    BTreeMap<String, Integration>,
+) {
+    let info = spec.get("info");
+    let name = info
+        .and_then(|i| i.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("imported-api")
+        .to_string();
+    let description = info
+        .and_then(|i| i.get("description"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let version = info
+        .and_then(|i| i.get("version"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let mut api = HttpApi::new(api_id, name, description, None, region);
+    api.version = version;
+
+    let mut routes = BTreeMap::new();
+    let mut integrations = BTreeMap::new();
+
+    if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) {
+        for (path, item) in paths {
+            let Some(methods) = item.as_object() else {
+                continue;
+            };
+            for (method, op) in methods {
+                let upper = method.to_ascii_uppercase();
+                let route_method = if upper == "X-AMAZON-APIGATEWAY-ANY-METHOD" {
+                    "ANY".to_string()
+                } else if OPENAPI_HTTP_METHODS.contains(&upper.as_str()) {
+                    upper
+                } else {
+                    // Skip non-operation keys (parameters, servers, $ref, ...).
+                    continue;
+                };
+                let route_id = generate_id("route");
+                let mut target = None;
+                if let Some(integ) = op.get("x-amazon-apigateway-integration") {
+                    let integration_id = generate_id("integ");
+                    let integration = Integration {
+                        integration_id: integration_id.clone(),
+                        integration_type: integ
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_ascii_uppercase())
+                            .unwrap_or_else(|| "HTTP_PROXY".to_string()),
+                        integration_uri: integ
+                            .get("uri")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        payload_format_version: integ
+                            .get("payloadFormatVersion")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        timeout_in_millis: integ.get("timeoutInMillis").and_then(|v| v.as_i64()),
+                        integration_method: integ
+                            .get("httpMethod")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        integration_response_selection_expression: None,
+                        passthrough_behavior: integ
+                            .get("passthroughBehavior")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        connection_type: integ
+                            .get("connectionType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_ascii_uppercase())
+                            .unwrap_or_else(|| "INTERNET".to_string()),
+                    };
+                    integrations.insert(integration_id.clone(), integration);
+                    target = Some(format!("integrations/{integration_id}"));
+                }
+                let route = Route {
+                    route_id: route_id.clone(),
+                    route_key: format!("{route_method} {path}"),
+                    target,
+                    ..Default::default()
+                };
+                routes.insert(route_id, route);
+            }
+        }
+    }
+
+    (api, routes, integrations)
+}
+
+/// Generate an OpenAPI 3.0 document from an API and its routes. The inverse
+/// of `build_api_from_spec` for the parts that round-trip.
+fn export_openapi(api: &HttpApi, routes: &[Route]) -> Value {
+    let mut paths = serde_json::Map::new();
+    for route in routes {
+        // route_key is "<METHOD> <path>"; "$default" carries no method/path.
+        let Some((method, path)) = route.route_key.split_once(' ') else {
+            continue;
+        };
+        let method_key = if method.eq_ignore_ascii_case("ANY") {
+            "x-amazon-apigateway-any-method".to_string()
+        } else {
+            method.to_ascii_lowercase()
+        };
+        let entry = paths.entry(path.to_string()).or_insert_with(|| json!({}));
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                method_key,
+                json!({
+                    "responses": { "default": { "description": "Default response" } }
+                }),
+            );
+        }
+    }
+    json!({
+        "openapi": "3.0.1",
+        "info": {
+            "title": api.name,
+            "version": api.version.clone().unwrap_or_else(|| "1.0".to_string()),
+            "description": api.description.clone().unwrap_or_default(),
+        },
+        "paths": Value::Object(paths),
+    })
+}
+
+/// Produce a best-effort example JSON value from a (subset of) JSON schema,
+/// used to synthesize a `GetModelTemplate` mapping template.
+fn example_from_schema(schema: &Value) -> Value {
+    if let Some(example) = schema.get("example") {
+        return example.clone();
+    }
+    let ty = schema.get("type").and_then(|v| v.as_str());
+    match ty {
+        Some("object") | None if schema.get("properties").is_some() => {
+            let mut obj = serde_json::Map::new();
+            if let Some(props) = schema.get("properties").and_then(|v| v.as_object()) {
+                for (k, v) in props {
+                    obj.insert(k.clone(), example_from_schema(v));
+                }
+            }
+            Value::Object(obj)
+        }
+        Some("object") => Value::Object(serde_json::Map::new()),
+        Some("array") => {
+            let item = schema
+                .get("items")
+                .map(example_from_schema)
+                .unwrap_or(Value::Null);
+            json!([item])
+        }
+        Some("string") => json!(""),
+        Some("integer") | Some("number") => json!(0),
+        Some("boolean") => json!(false),
+        _ => json!({}),
+    }
+}
+
 impl ApiGatewayV2Service {
     pub(crate) fn handle_extra_action(
         &self,
@@ -524,9 +713,26 @@ impl ApiGatewayV2Service {
                 no_content()
             }
             "GetModelTemplate" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
-                resource_id.ok_or_else(|| missing("ModelId"))?;
-                ok(json!({"Value": "{}"}))
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let model = resource_id.ok_or_else(|| missing("ModelId"))?;
+                self.read_state(aid, &region, |state| {
+                    let stored = state
+                        .models
+                        .get(api)
+                        .and_then(|m| m.get(model))
+                        .ok_or_else(|| not_found("Model", model))?;
+                    // Derive a mapping-template example from the model schema
+                    // rather than returning a fixed constant.
+                    let schema = stored
+                        .get("Schema")
+                        .or_else(|| stored.get("schema"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let schema_json: Value =
+                        serde_json::from_str(schema).unwrap_or_else(|_| json!({}));
+                    let template = example_from_schema(&schema_json);
+                    ok(json!({ "Value": template.to_string() }))
+                })
             }
 
             // ── Integration responses ──
@@ -989,22 +1195,43 @@ impl ApiGatewayV2Service {
             // ── Import / Export ──
             "ImportApi" => {
                 let body = body(req);
-                req_str(&body, "Body")?;
-                let api_id = format!("imported-{}", rand_id());
-                ok(json!({
-                    "ApiId": api_id,
-                    "Name": "imported-api",
-                    "ProtocolType": "HTTP",
-                }))
+                let spec_raw = req_str(&body, "Body")?.to_string();
+                let spec = parse_openapi_spec(&spec_raw)?;
+                let new_api_id = generate_id("api");
+                let (api, routes, integrations) =
+                    build_api_from_spec(&spec, new_api_id.clone(), &region);
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                state.apis.insert(new_api_id.clone(), api.clone());
+                state.routes.insert(new_api_id.clone(), routes);
+                state.integrations.insert(new_api_id.clone(), integrations);
+                ok(json!(api))
             }
             "ReimportApi" => {
-                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?.to_string();
                 let body = body(req);
-                req_str(&body, "Body")?;
-                ok(json!({"ApiId": api, "Name": "reimported"}))
+                let spec_raw = req_str(&body, "Body")?.to_string();
+                let spec = parse_openapi_spec(&spec_raw)?;
+                let (rebuilt, routes, integrations) =
+                    build_api_from_spec(&spec, api.clone(), &region);
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let existing = state
+                    .apis
+                    .get_mut(&api)
+                    .ok_or_else(|| not_found("Api", &api))?;
+                // Preserve the existing endpoint/ids; overlay name/description/
+                // version and the synthesized surface from the new spec.
+                existing.name = rebuilt.name;
+                existing.description = rebuilt.description;
+                existing.version = rebuilt.version;
+                let updated = existing.clone();
+                state.routes.insert(api.clone(), routes);
+                state.integrations.insert(api.clone(), integrations);
+                ok(json!(updated))
             }
             "ExportApi" => {
-                let _api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?.to_string();
                 // Specification is an httpLabel (segs[4]) — already filtered
                 // to None for empty/placeholder path ids, so resource_id=None
                 // here means the caller omitted it.
@@ -1014,20 +1241,51 @@ impl ApiGatewayV2Service {
                     .iter()
                     .find(|(k, _)| *k == "outputType")
                     .map(|(_, v)| v.as_str());
-                if output_type.is_none() {
+                let Some(output_type) = output_type else {
                     return Err(missing("OutputType"));
-                }
-                ok(json!({"body": "openapi: 3.0.1\n"}))
+                };
+                let document = self.read_state(aid, &region, |state| {
+                    let api_obj = state.apis.get(&api).ok_or_else(|| not_found("Api", &api))?;
+                    let routes = state
+                        .routes
+                        .get(&api)
+                        .map(|r| r.values().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    Ok::<_, AwsServiceError>(export_openapi(api_obj, &routes))
+                })?;
+                // ExportApi returns the spec as a Blob body. Honor the requested
+                // OutputType (JSON default, YAML when asked).
+                let rendered = if output_type.eq_ignore_ascii_case("YAML") {
+                    serde_yaml::to_string(&document).unwrap_or_default()
+                } else {
+                    serde_json::to_string_pretty(&document).unwrap_or_default()
+                };
+                ok(json!({ "body": rendered }))
             }
 
             // ── Cleanup ops ──
             "DeleteCorsConfiguration" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let api_obj = state
+                    .apis
+                    .get_mut(api)
+                    .ok_or_else(|| not_found("Api", api))?;
+                api_obj.cors_configuration = None;
                 no_content()
             }
             "DeleteAccessLogSettings" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
-                resource_id.ok_or_else(|| missing("StageName"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let stage_name = resource_id.ok_or_else(|| missing("StageName"))?;
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let stage = state
+                    .stages
+                    .get_mut(api)
+                    .and_then(|s| s.get_mut(stage_name))
+                    .ok_or_else(|| not_found("Stage", stage_name))?;
+                stage.access_log_settings = None;
                 no_content()
             }
             "DeleteRouteRequestParameter" => {
@@ -2042,13 +2300,43 @@ mod tests {
             Some("a1"),
             None,
         );
-        ok(
-            "GetModelTemplate",
-            "",
-            &["v2", "apis", "a1", "models", "m1", "template"],
-            Some("a1"),
-            Some("m1"),
-        );
+        {
+            // GetModelTemplate now derives a template from a real stored
+            // model schema, so seed one first.
+            let s = svc();
+            run(
+                &s,
+                "CreateModel",
+                r#"{"Name":"m","Schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}}}"}"#,
+                &["v2", "apis", "a1", "models"],
+                Some("a1"),
+                None,
+            );
+            let model_id = {
+                let accounts = s.state.read();
+                accounts
+                    .get("000000000000")
+                    .and_then(|st| st.models.get("a1"))
+                    .and_then(|m| m.keys().next().cloned())
+                    .expect("model seeded")
+            };
+            let resp = s
+                .handle_extra_action(
+                    "GetModelTemplate",
+                    &req(
+                        "GetModelTemplate",
+                        "",
+                        &["v2", "apis", "a1", "models", &model_id, "template"],
+                    ),
+                    Some("a1"),
+                    Some(&model_id),
+                )
+                .expect("GetModelTemplate");
+            let b: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let tmpl: serde_json::Value =
+                serde_json::from_str(b["value"].as_str().unwrap()).unwrap();
+            assert_eq!(tmpl["id"], "");
+        }
         ok(
             "CreateIntegrationResponse",
             r#"{"IntegrationResponseKey":"$default"}"#,
@@ -2095,46 +2383,162 @@ mod tests {
 
     #[test]
     fn import_export_cleanup() {
-        ok(
-            "ImportApi",
-            r#"{"Body":"openapi"}"#,
-            &["v2", "apis"],
-            None,
-            None,
-        );
-        ok(
-            "ReimportApi",
-            r#"{"Body":"openapi"}"#,
-            &["v2", "apis", "a1"],
-            Some("a1"),
-            None,
-        );
+        // A minimal-but-real OpenAPI document. ImportApi/ReimportApi now
+        // parse this and synthesize routes rather than echoing a constant.
+        let spec = r#"{"openapi":"3.0.1","info":{"title":"t","version":"1"},"paths":{"/p":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+
+        // ImportApi creates a real API on a fresh service.
         {
-            // ExportApi requires @httpQuery("outputType") + path Specification.
             let s = svc();
+            let import_body = serde_json::json!({ "Body": spec }).to_string();
+            let resp = s
+                .handle_extra_action(
+                    "ImportApi",
+                    &req("ImportApi", &import_body, &["v2", "apis"]),
+                    None,
+                    None,
+                )
+                .expect("ImportApi");
+            let b: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let api = b["apiId"].as_str().unwrap().to_string();
+            // The synthesized route is readable back.
+            assert!(s
+                .state
+                .read()
+                .get("000000000000")
+                .and_then(|st| st.routes.get(&api))
+                .map(|r| r.values().any(|rt| rt.route_key == "GET /p"))
+                .unwrap_or(false));
+        }
+
+        // ExportApi / ReimportApi / cleanup ops all operate on a single
+        // service seeded with a real API + stage.
+        let s = svc();
+        let api = {
+            let import_body = serde_json::json!({ "Body": spec }).to_string();
+            let resp = s
+                .handle_extra_action(
+                    "ImportApi",
+                    &req("ImportApi", &import_body, &["v2", "apis"]),
+                    None,
+                    None,
+                )
+                .expect("ImportApi");
+            let b: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            b["apiId"].as_str().unwrap().to_string()
+        };
+
+        // Attach a CORS config + a stage with access log settings so the
+        // cleanup ops have something real to clear.
+        {
+            let mut accounts = s.state.write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(a) = state.apis.get_mut(&api) {
+                a.cors_configuration = Some(crate::state::CorsConfiguration {
+                    allow_credentials: None,
+                    allow_headers: None,
+                    allow_methods: Some(vec!["GET".to_string()]),
+                    allow_origins: Some(vec!["*".to_string()]),
+                    expose_headers: None,
+                    max_age: None,
+                });
+            }
+            state.stages.entry(api.clone()).or_default().insert(
+                "prod".to_string(),
+                crate::state::Stage {
+                    stage_name: "prod".to_string(),
+                    description: None,
+                    deployment_id: None,
+                    auto_deploy: false,
+                    created_date: chrono::Utc::now(),
+                    last_updated_date: None,
+                    web_acl_arn: None,
+                    stage_variables: None,
+                    access_log_settings: Some(crate::state::AccessLogSettings {
+                        destination_arn: "arn:aws:logs:us-east-1:0:log-group:g:*".to_string(),
+                        format: None,
+                    }),
+                    client_certificate_id: None,
+                    default_route_settings: None,
+                    route_settings: None,
+                    tags: None,
+                },
+            );
+        }
+
+        // ReimportApi replaces the surface of the existing API.
+        {
+            let spec2 = r#"{"openapi":"3.0.1","info":{"title":"t2","version":"2"},"paths":{"/q":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+            let reimport_body = serde_json::json!({ "Body": spec2 }).to_string();
+            run(
+                &s,
+                "ReimportApi",
+                &reimport_body,
+                &["v2", "apis", &api],
+                Some(&api),
+                None,
+            );
+            assert!(s
+                .state
+                .read()
+                .get("000000000000")
+                .and_then(|st| st.routes.get(&api))
+                .map(|r| r.values().all(|rt| rt.route_key == "GET /q"))
+                .unwrap_or(false));
+        }
+
+        // ExportApi generates a real document.
+        {
             let r = req_with_query(
                 "ExportApi",
                 "",
-                &["v2", "apis", "a1", "exports", "OAS30"],
+                &["v2", "apis", &api, "exports", "OAS30"],
                 &[("outputType", "JSON")],
             );
-            s.handle_extra_action("ExportApi", &r, Some("a1"), Some("OAS30"))
+            let resp = s
+                .handle_extra_action("ExportApi", &r, Some(&api), Some("OAS30"))
                 .expect("ExportApi");
+            let b: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            let doc: serde_json::Value = serde_json::from_str(b["body"].as_str().unwrap()).unwrap();
+            assert_eq!(doc["openapi"], "3.0.1");
+            assert!(doc["paths"]["/q"].get("get").is_some());
         }
-        ok(
+
+        // DeleteCorsConfiguration clears the config.
+        run(
+            &s,
             "DeleteCorsConfiguration",
             "",
-            &["v2", "apis", "a1", "cors"],
-            Some("a1"),
+            &["v2", "apis", &api, "cors"],
+            Some(&api),
             None,
         );
-        ok(
+        assert!(s
+            .state
+            .read()
+            .get("000000000000")
+            .and_then(|st| st.apis.get(&api))
+            .map(|a| a.cors_configuration.is_none())
+            .unwrap_or(false));
+
+        // DeleteAccessLogSettings clears the stage settings.
+        run(
+            &s,
             "DeleteAccessLogSettings",
             "",
-            &["v2", "apis", "a1", "stages", "prod", "accesslogsettings"],
-            Some("a1"),
+            &["v2", "apis", &api, "stages", "prod", "accesslogsettings"],
+            Some(&api),
             Some("prod"),
         );
+        assert!(s
+            .state
+            .read()
+            .get("000000000000")
+            .and_then(|st| st.stages.get(&api))
+            .and_then(|m| m.get("prod"))
+            .map(|st| st.access_log_settings.is_none())
+            .unwrap_or(false));
+
         ok(
             "DeleteRouteRequestParameter",
             "",

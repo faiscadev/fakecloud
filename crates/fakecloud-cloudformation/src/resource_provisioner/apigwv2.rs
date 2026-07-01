@@ -162,6 +162,39 @@ impl ResourceProvisioner {
                 .get("AuthorizerId")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            api_key_required: props.get("ApiKeyRequired").and_then(|v| v.as_bool()),
+            authorization_scopes: props
+                .get("AuthorizationScopes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+            model_selection_expression: props
+                .get("ModelSelectionExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            operation_name: props
+                .get("OperationName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            request_models: props
+                .get("RequestModels")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
+            request_parameters: props
+                .get("RequestParameters")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            route_response_selection_expression: props
+                .get("RouteResponseSelectionExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
         state
             .routes
@@ -463,6 +496,20 @@ impl ResourceProvisioner {
             web_acl_arn: None,
             stage_variables,
             access_log_settings,
+            client_certificate_id: props
+                .get("ClientCertificateId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            default_route_settings: props.get("DefaultRouteSettings").cloned(),
+            route_settings: props
+                .get("RouteSettings")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            tags: props.get("Tags").and_then(|v| v.as_object()).map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            }),
         };
 
         let mut accounts = self.apigatewayv2_state.write();
@@ -620,6 +667,14 @@ impl ResourceProvisioner {
                 .get("AuthorizerResultTtlInSeconds")
                 .and_then(|v| v.as_i64()),
             enable_simple_responses: props.get("EnableSimpleResponses").and_then(|v| v.as_bool()),
+            authorizer_credentials_arn: props
+                .get("AuthorizerCredentialsArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            identity_validation_expression: props
+                .get("IdentityValidationExpression")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
         let mut accounts = self.apigatewayv2_state.write();
         let state = accounts.get_or_create(&self.account_id);

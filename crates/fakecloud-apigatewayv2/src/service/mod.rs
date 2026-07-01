@@ -330,6 +330,9 @@ impl ApiGatewayV2Service {
         if let Some(b) = body["disableExecuteApiEndpoint"].as_bool() {
             api.disable_execute_api_endpoint = b;
         }
+        if let Some(v) = body["version"].as_str() {
+            api.version = Some(v.to_string());
+        }
 
         Ok(AwsResponse::ok_json(json!(api)))
     }
@@ -735,6 +738,38 @@ fn lowercase_first_letter_keys(v: serde_json::Value) -> serde_json::Value {
         }
         other => other,
     }
+}
+
+/// Parse a JSON array of strings into `Vec<String>`, or `None` when the
+/// value is not an array.
+pub(crate) fn parse_string_array(v: &serde_json::Value) -> Option<Vec<String>> {
+    v.as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect()
+    })
+}
+
+/// Parse a JSON object of `string -> string` into a `BTreeMap`, or `None`
+/// when the value is not an object.
+pub(crate) fn parse_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    v.as_object().map(|obj| {
+        obj.iter()
+            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    })
+}
+
+/// Parse a JSON object of `string -> Value` into a `BTreeMap`, preserving
+/// each value verbatim, or `None` when the value is not an object.
+pub(crate) fn parse_value_map(
+    v: &serde_json::Value,
+) -> Option<BTreeMap<String, serde_json::Value>> {
+    v.as_object().map(|obj| {
+        obj.iter()
+            .map(|(k, val)| (k.clone(), val.clone()))
+            .collect()
+    })
 }
 
 fn swap_first_letter_case(s: &str) -> String {

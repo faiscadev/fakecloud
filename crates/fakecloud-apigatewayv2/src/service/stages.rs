@@ -55,6 +55,21 @@ impl ApiGatewayV2Service {
 
         let created_date = chrono::Utc::now();
 
+        let client_certificate_id = body["clientCertificateId"].as_str().map(|s| s.to_string());
+        let default_route_settings = body
+            .get("defaultRouteSettings")
+            .filter(|v| !v.is_null())
+            .cloned();
+        let route_settings = body
+            .get("routeSettings")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<String, serde_json::Value>>()
+            });
+        let tags = parse_string_map(&body["tags"]);
+
         let stage = Stage {
             stage_name: stage_name.clone(),
             description,
@@ -65,6 +80,10 @@ impl ApiGatewayV2Service {
             web_acl_arn: None,
             stage_variables,
             access_log_settings,
+            client_certificate_id,
+            default_route_settings,
+            route_settings,
+            tags,
         };
 
         let mut accounts = self.state.write();
@@ -265,6 +284,31 @@ impl ApiGatewayV2Service {
             }
             // If accessLogSettings is present but destinationArn is missing,
             // preserve the existing settings (Cubic finding).
+        }
+
+        if let Some(cert) = body["clientCertificateId"].as_str() {
+            stage.client_certificate_id = Some(cert.to_string());
+        }
+
+        if let Some(settings) = body.get("defaultRouteSettings") {
+            if settings.is_null() {
+                stage.default_route_settings = None;
+            } else {
+                stage.default_route_settings = Some(settings.clone());
+            }
+        }
+
+        if let Some(settings) = body.get("routeSettings").and_then(|v| v.as_object()) {
+            stage.route_settings = Some(
+                settings
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+        }
+
+        if let Some(tags) = parse_string_map(&body["tags"]) {
+            stage.tags = Some(tags);
         }
 
         stage.last_updated_date = Some(chrono::Utc::now());
