@@ -800,6 +800,10 @@ impl TestServer {
         aws_sdk_scheduler::Client::new(&self.aws_config().await)
     }
 
+    pub async fn pipes_client(&self) -> aws_sdk_pipes::Client {
+        aws_sdk_pipes::Client::new(&self.aws_config().await)
+    }
+
     pub async fn dsql_client(&self) -> aws_sdk_dsql::Client {
         aws_sdk_dsql::Client::new(&self.aws_config().await)
     }
