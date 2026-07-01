@@ -401,6 +401,7 @@ mod tests {
             ("bedrock", Protocol::Rest),
             ("bedrock-runtime", Protocol::Rest),
             ("scheduler", Protocol::Rest),
+            ("pipes", Protocol::Rest),
         ];
         for (svc, expected) in cases {
             let got = service_protocol(svc);

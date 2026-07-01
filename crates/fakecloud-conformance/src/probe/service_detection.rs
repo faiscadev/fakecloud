@@ -93,6 +93,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "bedrock-agent" => Protocol::Rest,
         "bedrock-agent-runtime" => Protocol::Rest,
         "scheduler" => Protocol::Rest,
+        // EventBridge Pipes: restJson1 control plane (@http traits + JSON bodies).
+        "pipes" => Protocol::Rest,
         // RDS Data API: restJson1, runs real SQL on the backing RDS container.
         "rds-data" => Protocol::Rest,
         // Aurora DSQL: restJson1 control plane (clusters, streams, policies).
