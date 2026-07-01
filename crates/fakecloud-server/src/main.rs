@@ -2743,7 +2743,8 @@ async fn main() {
     registry.register(cloudfront_service.clone());
     // Start the in-process data plane: enabled distributions bind a listener
     // and serve viewer traffic (discovered via /_fakecloud/cloudfront/*).
-    cloudfront_service.start_dataplane();
+    // Pass the server's own port so S3-website origins can be reached here.
+    cloudfront_service.start_dataplane(bound_addr.port());
     let cloudfront_introspection_state = cloudfront_state.clone();
     let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

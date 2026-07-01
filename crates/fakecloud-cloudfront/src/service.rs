@@ -268,8 +268,10 @@ impl CloudFrontService {
     /// wiring so that enabled distributions actually serve viewer traffic. A
     /// no-op when disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`. Must be
     /// called from within a Tokio runtime (it spawns the supervisor task).
-    pub fn start_dataplane(&self) {
-        crate::dataplane::spawn_dataplane(self.state.clone());
+    /// `server_port` is fakecloud's own listen port, used to reach S3-website
+    /// origins served by this process.
+    pub fn start_dataplane(&self, server_port: u16) {
+        crate::dataplane::spawn_dataplane(self.state.clone(), server_port);
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {

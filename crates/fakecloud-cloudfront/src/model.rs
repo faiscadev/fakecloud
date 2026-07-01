@@ -150,7 +150,12 @@ pub struct S3OriginConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct CustomOriginConfig {
+    // AWS spells these HTTPPort / HTTPSPort (not the PascalCase HttpPort), so a
+    // real SDK's CreateDistribution with a custom origin round-trips. Matches
+    // the casing already used in extras.rs.
+    #[serde(rename = "HTTPPort")]
     pub http_port: i32,
+    #[serde(rename = "HTTPSPort")]
     pub https_port: i32,
     pub origin_protocol_policy: String,
     #[serde(default, skip_serializing_if = "skip_if_none")]

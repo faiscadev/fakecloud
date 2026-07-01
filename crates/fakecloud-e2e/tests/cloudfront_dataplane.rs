@@ -19,6 +19,8 @@ use aws_sdk_cloudfront::types::{
 };
 use helpers::TestServer;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// Creates a minimal SPA-style distribution: an S3-website default origin,
 /// an optional `/api/*` custom origin cache behavior, and a 404 -> /index.html
@@ -309,13 +311,15 @@ async fn binds_on_enable_and_stops_on_disable() {
         .await
         .expect("data plane should bind a port for the enabled distribution");
 
-    // It serves (fixed 200 at this stage).
-    let resp = reqwest::Client::new()
+    // The bound listener answers an HTTP request (this test asserts the
+    // lifecycle, not origin content — the default origin here has no bucket, so
+    // the proxied response is a 4xx/5xx; a successful send still proves the port
+    // is serving). Origin content is covered by the S3-website test.
+    reqwest::Client::new()
         .get(format!("http://127.0.0.1:{port}/"))
         .send()
         .await
-        .expect("request to bound listener");
-    assert!(resp.status().is_success());
+        .expect("bound listener answers");
 
     // Disable -> supervisor tears the listener down and clears bound_port.
     disable_distribution(
@@ -329,6 +333,134 @@ async fn binds_on_enable_and_stops_on_disable() {
         wait_for_unbound(&server, dist.id(), Duration::from_secs(10)).await,
         "disabled distribution should stop serving / clear bound_port"
     );
+}
+
+/// Minimal HTTP origin that echoes the request path back, so a test can prove
+/// the data plane routed to THIS origin (vs the S3 default). Mirrors the pattern
+/// in `elbv2_dataplane.rs`.
+struct EchoTarget {
+    addr: std::net::SocketAddr,
+}
+
+impl EchoTarget {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    let body = format!("ECHO {path}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Self { addr }
+    }
+}
+
+async fn put_object(s3: &aws_sdk_s3::Client, bucket: &str, key: &str, ctype: &str, body: &[u8]) {
+    s3.put_object()
+        .bucket(bucket)
+        .key(key)
+        .content_type(ctype)
+        .body(aws_sdk_s3::primitives::ByteStream::from(body.to_vec()))
+        .send()
+        .await
+        .expect("put_object");
+}
+
+/// Create an S3 bucket configured as a website with `index.html` as both index
+/// and error document (SPA setup), seeded with an index and a hashed asset.
+async fn make_website_bucket(s3: &aws_sdk_s3::Client, bucket: &str) {
+    s3.create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create_bucket");
+    s3.put_bucket_website()
+        .bucket(bucket)
+        .website_configuration(
+            aws_sdk_s3::types::WebsiteConfiguration::builder()
+                .index_document(
+                    aws_sdk_s3::types::IndexDocument::builder()
+                        .suffix("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .error_document(
+                    aws_sdk_s3::types::ErrorDocument::builder()
+                        .key("index.html")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put_bucket_website");
+    put_object(s3, bucket, "index.html", "text/html", b"<html>HOME</html>").await;
+    put_object(
+        s3,
+        bucket,
+        "assets/app.js",
+        "application/javascript",
+        b"APPJS",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serves_static_from_s3_website_origin_and_routes_api() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    make_website_bucket(&s3, "site").await;
+    let api = EchoTarget::start().await;
+    let api_domain = format!("127.0.0.1:{}", api.addr.port());
+
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(
+        &cf,
+        "site.s3-website-us-east-1.amazonaws.com",
+        Some(&api_domain),
+    )
+    .await;
+    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
+        .await
+        .expect("bind");
+    let http = reqwest::Client::new();
+
+    // Default (S3-website) origin serves the hashed asset.
+    let r = http
+        .get(format!("http://127.0.0.1:{port}/assets/app.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "APPJS");
+
+    // /api/* routes to the custom origin (echo proves it hit the API origin).
+    let r = http
+        .get(format!("http://127.0.0.1:{port}/api/orders"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.text().await.unwrap(), "ECHO /api/orders");
 }
 
 #[tokio::test]

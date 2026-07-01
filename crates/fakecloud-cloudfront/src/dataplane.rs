@@ -19,7 +19,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http::{HeaderMap, Method};
+use http_body_util::{BodyExt, Full};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
@@ -27,6 +28,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
+use crate::model::DistributionConfig;
 use crate::state::SharedCloudFrontState;
 
 const ENV_DISABLE: &str = "FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE";
@@ -58,16 +60,40 @@ impl Drop for BoundListener {
 #[derive(Clone)]
 struct DataPlane {
     state: SharedCloudFrontState,
+    /// HTTP client used to fetch from origins (reverse-proxy).
+    upstream: reqwest::Client,
+    /// `host:port` of fakecloud's own server. An S3-website origin is served by
+    /// this same process on the main port, so those origins are reached here
+    /// with the website domain preserved in the `Host` header (real CloudFront
+    /// likewise treats an S3-website endpoint as an HTTP custom origin).
+    s3_endpoint: String,
 }
 
 /// Spawn the CloudFront data-plane supervisor. No-op (returns without spawning)
-/// when disabled via the env flag.
-pub fn spawn_dataplane(state: SharedCloudFrontState) {
+/// when disabled via the env flag. `server_port` is fakecloud's own listen port,
+/// used to reach S3-website origins served by this process.
+pub fn spawn_dataplane(state: SharedCloudFrontState, server_port: u16) {
     if !dataplane_enabled() {
         debug!("CloudFront data plane disabled via {ENV_DISABLE}");
         return;
     }
-    let dp = DataPlane { state };
+    let upstream = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("CloudFront data plane: failed to build reqwest client: {e}");
+            return;
+        }
+    };
+    let dp = DataPlane {
+        state,
+        upstream,
+        s3_endpoint: format!("127.0.0.1:{server_port}"),
+    };
     tokio::spawn(supervisor_loop(dp));
 }
 
@@ -177,17 +203,180 @@ async fn accept_loop(dp: DataPlane, dist_id: String, listener: TcpListener) {
     }
 }
 
-/// Serve one viewer request. Task 2 returns a fixed `200` to prove the listener
-/// lifecycle and discovery end to end; Task 3 adds path-pattern origin routing
-/// and origin fetch, Task 4 adds CustomErrorResponses.
+/// Serve one viewer request: select a cache behavior by path pattern, resolve
+/// its origin, and reverse-proxy to it. Task 4 interposes CustomErrorResponses
+/// on the origin status before returning.
 async fn handle_request(
-    _dp: &DataPlane,
+    dp: &DataPlane,
     dist_id: &str,
-    _req: Request<hyper::body::Incoming>,
+    req: Request<hyper::body::Incoming>,
 ) -> Response<Full<Bytes>> {
-    trace!(dist = %dist_id, "CloudFront data plane: serving request");
+    let (parts, body) = req.into_parts();
+    let method = parts.method;
+    let path = parts.uri.path().to_string();
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let req_headers = parts.headers;
+    let body_bytes = body
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+
+    // Resolve the origin domain for this path under the read lock (return an
+    // owned value so the guard drops at the end of the block).
+    let origin_domain: Option<String> = {
+        let accs = dp.state.read();
+        let resolved = accs
+            .all_distributions()
+            .find(|(_, d)| d.id == dist_id)
+            .and_then(|(_, d)| resolve_origin_for_path(&d.config, &path));
+        resolved
+    };
+    let Some(origin_domain) = origin_domain else {
+        return canned(502, "distribution or matching origin not found");
+    };
+
+    let (authority, host_header) = resolve_upstream(&origin_domain, &dp.s3_endpoint);
+    let url = format!("http://{authority}{path_and_query}");
+    trace!(dist = %dist_id, %path, origin = %origin_domain, "CloudFront data plane: proxying");
+    fetch_origin(dp, &method, &url, &host_header, &req_headers, &body_bytes).await
+}
+
+/// Pick the cache behavior matching `path` (ordered `CacheBehaviors`, else the
+/// default) and return its origin's `domain_name`.
+fn resolve_origin_for_path(cfg: &DistributionConfig, path: &str) -> Option<String> {
+    let target = select_target_origin(cfg, path);
+    let items = cfg.origins.items.as_ref()?;
+    items
+        .origin
+        .iter()
+        .find(|o| o.id == target)
+        .map(|o| o.domain_name.clone())
+}
+
+fn select_target_origin<'a>(cfg: &'a DistributionConfig, path: &str) -> &'a str {
+    if let Some(cbs) = &cfg.cache_behaviors {
+        if let Some(items) = &cbs.items {
+            for cb in &items.cache_behavior {
+                if path_pattern_matches(&cb.path_pattern, path) {
+                    return &cb.target_origin_id;
+                }
+            }
+        }
+    }
+    &cfg.default_cache_behavior.target_origin_id
+}
+
+/// Resolve an origin `domain_name` to the `(authority, host_header)` to use.
+/// S3-website origins are served by this same fakecloud process, so connect to
+/// its own port while preserving the website domain in `Host`; other (custom)
+/// origins are reached at their domain verbatim.
+fn resolve_upstream(origin_domain: &str, s3_endpoint: &str) -> (String, String) {
+    if origin_domain.contains(".s3-website") {
+        (s3_endpoint.to_string(), origin_domain.to_string())
+    } else {
+        (origin_domain.to_string(), origin_domain.to_string())
+    }
+}
+
+/// Reverse-proxy the request to the resolved origin and copy the response back.
+async fn fetch_origin(
+    dp: &DataPlane,
+    method: &Method,
+    url: &str,
+    host_header: &str,
+    req_headers: &HeaderMap,
+    body: &Bytes,
+) -> Response<Full<Bytes>> {
+    let mut rb = dp.upstream.request(reqwest_method(method), url);
+    for (k, v) in req_headers.iter() {
+        let n = k.as_str();
+        if is_hop_by_hop(n) || n.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        rb = rb.header(k.as_str(), v.as_bytes());
+    }
+    rb = rb.header("host", host_header);
+    if !body.is_empty() {
+        rb = rb.body(body.to_vec());
+    }
+    match rb.send().await {
+        Ok(up) => {
+            let status = up.status();
+            let headers = up.headers().clone();
+            let bytes = up.bytes().await.unwrap_or_default();
+            let mut resp = Response::new(Full::new(bytes));
+            *resp.status_mut() = status;
+            for (k, v) in headers.iter() {
+                if !is_hop_by_hop(k.as_str()) {
+                    resp.headers_mut().append(k.clone(), v.clone());
+                }
+            }
+            resp
+        }
+        Err(e) => canned(502, &format!("origin error: {e}")),
+    }
+}
+
+/// Match a CloudFront cache-behavior path pattern (`*` = any sequence, `?` = one
+/// character) against a request path.
+fn path_pattern_matches(pattern: &str, path: &str) -> bool {
+    glob_match(pattern.as_bytes(), path.as_bytes())
+}
+
+fn glob_match(pat: &[u8], text: &[u8]) -> bool {
+    // Iterative glob with backtracking on `*`.
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            mark = t;
+            p += 1;
+        } else if let Some(sp) = star {
+            p = sp + 1;
+            mark += 1;
+            t = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+fn canned(status: u16, msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
-        .status(200)
-        .body(Full::new(Bytes::from_static(b"ok")))
-        .expect("static response builds")
+        .status(status)
+        .body(Full::new(Bytes::from(msg.to_string())))
+        .expect("canned response builds")
+}
+
+fn reqwest_method(m: &Method) -> reqwest::Method {
+    reqwest::Method::from_bytes(m.as_str().as_bytes()).unwrap_or(reqwest::Method::GET)
+}
+
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+fn is_hop_by_hop(name: &str) -> bool {
+    HOP_BY_HOP.iter().any(|&h| h.eq_ignore_ascii_case(name))
 }

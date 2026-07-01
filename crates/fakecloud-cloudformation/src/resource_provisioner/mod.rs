@@ -4967,30 +4967,17 @@ impl ResourceProvisioner {
             .ok_or_else(|| "DistributionConfig is required".to_string())?;
 
         // CFN Origins is a flat JSON array; the wire shape is
-        // { Quantity, Items: { Origin: [...] } }. Translate. CFN's
-        // PascalCase doesn't always match the wire model — Origin's
-        // CustomOriginConfig uses HTTPPort/HTTPSPort while the model
-        // expects HttpPort/HttpsPort, so we patch a few well-known
-        // renames before letting serde finish the parse.
+        // { Quantity, Items: { Origin: [...] } }. Translate. CustomOriginConfig
+        // uses AWS's HTTPPort/HTTPSPort casing, which the model now accepts
+        // natively (see CustomOriginConfig in fakecloud-cloudfront::model), so no
+        // field patching is needed here.
         let origin_entries: Vec<Origin> = cfg
             .get("Origins")
             .and_then(|v| v.as_array())
             .ok_or_else(|| "DistributionConfig.Origins is required".to_string())?
             .iter()
             .map(|o| {
-                let mut patched = o.clone();
-                if let Some(custom) = patched
-                    .get_mut("CustomOriginConfig")
-                    .and_then(|v| v.as_object_mut())
-                {
-                    if let Some(v) = custom.remove("HTTPPort") {
-                        custom.insert("HttpPort".to_string(), v);
-                    }
-                    if let Some(v) = custom.remove("HTTPSPort") {
-                        custom.insert("HttpsPort".to_string(), v);
-                    }
-                }
-                serde_json::from_value::<Origin>(patched)
+                serde_json::from_value::<Origin>(o.clone())
                     .map_err(|e| format!("Invalid Origin entry: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
