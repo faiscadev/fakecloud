@@ -790,6 +790,7 @@ impl RdsService {
         master_username: String,
         master_user_password: String,
         logical_db: String,
+        tags: Vec<RdsTag>,
         dump: Option<Vec<u8>>,
         created_event: (&'static str, &'static str),
     ) {
@@ -798,6 +799,36 @@ impl RdsService {
         let snapshot_store = self.snapshot_store.clone();
         let snapshot_lock = self.snapshot_lock.clone();
         let (event_id, event_message) = created_event;
+        // Shared failure path: drop the placeholder row, reap any container the
+        // runtime managed to start, persist, and emit the create-failure event.
+        async fn fail(
+            state_handle: &SharedRdsState,
+            snapshot_store: Option<Arc<dyn SnapshotStore>>,
+            snapshot_lock: Arc<AsyncMutex<()>>,
+            delivery_bus: Option<&Arc<DeliveryBus>>,
+            runtime: &Arc<RdsRuntime>,
+            account_id: &str,
+            id: &str,
+            arn: &str,
+            error: &str,
+        ) {
+            tracing::error!(%error, db_instance_identifier=%id, "restore/replica background finalize failed");
+            {
+                let mut accounts = state_handle.write();
+                accounts.get_or_create(account_id).instances.remove(id);
+            }
+            runtime.stop_container(id).await;
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+            emit_event_static(
+                delivery_bus,
+                RdsSourceType::DbInstance,
+                id,
+                arn,
+                "RDS-EVENT-0058",
+                &["failure"],
+                &format!("DB instance failed to create: {error}"),
+            );
+        }
         tokio::spawn(async move {
             let running = match runtime
                 .ensure_postgres(
@@ -809,27 +840,24 @@ impl RdsService {
                     &logical_db,
                     &account_id,
                     &region,
-                    &[],
+                    &tags,
                 )
                 .await
             {
                 Ok(running) => running,
                 Err(error) => {
-                    tracing::error!(%error, db_instance_identifier=%id, "restore/replica background start failed");
-                    {
-                        let mut accounts = state_handle.write();
-                        accounts.get_or_create(&account_id).instances.remove(&id);
-                    }
-                    save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
-                    emit_event_static(
+                    fail(
+                        &state_handle,
+                        snapshot_store,
+                        snapshot_lock,
                         delivery_bus.as_ref(),
-                        RdsSourceType::DbInstance,
+                        &runtime,
+                        &account_id,
                         &id,
                         &arn,
-                        "RDS-EVENT-0058",
-                        &["failure"],
-                        &format!("DB instance failed to create: {error}"),
-                    );
+                        &error.to_string(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -846,7 +874,21 @@ impl RdsService {
                     )
                     .await
                 {
-                    tracing::error!(%error, db_instance_identifier=%id, "restore data replay failed");
+                    // A failed data replay must NOT be reported as a successful
+                    // `available` restore with missing data — fail the instance.
+                    fail(
+                        &state_handle,
+                        snapshot_store,
+                        snapshot_lock,
+                        delivery_bus.as_ref(),
+                        &runtime,
+                        &account_id,
+                        &id,
+                        &arn,
+                        &error.to_string(),
+                    )
+                    .await;
+                    return;
                 }
             }
 

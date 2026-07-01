@@ -293,18 +293,23 @@ pub(crate) fn modify_transit_gateway_vpc_attachment(
     let remove = indexed_list(&req.query_params, "RemoveSubnetIds");
     {
         let mut accounts = svc.state.write();
-        if let Some(stored) = accounts
+        let stored = accounts
             .get_or_create(&req.account_id)
             .tgw_attachments
             .get_mut(&id)
-        {
-            for s in &add {
-                if !stored.subnet_ids.contains(s) {
-                    stored.subnet_ids.push(s.clone());
-                }
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "InvalidTransitGatewayAttachmentID.NotFound",
+                    format!("Transit gateway attachment {id} was not found"),
+                )
+            })?;
+        for s in &add {
+            if !stored.subnet_ids.contains(s) {
+                stored.subnet_ids.push(s.clone());
             }
-            stored.subnet_ids.retain(|s| !remove.contains(s));
         }
+        stored.subnet_ids.retain(|s| !remove.contains(s));
     }
     let a = att_lookup(svc, req, &id);
     Ok(Ec2Service::respond(

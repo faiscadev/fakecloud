@@ -446,7 +446,7 @@ impl RdsService {
             vpc_security_group_ids,
             &snapshot,
             &creating_placeholder_container(),
-            tags,
+            tags.clone(),
         );
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
@@ -468,6 +468,7 @@ impl RdsService {
             snapshot.master_username.clone(),
             snapshot.master_user_password.clone(),
             db_name,
+            tags,
             Some(snapshot.dump_data.clone()),
             ("RDS-EVENT-0043", "DB instance restored from snapshot"),
         );

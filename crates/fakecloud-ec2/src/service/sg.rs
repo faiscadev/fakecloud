@@ -620,7 +620,14 @@ fn update_rule_descriptions(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(sg) = state.security_groups.get_mut(&group_id) {
+        let sg = state.security_groups.get_mut(&group_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidGroup.NotFound",
+                format!("The security group '{group_id}' does not exist"),
+            )
+        })?;
+        {
             let mut n = 1usize;
             loop {
                 let proto_key = format!("IpPermissions.{n}.IpProtocol");

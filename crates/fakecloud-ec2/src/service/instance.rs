@@ -1819,6 +1819,9 @@ pub(crate) fn get_instance_metadata_defaults(
     if let Some(v) = &d.instance_metadata_tags {
         inner.push_str(&ec2_elem("instanceMetadataTags", v));
     }
+    if let Some(v) = &d.http_tokens_enforced {
+        inner.push_str(&ec2_elem("httpTokensEnforced", v));
+    }
     Ok(Ec2Service::respond(
         "GetInstanceMetadataDefaults",
         &req.request_id,
@@ -1862,6 +1865,7 @@ pub(crate) fn modify_instance_metadata_defaults(
         apply(&mut d.http_tokens, "HttpTokens");
         apply(&mut d.http_endpoint, "HttpEndpoint");
         apply(&mut d.instance_metadata_tags, "InstanceMetadataTags");
+        apply(&mut d.http_tokens_enforced, "HttpTokensEnforced");
         if let Some(v) = p
             .get("HttpPutResponseHopLimit")
             .and_then(|v| v.parse::<i64>().ok())
@@ -1960,10 +1964,12 @@ fn indexed_sub_keys(params: &HashMap<String, String>) -> Vec<String> {
 }
 
 fn event_tag_attribute(state: &Ec2State) -> String {
+    // `ec2_list` already wraps each element in <item>; pass the (escaped) key
+    // strings directly so the shape is <item>key</item>, not a nested pair.
     let keys: Vec<String> = state
         .event_notification_tag_keys
         .iter()
-        .map(|k| ec2_elem("item", k))
+        .map(|k| fakecloud_aws::xml::xml_escape(k))
         .collect();
     format!(
         "<instanceTagAttribute><includeAllTagsOfInstance>{}</includeAllTagsOfInstance>{}</instanceTagAttribute>",
@@ -2146,7 +2152,11 @@ mod modify_tests {
             &svc,
             &req(
                 "ModifyInstanceMetadataDefaults",
-                &[("HttpTokens", "required"), ("HttpEndpoint", "enabled")],
+                &[
+                    ("HttpTokens", "required"),
+                    ("HttpEndpoint", "enabled"),
+                    ("HttpTokensEnforced", "enabled"),
+                ],
             ),
         )
         .unwrap();
@@ -2158,6 +2168,8 @@ mod modify_tests {
             "got: {out}"
         );
         assert!(out.contains("<httpEndpoint>enabled</httpEndpoint>"));
+        // HttpTokensEnforced must persist too (Cubic P2 on #2057).
+        assert!(out.contains("<httpTokensEnforced>enabled</httpTokensEnforced>"));
 
         // `no-preference` drops the stored default.
         modify_instance_metadata_defaults(
@@ -2172,7 +2184,7 @@ mod modify_tests {
             get_instance_metadata_defaults(&svc, &req("GetInstanceMetadataDefaults", &[])).unwrap(),
         );
         assert!(
-            !out.contains("httpTokens"),
+            !out.contains("<httpTokens>"),
             "no-preference should clear it: {out}"
         );
     }
@@ -2200,6 +2212,9 @@ mod modify_tests {
         );
         assert!(out.contains("<item>Name</item>"), "got: {out}");
         assert!(out.contains("<item>env</item>"));
+        // Keys must not be double-wrapped as <item><item>key</item></item>
+        // (Cubic P2 on #2057).
+        assert!(!out.contains("<item><item>"), "got: {out}");
 
         deregister_event_notification_attributes(
             &svc,

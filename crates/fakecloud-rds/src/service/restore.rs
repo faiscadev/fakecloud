@@ -170,7 +170,7 @@ impl RdsService {
             vpc_security_group_ids,
             &source_instance,
             &creating_placeholder_container(),
-            tags,
+            tags.clone(),
         );
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
@@ -200,6 +200,7 @@ impl RdsService {
             source_instance.master_username.clone(),
             source_instance.master_user_password.clone(),
             db_name,
+            tags,
             Some(dump_data),
             ("RDS-EVENT-0008", "DB instance restored to point in time"),
         );
@@ -307,7 +308,7 @@ impl RdsService {
             db_name.clone(),
             vpc_security_group_ids,
             &creating_placeholder_container(),
-            tags,
+            tags.clone(),
         );
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
@@ -329,6 +330,7 @@ impl RdsService {
             master_username,
             master_user_password,
             db_name,
+            tags,
             Some(dump_data),
             ("RDS-EVENT-0043", "DB instance restored from S3 backup"),
         );

@@ -144,6 +144,8 @@ impl RdsService {
             source_instance.master_username.clone(),
             source_instance.master_user_password.clone(),
             db_name,
+            // A read replica inherits the source instance's Pod scheduling tags.
+            source_instance.tags.clone(),
             Some(dump_data),
             ("RDS-EVENT-0005", "Read replica DB instance created"),
         );

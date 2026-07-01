@@ -12,6 +12,15 @@ const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
 // ---- VPC endpoints ----
 
+/// Render the endpoint `<groupSet>` from attached security-group ids.
+fn groups_xml(group_ids: &[String]) -> String {
+    let items: Vec<String> = group_ids
+        .iter()
+        .map(|g| format!("<groupId>{}</groupId>", fakecloud_aws::xml::xml_escape(g)))
+        .collect();
+    ec2_list("groupSet", &items)
+}
+
 fn endpoint_xml(e: &VpcEndpoint, tags: &[Tag], owner: &str) -> String {
     format!(
         "{}{}{}{}{}<privateDnsEnabled>{}</privateDnsEnabled><requesterManaged>false</requesterManaged>\
@@ -24,7 +33,7 @@ fn endpoint_xml(e: &VpcEndpoint, tags: &[Tag], owner: &str) -> String {
         e.private_dns_enabled,
         ec2_elem("ipAddressType", "ipv4"),
         ec2_list("subnetIdSet", &e.subnet_ids),
-        ec2_list("groupSet", &[]),
+        groups_xml(&e.security_group_ids),
         ec2_list("routeTableIdSet", &e.route_table_ids),
         ec2_list("networkInterfaceIdSet", &[]),
         ec2_elem("creationTimestamp", FIXED_TIME),
@@ -76,6 +85,7 @@ pub(crate) fn create_vpc_endpoint(
             .get("PrivateDnsEnabled")
             .map(|v| v == "true")
             .unwrap_or(false),
+        security_group_ids: indexed_list(&req.query_params, "SecurityGroupId"),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -160,6 +170,8 @@ pub(crate) fn modify_vpc_endpoint(
     let remove_subnets = indexed_list(&req.query_params, "RemoveSubnetId");
     let add_rts = indexed_list(&req.query_params, "AddRouteTableId");
     let remove_rts = indexed_list(&req.query_params, "RemoveRouteTableId");
+    let add_sgs = indexed_list(&req.query_params, "AddSecurityGroupId");
+    let remove_sgs = indexed_list(&req.query_params, "RemoveSecurityGroupId");
     let private_dns = req
         .query_params
         .get("PrivateDnsEnabled")
@@ -186,6 +198,12 @@ pub(crate) fn modify_vpc_endpoint(
             }
         }
         e.route_table_ids.retain(|r| !remove_rts.contains(r));
+        for g in &add_sgs {
+            if !e.security_group_ids.contains(g) {
+                e.security_group_ids.push(g.clone());
+            }
+        }
+        e.security_group_ids.retain(|g| !remove_sgs.contains(g));
         if let Some(v) = private_dns {
             e.private_dns_enabled = v;
         }
@@ -755,6 +773,7 @@ mod tests {
                 subnet_ids: vec!["subnet-a".into()],
                 route_table_ids: vec![],
                 private_dns_enabled: false,
+                security_group_ids: vec![],
             },
         );
     }
@@ -785,6 +804,41 @@ mod tests {
         assert_eq!(e.subnet_ids, vec!["subnet-b".to_string()]);
         assert_eq!(e.route_table_ids, vec!["rtb-1".to_string()]);
         assert!(e.private_dns_enabled);
+    }
+
+    #[test]
+    fn modify_vpc_endpoint_persists_security_groups() {
+        // Add/RemoveSecurityGroupId were silently dropped (Cubic P2 on #2057).
+        let svc = Ec2Service::new();
+        seed_endpoint(&svc);
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .vpc_endpoints
+            .get_mut("vpce-1")
+            .unwrap()
+            .security_group_ids = vec!["sg-old".into()];
+        modify_vpc_endpoint(
+            &svc,
+            &req(
+                "ModifyVpcEndpoint",
+                &[
+                    ("VpcEndpointId", "vpce-1"),
+                    ("AddSecurityGroupId.1", "sg-new"),
+                    ("RemoveSecurityGroupId.1", "sg-old"),
+                ],
+            ),
+        )
+        .unwrap();
+        {
+            let accounts = svc.state.read();
+            let e = &accounts.get("000000000000").unwrap().vpc_endpoints["vpce-1"];
+            assert_eq!(e.security_group_ids, vec!["sg-new".to_string()]);
+        }
+        // And the groupSet round-trips in DescribeVpcEndpoints.
+        let resp = describe_vpc_endpoints(&svc, &req("DescribeVpcEndpoints", &[])).unwrap();
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(body.contains("<groupId>sg-new</groupId>"), "got: {body}");
     }
 
     #[test]

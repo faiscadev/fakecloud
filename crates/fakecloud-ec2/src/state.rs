@@ -410,6 +410,8 @@ pub struct InstanceMetadataDefaults {
     pub http_put_response_hop_limit: Option<i64>,
     #[serde(default)]
     pub instance_metadata_tags: Option<String>,
+    #[serde(default)]
+    pub http_tokens_enforced: Option<String>,
 }
 
 impl Default for MetadataOptions {
@@ -623,6 +625,9 @@ pub struct VpcEndpoint {
     pub route_table_ids: Vec<String>,
     #[serde(default)]
     pub private_dns_enabled: bool,
+    /// Security groups attached to an Interface endpoint's ENIs.
+    #[serde(default)]
+    pub security_group_ids: Vec<String>,
 }
 
 /// A VPC endpoint service configuration (PrivateLink provider side).
