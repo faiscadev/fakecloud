@@ -1144,9 +1144,10 @@ impl CloudFrontService {
         }
 
         // The "by-X" listings each have a distinct response root element.
-        // We never index distributions by the predicate (that would require
-        // shipping each policy/key-group/etc service first), so each
-        // response is empty until those services land.
+        // For the seven predicate ops whose match field is persisted on the
+        // distribution config we filter the live state; the remaining ops
+        // (owned-resource, connection-mode/function, trust-store,
+        // realtime-log-config) are not yet indexed and stay empty.
         let root = match action {
             "ListDistributionsByCachePolicyId"
             | "ListDistributionsByOriginRequestPolicyId"
@@ -1156,7 +1157,64 @@ impl CloudFrontService {
             "ListDistributionsByOwnedResource" => "DistributionIdOwnerList",
             _ => "DistributionList",
         };
-        let body = build_empty_distribution_id_list(root);
+
+        // Collect all distributions once, sorted for stable ordering.
+        let mut all: Vec<StoredDistribution> = {
+            let state = self.state.read();
+            state
+                .accounts
+                .values()
+                .flat_map(|a| a.distributions.values().cloned())
+                .collect()
+        };
+        all.sort_by_key(|d| d.last_modified_time);
+
+        let path_id = route.id.as_deref().unwrap_or("");
+        let matched: Vec<StoredDistribution> = match action {
+            "ListDistributionsByCachePolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_cache_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByOriginRequestPolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_origin_request_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByResponseHeadersPolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_response_headers_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByKeyGroup" => all
+                .into_iter()
+                .filter(|d| distribution_uses_key_group(d, path_id))
+                .collect(),
+            "ListDistributionsByVpcOriginId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_vpc_origin(d, path_id))
+                .collect(),
+            "ListDistributionsByWebACLId" => all
+                .into_iter()
+                .filter(|d| d.config.web_acl_id.as_deref() == Some(path_id))
+                .collect(),
+            "ListDistributionsByAnycastIpListId" => all
+                .into_iter()
+                .filter(|d| d.config.anycast_ip_list_id.as_deref() == Some(path_id))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let body = if root == "DistributionIdList" {
+            let ids: Vec<&str> = matched.iter().map(|d| d.id.as_str()).collect();
+            build_distribution_id_list_xml(&ids)
+        } else if root == "DistributionList"
+            && matches!(
+                action,
+                "ListDistributionsByWebACLId" | "ListDistributionsByAnycastIpListId"
+            )
+        {
+            build_distribution_list_xml(&matched, "DistributionList", "", 100, None)
+        } else {
+            build_empty_distribution_id_list(root)
+        };
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
 
@@ -1757,6 +1815,97 @@ fn build_empty_distribution_id_list(root: &str) -> String {
     out.push_str("<Quantity>0</Quantity>");
     out.push_str(&format!("</{root}>"));
     out
+}
+
+/// Render a `DistributionIdList` response body listing the given ids.
+fn build_distribution_id_list_xml(ids: &[&str]) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    out.push_str(&format!(
+        "<DistributionIdList xmlns=\"{ns}\">",
+        ns = crate::NAMESPACE
+    ));
+    out.push_str("<Marker></Marker>");
+    out.push_str("<MaxItems>100</MaxItems>");
+    out.push_str("<IsTruncated>false</IsTruncated>");
+    out.push_str(&format!("<Quantity>{}</Quantity>", ids.len()));
+    if !ids.is_empty() {
+        out.push_str("<Items>");
+        for id in ids {
+            out.push_str(&format!("<DistributionId>{}</DistributionId>", esc(id)));
+        }
+        out.push_str("</Items>");
+    }
+    out.push_str("</DistributionIdList>");
+    out
+}
+
+/// Iterate the default cache behavior followed by every additional cache
+/// behavior of a distribution.
+fn distribution_cache_behaviors(
+    d: &StoredDistribution,
+) -> impl Iterator<Item = &crate::model::CacheBehavior> {
+    d.config
+        .cache_behaviors
+        .as_ref()
+        .and_then(|cb| cb.items.as_ref())
+        .into_iter()
+        .flat_map(|items| items.cache_behavior.iter())
+}
+
+fn distribution_uses_cache_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config.default_cache_behavior.cache_policy_id.as_deref() == Some(id)
+        || distribution_cache_behaviors(d).any(|b| b.cache_policy_id.as_deref() == Some(id))
+}
+
+fn distribution_uses_origin_request_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .default_cache_behavior
+        .origin_request_policy_id
+        .as_deref()
+        == Some(id)
+        || distribution_cache_behaviors(d)
+            .any(|b| b.origin_request_policy_id.as_deref() == Some(id))
+}
+
+fn distribution_uses_response_headers_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .default_cache_behavior
+        .response_headers_policy_id
+        .as_deref()
+        == Some(id)
+        || distribution_cache_behaviors(d)
+            .any(|b| b.response_headers_policy_id.as_deref() == Some(id))
+}
+
+fn trusted_key_groups_contains(tkg: Option<&crate::model::TrustedKeyGroups>, id: &str) -> bool {
+    tkg.and_then(|g| g.items.as_ref())
+        .map(|items| items.key_group.iter().any(|k| k == id))
+        .unwrap_or(false)
+}
+
+fn distribution_uses_key_group(d: &StoredDistribution, id: &str) -> bool {
+    trusted_key_groups_contains(
+        d.config.default_cache_behavior.trusted_key_groups.as_ref(),
+        id,
+    ) || distribution_cache_behaviors(d)
+        .any(|b| trusted_key_groups_contains(b.trusted_key_groups.as_ref(), id))
+}
+
+fn distribution_uses_vpc_origin(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .origins
+        .items
+        .as_ref()
+        .map(|items| {
+            items.origin.iter().any(|o| {
+                o.vpc_origin_config
+                    .as_ref()
+                    .map(|v| v.vpc_origin_id == id)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn build_invalidation_xml(inv: &StoredInvalidation) -> String {
@@ -2581,5 +2730,117 @@ mod tests {
         // a Comment element on the wire.
         assert!(!xml.contains("<Comment>a&b<c>d"));
         assert!(xml.contains(dist_id));
+    }
+
+    fn predicate_dist_config_xml(caller_ref: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+  <CallerReference>{caller_ref}</CallerReference>
+  <Origins>
+    <Quantity>1</Quantity>
+    <Items>
+      <Origin>
+        <Id>primary</Id>
+        <DomainName>example.com</DomainName>
+        <VpcOriginConfig><VpcOriginId>vo-123</VpcOriginId></VpcOriginConfig>
+      </Origin>
+    </Items>
+  </Origins>
+  <DefaultCacheBehavior>
+    <TargetOriginId>primary</TargetOriginId>
+    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+    <CachePolicyId>cp-123</CachePolicyId>
+    <OriginRequestPolicyId>orp-123</OriginRequestPolicyId>
+    <ResponseHeadersPolicyId>rhp-123</ResponseHeadersPolicyId>
+    <TrustedKeyGroups>
+      <Enabled>true</Enabled>
+      <Quantity>1</Quantity>
+      <Items><KeyGroup>kg-123</KeyGroup></Items>
+    </TrustedKeyGroups>
+  </DefaultCacheBehavior>
+  <Comment></Comment>
+  <WebACLId>waf-abc</WebACLId>
+  <AnycastIpListId>ail-123</AnycastIpListId>
+  <Enabled>true</Enabled>
+</DistributionConfig>"#
+        )
+    }
+
+    async fn list_by(svc: &CloudFrontService, path: &str) -> String {
+        let resp = svc
+            .handle(make_request(http::Method::GET, path, "", ""))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn list_distributions_by_predicate_fields_filters_state() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &predicate_dist_config_xml("pred-ref"),
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes()).unwrap();
+        let id = xml
+            .split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string();
+
+        // DistributionIdList-shaped ops: match id must appear, mismatch empty.
+        for (path, root) in [
+            ("/2020-05-31/distributionsByCachePolicyId/cp-123", "cp-123"),
+            (
+                "/2020-05-31/distributionsByOriginRequestPolicyId/orp-123",
+                "orp-123",
+            ),
+            (
+                "/2020-05-31/distributionsByResponseHeadersPolicyId/rhp-123",
+                "rhp-123",
+            ),
+            ("/2020-05-31/distributionsByKeyGroupId/kg-123", "kg-123"),
+            ("/2020-05-31/distributionsByVpcOriginId/vo-123", "vo-123"),
+        ] {
+            let body = list_by(&svc, path).await;
+            assert!(body.contains("<DistributionIdList"), "{root}: {body}");
+            assert!(
+                body.contains(&format!("<DistributionId>{id}</DistributionId>")),
+                "{root} did not list distribution: {body}"
+            );
+            assert!(body.contains("<Quantity>1</Quantity>"), "{root}: {body}");
+        }
+
+        // Mismatched id -> empty.
+        let empty = list_by(&svc, "/2020-05-31/distributionsByCachePolicyId/other").await;
+        assert!(empty.contains("<Quantity>0</Quantity>"), "{empty}");
+        assert!(!empty.contains("<DistributionId>"), "{empty}");
+
+        // DistributionList-shaped ops: WebACLId + AnycastIpListId.
+        let web = list_by(&svc, "/2020-05-31/distributionsByWebACLId/waf-abc").await;
+        assert!(web.contains("<DistributionList"), "{web}");
+        assert!(web.contains(&format!("<Id>{id}</Id>")), "{web}");
+
+        let anycast = list_by(&svc, "/2020-05-31/distributionsByAnycastIpListId/ail-123").await;
+        assert!(anycast.contains("<DistributionList"), "{anycast}");
+        assert!(anycast.contains(&format!("<Id>{id}</Id>")), "{anycast}");
+
+        let anycast_miss = list_by(&svc, "/2020-05-31/distributionsByAnycastIpListId/nope").await;
+        assert!(
+            anycast_miss.contains("<Quantity>0</Quantity>"),
+            "{anycast_miss}"
+        );
     }
 }

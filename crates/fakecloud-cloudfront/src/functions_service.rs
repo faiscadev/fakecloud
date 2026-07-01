@@ -1155,6 +1155,13 @@ fn stage_view(f: &StoredFunction, stage: &Option<String>) -> StoredFunction {
     let mut clone = f.clone();
     if stage.as_deref() == Some("LIVE") {
         clone.stage = "LIVE".into();
+        // GetFunction/TestFunction against the LIVE stage must serve the
+        // code frozen at PublishFunction, not the mutable DEVELOPMENT
+        // working copy. If the function was never published there is no
+        // LIVE snapshot, so fall back to the development code unchanged.
+        if let Some(live) = &f.live_function_code {
+            clone.function_code = live.clone();
+        }
     }
     clone
 }
@@ -1195,6 +1202,23 @@ fn render_function_summary_body(f: &StoredFunction) -> String {
         out.push_str("<Comment></Comment>");
     }
     out.push_str(&format!("<Runtime>{}</Runtime>", esc(&f.config.runtime)));
+    if let Some(kvsa) = &f.config.key_value_store_associations {
+        out.push_str("<KeyValueStoreAssociations>");
+        out.push_str(&format!("<Quantity>{}</Quantity>", kvsa.quantity));
+        if let Some(items) = &kvsa.items {
+            out.push_str("<Items>");
+            for a in &items.key_value_store_association {
+                out.push_str("<KeyValueStoreAssociation>");
+                out.push_str(&format!(
+                    "<KeyValueStoreARN>{}</KeyValueStoreARN>",
+                    esc(&a.key_value_store_arn)
+                ));
+                out.push_str("</KeyValueStoreAssociation>");
+            }
+            out.push_str("</Items>");
+        }
+        out.push_str("</KeyValueStoreAssociations>");
+    }
     out.push_str("</FunctionConfig>");
     out.push_str("<FunctionMetadata>");
     out.push_str(&format!(
@@ -1731,5 +1755,99 @@ mod tests {
         let cu_close = xml.find("</ComputeUtilization>").unwrap();
         let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
         assert!(pct > 100, "expected pct > 100 after kill, got {pct}");
+    }
+
+    fn req_q(method: http::Method, path: &str, query: &str) -> AwsRequest {
+        let mut r = req(method, path, "", None);
+        r.raw_query = query.to_string();
+        r
+    }
+
+    #[tokio::test]
+    async fn get_function_live_stage_returns_published_code_not_dev() {
+        // Finding #3: after PublishFunction freezes the LIVE snapshot, a
+        // subsequent UpdateFunction mutates DEVELOPMENT only. GetFunction
+        // must serve DEV working copy for DEVELOPMENT and the frozen
+        // snapshot for LIVE.
+        let svc = svc();
+        let e1 = create_function(&svc, "stage-fn", "CODE_V1").await;
+        let e2 = publish_function(&svc, "stage-fn", &e1).await;
+        update_function(&svc, "stage-fn", "CODE_V2", &e2).await;
+
+        let live = svc
+            .handle(req_q(
+                http::Method::GET,
+                "/2020-05-31/function/stage-fn",
+                "Stage=LIVE",
+            ))
+            .await
+            .unwrap();
+        let live_code = String::from_utf8(live.body.expect_bytes().to_vec()).unwrap();
+        assert_eq!(live_code, "CODE_V1", "LIVE stage must serve published code");
+
+        let dev = svc
+            .handle(req_q(
+                http::Method::GET,
+                "/2020-05-31/function/stage-fn",
+                "Stage=DEVELOPMENT",
+            ))
+            .await
+            .unwrap();
+        let dev_code = String::from_utf8(dev.body.expect_bytes().to_vec()).unwrap();
+        assert_eq!(dev_code, "CODE_V2", "DEVELOPMENT stage serves working copy");
+    }
+
+    #[tokio::test]
+    async fn function_config_round_trips_key_value_store_associations() {
+        // Finding #4: KeyValueStoreAssociations survive Create and are echoed
+        // on Describe.
+        let svc = svc();
+        let arn = "arn:aws:cloudfront::123456789012:key-value-store/kvs-1";
+        let code_b64 = base64::engine::general_purpose::STANDARD.encode(b"CODE");
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<CreateFunctionRequest xmlns="{NS}">
+  <Name>kvs-fn</Name>
+  <FunctionConfig>
+    <Comment>t</Comment>
+    <Runtime>cloudfront-js-2.0</Runtime>
+    <KeyValueStoreAssociations>
+      <Quantity>1</Quantity>
+      <Items>
+        <KeyValueStoreAssociation>
+          <KeyValueStoreARN>{arn}</KeyValueStoreARN>
+        </KeyValueStoreAssociation>
+      </Items>
+    </KeyValueStoreAssociations>
+  </FunctionConfig>
+  <FunctionCode>{code_b64}</FunctionCode>
+</CreateFunctionRequest>"#
+        );
+        let create = svc
+            .handle(req(http::Method::POST, "/2020-05-31/function", &body, None))
+            .await
+            .unwrap();
+        assert_eq!(create.status, StatusCode::CREATED);
+        let create_xml = std::str::from_utf8(create.body.expect_bytes()).unwrap();
+        assert!(
+            create_xml.contains(&format!("<KeyValueStoreARN>{arn}</KeyValueStoreARN>")),
+            "create response dropped KVS association: {create_xml}"
+        );
+
+        let describe = svc
+            .handle(req(
+                http::Method::GET,
+                "/2020-05-31/function/kvs-fn/describe",
+                "",
+                None,
+            ))
+            .await
+            .unwrap();
+        let describe_xml = std::str::from_utf8(describe.body.expect_bytes()).unwrap();
+        assert!(
+            describe_xml.contains(&format!("<KeyValueStoreARN>{arn}</KeyValueStoreARN>")),
+            "describe response dropped KVS association: {describe_xml}"
+        );
+        assert!(describe_xml.contains("<Quantity>1</Quantity>"));
     }
 }

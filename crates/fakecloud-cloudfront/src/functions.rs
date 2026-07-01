@@ -39,6 +39,10 @@ pub struct KeyValueStoreAssociationItems {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct KeyValueStoreAssociation {
+    // AWS spells the member `KeyValueStoreARN` (upper-case ARN), which the
+    // default PascalCase rule would render as `KeyValueStoreArn`. Pin the
+    // exact wire name so real SDK requests parse and responses round-trip.
+    #[serde(rename = "KeyValueStoreARN")]
     pub key_value_store_arn: String,
 }
 
