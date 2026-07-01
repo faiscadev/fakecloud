@@ -5026,3 +5026,47 @@ fn put_parameter_overwrite_rejects_downgrade_with_policies() {
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     assert!(err.message().contains("Advanced"));
 }
+
+/// A duplicate PutParameter WITHOUT Overwrite must return ParameterAlreadyExists,
+/// even when the request would otherwise trip the tier/policy validation
+/// (which only matters for a write that is actually applied). The
+/// already-exists check must precede the tier/policy validation.
+#[test]
+fn put_parameter_duplicate_without_overwrite_reports_already_exists_first() {
+    let svc = make_service();
+    // Existing Advanced parameter carrying a policy.
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/dup-param",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies,
+        }),
+    ))
+    .unwrap();
+
+    // Re-put WITHOUT Overwrite, and with Tier=Standard (which, combined with
+    // the existing policy, would trip the tier/policy validation if it ran
+    // first). AWS returns ParameterAlreadyExists instead.
+    let err = match svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/dup-param",
+            "Value": "v2",
+            "Type": "String",
+            "Tier": "Standard",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("duplicate without overwrite must fail"),
+    };
+    assert_eq!(err.code(), "ParameterAlreadyExists");
+}

@@ -684,6 +684,20 @@ impl SsmService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // A non-overwrite write to a parameter that already exists fails fast
+        // with ParameterAlreadyExists, BEFORE the tier/policy validation (which
+        // only matters for a write that will actually be applied). Otherwise a
+        // duplicate PutParameter without Overwrite could surface the tier/policy
+        // error instead of the expected already-exists error.
+        if !input.overwrite && lookup_param(&state.parameters, &input.name).is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ParameterAlreadyExists",
+                "The parameter already exists. To overwrite this value, set the \
+                 overwrite option in the request to true.",
+            ));
+        }
+
         // Validate the tier/policy conflict BEFORE any KMS encryption work.
         // Policies are Advanced-tier only; rejecting a Standard-tier param
         // that carries policies must happen ahead of encrypt_secure_value so

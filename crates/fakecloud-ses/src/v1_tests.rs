@@ -1696,6 +1696,13 @@ fn test_event_destination_rejects_multiple_and_zero_targets() {
                     "EventDestination.SNSDestination.TopicARN",
                     "arn:aws:sns:us-east-1:123456789012:t",
                 ),
+                // A fully-valid Kinesis block (both IAMRoleARN and
+                // DeliveryStreamARN) so the ONLY reason for rejection is that
+                // two targets are supplied, not an incomplete Kinesis block.
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/ses-firehose",
+                ),
                 (
                     "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
                     "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
@@ -1786,6 +1793,79 @@ fn test_event_destination_update_switches_target_type() {
     );
     assert!(dest.kinesis_firehose_destination.is_some());
     assert!(dest.cloud_watch_destination.is_none());
+}
+
+#[test]
+fn test_event_destination_update_multiple_targets_is_atomic() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs5")],
+        ),
+    )
+    .unwrap();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs5"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // A rejected update (two targets + Enabled=false) must not persist ANY of
+    // its changes: Enabled and MatchingEventTypes stay as they were.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "UpdateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs5"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.Enabled", "false"),
+                ("EventDestination.MatchingEventTypes.member.1", "bounce"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t2",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/r",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("multiple-target update must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+
+    let mas = state.read();
+    let st = mas.default_ref();
+    let dest = &st.event_destinations.get("cs5").unwrap()[0];
+    assert!(
+        dest.enabled,
+        "Enabled must be unchanged after a rejected update"
+    );
+    assert_eq!(dest.matching_event_types, vec!["send"]);
+    // The original SNS target is intact; no partial target swap happened.
+    assert!(dest.sns_destination.is_some());
+    assert!(dest.kinesis_firehose_destination.is_none());
 }
 
 // ── Account / Quota tests ──

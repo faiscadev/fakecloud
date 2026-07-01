@@ -2521,18 +2521,51 @@ async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() 
         "ClientRequestToken": token,
         "RotateImmediately": false,
     });
+    // Capture the AWSCURRENT version id before rotation.
+    let original_current = {
+        let accts = state.read();
+        accts
+            .default_ref()
+            .secrets
+            .get("rot-test-step")
+            .unwrap()
+            .current_version_id
+            .clone()
+    };
+
     let (_resp, invocation) = svc
         .rotate_secret(&make_request("RotateSecret", &rot.to_string()))
         .unwrap();
     let inv = invocation.expect("a Lambda invocation must be scheduled to test the config");
     assert_eq!(inv.steps, vec!["testSecret"]);
+    let cleanup = inv
+        .cleanup_pending
+        .expect("test-only rotation must stage a temporary AWSPENDING version to clean up");
 
-    // Value not rotated: no new version, current version unchanged, no
-    // LastRotatedDate.
+    {
+        let accts = state.read();
+        let secret = accts.default_ref().secrets.get("rot-test-step").unwrap();
+        // A temporary AWSPENDING version was staged for the testSecret step,
+        // carrying a copy of the current value.
+        let pending = secret
+            .versions
+            .get(token)
+            .expect("AWSPENDING test version must exist for the Lambda to read");
+        assert!(pending.stages.contains(&"AWSPENDING".to_string()));
+        assert_eq!(pending.secret_string.as_deref(), Some("original"));
+        // The current value is NOT rotated and LastRotatedDate is untouched.
+        assert_eq!(secret.current_version_id, original_current);
+        assert!(secret.last_rotated_at.is_none());
+    }
+
+    // The cleanup removes the temporary AWSPENDING version.
+    super::remove_rotation_test_pending(&state, &cleanup);
     let accts = state.read();
     let secret = accts.default_ref().secrets.get("rot-test-step").unwrap();
-    assert!(!secret.versions.contains_key(token));
-    assert!(secret.last_rotated_at.is_none());
+    assert!(
+        !secret.versions.contains_key(token),
+        "temporary AWSPENDING version must be cleaned up after the test step"
+    );
 }
 
 #[tokio::test]

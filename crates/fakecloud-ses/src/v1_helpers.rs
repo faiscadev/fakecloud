@@ -2281,6 +2281,12 @@ pub(crate) fn update_configuration_set_event_destination(
     let config_set_name = required_param(&req.query_params, "ConfigurationSetName")?;
     let dest_name = required_param(&req.query_params, "EventDestination.Name")?;
 
+    // Parse + validate the (optional) target BEFORE mutating any state so a
+    // rejected request (multiple targets) leaves the destination untouched
+    // rather than persisting partial Enabled / MatchingEventTypes changes.
+    let target = parse_event_destination_target(&req.query_params)?;
+    let event_types = parse_member_list(&req.query_params, "EventDestination.MatchingEventTypes");
+
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
     let dests = st
@@ -2307,7 +2313,6 @@ pub(crate) fn update_configuration_set_event_destination(
     if let Some(v) = req.query_params.get("EventDestination.Enabled") {
         dest.enabled = v == "true";
     }
-    let event_types = parse_member_list(&req.query_params, "EventDestination.MatchingEventTypes");
     if !event_types.is_empty() {
         dest.matching_event_types = event_types;
     }
@@ -2316,7 +2321,7 @@ pub(crate) fn update_configuration_set_event_destination(
     // Applying a new target clears the other two so a destination never ends
     // up with more than one target type (which would make
     // DescribeConfigurationSet report multiple targets).
-    if let Some(target) = parse_event_destination_target(&req.query_params)? {
+    if let Some(target) = target {
         dest.kinesis_firehose_destination = None;
         dest.cloud_watch_destination = None;
         dest.sns_destination = None;

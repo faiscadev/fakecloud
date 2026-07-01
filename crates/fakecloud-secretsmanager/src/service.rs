@@ -28,6 +28,29 @@ struct RotationInvocation {
     /// createSecret/setSecret/testSecret/finishSecret; RotateImmediately=false
     /// with a Lambda runs only testSecret to validate the configuration.
     steps: Vec<&'static str>,
+    /// A temporary AWSPENDING version created purely so a test-only
+    /// (RotateImmediately=false) invocation has something for the Lambda's
+    /// testSecret step to read. Removed once the steps complete.
+    cleanup_pending: Option<PendingCleanup>,
+}
+
+/// Locates a temporary AWSPENDING version to delete after a test-only rotation.
+struct PendingCleanup {
+    account_id: String,
+    secret_name: String,
+    version_id: String,
+}
+
+/// Remove the temporary AWSPENDING version created for a test-only rotation.
+fn remove_rotation_test_pending(state: &SharedSecretsManagerState, cleanup: &PendingCleanup) {
+    let mut accounts = state.write();
+    if let Some(secret) = accounts
+        .get_or_create(&cleanup.account_id)
+        .secrets
+        .get_mut(&cleanup.secret_name)
+    {
+        secret.versions.remove(&cleanup.version_id);
+    }
 }
 
 /// Result of an idempotency check against an existing
@@ -1427,6 +1450,7 @@ impl SecretsManagerService {
                                     "testSecret",
                                     "finishSecret",
                                 ],
+                                cleanup_pending: None,
                             });
                         }
                     } else {
@@ -1451,16 +1475,39 @@ impl SecretsManagerService {
                 }
             }
         } else if has_lambda {
-            // RotateImmediately=false with a Lambda: validate the rotation
-            // configuration by running only the testSecret step. The value is
-            // not rotated and LastRotatedDate is left untouched.
-            if let Some(ref arn) = lambda_arn {
-                invocation = Some(RotationInvocation {
-                    lambda_arn: arn.clone(),
-                    secret_id: secret.arn.clone(),
-                    client_request_token: version_id.clone(),
-                    steps: vec!["testSecret"],
-                });
+            // RotateImmediately=false with a Lambda: AWS validates the rotation
+            // configuration by running only the testSecret step. The current
+            // value is NOT rotated and LastRotatedDate is left untouched, but
+            // the Lambda's testSecret step needs an AWSPENDING version to read.
+            // Mirror AWS by staging a temporary AWSPENDING copy of the current
+            // value (keyed by the rotation token) and removing it once the test
+            // completes.
+            if let (Some(arn), Some(current_vid)) =
+                (lambda_arn.as_ref(), secret.current_version_id.clone())
+            {
+                if let Some(cv) = secret.versions.get(&current_vid).cloned() {
+                    secret.versions.insert(
+                        version_id.clone(),
+                        SecretVersion {
+                            version_id: version_id.clone(),
+                            secret_string: cv.secret_string.clone(),
+                            secret_binary: cv.secret_binary.clone(),
+                            stages: vec!["AWSPENDING".to_string()],
+                            created_at: now,
+                        },
+                    );
+                    invocation = Some(RotationInvocation {
+                        lambda_arn: arn.clone(),
+                        secret_id: secret.arn.clone(),
+                        client_request_token: version_id.clone(),
+                        steps: vec!["testSecret"],
+                        cleanup_pending: Some(PendingCleanup {
+                            account_id: req.account_id.clone(),
+                            secret_name: secret.name.clone(),
+                            version_id: version_id.clone(),
+                        }),
+                    });
+                }
             }
         }
 
@@ -2153,10 +2200,13 @@ impl AwsService for SecretsManagerService {
             "RotateSecret" => {
                 let (response, invocation) = self.rotate_secret(&req)?;
                 if let Some(inv) = invocation {
-                    if let Some(ref bus) = self.delivery_bus {
-                        let bus = bus.clone();
-                        // AWS invokes the rotation Lambda asynchronously for each step.
-                        tokio::spawn(async move {
+                    let bus = self.delivery_bus.clone();
+                    let state = self.state.clone();
+                    // AWS invokes the rotation Lambda asynchronously for each
+                    // step, then (for a test-only invocation) removes the
+                    // temporary AWSPENDING version.
+                    tokio::spawn(async move {
+                        if let Some(bus) = bus {
                             for step in &inv.steps {
                                 let payload = serde_json::json!({
                                     "SecretId": inv.secret_id,
@@ -2184,8 +2234,13 @@ impl AwsService for SecretsManagerService {
                                     }
                                 }
                             }
-                        });
-                    }
+                        }
+                        // Clean up the temporary AWSPENDING version even when no
+                        // delivery bus is wired, so it never lingers.
+                        if let Some(cleanup) = inv.cleanup_pending {
+                            remove_rotation_test_pending(&state, &cleanup);
+                        }
+                    });
                 }
                 Ok(response)
             }
