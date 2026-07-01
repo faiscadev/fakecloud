@@ -271,9 +271,17 @@ fn is_wellformed_add_operand(v: &Value) -> bool {
             .unwrap_or(false);
     }
     if let Some(bs) = v.get("BS") {
+        use base64::Engine;
         return bs
             .as_array()
-            .map(|a| !a.is_empty() && a.iter().all(|e| e.is_string()))
+            .map(|a| {
+                !a.is_empty()
+                    && a.iter().all(|e| {
+                        e.as_str()
+                            .map(|s| base64::engine::general_purpose::STANDARD.decode(s).is_ok())
+                            .unwrap_or(false)
+                    })
+            })
             .unwrap_or(false);
     }
     false
@@ -414,7 +422,12 @@ mod remove_path_tests {
     fn add_malformed_number_to_new_attribute_is_rejected() {
         // {"N": 5} is not a string, {"N":"abc"} is unparseable, {"SS":"x"} is
         // not an array -- none may reach storage (Cubic P2, 2026-07-01).
-        for bad in [json!({"N": 5}), json!({"N": "abc"}), json!({"SS": "x"})] {
+        for bad in [
+            json!({"N": 5}),
+            json!({"N": "abc"}),
+            json!({"SS": "x"}),
+            json!({"BS": ["not base64!"]}),
+        ] {
             let mut item: HashMap<String, AttributeValue> = HashMap::new();
             let err = apply_add_assignment(
                 &mut item,

@@ -221,10 +221,11 @@ pub(crate) fn evaluate_single_key_condition(
     key_cond_simple_comparison(part, item, expr_attr_names, expr_attr_values)
 }
 
-/// `begins_with(attr, :val)` — KeyCondition variant: supports only
-/// S-typed attributes (mirrors AWS's behavior of returning false for
-/// type mismatches). The filter-expression evaluator has its own
-/// `eval_begins_with` because it operates on filter-grammar inputs.
+/// `begins_with(attr, :val)` — KeyCondition variant: matches a String or
+/// Binary prefix via the shared [`attribute_begins_with`] helper (returns
+/// false for type mismatches, mirroring AWS). The filter-expression
+/// evaluator has its own `eval_begins_with` entry point because it operates
+/// on filter-grammar inputs, but both share the operand comparison.
 pub(crate) fn key_cond_begins_with(
     rest: &str,
     item: &HashMap<String, AttributeValue>,

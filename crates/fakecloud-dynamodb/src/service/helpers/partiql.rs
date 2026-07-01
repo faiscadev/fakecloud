@@ -11,18 +11,16 @@ use super::*;
 /// unparseable. Handles exponent notation and negative zero.
 fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    // A malformed Number string (unparseable) must NOT compare Equal to a valid
-    // one -- otherwise `{"N":"abc"}` would match any stored numeric key on the
-    // primary-key lookup path (DeleteItem/GetItem), mutating the wrong item.
-    // Fall back to a lexical comparison so a malformed operand only ever equals
-    // a byte-identical string (bug-hunt 2026-07-01, Cubic P1).
+    // A malformed Number string has no defined ordering; callers that care about
+    // equality (values_equal) pre-check validity, so leaving this Equal keeps
+    // range/order comparisons undefined rather than inventing a lexical order.
     let (xn, xd) = match normalize_decimal(x) {
         Some(v) => v,
-        None => return x.cmp(y),
+        None => return Ordering::Equal,
     };
     let (yn, yd) = match normalize_decimal(y) {
         Some(v) => v,
-        None => return x.cmp(y),
+        None => return Ordering::Equal,
     };
     // (is_negative_x, is_negative_y): a negative value is always less than a
     // non-negative one. Only decide by sign when the signs actually differ.
@@ -295,8 +293,19 @@ pub(crate) fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
             if let (Some(("N", an)), Some(("N", bn))) =
                 (attribute_type_and_value(av), attribute_type_and_value(bv))
             {
-                compare_number_strings(an.as_str().unwrap_or("0"), bn.as_str().unwrap_or("0"))
-                    == std::cmp::Ordering::Equal
+                let (an, bn) = (
+                    an.as_str().unwrap_or_default(),
+                    bn.as_str().unwrap_or_default(),
+                );
+                // Only canonicalize when BOTH are valid numbers. A malformed
+                // operand ({"N":"abc"}) must not compare equal to a valid stored
+                // key, so fall back to strict byte-equality there -- otherwise
+                // DeleteItem could delete the wrong row (Cubic P1, 2026-07-01).
+                if is_valid_number(an) && is_valid_number(bn) {
+                    compare_number_strings(an, bn) == std::cmp::Ordering::Equal
+                } else {
+                    av == bv
+                }
             } else {
                 av == bv
             }

@@ -127,9 +127,10 @@ pub(crate) fn evaluate_single_filter_condition(
     evaluate_single_key_condition(part, item, expr_attr_names, expr_attr_values)
 }
 
-/// `begins_with(path, :val)` — only S (string) operands. Returns false on
-/// any parse failure or type mismatch (this is the same shape DynamoDB
-/// returns: a malformed predicate is silently false rather than an error).
+/// `begins_with(path, :val)` — matches a String or Binary prefix (via
+/// [`attribute_begins_with`]). Returns false on any parse failure or type
+/// mismatch (the same shape DynamoDB returns: a malformed predicate is
+/// silently false rather than an error).
 pub(crate) fn eval_begins_with(
     rest: &str,
     item: &HashMap<String, AttributeValue>,
