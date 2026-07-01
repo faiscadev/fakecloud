@@ -253,6 +253,7 @@ async fn handle_request(
     // it with the rule's response code (the SPA deep-link fallback, e.g.
     // 404 -> /index.html returned as 200).
     if let Some(rule) = match_error_rule(&route.error_rules, resp.status().as_u16()) {
+        let origin_status = resp.status();
         let (auth, host) = resolve_upstream(&route.default_origin_domain, &dp.s3_endpoint);
         let url = format!("http://{auth}{}", rule.page_path);
         let mut err_resp = fetch_origin(
@@ -264,11 +265,13 @@ async fn handle_request(
             &Bytes::new(),
         )
         .await;
-        if let Some(code) = rule.response_code {
-            if let Ok(status) = http::StatusCode::from_u16(code) {
-                *err_resp.status_mut() = status;
-            }
-        }
+        // Status = the rule's ResponseCode if set, else the ORIGINAL origin
+        // error status (AWS: an omitted ResponseCode keeps the origin's code).
+        let final_status = rule
+            .response_code
+            .and_then(|c| http::StatusCode::from_u16(c).ok())
+            .unwrap_or(origin_status);
+        *err_resp.status_mut() = final_status;
         return err_resp;
     }
     resp
