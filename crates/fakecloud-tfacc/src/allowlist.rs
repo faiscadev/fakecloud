@@ -1156,10 +1156,30 @@ pub const SHARDS: &[Shard] = &[
         run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
         extra_deny: &[],
     },
+    // EventBridge Pipes is split across three shards, each a fresh fakecloud
+    // handling at most four pipe-lifecycle tests. Pipes is the only service that
+    // runs a persistent execution loop, and a single process that drives ~6+ of
+    // these create/transition/destroy tests back-to-back on a constrained 2-core
+    // CI runner degrades until the provider's delete/"gone" waiters stop
+    // converging (a pipe or its SQS source/target queue lingers past the waiter
+    // budget). Keeping each shard small holds every run well under that point;
+    // the union of the three equals the original single-shard selection.
     Shard {
-        name: "pipes",
+        name: "pipes-a",
         service: "pipes",
-        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState|roleARN|nameGenerated|namePrefix|tags|targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
+        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "pipes-b",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(roleARN|nameGenerated|namePrefix|tags)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "pipes-c",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
         extra_deny: &[],
     },
     Shard {
