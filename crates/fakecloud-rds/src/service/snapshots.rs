@@ -430,76 +430,46 @@ impl RdsService {
             }
         };
 
+        let runtime = runtime.clone();
         let db_name = snapshot
             .db_name
-            .as_deref()
-            .unwrap_or(default_db_name(&snapshot.engine));
-        let running = match runtime
-            .ensure_postgres(
-                &db_instance_identifier,
-                &snapshot.engine,
-                &snapshot.engine_version,
-                &snapshot.master_username,
-                &snapshot.master_user_password,
-                db_name,
-                &request.account_id,
-                &request.region,
-                &tags,
-            )
-            .await
-        {
-            Ok(running) => running,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&db_instance_identifier);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
+            .clone()
+            .unwrap_or_else(|| default_db_name(&snapshot.engine).to_string());
 
-        if let Err(e) = runtime
-            .restore_database(
-                &db_instance_identifier,
-                &snapshot.engine,
-                &snapshot.master_username,
-                &snapshot.master_user_password,
-                db_name,
-                &snapshot.dump_data,
-            )
-            .await
-        {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_instance_creation(&db_instance_identifier);
-            runtime.stop_container(&db_instance_identifier).await;
-            return Err(runtime_error_to_service_error(e));
-        }
-
-        let instance = build_restored_instance(
+        // Build a `creating` placeholder; the backgrounded container start
+        // (below) fills in the endpoint and flips to `available`.
+        let mut instance = build_restored_instance(
             &db_instance_identifier,
-            db_instance_arn,
+            db_instance_arn.clone(),
             dbi_resource_id,
             created_at,
             vpc_security_group_ids,
             &snapshot,
-            &running,
+            &creating_placeholder_container(),
             tags,
         );
+        instance.db_instance_status = "creating".to_string();
+        instance.endpoint_address = String::new();
+        instance.port = 0;
 
         self.state
             .write()
             .get_or_create(&request.account_id)
             .finish_instance_creation(instance.clone());
 
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &db_instance_identifier,
-            &instance.db_instance_arn,
-            "RDS-EVENT-0043",
-            &["creation"],
-            "DB instance restored from snapshot",
+        self.spawn_finalize_restored_instance(
+            runtime,
+            request.account_id.clone(),
+            request.region.clone(),
+            db_instance_identifier.clone(),
+            db_instance_arn,
+            snapshot.engine.clone(),
+            snapshot.engine_version.clone(),
+            snapshot.master_username.clone(),
+            snapshot.master_user_password.clone(),
+            db_name,
+            Some(snapshot.dump_data.clone()),
+            ("RDS-EVENT-0043", "DB instance restored from snapshot"),
         );
 
         Ok(AwsResponse::xml(

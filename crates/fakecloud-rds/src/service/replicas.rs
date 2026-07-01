@@ -90,62 +90,27 @@ impl RdsService {
             )
         };
         let created_at = Utc::now();
+        let runtime = runtime.clone();
 
-        let running = match runtime
-            .ensure_postgres(
-                &db_instance_identifier,
-                &source_instance.engine,
-                &source_instance.engine_version,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-                &request.account_id,
-                &request.region,
-                // A read replica inherits the source instance's Pod
-                // scheduling (no separate replica tag input here).
-                &source_instance.tags,
-            )
-            .await
-        {
-            Ok(running) => running,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&db_instance_identifier);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
-
-        if let Err(e) = runtime
-            .restore_database(
-                &db_instance_identifier,
-                &source_instance.engine,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-                &dump_data,
-            )
-            .await
-        {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_instance_creation(&db_instance_identifier);
-            runtime.stop_container(&db_instance_identifier).await;
-            return Err(runtime_error_to_service_error(e));
-        }
-
-        let replica = build_read_replica_instance(
+        // Build a `creating` placeholder replica; the backgrounded container
+        // start (below) fills in the endpoint and flips to `available`,
+        // mirroring CreateDBInstance so the client isn't held for the cold
+        // image pull.
+        let mut replica = build_read_replica_instance(
             &db_instance_identifier,
-            db_instance_arn,
+            db_instance_arn.clone(),
             dbi_resource_id,
             created_at,
             &source_db_instance_identifier,
             &source_instance,
-            &running,
+            &creating_placeholder_container(),
         );
+        replica.db_instance_status = "creating".to_string();
+        replica.endpoint_address = String::new();
+        replica.port = 0;
 
+        // Register the replica against its source synchronously so a concurrent
+        // DescribeDBInstances of the source sees the linkage immediately.
         let source_missing = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
@@ -165,17 +130,22 @@ impl RdsService {
         };
 
         if source_missing {
-            runtime.stop_container(&db_instance_identifier).await;
             return Err(db_instance_not_found(&source_db_instance_identifier));
         }
 
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &db_instance_identifier,
-            &replica.db_instance_arn,
-            "RDS-EVENT-0005",
-            &["creation", "read replica"],
-            "Read replica DB instance created",
+        self.spawn_finalize_restored_instance(
+            runtime,
+            request.account_id.clone(),
+            request.region.clone(),
+            db_instance_identifier.clone(),
+            db_instance_arn,
+            source_instance.engine.clone(),
+            source_instance.engine_version.clone(),
+            source_instance.master_username.clone(),
+            source_instance.master_user_password.clone(),
+            db_name,
+            Some(dump_data),
+            ("RDS-EVENT-0005", "Read replica DB instance created"),
         );
 
         Ok(AwsResponse::xml(

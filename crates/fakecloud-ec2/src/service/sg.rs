@@ -534,10 +534,69 @@ pub(crate) fn describe_security_group_rules(
 }
 
 pub(crate) fn modify_security_group_rules(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "GroupId")?;
+    let group_id = require(&req.query_params, "GroupId")?;
+    let p = &req.query_params;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let sg = state.security_groups.get_mut(&group_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidGroup.NotFound",
+                format!("The security group '{group_id}' does not exist"),
+            )
+        })?;
+        let mut n = 1usize;
+        loop {
+            let id_key = format!("SecurityGroupRule.{n}.SecurityGroupRuleId");
+            let Some(rule_id) = p.get(&id_key) else { break };
+            let pre = format!("SecurityGroupRule.{n}.SecurityGroupRule");
+            if let Some(rule) = sg.rules.iter_mut().find(|r| &r.rule_id == rule_id) {
+                if let Some(v) = p.get(&format!("{pre}.IpProtocol")) {
+                    rule.ip_protocol = v.clone();
+                }
+                if let Some(v) = p.get(&format!("{pre}.FromPort")).and_then(|v| v.parse().ok()) {
+                    rule.from_port = v;
+                }
+                if let Some(v) = p.get(&format!("{pre}.ToPort")).and_then(|v| v.parse().ok()) {
+                    rule.to_port = v;
+                }
+                if let Some(v) = p.get(&format!("{pre}.CidrIpv4")) {
+                    rule.cidr_ipv4 = Some(v.clone());
+                    rule.cidr_ipv6 = None;
+                    rule.prefix_list_id = None;
+                    rule.referenced_group_id = None;
+                }
+                if let Some(v) = p.get(&format!("{pre}.CidrIpv6")) {
+                    rule.cidr_ipv6 = Some(v.clone());
+                    rule.cidr_ipv4 = None;
+                    rule.prefix_list_id = None;
+                    rule.referenced_group_id = None;
+                }
+                if let Some(v) = p.get(&format!("{pre}.PrefixListId")) {
+                    rule.prefix_list_id = Some(v.clone());
+                    rule.cidr_ipv4 = None;
+                    rule.cidr_ipv6 = None;
+                    rule.referenced_group_id = None;
+                }
+                if let Some(v) = p.get(&format!("{pre}.ReferencedGroupId")) {
+                    rule.referenced_group_id = Some(v.clone());
+                    rule.cidr_ipv4 = None;
+                    rule.cidr_ipv6 = None;
+                    rule.prefix_list_id = None;
+                }
+                if let Some(v) = p.get(&format!("{pre}.Description")) {
+                    rule.description = v.clone();
+                }
+            }
+            n += 1;
+        }
+    }
+    // Rule changes alter allowed traffic — re-apply the firewall (ph3).
+    svc.spawn_firewall_reconcile();
     Ok(Ec2Service::respond(
         "ModifySecurityGroupRules",
         &req.request_id,
@@ -545,26 +604,87 @@ pub(crate) fn modify_security_group_rules(
     ))
 }
 
+/// Match existing rules by protocol/port/CIDR and overwrite their descriptions.
+/// Shared by the ingress and egress `UpdateSecurityGroupRuleDescriptions*` ops.
+fn update_rule_descriptions(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+    action: &str,
+    is_egress: bool,
+) -> Result<AwsResponse, AwsServiceError> {
+    let group_id = require(&req.query_params, "GroupId")?;
+    let p = &req.query_params;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(sg) = state.security_groups.get_mut(&group_id) {
+            let mut n = 1usize;
+            loop {
+                let proto_key = format!("IpPermissions.{n}.IpProtocol");
+                if !p.contains_key(&proto_key) {
+                    break;
+                }
+                let proto = p.get(&proto_key).cloned().unwrap_or_else(|| "-1".into());
+                let from = p
+                    .get(&format!("IpPermissions.{n}.FromPort"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(-1);
+                let to = p
+                    .get(&format!("IpPermissions.{n}.ToPort"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(-1);
+                let mut m = 1usize;
+                loop {
+                    let cidr_key = format!("IpPermissions.{n}.IpRanges.{m}.CidrIp");
+                    let cidr6_key = format!("IpPermissions.{n}.Ipv6Ranges.{m}.CidrIpv6");
+                    let (cidr4, cidr6) = (p.get(&cidr_key), p.get(&cidr6_key));
+                    if cidr4.is_none() && cidr6.is_none() {
+                        break;
+                    }
+                    let desc = p
+                        .get(&format!("IpPermissions.{n}.IpRanges.{m}.Description"))
+                        .or_else(|| {
+                            p.get(&format!("IpPermissions.{n}.Ipv6Ranges.{m}.Description"))
+                        })
+                        .cloned()
+                        .unwrap_or_default();
+                    for rule in sg.rules.iter_mut().filter(|r| {
+                        r.is_egress == is_egress
+                            && r.ip_protocol == proto
+                            && r.from_port == from
+                            && r.to_port == to
+                            && ((cidr4.is_some() && r.cidr_ipv4.as_deref() == cidr4.map(|s| s.as_str()))
+                                || (cidr6.is_some()
+                                    && r.cidr_ipv6.as_deref() == cidr6.map(|s| s.as_str())))
+                    }) {
+                        rule.description = desc.clone();
+                    }
+                    m += 1;
+                }
+                n += 1;
+            }
+        }
+    }
+    Ok(Ec2Service::respond(action, &req.request_id, &ec2_return(true)))
+}
+
 pub(crate) fn update_rule_descriptions_ingress(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    Ok(Ec2Service::respond(
+    update_rule_descriptions(
+        svc,
+        req,
         "UpdateSecurityGroupRuleDescriptionsIngress",
-        &req.request_id,
-        &ec2_return(true),
-    ))
+        false,
+    )
 }
 
 pub(crate) fn update_rule_descriptions_egress(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    Ok(Ec2Service::respond(
-        "UpdateSecurityGroupRuleDescriptionsEgress",
-        &req.request_id,
-        &ec2_return(true),
-    ))
+    update_rule_descriptions(svc, req, "UpdateSecurityGroupRuleDescriptionsEgress", true)
 }
 
 pub(crate) fn associate_security_group_vpc(
@@ -664,4 +784,119 @@ pub(crate) fn describe_security_group_references(
         &req.request_id,
         &ec2_list("securityGroupReferenceSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod modify_tests {
+    use super::*;
+
+    fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn seed_group(svc: &Ec2Service, rule: SecurityGroupRule) -> String {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        state.security_groups.insert(
+            "sg-1".to_string(),
+            SecurityGroup {
+                group_id: "sg-1".into(),
+                group_name: "g".into(),
+                description: "d".into(),
+                vpc_id: "vpc-1".into(),
+                rules: vec![rule],
+            },
+        );
+        "sg-1".to_string()
+    }
+
+    fn base_rule() -> SecurityGroupRule {
+        SecurityGroupRule {
+            rule_id: "sgr-1".into(),
+            group_id: "sg-1".into(),
+            is_egress: false,
+            ip_protocol: "tcp".into(),
+            from_port: 22,
+            to_port: 22,
+            cidr_ipv4: Some("10.0.0.0/8".into()),
+            cidr_ipv6: None,
+            prefix_list_id: None,
+            referenced_group_id: None,
+            description: "old".into(),
+        }
+    }
+
+    #[test]
+    fn modify_security_group_rules_updates_rule() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        modify_security_group_rules(
+            &svc,
+            &req(
+                "ModifySecurityGroupRules",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("SecurityGroupRule.1.SecurityGroupRuleId", "sgr-1"),
+                    ("SecurityGroupRule.1.SecurityGroupRule.IpProtocol", "tcp"),
+                    ("SecurityGroupRule.1.SecurityGroupRule.FromPort", "443"),
+                    ("SecurityGroupRule.1.SecurityGroupRule.ToPort", "443"),
+                    ("SecurityGroupRule.1.SecurityGroupRule.CidrIpv4", "0.0.0.0/0"),
+                    ("SecurityGroupRule.1.SecurityGroupRule.Description", "https"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let r = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules[0];
+        assert_eq!(r.from_port, 443);
+        assert_eq!(r.to_port, 443);
+        assert_eq!(r.cidr_ipv4.as_deref(), Some("0.0.0.0/0"));
+        assert_eq!(r.description, "https");
+    }
+
+    #[test]
+    fn update_rule_descriptions_sets_description_by_match() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        update_rule_descriptions_ingress(
+            &svc,
+            &req(
+                "UpdateSecurityGroupRuleDescriptionsIngress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "22"),
+                    ("IpPermissions.1.ToPort", "22"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/8"),
+                    ("IpPermissions.1.IpRanges.1.Description", "ssh from vpc"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let r = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules[0];
+        assert_eq!(r.description, "ssh from vpc");
+    }
 }

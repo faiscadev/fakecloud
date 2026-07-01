@@ -768,6 +768,123 @@ impl RdsService {
         })
     }
 
+    /// Background the container start + optional data-replay for a
+    /// restore/replica op. The caller inserts a `creating` placeholder row and
+    /// returns immediately; this spawns `ensure_postgres` (which can pull a cold
+    /// image and wait minutes for engine readiness, far past the ~60s client
+    /// read timeout) and, when `dump` is present, replays it before flipping the
+    /// row to `available`. Mirrors `create_db_instance`'s backgrounding so
+    /// restore/replica no longer time the client out (bug-hunt 2026-07-01,
+    /// Tier-0). On failure the placeholder row is removed and any orphaned
+    /// container reaped.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_finalize_restored_instance(
+        &self,
+        runtime: Arc<RdsRuntime>,
+        account_id: String,
+        region: String,
+        id: String,
+        arn: String,
+        engine: String,
+        engine_version: String,
+        master_username: String,
+        master_user_password: String,
+        logical_db: String,
+        dump: Option<Vec<u8>>,
+        created_event: (&'static str, &'static str),
+    ) {
+        let state_handle = self.state.clone();
+        let delivery_bus = self.delivery_bus.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        let (event_id, event_message) = created_event;
+        tokio::spawn(async move {
+            let running = match runtime
+                .ensure_postgres(
+                    &id,
+                    &engine,
+                    &engine_version,
+                    &master_username,
+                    &master_user_password,
+                    &logical_db,
+                    &account_id,
+                    &region,
+                    &[],
+                )
+                .await
+            {
+                Ok(running) => running,
+                Err(error) => {
+                    tracing::error!(%error, db_instance_identifier=%id, "restore/replica background start failed");
+                    {
+                        let mut accounts = state_handle.write();
+                        accounts.get_or_create(&account_id).instances.remove(&id);
+                    }
+                    save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+                    emit_event_static(
+                        delivery_bus.as_ref(),
+                        RdsSourceType::DbInstance,
+                        &id,
+                        &arn,
+                        "RDS-EVENT-0058",
+                        &["failure"],
+                        &format!("DB instance failed to create: {error}"),
+                    );
+                    return;
+                }
+            };
+
+            if let Some(dump) = dump {
+                if let Err(error) = runtime
+                    .restore_database(
+                        &id,
+                        &engine,
+                        &master_username,
+                        &master_user_password,
+                        &logical_db,
+                        &dump,
+                    )
+                    .await
+                {
+                    tracing::error!(%error, db_instance_identifier=%id, "restore data replay failed");
+                }
+            }
+
+            let instance_present = {
+                let mut accounts = state_handle.write();
+                let state = accounts.get_or_create(&account_id);
+                if let Some(inst) = state.instances.get_mut(&id) {
+                    inst.db_instance_status = "available".to_string();
+                    inst.endpoint_address = running.endpoint_address.clone();
+                    inst.port = i32::from(running.endpoint_port);
+                    inst.host_port = running.host_port;
+                    inst.container_id = running.container_id.clone();
+                    true
+                } else {
+                    false
+                }
+            };
+            if !instance_present {
+                // Deleted while creating: reap the orphaned backing container.
+                runtime.stop_container(&id).await;
+                save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+                return;
+            }
+            emit_event_static_with_state(
+                delivery_bus.as_ref(),
+                Some(&state_handle),
+                Some(&account_id),
+                RdsSourceType::DbInstance,
+                &id,
+                &arn,
+                event_id,
+                &["creation"],
+                event_message,
+            );
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+        });
+    }
+
     /// Build a hook that persists the current state when invoked, or `None` in
     /// memory mode. The CloudFormation provisioner mutates `state` directly and
     /// uses this to write a CFN-provisioned resource through to disk.
