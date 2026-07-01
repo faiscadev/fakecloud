@@ -6521,6 +6521,50 @@ mod tests {
     }
 
     #[test]
+    fn update_stack_replaces_pipe_on_source_change() {
+        // Source is replacement-required on AWS::Pipes::Pipe: a changed Source
+        // must actually take effect (via delete+recreate), not be silently
+        // dropped by an in-place update that only touches the mutable fields.
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                serde_json::json!({
+                    "Name": "src-pipe",
+                    "Source": "arn:aws:sqs:us-east-1:123456789012:src-old",
+                    "Target": "arn:aws:sqs:us-east-1:123456789012:dst",
+                    "RoleArn": "arn:aws:iam::123456789012:role/pipe",
+                }),
+            ))
+            .expect("pipe provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                serde_json::json!({
+                    "Name": "src-pipe",
+                    "Source": "arn:aws:sqs:us-east-1:123456789012:src-new",
+                    "Target": "arn:aws:sqs:us-east-1:123456789012:dst",
+                    "RoleArn": "arn:aws:iam::123456789012:role/pipe",
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("Pipes::Pipe is updatable");
+        let pipes = prov.pipes_state.read();
+        let acct = pipes.get("123456789012").unwrap();
+        // Exactly one pipe (the recreate reused the same Name after deleting).
+        assert_eq!(acct.pipes.len(), 1);
+        let pipe = acct.pipes.get("src-pipe").unwrap();
+        assert_eq!(
+            pipe["Source"], "arn:aws:sqs:us-east-1:123456789012:src-new",
+            "changed Source is applied via replacement, not silently dropped"
+        );
+    }
+
+    #[test]
     fn update_stack_clears_omitted_pipe_field() {
         let prov = make_provisioner();
         let created = prov

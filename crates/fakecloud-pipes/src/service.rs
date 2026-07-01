@@ -455,35 +455,6 @@ impl PipesService {
         true
     }
 
-    /// Reject a mutating lifecycle op (Update/Start/Stop) while the pipe is
-    /// mid-transition. AWS returns `ConflictException` for these until the pipe
-    /// settles, so a racing Update/Start/Stop can't resurrect a `DELETING` pipe
-    /// (settling it back to `RUNNING`) or clobber an in-flight `CREATING`/
-    /// `UPDATING`/`STARTING`/`STOPPING` one. Settles an overdue pipe first, so a
-    /// pipe that has already finished its transition — but whose background
-    /// settle task hasn't fired yet — is not wrongly rejected. A pipe that no
-    /// longer exists (a completed delete) passes through here and is handled as
-    /// a NotFound by the caller.
-    fn ensure_not_transient(&self, account_id: &str, name: &str) -> Result<(), AwsServiceError> {
-        self.settle_if_overdue(account_id, name);
-        let accounts = self.state.read();
-        if let Some(pipe) = accounts.get(account_id).and_then(|st| st.pipes.get(name)) {
-            let cur = pipe
-                .get("CurrentState")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if is_transient_state(cur) {
-                return Err(conflict_error(
-                    format!(
-                        "Pipe '{name}' is in state {cur} and cannot be modified until it stabilizes."
-                    ),
-                    name,
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn list_pipes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let q = &req.query_params;
         let name_prefix = q.get("NamePrefix").map(String::as_str);
@@ -596,16 +567,12 @@ impl PipesService {
 
     fn update_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
-        self.ensure_not_transient(&req.account_id, &name)?;
+        // Advance an overdue transient pipe first (its own lock) so a pipe that
+        // already finished its transition isn't wrongly rejected; the
+        // authoritative, race-free transient check runs under the write lock
+        // below, in the same critical section as the mutation.
+        self.settle_if_overdue(&req.account_id, &name);
         let body = req.json_body();
-        if body
-            .get("RoleArn")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .is_none()
-        {
-            return Err(validation_error("RoleArn is required"));
-        }
         let now = now_epoch_secs();
 
         let response = {
@@ -615,6 +582,20 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // Atomic guard: reject a mutation while the pipe is mid-transition,
+            // holding the write lock so a concurrent DeletePipe/Start/Stop can't
+            // flip the state between this check and the write below.
+            if let Some(err) = transient_conflict(obj, &name) {
+                return Err(err);
+            }
+            if body
+                .get("RoleArn")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
+                return Err(validation_error("RoleArn is required"));
+            }
             // UpdatePipe is a full replace of the updatable fields: a field the
             // client omits is cleared, not left at its previous value. AWS does
             // this (e.g. dropping `TargetParameters.InputTemplate` on a later
@@ -688,7 +669,9 @@ impl PipesService {
         desired: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
-        self.ensure_not_transient(&req.account_id, &name)?;
+        // Settle an overdue transient pipe first; the authoritative transient
+        // check runs under the write lock below, atomically with the mutation.
+        self.settle_if_overdue(&req.account_id, &name);
         let now = now_epoch_secs();
         let response = {
             let mut accounts = self.state.write();
@@ -697,6 +680,11 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // Atomic guard in the same critical section as the mutation: a
+            // concurrent DeletePipe can't flip the state between check and write.
+            if let Some(err) = transient_conflict(obj, &name) {
+                return Err(err);
+            }
             obj.insert("DesiredState".into(), json!(desired));
             obj.insert("CurrentState".into(), json!(transient));
             obj.insert("LastModifiedTime".into(), json!(now));
@@ -1156,6 +1144,26 @@ fn not_found(name: &str) -> AwsServiceError {
     )
 }
 
+/// If a pipe object is mid-transition, produce the `ConflictException` a
+/// mutating lifecycle op (Update/Start/Stop) must return. Callers invoke this
+/// while holding the state write lock, in the same critical section as the
+/// mutation, so a concurrent Delete/Start/Stop can't flip the state between the
+/// check and the write.
+fn transient_conflict(obj: &Map<String, Value>, name: &str) -> Option<AwsServiceError> {
+    let cur = obj
+        .get("CurrentState")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if is_transient_state(cur) {
+        Some(conflict_error(
+            format!("Pipe '{name}' is in state {cur} and cannot be modified until it stabilizes."),
+            name,
+        ))
+    } else {
+        None
+    }
+}
+
 fn conflict_error(msg: impl Into<String>, resource_id: &str) -> AwsServiceError {
     AwsServiceError::aws_error_with_fields(
         StatusCode::CONFLICT,
@@ -1371,18 +1379,52 @@ mod tests {
     }
 
     #[test]
-    fn ensure_not_transient_allows_settled_pipe() {
-        // A RUNNING pipe is modifiable, so the guard passes cleanly.
-        let (svc, _state) = service_with_pipe(STATE_RUNNING, STATE_RUNNING, 0.0);
-        assert!(svc.ensure_not_transient("123456789012", "p1").is_ok());
+    fn transient_conflict_flags_only_transient_states() {
+        // The in-lock guard treats settled states as modifiable and every
+        // transient state as a ConflictException.
+        let mut obj = Map::new();
+        obj.insert("CurrentState".into(), json!(STATE_RUNNING));
+        assert!(transient_conflict(&obj, "p1").is_none());
+        obj.insert("CurrentState".into(), json!(STATE_STOPPED));
+        assert!(transient_conflict(&obj, "p1").is_none());
+        for st in [
+            STATE_CREATING,
+            STATE_UPDATING,
+            STATE_STARTING,
+            STATE_STOPPING,
+            STATE_DELETING,
+        ] {
+            obj.insert("CurrentState".into(), json!(st));
+            assert_eq!(
+                transient_conflict(&obj, "p1").unwrap().code(),
+                "ConflictException",
+                "{st} must conflict"
+            );
+        }
     }
 
     #[test]
-    fn ensure_not_transient_settles_overdue_deleting_then_allows() {
-        // An overdue DELETING pipe is settled (removed) before the guard checks,
-        // so a following op sees NotFound rather than a spurious Conflict.
+    fn update_allows_settled_pipe_past_the_guard() {
+        // A RUNNING pipe passes the transient guard: UpdatePipe then fails on the
+        // missing RoleArn (ValidationException), proving it was NOT a Conflict.
+        let (svc, _state) = service_with_pipe(STATE_RUNNING, STATE_RUNNING, 0.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[test]
+    fn update_settles_overdue_deleting_then_reports_not_found() {
+        // An overdue DELETING pipe is settled (removed) before the write-lock
+        // guard runs, so UpdatePipe sees NotFound rather than a spurious Conflict.
         let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
-        assert!(svc.ensure_not_transient("123456789012", "p1").is_ok());
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe on a removed pipe must error");
+        };
+        assert_eq!(err.code(), "NotFoundException");
         assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
     }
 

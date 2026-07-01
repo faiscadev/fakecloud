@@ -155,6 +155,13 @@ impl ResourceProvisioner {
     /// generic `update_resource` dispatcher returns `Ok(None)` for
     /// `AWS::Pipes::Pipe`, so CloudFormation reports `UPDATE_COMPLETE` while
     /// silently discarding the property change.
+    ///
+    /// `Source` is replacement-required on `AWS::Pipes::Pipe` (the CFN resource
+    /// schema marks Source create-only: "Update requires: Replacement"). A
+    /// changed Source therefore cannot be applied in place — doing so would leave
+    /// the pipe reading from the old source while reporting success. When Source
+    /// changes we perform a replacement (delete the old record + recreate from
+    /// the new properties) so the new Source actually takes effect.
     pub(super) fn update_pipes_pipe(
         &self,
         existing: &super::StackResource,
@@ -165,9 +172,26 @@ impl ResourceProvisioner {
         let name = existing.physical_id.clone();
         let now = epoch_secs();
 
+        // Replacement-required Source change: recreate instead of in-place update.
+        let old_source = self
+            .pipes_state
+            .read()
+            .get(&self.account_id)
+            .and_then(|st| st.pipes.get(&name))
+            .and_then(|p| p.get("Source").and_then(Value::as_str).map(String::from));
+        let new_source = props.get("Source").and_then(Value::as_str);
+        if let (Some(old), Some(new)) = (old_source.as_deref(), new_source) {
+            if new != old {
+                // Drop the old record so the recreate's same-name conflict check
+                // passes, then rebuild the pipe from scratch with the new Source.
+                self.delete_pipes_pipe(&name);
+                return self.create_pipes_pipe(resource);
+            }
+        }
+
         // Target/RoleArn stay required and non-empty on update; Source is
-        // immutable so it is not re-validated here. Called for validation only —
-        // the applied value flows through PIPE_UPDATE_FIELDS below.
+        // unchanged here (a change took the replacement path above). Called for
+        // validation only — the applied value flows through PIPE_UPDATE_FIELDS.
         require_arn_field(props, "Target")?;
         require_arn_field(props, "RoleArn")?;
 

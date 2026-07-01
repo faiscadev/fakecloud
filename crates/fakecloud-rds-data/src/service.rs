@@ -1,6 +1,7 @@
 //! RDS Data API (`rds-data`) restJson1 dispatch + real SQL execution.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
@@ -59,6 +60,12 @@ struct TxnEntry {
     /// `None` once the transaction has been committed/rolled-back or reaped.
     conn: Mutex<Option<HeldConn>>,
     last_used: StdMutex<Instant>,
+    /// Number of statements currently executing against this transaction. Bumped
+    /// while the transactions-map lock is held (so the reaper, which samples
+    /// under the same lock, can never see a live in-flight transaction as
+    /// reapable) and cleared when the statement finishes. A transaction is only
+    /// reapable when this is zero.
+    in_flight: AtomicU64,
 }
 
 impl TxnEntry {
@@ -76,6 +83,40 @@ impl TxnEntry {
             .lock()
             .map(|t| now.duration_since(*t) > TXN_IDLE_TIMEOUT)
             .unwrap_or(false)
+    }
+
+    /// May the reaper roll this transaction back? Only when no statement is
+    /// in-flight *and* it has been idle past the timeout. The `in_flight` check
+    /// closes the window where a statement has taken a reference to the entry but
+    /// has not yet refreshed `last_used`.
+    fn is_reapable(&self, now: Instant) -> bool {
+        self.in_flight.load(Ordering::SeqCst) == 0 && self.is_stale(now)
+    }
+}
+
+/// RAII marker that keeps a transaction pinned against the idle reaper for the
+/// duration of a statement. Incremented under the transactions-map lock in
+/// [`RdsDataService::acquire_txn`]; on drop it refreshes the idle clock and then
+/// releases the pin, so the moment the pin is gone `last_used` is already fresh.
+struct InFlightGuard {
+    entry: Arc<TxnEntry>,
+}
+
+impl InFlightGuard {
+    fn pin(entry: Arc<TxnEntry>) -> Self {
+        entry.in_flight.fetch_add(1, Ordering::SeqCst);
+        entry.touch();
+        Self { entry }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        // Refresh the idle clock *before* dropping the pin: once `in_flight`
+        // reaches zero the reaper may observe the entry, and it must then see an
+        // up-to-date `last_used` rather than the stale pre-statement value.
+        self.entry.touch();
+        self.entry.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -207,11 +248,11 @@ impl RdsDataService {
             // Validate the resource still resolves (AWS still checks it), but the
             // actual execution rides the held connection.
             self.require_conn(req, &body)?;
-            let entry = self.txn_entry(txid).await?;
-            entry.touch();
+            let pin = self.acquire_txn(txid).await?;
             // Lock only this transaction's connection, not the whole map, so a
-            // slow statement here can't block other transactions.
-            let mut guard = entry.conn.lock().await;
+            // slow statement here can't block other transactions. The pin keeps
+            // the reaper off this transaction for the whole statement.
+            let mut guard = pin.entry.conn.lock().await;
             let held = guard.as_mut().ok_or_else(|| not_found_txn(txid))?;
             let value = match held {
                 HeldConn::Pg(client) => {
@@ -267,20 +308,22 @@ impl RdsDataService {
         let entry = Arc::new(TxnEntry {
             conn: Mutex::new(Some(held)),
             last_used: StdMutex::new(Instant::now()),
+            in_flight: AtomicU64::new(0),
         });
         self.transactions.lock().await.insert(txid.clone(), entry);
         Ok(AwsResponse::ok_json(json!({ "transactionId": txid })))
     }
 
-    /// Look up an open transaction's entry, cloning the `Arc` so the map lock is
-    /// released before the caller locks the connection itself.
-    async fn txn_entry(&self, txid: &str) -> Result<Arc<TxnEntry>, AwsServiceError> {
-        self.transactions
-            .lock()
-            .await
-            .get(txid)
-            .cloned()
-            .ok_or_else(|| not_found_txn(txid))
+    /// Look up an open transaction and pin it against the idle reaper for the
+    /// duration of a statement. The `in_flight` bump happens while the
+    /// transactions-map lock is still held, so the reaper (which samples under
+    /// that same lock) can never observe this transaction as reapable between the
+    /// lookup and the pin — closing the clone-then-touch race. The returned guard
+    /// refreshes `last_used` and releases the pin on drop.
+    async fn acquire_txn(&self, txid: &str) -> Result<InFlightGuard, AwsServiceError> {
+        let map = self.transactions.lock().await;
+        let entry = map.get(txid).cloned().ok_or_else(|| not_found_txn(txid))?;
+        Ok(InFlightGuard::pin(entry))
     }
 
     /// Shared body for Commit/Rollback: pull the held connection out of the map
@@ -329,9 +372,8 @@ impl RdsDataService {
         // transaction when `transactionId` is given.
         if let Some(txid) = body.get("transactionId").and_then(Value::as_str) {
             self.require_conn(req, &body)?;
-            let entry = self.txn_entry(txid).await?;
-            entry.touch();
-            let mut guard = entry.conn.lock().await;
+            let pin = self.acquire_txn(txid).await?;
+            let mut guard = pin.entry.conn.lock().await;
             let held = guard.as_mut().ok_or_else(|| not_found_txn(txid))?;
             let mut results = Vec::with_capacity(sets.len().max(1));
             match held {
@@ -486,23 +528,24 @@ async fn reap_idle_transactions(transactions: TxnMap) {
 async fn collect_stale(transactions: &TxnMap, now: Instant) -> Vec<(String, Arc<TxnEntry>)> {
     let map = transactions.lock().await;
     map.iter()
-        .filter(|(_, e)| e.is_stale(now))
+        .filter(|(_, e)| e.is_reapable(now))
         .map(|(id, e)| (id.clone(), e.clone()))
         .collect()
 }
 
-/// Roll back and release each sampled-stale transaction — but only after
-/// re-verifying, under the map lock, that it is *still* idle and still the same
-/// entry. Without this recheck a statement that reactivated the transaction
-/// between the sample and the removal (`touch()` on an in-flight
-/// `ExecuteStatement`) would have its live connection rolled back out from under
-/// it — a TOCTOU that silently corrupts an active transaction.
+/// Roll back and release each sampled transaction — but only after re-verifying,
+/// under the map lock, that it is *still* reapable and still the same entry.
+/// `is_reapable` rejects a transaction that a statement has pinned in-flight
+/// since the sample (the statement bumps `in_flight` under this same lock, so
+/// there is no window where a live statement's transaction looks idle), and the
+/// `ptr_eq` guard rejects one that was removed and replaced by a new
+/// BeginTransaction reusing the id.
 async fn reap_stale(transactions: &TxnMap, stale: Vec<(String, Arc<TxnEntry>)>) {
     for (id, entry) in stale {
         let mut map = transactions.lock().await;
-        let still_stale =
-            entry.is_stale(Instant::now()) && map.get(&id).is_some_and(|e| Arc::ptr_eq(e, &entry));
-        if !still_stale {
+        let still_reapable = entry.is_reapable(Instant::now())
+            && map.get(&id).is_some_and(|e| Arc::ptr_eq(e, &entry));
+        if !still_reapable {
             continue;
         }
         map.remove(&id);
@@ -1208,6 +1251,7 @@ mod tests {
         Arc::new(TxnEntry {
             conn: Mutex::new(None),
             last_used: StdMutex::new(last_used),
+            in_flight: AtomicU64::new(0),
         })
     }
 
@@ -1225,6 +1269,30 @@ mod tests {
         assert!(
             transactions.lock().await.is_empty(),
             "a genuinely idle transaction is reaped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaper_spares_transaction_with_in_flight_statement() {
+        // Reproduces the Cubic P1 race: a statement has taken a reference to the
+        // entry (pin) but has NOT yet refreshed last_used (it is a slow query
+        // still running). Even though last_used is stale, the in-flight pin must
+        // keep the reaper from rolling the live transaction back.
+        let transactions: TxnMap = Arc::new(Mutex::new(HashMap::new()));
+        let base = Instant::now();
+        let entry = idle_entry(base);
+        transactions
+            .lock()
+            .await
+            .insert("tx1".to_string(), entry.clone());
+        tokio::time::advance(TXN_IDLE_TIMEOUT + Duration::from_secs(1)).await;
+        // A statement is now in-flight: pinned, but last_used still points at the
+        // pre-statement (stale) instant.
+        entry.in_flight.fetch_add(1, Ordering::SeqCst);
+        reap_once(&transactions).await;
+        assert!(
+            transactions.lock().await.contains_key("tx1"),
+            "a transaction with an in-flight statement is not reaped despite a stale last_used"
         );
     }
 
