@@ -568,23 +568,14 @@ impl PipesService {
     fn update_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
         let body = req.json_body();
-        // Validate the request body at the VERY START, before any state is read
-        // or mutated — including before `settle_if_overdue`, which can settle or
-        // even remove an overdue transient pipe. A rejected UpdatePipe must leave
-        // state completely untouched for both fresh and overdue pipes.
-        if body
-            .get("RoleArn")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .is_none()
-        {
+        // Validate the request body first, before any state is read or mutated.
+        // The overdue lazy-settle for this op runs in the async `handle` wrapper
+        // (so its persist can be awaited even when this dispatch then errors),
+        // and the wrapper gates that settle on the same validity check — so an
+        // invalid UpdatePipe never settles/removes a pipe.
+        if !has_valid_role_arn(&body) {
             return Err(validation_error("RoleArn is required"));
         }
-        // Advance an overdue transient pipe (its own lock) so a pipe that already
-        // finished its transition isn't wrongly rejected; the authoritative,
-        // race-free transient check runs under the write lock below, in the same
-        // critical section as the mutation.
-        self.settle_if_overdue(&req.account_id, &name);
         let now = now_epoch_secs();
 
         let response = {
@@ -680,9 +671,10 @@ impl PipesService {
         desired: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
-        // Settle an overdue transient pipe first; the authoritative transient
-        // check runs under the write lock below, atomically with the mutation.
-        self.settle_if_overdue(&req.account_id, &name);
+        // The overdue lazy-settle for Start/Stop runs in the async `handle`
+        // wrapper (so a removed overdue-DELETING pipe is persisted before this
+        // dispatch returns NotFound). The authoritative transient check runs
+        // under the write lock below, atomically with the mutation.
         let now = now_epoch_secs();
         let response = {
             let mut accounts = self.state.write();
@@ -823,13 +815,24 @@ impl AwsService for PipesService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
-        // DescribePipe lazily settles an overdue transient pipe (converging the
-        // provider's delete/create waiter on its own poll). When that settle
-        // removes a DELETING pipe we must persist BEFORE returning, so a restart
-        // right after the waiter observes deletion doesn't resurrect the pipe
-        // (and its stale checkpoints). Done here in the async path so the flush
-        // is awaited, not fire-and-forget (Cubic P2 on #2058).
-        if action == "DescribePipe" {
+        // Lazily settle an overdue transient pipe for the ops that depend on
+        // lifecycle convergence, and persist the settle here — BEFORE dispatch —
+        // so the flush is awaited, not fire-and-forget (the #2058 DescribePipe
+        // fix). This also covers the case where the settle *removes* an overdue
+        // DELETING pipe and the subsequent dispatch then returns NotFound: doing
+        // the settle+persist in this wrapper means the removal reaches disk even
+        // though the dispatch errors, so a restart can't resurrect the pipe (and
+        // its stale checkpoints).
+        //
+        // For UpdatePipe the settle is gated on a valid request body, so an
+        // invalid update never settles or removes a pipe (leaves state
+        // untouched); Start/Stop/Describe have no such body validation.
+        let settle_before_dispatch = match action {
+            "DescribePipe" | "StartPipe" | "StopPipe" => true,
+            "UpdatePipe" => has_valid_role_arn(&req.json_body()),
+            _ => false,
+        };
+        if settle_before_dispatch {
             if let Ok(name) = pipe_name_from_path(&req) {
                 if self.settle_if_overdue(&req.account_id, &name) {
                     self.save_snapshot().await;
@@ -1202,6 +1205,16 @@ fn not_found(name: &str) -> AwsServiceError {
         "NotFoundException",
         format!("Pipe {name} does not exist."),
     )
+}
+
+/// Does the UpdatePipe request body carry a non-empty `RoleArn` (the one
+/// required field)? Used both to reject an invalid UpdatePipe and to gate the
+/// pre-dispatch overdue settle in `handle`, so an invalid update never mutates
+/// state.
+fn has_valid_role_arn(body: &Value) -> bool {
+    body.get("RoleArn")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// If a pipe object is mid-transition, produce the `ConflictException` a
@@ -1588,18 +1601,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_settles_overdue_deleting_then_reports_not_found() {
-        // An overdue DELETING pipe is settled (removed) before the write-lock
-        // guard runs, so UpdatePipe sees NotFound rather than a spurious Conflict.
-        // A valid RoleArn ensures request validation passes and the lookup runs.
+    #[tokio::test]
+    async fn update_settles_overdue_deleting_then_reports_not_found() {
+        // Through the full `handle` path: an overdue DELETING pipe is settled
+        // (removed) by the pre-dispatch wrapper, so a valid UpdatePipe sees
+        // NotFound rather than a spurious Conflict, and the pipe is gone.
         let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
-        let req = update_request_with_role();
-        let Err(err) = svc.update_pipe(&req) else {
+        let Err(err) = svc.handle(update_request_with_role()).await else {
             panic!("UpdatePipe on a removed pipe must error");
         };
         assert_eq!(err.code(), "NotFoundException");
         assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
+    }
+
+    /// A test `SnapshotStore` that retains the last saved bytes so a test can
+    /// assert what was persisted (the real `MemorySnapshotStore` is a no-op).
+    #[derive(Default)]
+    struct CapturingStore {
+        saved: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for CapturingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_update_on_overdue_deleting_pipe_persists_removal() {
+        // The resurrection bug: a valid UpdatePipe against an overdue DELETING
+        // pipe removes it in memory, then returns NotFound. That removal must be
+        // flushed to the snapshot store (awaited) so a restart from the snapshot
+        // doesn't bring the deleted pipe back.
+        let (svc, _state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let store = Arc::new(CapturingStore::default());
+        let svc = svc.with_snapshot_store(store.clone());
+
+        let Err(err) = svc.handle(update_request_with_role()).await else {
+            panic!("UpdatePipe on a removed pipe must error");
+        };
+        assert_eq!(err.code(), "NotFoundException");
+
+        // Deserialize the persisted snapshot and assert the pipe is gone.
+        let bytes = store
+            .load()
+            .unwrap()
+            .expect("the settle/removal was flushed to the snapshot store");
+        let snapshot: PipesSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("snapshot carries account state");
+        let still_present = accounts
+            .get("123456789012")
+            .is_some_and(|st| st.pipes.contains_key("p1"));
+        assert!(
+            !still_present,
+            "the removed DELETING pipe must not survive in the snapshot (no resurrection)"
+        );
     }
 
     #[test]
