@@ -573,6 +573,17 @@ impl PipesService {
         // below, in the same critical section as the mutation.
         self.settle_if_overdue(&req.account_id, &name);
         let body = req.json_body();
+        // Validate the request BEFORE touching any state, so a rejected
+        // UpdatePipe leaves the pipe untouched — otherwise force-settling a fresh
+        // transient pipe below would be a side effect of a failed call.
+        if body
+            .get("RoleArn")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            return Err(validation_error("RoleArn is required"));
+        }
         let now = now_epoch_secs();
 
         let response = {
@@ -584,7 +595,9 @@ impl PipesService {
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
             // Stabilize a fresh transient pipe on demand (CREATING/STARTING/
             // STOPPING/UPDATING -> steady state) so Update on a just-created pipe
-            // succeeds like real AWS; DELETING is left for the guard below.
+            // succeeds like real AWS; DELETING is left for the guard below. Runs
+            // only after request validation has passed, so a rejected update
+            // never mutates state.
             settle_transient_obj(obj);
             // Atomic guard: reject a mutation only while the pipe is DELETING
             // (the sole remaining transient state after the settle above),
@@ -592,14 +605,6 @@ impl PipesService {
             // state between this check and the write below.
             if let Some(err) = transient_conflict(obj, &name) {
                 return Err(err);
-            }
-            if body
-                .get("RoleArn")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .is_none()
-            {
-                return Err(validation_error("RoleArn is required"));
             }
             // UpdatePipe is a full replace of the updatable fields: a field the
             // client omits is cleared, not left at its previous value. AWS does
@@ -1395,12 +1400,26 @@ mod tests {
         );
     }
 
+    /// A PUT /v1/pipes/p1 request carrying a valid RoleArn body, so UpdatePipe
+    /// passes request validation and reaches the transient/conflict logic.
+    fn update_request_with_role() -> AwsRequest {
+        let mut req = make_request(Method::PUT, "/v1/pipes/p1");
+        req.body = serde_json::to_vec(&json!({
+            "RoleArn": "arn:aws:iam::123456789012:role/p"
+        }))
+        .unwrap()
+        .into();
+        req
+    }
+
     #[test]
     fn update_rejects_deleting_pipe_with_conflict() {
         // A racing UpdatePipe must not resurrect a fresh DELETING pipe: AWS
-        // returns ConflictException while the pipe is mid-transition.
+        // returns ConflictException while the pipe is mid-transition. The request
+        // carries a valid RoleArn so it reaches the guard rather than failing
+        // request validation first.
         let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 0.0);
-        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let req = update_request_with_role();
         let Err(err) = svc.update_pipe(&req) else {
             panic!("UpdatePipe on a DELETING pipe must be rejected");
         };
@@ -1495,23 +1514,46 @@ mod tests {
     }
 
     #[test]
-    fn update_allows_settled_pipe_past_the_guard() {
-        // A RUNNING pipe passes the transient guard: UpdatePipe then fails on the
-        // missing RoleArn (ValidationException), proving it was NOT a Conflict.
-        let (svc, _state) = service_with_pipe(STATE_RUNNING, STATE_RUNNING, 0.0);
+    fn invalid_update_leaves_fresh_transient_pipe_untouched() {
+        // A missing RoleArn is rejected BEFORE the on-demand settle, so an
+        // invalid UpdatePipe on a fresh CREATING pipe returns ValidationException
+        // without force-settling it (no failed-update side effect).
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
         let req = make_request(Method::PUT, "/v1/pipes/p1");
         let Err(err) = svc.update_pipe(&req) else {
             panic!("UpdatePipe with no RoleArn must error");
         };
         assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING,
+            "a rejected UpdatePipe must not force-settle (state unchanged)"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_allows_settled_pipe() {
+        // A RUNNING pipe with a valid request passes the transient guard and is
+        // updated (CurrentState -> UPDATING), rather than being rejected.
+        let (svc, state) = service_with_pipe(STATE_RUNNING, STATE_RUNNING, 0.0);
+        let req = update_request_with_role();
+        assert!(
+            svc.update_pipe(&req).is_ok(),
+            "UpdatePipe on a RUNNING pipe must succeed"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_UPDATING
+        );
     }
 
     #[test]
     fn update_settles_overdue_deleting_then_reports_not_found() {
         // An overdue DELETING pipe is settled (removed) before the write-lock
         // guard runs, so UpdatePipe sees NotFound rather than a spurious Conflict.
+        // A valid RoleArn ensures request validation passes and the lookup runs.
         let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
-        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let req = update_request_with_role();
         let Err(err) = svc.update_pipe(&req) else {
             panic!("UpdatePipe on a removed pipe must error");
         };
