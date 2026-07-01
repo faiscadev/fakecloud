@@ -94,7 +94,8 @@ fn pointer_of(op: &Value, field: &str) -> Result<Vec<String>, String> {
 
 /// Parse an RFC 6901 JSON Pointer into decoded reference tokens. A non-empty
 /// pointer that does not begin with `/` is malformed (RFC 6901 s3) and is
-/// rejected rather than silently targeting the whole document.
+/// rejected rather than silently targeting the whole document; so is any token
+/// containing a stray `~` not followed by `0` or `1`.
 fn parse_pointer(pointer: &str) -> Result<Vec<String>, String> {
     if pointer.is_empty() {
         return Ok(Vec::new());
@@ -104,11 +105,35 @@ fn parse_pointer(pointer: &str) -> Result<Vec<String>, String> {
             "invalid JSON Pointer '{pointer}': must be empty or begin with '/'"
         ));
     }
-    Ok(pointer
+    pointer
         .split('/')
         .skip(1) // leading empty segment before the first '/'
-        .map(|t| t.replace("~1", "/").replace("~0", "~"))
-        .collect())
+        .map(unescape_token)
+        .collect()
+}
+
+/// Decode a single RFC 6901 reference token: `~1` -> `/`, `~0` -> `~`. A `~`
+/// followed by anything else (or trailing) is an invalid escape.
+fn unescape_token(token: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars();
+    while let Some(c) = chars.next() {
+        if c == '~' {
+            match chars.next() {
+                Some('0') => out.push('~'),
+                Some('1') => out.push('/'),
+                other => {
+                    return Err(format!(
+                        "invalid JSON Pointer escape '~{}'",
+                        other.map(String::from).unwrap_or_default()
+                    ));
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
 
 fn get<'a>(doc: &'a Value, path: &[String]) -> Option<&'a Value> {
@@ -293,5 +318,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(doc["c~d"], 8);
+    }
+
+    #[test]
+    fn invalid_pointer_escape_is_rejected() {
+        // `~` must be followed by `0` or `1`; `~2` (and a trailing `~`) are
+        // invalid escapes and must not mutate the document.
+        let mut doc = json!({"A": 1});
+        assert!(
+            apply_json_patch(&mut doc, &json!([{"op":"add","path":"/A~2B","value":9}])).is_err()
+        );
+        assert!(apply_json_patch(&mut doc, &json!([{"op":"add","path":"/A~","value":9}])).is_err());
+        assert_eq!(doc, json!({"A": 1}));
     }
 }

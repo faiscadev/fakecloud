@@ -496,10 +496,12 @@ impl CloudControlService {
         fingerprint: &str,
     ) -> Option<Result<AwsResponse, AwsServiceError>> {
         let existing = self.find_by_client_token(account_id, token)?;
-        if existing.fingerprint.as_deref() == Some(fingerprint) {
-            Some(Ok(progress_event_response(&existing)))
-        } else {
-            Some(Err(client_token_conflict(token)))
+        match existing.fingerprint.as_deref() {
+            // Legacy record from a snapshot written before fingerprints existed:
+            // replay rather than invent a conflict we can't actually prove.
+            None => Some(Ok(progress_event_response(&existing))),
+            Some(fp) if fp == fingerprint => Some(Ok(progress_event_response(&existing))),
+            Some(_) => Some(Err(client_token_conflict(token))),
         }
     }
 }
@@ -719,18 +721,27 @@ fn validate_max_results(body: &Value) -> Result<(), AwsServiceError> {
 
 /// Slice a full result list by `MaxResults`/`NextToken`. The `NextToken` is an
 /// opaque zero-based offset into the (stably ordered) full list; a continuation
-/// token is returned only when more results remain.
+/// token is returned only when more results remain. A `NextToken` this API
+/// never issued yields an empty terminal page rather than silently restarting
+/// at page one, so a bad token can't loop the caller or replay pages. (The
+/// Smithy model defines no `InvalidRequest` error on a length-valid `NextToken`,
+/// so an empty page keeps this conformant where a 4xx would not.)
 fn paginate(items: Vec<Value>, body: &Value) -> (Vec<Value>, Option<String>) {
     let max = body
         .get("MaxResults")
         .and_then(|v| v.as_i64())
         .map(|n| n as usize)
         .unwrap_or(100);
-    let start = body
-        .get("NextToken")
-        .and_then(|v| v.as_str())
-        .and_then(|t| t.parse::<usize>().ok())
-        .unwrap_or(0);
+    let start = match body.get("NextToken").and_then(|v| v.as_str()) {
+        // Unparseable / never-issued token: treat as past the end so a bad
+        // token yields an empty terminal page instead of restarting page one
+        // (which could loop the caller or replay pages).
+        Some(t) => match t.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => return (Vec::new(), None),
+        },
+        None => 0,
+    };
     let total = items.len();
     if start >= total {
         return (Vec::new(), None);

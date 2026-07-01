@@ -280,6 +280,10 @@ async fn cloudcontrol_list_resources_paginates() {
         .await
         .unwrap();
     assert_eq!(page1.resource_descriptions().len(), 1);
+    let id1 = page1.resource_descriptions()[0]
+        .identifier()
+        .unwrap()
+        .to_string();
     let next = page1
         .next_token()
         .expect("next token when more remain")
@@ -294,4 +298,23 @@ async fn cloudcontrol_list_resources_paginates() {
         .await
         .unwrap();
     assert_eq!(page2.resource_descriptions().len(), 1);
+    let id2 = page2.resource_descriptions()[0]
+        .identifier()
+        .unwrap()
+        .to_string();
+    // Pages are distinct and the final page carries no continuation token.
+    assert_ne!(id1, id2);
+    assert!(page2.next_token().is_none());
+
+    // A NextToken this API never issued yields an empty terminal page (no
+    // continuation token), so it can't loop the caller or replay pages.
+    let bad = client
+        .list_resources()
+        .type_name("AWS::SQS::Queue")
+        .next_token("not-a-real-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(bad.resource_descriptions().is_empty());
+    assert!(bad.next_token().is_none());
 }
