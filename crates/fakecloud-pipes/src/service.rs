@@ -128,7 +128,10 @@ pub fn normalize_empty_input_templates(pipe: &mut Map<String, Value>) {
     // so it reads back as no filter at all. Leave the surrounding
     // SourceParameters block in place — it still carries the source-typed
     // parameter defaults (e.g. SqsQueueParameters).
-    if let Some(sp) = pipe.get_mut("SourceParameters").and_then(Value::as_object_mut) {
+    if let Some(sp) = pipe
+        .get_mut("SourceParameters")
+        .and_then(Value::as_object_mut)
+    {
         let drop_fc = match sp.get("FilterCriteria").and_then(Value::as_object) {
             Some(fc) => fc
                 .get("Filters")
