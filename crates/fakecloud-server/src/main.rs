@@ -452,6 +452,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let cloudcontrol_state: fakecloud_cloudcontrol::SharedCloudControlState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let rds_runtime = if fakecloud_k8s::backend_choice("FAKECLOUD_RDS_BACKEND")
         == fakecloud_k8s::Backend::K8s
     {
@@ -3808,7 +3815,43 @@ async fn main() {
     let cloudformation_service = cloudformation_service
         .with_s3_store(s3_store.clone())
         .with_snapshot_hooks(cfn_snapshot_hooks);
-    registry.register(Arc::new(cloudformation_service));
+    // Keep a concrete handle: Cloud Control API drives the same resource
+    // provisioners one resource at a time via this service.
+    let cloudformation_arc = Arc::new(cloudformation_service);
+    registry.register(cloudformation_arc.clone());
+
+    // Cloud Control API (cloudcontrolapi): uniform CRUD+L over every CFN
+    // resource type, delegating to the CloudFormation provisioner bridge.
+    let cloudcontrol_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("cloudcontrol").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_cloudcontrol::persistence::load_into(&store, &cloudcontrol_state) {
+                Ok(fakecloud_cloudcontrol::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded cloudcontrol persistence snapshot");
+                }
+                Ok(fakecloud_cloudcontrol::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no cloudcontrol persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut cloudcontrol_service = fakecloud_cloudcontrol::CloudControlService::new(
+        cloudformation_arc.clone(),
+        cloudcontrol_state.clone(),
+    );
+    if let Some(store) = cloudcontrol_snapshot_store {
+        cloudcontrol_service = cloudcontrol_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(cloudcontrol_service));
     // Spawn the Scheduler firing loop as a background task. Mirrors
     // EventBridge's delivery bus so every target type Scheduler
     // routes (`:sqs:`, `:sns:`, `:lambda:`, `:states:`, `:events:`)

@@ -279,6 +279,42 @@ pub(crate) fn provision_stack_resources(
 }
 
 /// State references for every service CloudFormation can provision resources in.
+/// The result of a Cloud Control API resource provisioning call: the resource's
+/// primary identifier plus its `GetAtt`-resolvable attributes. Kept free of the
+/// crate-internal `StackResource` type so the `cloudcontrol` crate can consume
+/// it directly.
+#[derive(Debug, Clone)]
+pub struct CloudControlOutcome {
+    pub physical_id: String,
+    pub attributes: BTreeMap<String, String>,
+}
+
+impl CloudControlOutcome {
+    fn from(resource: &StackResource) -> Self {
+        Self {
+            physical_id: resource.physical_id.clone(),
+            attributes: resource.attributes.clone(),
+        }
+    }
+}
+
+/// Rebuild the `StackResource` shape the update/delete handlers expect from the
+/// identity Cloud Control persists between calls.
+fn reconstruct_stack_resource(
+    type_name: &str,
+    physical_id: &str,
+    attributes: &BTreeMap<String, String>,
+) -> StackResource {
+    StackResource {
+        logical_id: "Resource".to_string(),
+        physical_id: physical_id.to_string(),
+        resource_type: type_name.to_string(),
+        status: "CREATE_COMPLETE".to_string(),
+        service_token: None,
+        attributes: attributes.clone(),
+    }
+}
+
 pub struct CloudFormationDeps {
     pub sqs: SharedSqsState,
     pub sns: SharedSnsState,
@@ -783,7 +819,109 @@ impl CloudFormationService {
             account_id: account_id.to_string(),
             region: region.to_string(),
             stack_id: stack_id.to_string(),
+            // CreateStack + changeset/update/delete accept unmodeled types; only
+            // the Cloud Control bridge flips this on to reject them.
+            strict_unknown_types: false,
         }
+    }
+
+    // --- Cloud Control API bridge -----------------------------------------
+    //
+    // Cloud Control API (`cloudcontrolapi`) drives the SAME resource
+    // provisioners CloudFormation uses, one resource at a time, with a
+    // caller-supplied `DesiredState` instead of a template. These methods build
+    // a one-shot provisioner (a synthetic stack id per request), run the
+    // relevant create/update/delete handler, and — crucially — drain the
+    // container-spawn / teardown intents the same way `CreateStack`/`DeleteStack`
+    // do, so a CCAPI-provisioned RDS/EC2/ECS/ElastiCache resource is backed by a
+    // REAL container, not just a metadata record.
+
+    /// Provision a single resource of `type_name` with concrete `properties`
+    /// (Cloud Control `DesiredState`). Returns the physical id + `GetAtt`-style
+    /// attributes on success, or the handler error message.
+    pub fn cloudcontrol_create(
+        &self,
+        type_name: &str,
+        properties: serde_json::Value,
+        account_id: &str,
+        region: &str,
+    ) -> Result<CloudControlOutcome, String> {
+        let stack_id = format!("cloudcontrol-{}", uuid::Uuid::new_v4());
+        let mut provisioner = self.provisioner(&stack_id, account_id, region);
+        // Reject a TypeName fakecloud has no provisioner for, so Cloud Control
+        // never records a resource with no backing service state.
+        provisioner.strict_unknown_types = true;
+        let backing = ContainerBackingHandles::from_provisioner(&provisioner);
+        let spawns = provisioner.pending_container_spawns.clone();
+        let def = template::ResourceDefinition {
+            logical_id: "Resource".to_string(),
+            resource_type: type_name.to_string(),
+            properties,
+        };
+        let resource = provisioner.create_resource(&def)?;
+        // Back any container-backed resource with a real container, off the
+        // request path, exactly as CreateStack does.
+        backing.spawn_container_intents(std::mem::take(&mut *spawns.lock()));
+        Ok(CloudControlOutcome::from(&resource))
+    }
+
+    /// Apply a new desired state to an existing resource. `prior_attributes` is
+    /// what the previous create/update returned; it lets us reconstruct the
+    /// backing `StackResource` the update handlers expect without leaking that
+    /// type across the crate boundary.
+    pub fn cloudcontrol_update(
+        &self,
+        type_name: &str,
+        physical_id: &str,
+        prior_attributes: &BTreeMap<String, String>,
+        new_properties: serde_json::Value,
+        account_id: &str,
+        region: &str,
+    ) -> Result<CloudControlOutcome, String> {
+        let stack_id = format!("cloudcontrol-{}", uuid::Uuid::new_v4());
+        let mut provisioner = self.provisioner(&stack_id, account_id, region);
+        provisioner.strict_unknown_types = true;
+        let existing = reconstruct_stack_resource(type_name, physical_id, prior_attributes);
+        let def = template::ResourceDefinition {
+            logical_id: "Resource".to_string(),
+            resource_type: type_name.to_string(),
+            properties: new_properties,
+        };
+        // `None` means the handler treated the change as a no-op (nothing to
+        // mutate); the resource keeps its prior identity + attributes.
+        match provisioner.update_resource(&existing, &def)? {
+            Some(updated) => Ok(CloudControlOutcome::from(&updated)),
+            None => Ok(CloudControlOutcome::from(&existing)),
+        }
+    }
+
+    /// Delete an existing resource, reaping any real backing container.
+    pub fn cloudcontrol_delete(
+        &self,
+        type_name: &str,
+        physical_id: &str,
+        prior_attributes: &BTreeMap<String, String>,
+        account_id: &str,
+        region: &str,
+    ) -> Result<(), String> {
+        let stack_id = format!("cloudcontrol-{}", uuid::Uuid::new_v4());
+        let provisioner = self.provisioner(&stack_id, account_id, region);
+        let teardowns = provisioner.pending_container_teardowns.clone();
+        let existing = reconstruct_stack_resource(type_name, physical_id, prior_attributes);
+        provisioner.delete_resource(&existing)?;
+        ContainerBackingHandles::from_provisioner(&provisioner)
+            .spawn_teardown_intents(std::mem::take(&mut *teardowns.lock()));
+        Ok(())
+    }
+
+    /// Flush the backing service state a Cloud Control op just mutated to disk,
+    /// using the SAME snapshot hooks `CreateStack`/`ExecuteChangeSet` fire. A
+    /// CCAPI create/update/delete goes straight through the provisioner without
+    /// touching the stack handlers, so without this the provisioned SQS queue
+    /// (etc.) would never be persisted and a restart would leave Cloud Control
+    /// listing a resource whose owning service lost its backing state.
+    pub async fn cloudcontrol_persist_type(&self, type_name: &str) {
+        persist_touched_services(&self.snapshot_hooks, [type_name.to_string()]).await;
     }
 
     /// Build a provisioner for the changeset/update/delete paths, which run

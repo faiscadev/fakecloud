@@ -440,6 +440,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AmazonAthena" => "athena",
         s if s.starts_with("Firehose_") => "firehose",
         "AWSGlue" => "glue",
+        "CloudApiService" => "cloudcontrolapi",
         _ => return None,
     };
 

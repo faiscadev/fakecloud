@@ -79,6 +79,10 @@
         "repo_dir": "dsql",
         "service_name": "dsql"
     },
+    "cloudcontrolapi": {
+        "repo_dir": "cloudcontrol",
+        "service_name": "cloudcontrolapi"
+    },
     "elasticache": {
         "repo_dir": "elasticache",
         "service_name": "elasticache"

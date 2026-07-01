@@ -71,6 +71,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "glue" => Protocol::Json {
             target_prefix: "AWSGlue",
         },
+        "cloudcontrolapi" => Protocol::Json {
+            target_prefix: "CloudApiService",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).
