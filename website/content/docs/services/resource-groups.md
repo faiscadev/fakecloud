@@ -39,9 +39,13 @@ ARNs.
 
 Query-based membership **resolution** (evaluating a tag or CloudFormation-stack
 query against live resources across every service) depends on the cross-service
-tag index that ships with the Resource Groups Tagging API. Until then a
-query-based group resolves to its explicitly associated members; explicit
-`GroupResources` membership is fully real today.
+tag index that ships with the Resource Groups Tagging API. Until that lands, a
+query-based group has **no** computed members and `ListGroupResources` returns
+an empty set for it — query-based groups also reject explicit `GroupResources` /
+`UngroupResources` (matching AWS, since their membership is meant to be derived).
+Explicit membership on **configuration** groups is fully real today: create a
+group with a `Configuration` and `GroupResources` associates ARNs you can list
+back immediately.
 
 ## Example
 

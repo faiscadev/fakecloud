@@ -78,11 +78,24 @@ impl ResourceGroupsState {
         if self.groups.contains_key(name_or_arn) {
             return Some(name_or_arn);
         }
-        // ARN form: arn:aws:resource-groups:region:acct:group/<name>[/<uid>]
-        self.groups
-            .values()
-            .find(|g| g.arn == name_or_arn)
-            .map(|g| g.name.as_str())
+        // Exact stored ARN: arn:aws:resource-groups:region:acct:group/<name>/<uid>
+        if let Some(g) = self.groups.values().find(|g| g.arn == name_or_arn) {
+            return Some(g.name.as_str());
+        }
+        // ARN whose `group/` resource part names an existing group, with or without
+        // the generated id suffix (`group/<name>` or `group/<name>/<uid>`). Match by
+        // the leading name segment so a client-reconstructed ARN still resolves.
+        if let Some(resource) = name_or_arn
+            .starts_with("arn:")
+            .then(|| name_or_arn.split(":group/").nth(1))
+            .flatten()
+        {
+            let group_name = resource.split('/').next().unwrap_or(resource);
+            if let Some((stored, _)) = self.groups.get_key_value(group_name) {
+                return Some(stored.as_str());
+            }
+        }
+        None
     }
 }
 
@@ -129,6 +142,20 @@ mod tests {
             st.resolve_name("arn:aws:resource-groups:us-east-1:123456789012:group/g1/abcd"),
             Some("g1")
         );
+        // Client-reconstructed ARN without the generated id suffix still resolves.
+        assert_eq!(
+            st.resolve_name("arn:aws:resource-groups:us-east-1:123456789012:group/g1"),
+            Some("g1")
+        );
+        // ARN with a different (wrong) id suffix but the right name still resolves.
+        assert_eq!(
+            st.resolve_name("arn:aws:resource-groups:us-west-2:123456789012:group/g1/zzzz"),
+            Some("g1")
+        );
         assert_eq!(st.resolve_name("missing"), None);
+        assert_eq!(
+            st.resolve_name("arn:aws:resource-groups:us-east-1:123456789012:group/missing"),
+            None
+        );
     }
 }

@@ -376,6 +376,11 @@ impl ResourceGroupsService {
             return Err(not_found(&key));
         };
         let group = st.groups.get_mut(&name).unwrap();
+        if group.query.is_some() {
+            return Err(bad_request(
+                "Resources cannot be removed from a resource-query group; membership is computed from its query.",
+            ));
+        }
         for a in &arns {
             group.resources.remove(a);
         }
@@ -589,7 +594,7 @@ impl ResourceGroupsService {
             return Err(not_found(&key));
         };
         let group_arn = st.groups.get(&name).unwrap().arn.clone();
-        let task_arn = tag_sync_task_arn(&req.region, &req.account_id, &name);
+        let task_arn = tag_sync_task_arn(&group_arn);
         let task = TagSyncTask {
             task_arn: task_arn.clone(),
             group_arn: group_arn.clone(),
@@ -964,14 +969,29 @@ fn decode(seg: &str) -> String {
     percent_decode_str(seg).decode_utf8_lossy().into_owned()
 }
 
-fn group_arn(region: &str, account: &str, name: &str) -> String {
-    let uid = uuid::Uuid::new_v4().simple().to_string();
-    format!("arn:aws:resource-groups:{region}:{account}:group/{name}/{uid}")
+/// A 26-char lowercase-alphanumeric id, matching AWS's group/tag-sync-task id
+/// shape (`[a-z0-9]{26}`).
+fn short_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = uuid::Uuid::new_v4().into_bytes().to_vec();
+    bytes.extend_from_slice(&uuid::Uuid::new_v4().into_bytes()[..10]);
+    bytes[..26]
+        .iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect()
 }
 
-fn tag_sync_task_arn(region: &str, account: &str, name: &str) -> String {
-    let uid = uuid::Uuid::new_v4().simple().to_string();
-    format!("arn:aws:resource-groups:{region}:{account}:group/{name}/{uid}")
+fn group_arn(region: &str, account: &str, name: &str) -> String {
+    format!(
+        "arn:aws:resource-groups:{region}:{account}:group/{name}/{}",
+        short_id()
+    )
+}
+
+/// Tag-sync-task ARN nests under the group ARN:
+/// `.../group/<name>/<group-id>/tag-sync-task/<task-id>`.
+fn tag_sync_task_arn(group_arn: &str) -> String {
+    format!("{group_arn}/tag-sync-task/{}", short_id())
 }
 
 /// Best-effort `AWS::Service::Type` from an ARN. Returns `None` when the ARN
