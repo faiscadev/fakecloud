@@ -107,7 +107,16 @@ async fn dsql_get_vpc_endpoint_service_name() {
         .send()
         .await
         .unwrap();
-    assert!(resp.service_name().starts_with("com.amazonaws."));
+    // Must match the DSQL VPC-endpoint service-name shape:
+    // com.amazonaws.<region>.dsql-<6 hex>.
+    let name = resp.service_name();
+    assert!(
+        name.starts_with("com.amazonaws.us-east-1.dsql-"),
+        "unexpected service name: {name}"
+    );
+    let suffix = name.rsplit("dsql-").next().unwrap();
+    assert_eq!(suffix.len(), 6, "expected 6-char hex suffix, got {suffix}");
+    assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +323,7 @@ async fn dsql_untag_resource() {
     let arn = client
         .create_cluster()
         .tags("team", "platform")
+        .tags("env", "prod")
         .send()
         .await
         .unwrap()
@@ -332,5 +342,8 @@ async fn dsql_untag_resource() {
         .send()
         .await
         .unwrap();
-    assert!(resp.tags().map(|t| t.is_empty()).unwrap_or(true));
+    // Selective removal: only "team" is gone; "env" survives.
+    let tags = resp.tags().expect("tags map present");
+    assert!(!tags.contains_key("team"), "team should have been removed");
+    assert_eq!(tags.get("env").map(String::as_str), Some("prod"));
 }

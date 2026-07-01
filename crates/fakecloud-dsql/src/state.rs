@@ -36,6 +36,10 @@ pub struct Cluster {
     /// The `clientToken` that created this cluster, for create idempotency.
     #[serde(default)]
     pub client_token: Option<String>,
+    /// When `DeleteCluster` was requested; drives the ticker's grace window
+    /// before the record is removed. `None` until deletion is requested.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
     /// Change streams keyed by `streamIdentifier`.
     #[serde(default)]
     pub streams: BTreeMap<String, Stream>,
@@ -74,6 +78,10 @@ pub struct Stream {
     pub tags: BTreeMap<String, String>,
     #[serde(default)]
     pub client_token: Option<String>,
+    /// When `DeleteStream` was requested; drives the ticker's grace window
+    /// before the record is removed. `None` until deletion is requested.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// One account's DSQL clusters, keyed by cluster identifier.

@@ -142,7 +142,7 @@ impl DsqlService {
     // --- Cluster operations ------------------------------------------------
 
     fn create_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let body: Value = parse_body(req)?;
         let region = &req.region;
         let account = &req.account_id;
 
@@ -210,6 +210,7 @@ impl DsqlService {
                 .map(|s| s.to_string()),
             policy_version: body.get("policy").map(|_| 1).unwrap_or(0),
             client_token,
+            deleted_at: None,
             streams: BTreeMap::new(),
         };
         let resp = cluster_mutation_response(&cluster);
@@ -240,7 +241,7 @@ impl DsqlService {
     }
 
     fn update_cluster(&self, req: &AwsRequest, id: &str) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let body: Value = parse_body(req)?;
         let mut accounts = self.state.write();
         let st = accounts
             .get_mut(&req.account_id)
@@ -280,6 +281,7 @@ impl DsqlService {
             ));
         }
         cluster.status = "DELETING".to_string();
+        cluster.deleted_at = Some(Utc::now());
         Ok(cluster_mutation_response(cluster))
     }
 
@@ -323,13 +325,22 @@ impl DsqlService {
     }
 
     // --- Cluster policy operations ----------------------------------------
+    //
+    // A DSQL cluster resource policy authorizes the data-plane `dsql:DbConnect`
+    // action (who may open a SQL connection to the cluster). It is stored and
+    // round-tripped faithfully here, but it is not yet registered with the
+    // central `resource_policy_provider` used by `--iam` enforcement: the only
+    // action it governs is `DbConnect`, which is a data-plane operation that
+    // lands with the Postgres data-plane batch. Enforcement is wired up there,
+    // alongside the connect path it actually gates, rather than as an
+    // enforce-nothing hook in this control-plane batch.
 
     fn put_cluster_policy(
         &self,
         req: &AwsRequest,
         id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let body: Value = parse_body(req)?;
         let policy = body
             .get("policy")
             .and_then(|v| v.as_str())
@@ -427,7 +438,7 @@ impl DsqlService {
         req: &AwsRequest,
         cluster_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let body: Value = parse_body(req)?;
         let target = body
             .get("targetDefinition")
             .cloned()
@@ -482,6 +493,7 @@ impl DsqlService {
             status_reason: None,
             tags,
             client_token,
+            deleted_at: None,
         };
         let resp = stream_mutation_response(&stream);
         cluster.streams.insert(sid, stream);
@@ -523,7 +535,11 @@ impl DsqlService {
             .streams
             .get_mut(stream_id)
             .ok_or_else(|| stream_not_found(stream_id))?;
+        // Stamp DELETING and let the ticker remove the record after the grace
+        // window, mirroring the cluster lifecycle so the transient state is
+        // observable and persisted rather than vanishing immediately.
         stream.status = "DELETING".to_string();
+        stream.deleted_at = Some(Utc::now());
         let resp = json!({
             "clusterIdentifier": stream.cluster_identifier,
             "streamIdentifier": stream.stream_identifier,
@@ -532,7 +548,6 @@ impl DsqlService {
             "creationTime": stream.creation_time.timestamp() as f64
                 + stream.creation_time.timestamp_subsec_millis() as f64 / 1000.0,
         });
-        cluster.streams.remove(stream_id);
         Ok(AwsResponse::json_value(StatusCode::OK, resp))
     }
 
@@ -578,7 +593,7 @@ impl DsqlService {
 
     fn tag_resource(&self, req: &AwsRequest, arn: &str) -> Result<AwsResponse, AwsServiceError> {
         require_resource_arn(arn)?;
-        let body: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let body: Value = parse_body(req)?;
         let new_tags = parse_tag_map(body.get("tags"));
         let mut accounts = self.state.write();
         let st = accounts
@@ -822,6 +837,17 @@ fn validate_str(
     Ok(())
 }
 
+/// Parse a request body as JSON. An empty body is the empty object (many DSQL
+/// inputs have only optional members); a non-empty but malformed body is a
+/// `ValidationException` rather than a silently-accepted `{}` (which would let
+/// a garbage payload drive a real mutation).
+fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
+    if req.body.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(&req.body).map_err(|e| validation(&format!("Invalid request body: {e}")))
+}
+
 /// Reject an empty/whitespace `resourceArn` path label with a modeled
 /// `ValidationException` (the too-short-arn constraint variant).
 fn require_resource_arn(arn: &str) -> Result<(), AwsServiceError> {
@@ -955,10 +981,16 @@ fn resolve_tags_ref<'a>(
 }
 
 /// Extract `(clusterId, Option<streamId>)` from a DSQL ARN of the form
-/// `arn:aws:dsql:region:acct:cluster/<id>[/stream/<id>]`.
+/// `arn:<partition>:dsql:<region>:<acct>:cluster/<id>[/stream/<id>]`. Returns
+/// `None` for anything that isn't a structurally-valid `dsql` ARN, so a
+/// malformed or wrong-service ARN can never alias a local cluster/stream.
 fn parse_resource_arn(arn: &str) -> Option<(String, Option<String>)> {
-    let resource = arn.splitn(6, ':').nth(5)?;
-    let parts: Vec<&str> = resource.split('/').collect();
+    // arn : partition : service : region : account : resource
+    let fields: Vec<&str> = arn.splitn(6, ':').collect();
+    if fields.len() != 6 || fields[0] != "arn" || fields[2] != "dsql" {
+        return None;
+    }
+    let parts: Vec<&str> = fields[5].split('/').collect();
     match parts.as_slice() {
         ["cluster", cid] => Some(((*cid).to_string(), None)),
         ["cluster", cid, "stream", sid] => Some(((*cid).to_string(), Some((*sid).to_string()))),
@@ -1016,4 +1048,40 @@ fn stream_not_found(id: &str) -> AwsServiceError {
 
 fn resource_not_found_arn(arn: &str) -> AwsServiceError {
     resource_not_found(&format!("Resource not found: {arn}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_resource_arn_accepts_cluster_and_stream() {
+        assert_eq!(
+            parse_resource_arn("arn:aws:dsql:us-east-1:123456789012:cluster/abc"),
+            Some(("abc".to_string(), None))
+        );
+        assert_eq!(
+            parse_resource_arn("arn:aws:dsql:us-east-1:123456789012:cluster/abc/stream/xyz"),
+            Some(("abc".to_string(), Some("xyz".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_resource_arn_rejects_wrong_service_or_malformed() {
+        // wrong service
+        assert!(parse_resource_arn("arn:aws:rds:us-east-1:123456789012:cluster/abc").is_none());
+        // not an ARN
+        assert!(parse_resource_arn("cluster/abc").is_none());
+        // missing "arn" literal
+        assert!(parse_resource_arn("xrn:aws:dsql:us-east-1:123456789012:cluster/abc").is_none());
+        // wrong resource type
+        assert!(parse_resource_arn("arn:aws:dsql:us-east-1:123456789012:widget/abc").is_none());
+    }
+
+    #[test]
+    fn hex6_is_six_hex_chars() {
+        let h = hex6("abcdefghij0123456789klmnop");
+        assert_eq!(h.len(), 6);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

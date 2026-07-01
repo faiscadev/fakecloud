@@ -60,23 +60,45 @@ pub fn advance(state: &SharedDsqlState) -> bool {
                     changed = true;
                 }
                 "DELETING" | "PENDING_DELETE" => {
-                    // Deletion is requested by DeleteCluster, which stamps the
-                    // status; once the grace window elapses the record is gone.
-                    to_remove.push(cid.clone());
-                    changed = true;
+                    // DeleteCluster stamped `deleted_at`; remove only once the
+                    // grace window has elapsed, so the DELETING state is
+                    // observable and persisted (not gone on the next tick).
+                    let deleting_for = cluster
+                        .deleted_at
+                        .map(|t| now.signed_duration_since(t))
+                        .unwrap_or(TRANSITION_AFTER);
+                    if deleting_for >= TRANSITION_AFTER {
+                        to_remove.push(cid.clone());
+                        changed = true;
+                    }
                 }
                 _ => {}
             }
-            // Advance streams within an (already-existing) cluster.
-            for stream in cluster.streams.values_mut() {
-                let s_elapsed = now.signed_duration_since(stream.creation_time);
+            // Advance / reap streams within the cluster.
+            let mut streams_to_remove = Vec::new();
+            for (sid, stream) in cluster.streams.iter_mut() {
                 match stream.status.as_str() {
-                    "CREATING" if s_elapsed >= TRANSITION_AFTER => {
+                    "CREATING"
+                        if now.signed_duration_since(stream.creation_time) >= TRANSITION_AFTER =>
+                    {
                         stream.status = "ACTIVE".to_string();
                         changed = true;
                     }
+                    "DELETING" => {
+                        let deleting_for = stream
+                            .deleted_at
+                            .map(|t| now.signed_duration_since(t))
+                            .unwrap_or(TRANSITION_AFTER);
+                        if deleting_for >= TRANSITION_AFTER {
+                            streams_to_remove.push(sid.clone());
+                            changed = true;
+                        }
+                    }
                     _ => {}
                 }
+            }
+            for sid in streams_to_remove {
+                cluster.streams.remove(&sid);
             }
         }
         for cid in to_remove {
@@ -112,6 +134,7 @@ mod tests {
             policy: None,
             policy_version: 0,
             client_token: None,
+            deleted_at: None,
             streams: BTreeMap::new(),
         }
     }
@@ -143,8 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn deleting_removes_record() {
-        let state = state_with(cluster("DELETING", 0));
+    fn deleting_removed_after_grace_window() {
+        // deleted_at older than the window: reaped this tick.
+        let mut c = cluster("DELETING", 0);
+        c.deleted_at = Some(Utc::now() - chrono::Duration::milliseconds(1000));
+        let state = state_with(c);
         assert!(advance(&state));
         assert!(state
             .read()
@@ -152,5 +178,18 @@ mod tests {
             .unwrap()
             .clusters
             .is_empty());
+    }
+
+    #[test]
+    fn deleting_survives_within_grace_window() {
+        // Just-requested deletion stays observable until the window elapses.
+        let mut c = cluster("DELETING", 0);
+        c.deleted_at = Some(Utc::now());
+        let state = state_with(c);
+        assert!(!advance(&state));
+        assert_eq!(
+            state.read().get("000000000000").unwrap().clusters["abcdefghij0123456789klmnop"].status,
+            "DELETING"
+        );
     }
 }

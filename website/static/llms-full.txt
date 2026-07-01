@@ -502,7 +502,7 @@ Protocol: JSON 1.1 (`X-Amz-Target: CertificateManager.<Action>`)
 **Activity + Forecasting:** DescribeScalingActivities, GetPredictiveScalingForecast
 **Tags:** TagResource, UntagResource, ListTagsForResource
 
-Features: Supports all 13 documented namespaces (ECS, Lambda, DynamoDB, RDS, Aurora DSQL, ElastiCache, SageMaker, EMR, AppStream, Cassandra, Kafka, Neptune, EC2 Spot Fleet, Comprehend). Step + target-tracking + predictive scaling policies. Scheduled actions with cron / one-shot start/end times + Timezone. `RoleARN` defaults to per-namespace service-linked role ARN. `Deregister` cascades to policies + scheduled actions for the same target. `GetPredictiveScalingForecast` returns deterministic hourly Load + Capacity buckets capped at 168 hours (one week).
+Features: Supports all 13 documented namespaces (ECS, Lambda, DynamoDB, RDS, ElastiCache, SageMaker, EMR, AppStream, Cassandra, Kafka, Neptune, EC2 Spot Fleet, Comprehend). Step + target-tracking + predictive scaling policies. Scheduled actions with cron / one-shot start/end times + Timezone. `RoleARN` defaults to per-namespace service-linked role ARN. `Deregister` cascades to policies + scheduled actions for the same target. `GetPredictiveScalingForecast` returns deterministic hourly Load + Capacity buckets capped at 168 hours (one week).
 
 Protocol: JSON 1.1 (`X-Amz-Target: AnyScaleFrontendService.<Action>`)
 
@@ -618,9 +618,9 @@ fakecloud implements real cross-service message delivery:
 
 fakecloud handles three AWS protocol families:
 
-- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, Aurora DSQL, ElastiCache, EC2 ec2Query): form-encoded body with `Action` parameter, XML responses
+- **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache, EC2 ec2Query): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis, Step Functions): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda, SES v2, API Gateway v1, API Gateway v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML or JSON responses
+- **REST protocol** (S3, Lambda, SES v2, API Gateway v1, API Gateway v2, Bedrock, Bedrock Runtime, RDS Data API, Aurora DSQL): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
 
