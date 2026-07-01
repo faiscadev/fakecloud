@@ -804,6 +804,10 @@ impl TestServer {
         aws_sdk_dsql::Client::new(&self.aws_config().await)
     }
 
+    pub async fn cloudcontrol_client(&self) -> aws_sdk_cloudcontrol::Client {
+        aws_sdk_cloudcontrol::Client::new(&self.aws_config().await)
+    }
+
     pub async fn ecr_client(&self) -> aws_sdk_ecr::Client {
         aws_sdk_ecr::Client::new(&self.aws_config().await)
     }

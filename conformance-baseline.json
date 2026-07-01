@@ -1,6 +1,6 @@
 {
-  "variants_passed": 124999,
-  "total_variants": 124999,
+  "variants_passed": 125345,
+  "total_variants": 125345,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -37,6 +37,10 @@
     "bedrock-runtime": {
       "passed": 446,
       "total": 446
+    },
+    "cloudcontrolapi": {
+      "passed": 346,
+      "total": 346
     },
     "cloudformation": {
       "passed": 3426,

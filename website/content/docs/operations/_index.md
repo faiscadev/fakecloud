@@ -1070,6 +1070,17 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateTerminationProtection`
 - `ValidateTemplate`
 
+## [Cloud Control API](@/docs/services/cloudcontrol.md)
+
+- `CancelResourceRequest`
+- `CreateResource`
+- `DeleteResource`
+- `GetResource`
+- `GetResourceRequestStatus`
+- `ListResourceRequests`
+- `ListResources`
+- `UpdateResource`
+
 ## [SES](@/docs/services/ses.md)
 
 - `BatchGetMetricData`

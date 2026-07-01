@@ -238,7 +238,10 @@ jobs:
           # Layer 7: depends on all services
           publish fakecloud-cloudformation
 
-          # Layer 8: the binary
+          # Layer 8: depends on cloudformation (drives its resource provisioners)
+          publish fakecloud-cloudcontrol
+
+          # Layer 9: the binary
           publish fakecloud
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -61,6 +61,7 @@ SERVICES=(
     "organizations:organizations"
     "ec2:ec2"
     "pipes:pipes"
+    "cloudcontrolapi:cloudcontrol"
 )
 
 # Sparse checkout only the models we need

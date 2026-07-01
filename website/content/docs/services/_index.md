@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 43 AWS services with 3,742 total operations. 124,999/124,999 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 44 AWS services with 3,750 total operations. 125,345/125,345 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -25,6 +25,7 @@ fakecloud implements 43 AWS services with 3,742 total operations. 124,999/124,99
 | CloudWatch Logs        | 113 | Groups, streams, subscription filters, query language                  |
 | KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import, **cross-service hook** |
 | CloudFormation         |  90 | Template parsing, resource provisioning, custom resources              |
+| Cloud Control API      |   8 | Uniform CRUD-L over CloudFormation resource types, JSON Patch updates, request tracking |
 | SES (v2 + v1 inbound)  | 111 | Sending, templates, DKIM, **real receipt rule execution**              |
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |

@@ -49,6 +49,7 @@ SERVICES=(
     "cloudwatch-logs|CloudWatch Logs|logs"
     "kms|KMS|kms"
     "cloudformation|CloudFormation|cloudformation"
+    "cloudcontrolapi|Cloud Control API|cloudcontrol"
     "sesv2|SES|ses"
     "cognito-identity-provider|Cognito User Pools|cognito"
     "cognito-identity|Cognito Identity|cognito"
