@@ -618,6 +618,14 @@ async fn rds_restore_from_snapshot() {
     assert_eq!(restored_instance.master_username(), Some("admin"));
     assert_eq!(restored_instance.db_name(), Some("appdb"));
 
+    // RestoreDBInstanceFromDBSnapshot is backgrounded (same client-timeout fix
+    // as CreateDBInstance): it returns `creating` with no endpoint yet, then the
+    // backing container is provisioned and the instance flips to `available`
+    // with its endpoint populated. A real client waits for `available` before
+    // connecting, so poll for it rather than reading the endpoint synchronously.
+    assert_eq!(restored_instance.db_instance_status(), Some("creating"));
+    helpers::wait_for_db_available(&client, "orders-restored-db", 180).await;
+
     let describe_response = client
         .describe_db_instances()
         .db_instance_identifier("orders-restored-db")
@@ -711,6 +719,11 @@ async fn rds_create_and_query_read_replica() {
         replica_instance.read_replica_source_db_instance_identifier(),
         Some("orders-source-db")
     );
+
+    // CreateDBInstanceReadReplica is backgrounded (client-timeout fix): the
+    // replica returns `creating` with no endpoint, then flips to `available`
+    // with its endpoint once its backing container replays the source data.
+    helpers::wait_for_db_available(&client, "orders-replica-db", 180).await;
 
     let source_describe_after = client
         .describe_db_instances()
@@ -968,8 +981,12 @@ async fn final_snapshot_on_delete() {
         .await
         .unwrap();
 
+    // Restore is backgrounded: it returns `creating` with no endpoint, then
+    // flips to `available` once the backing container is provisioned.
     let restored = response.db_instance().expect("db instance");
-    let restored_port = restored.endpoint().unwrap().port().unwrap();
+    assert_eq!(restored.db_instance_status(), Some("creating"));
+    let ready = helpers::wait_for_db_available(&client, "e2e-rds-restored", 180).await;
+    let restored_port = ready.endpoint().unwrap().port().unwrap();
 
     let (postgres, connection) =
         connect_with_retry("127.0.0.1", restored_port, "admin", "secret123", "testdb")
