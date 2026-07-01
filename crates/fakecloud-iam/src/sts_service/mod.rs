@@ -223,6 +223,8 @@ pub(super) fn sts_issuer_url(region: &str) -> String {
 fn partition_for_region(region: &str) -> &str {
     if region.starts_with("cn-") {
         "aws-cn"
+    } else if region.starts_with("us-gov-") {
+        "aws-us-gov"
     } else if region.starts_with("us-iso-") {
         "aws-iso"
     } else if region.starts_with("us-isob-") {
@@ -593,6 +595,8 @@ mod tests {
         assert_eq!(partition_for_region("eu-west-1"), "aws");
         assert_eq!(partition_for_region("cn-north-1"), "aws-cn");
         assert_eq!(partition_for_region("cn-northwest-1"), "aws-cn");
+        assert_eq!(partition_for_region("us-gov-west-1"), "aws-us-gov");
+        assert_eq!(partition_for_region("us-gov-east-1"), "aws-us-gov");
         assert_eq!(partition_for_region("us-isob-east-1"), "aws-iso-b");
         assert_eq!(partition_for_region("us-iso-east-1"), "aws-iso");
     }

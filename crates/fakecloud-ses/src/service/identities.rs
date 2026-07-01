@@ -76,21 +76,59 @@ impl SesV2Service {
         // here is a real input-drop bug.
         let configuration_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
 
-        // Easy DKIM auto-provisions a fresh RSA-2048 keypair when the
-        // identity is created so SendEmail can stamp DKIM-Signature
-        // headers without a follow-up PutEmailIdentityDkimSigningAttributes.
-        let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
+        // DKIM configuration. CreateEmailIdentity's DkimSigningAttributes
+        // selects between Easy DKIM (AWS-managed keypair, optionally with a
+        // requested NextSigningKeyLength) and BYODKIM (the caller supplies
+        // their own selector + private key, origin EXTERNAL). Previously
+        // this was hardcoded to Easy DKIM, silently dropping BYODKIM.
+        let dkim = &body["DkimSigningAttributes"];
+        let byo_selector = dkim["DomainSigningSelector"].as_str();
+        let byo_private_key = dkim["DomainSigningPrivateKey"].as_str();
+        let (dkim_origin, dkim_private_key, dkim_selector, dkim_key_length, dkim_public_key) =
+            if let (Some(selector), Some(private_key)) = (byo_selector, byo_private_key) {
+                // BYODKIM: honor the caller's selector + private key. AWS
+                // supplies the key as base64-encoded DER, so normalize it to
+                // the PEM form the signer expects before storing. There is no
+                // AWS-generated public key in this mode.
+                (
+                    "EXTERNAL".to_string(),
+                    Some(crate::dkim::normalize_byodkim_private_key(private_key)),
+                    Some(selector.to_string()),
+                    None,
+                    None,
+                )
+            } else {
+                // Easy DKIM: auto-provision a fresh keypair so SendEmail can
+                // stamp DKIM-Signature headers without a follow-up
+                // PutEmailIdentityDkimSigningAttributes. NextSigningKeyLength
+                // (if supplied) selects the reported key length.
+                let key_length = dkim["NextSigningKeyLength"]
+                    .as_str()
+                    .unwrap_or("RSA_2048_BIT")
+                    .to_string();
+                let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
+                (
+                    "AWS_SES".to_string(),
+                    Some(priv_pem),
+                    Some("fakecloudses".to_string()),
+                    Some(key_length),
+                    Some(pub_b64),
+                )
+            };
+        let dkim_origin_resp = dkim_origin.clone();
+        let dkim_selector_resp = dkim_selector.clone();
+        let dkim_key_length_resp = dkim_key_length.clone();
         let identity = EmailIdentity {
             identity_name: identity_name.clone(),
             identity_type: identity_type.to_string(),
             verified: true,
             created_at: Utc::now(),
             dkim_signing_enabled: true,
-            dkim_signing_attributes_origin: "AWS_SES".to_string(),
-            dkim_domain_signing_private_key: Some(priv_pem),
-            dkim_domain_signing_selector: Some("fakecloudses".to_string()),
-            dkim_next_signing_key_length: Some("RSA_2048_BIT".to_string()),
-            dkim_public_key_b64: Some(pub_b64),
+            dkim_signing_attributes_origin: dkim_origin,
+            dkim_domain_signing_private_key: dkim_private_key,
+            dkim_domain_signing_selector: dkim_selector,
+            dkim_next_signing_key_length: dkim_key_length,
+            dkim_public_key_b64: dkim_public_key,
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
@@ -125,18 +163,27 @@ impl SesV2Service {
             state.tags.remove(&arn);
         }
 
+        let mut dkim_attrs = json!({
+            "SigningEnabled": true,
+            "Status": "SUCCESS",
+            "SigningAttributesOrigin": dkim_origin_resp,
+            "Tokens": [
+                "token1",
+                "token2",
+                "token3",
+            ],
+        });
+        if let Some(ref selector) = dkim_selector_resp {
+            dkim_attrs["DomainSigningSelector"] = json!(selector);
+        }
+        if let Some(ref len) = dkim_key_length_resp {
+            dkim_attrs["CurrentSigningKeyLength"] = json!(len);
+            dkim_attrs["NextSigningKeyLength"] = json!(len);
+        }
         let response = json!({
             "IdentityType": identity_type,
             "VerifiedForSendingStatus": true,
-            "DkimAttributes": {
-                "SigningEnabled": true,
-                "Status": "SUCCESS",
-                "Tokens": [
-                    "token1",
-                    "token2",
-                    "token3",
-                ],
-            },
+            "DkimAttributes": dkim_attrs,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -555,7 +602,10 @@ impl SesV2Service {
 
         if let Some(attrs) = body.get("SigningAttributes") {
             if let Some(key) = attrs["DomainSigningPrivateKey"].as_str() {
-                identity.dkim_domain_signing_private_key = Some(key.to_string());
+                // AWS supplies BYODKIM keys as base64-encoded DER; normalize to
+                // the PEM form the signer expects so signing actually works.
+                identity.dkim_domain_signing_private_key =
+                    Some(crate::dkim::normalize_byodkim_private_key(key));
                 identity.dkim_public_key_b64 = None;
             }
             if let Some(selector) = attrs["DomainSigningSelector"].as_str() {

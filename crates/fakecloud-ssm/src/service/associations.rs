@@ -303,6 +303,22 @@ impl SsmService {
         if let Some(cs) = body["ComplianceSeverity"].as_str() {
             assoc.compliance_severity = Some(cs.to_string());
         }
+        // SyncCompliance / ApplyOnlyAtCronInterval / ScheduleOffset /
+        // OutputLocation are all settable on CreateAssociation and echoed
+        // by DescribeAssociation, so UpdateAssociation must persist them
+        // too (previously silently dropped).
+        if let Some(sc) = body["SyncCompliance"].as_str() {
+            assoc.sync_compliance = Some(sc.to_string());
+        }
+        if let Some(ac) = body["ApplyOnlyAtCronInterval"].as_bool() {
+            assoc.apply_only_at_cron_interval = ac;
+        }
+        if let Some(so) = body["ScheduleOffset"].as_i64() {
+            assoc.schedule_offset = Some(so);
+        }
+        if let Some(ol) = body.get("OutputLocation").filter(|v| !v.is_null()) {
+            assoc.output_location = Some(ol.clone());
+        }
 
         assoc.last_update_association_date = now;
 

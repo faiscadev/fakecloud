@@ -2458,3 +2458,294 @@ async fn batch_get_secret_value_returns_plaintext_not_ciphertext() {
         "BatchGetSecretValue must return plaintext, not ciphertext"
     );
 }
+
+#[tokio::test]
+async fn test_rotate_secret_rotate_immediately_false_does_not_rotate_value() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-defer", "SecretString": "original"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let original_vid = body["VersionId"].as_str().unwrap().to_string();
+
+    // Rotate with RotateImmediately=false: config saved, value untouched.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-defer",
+        "RotationRules": { "AutomaticallyAfterDays": 30 },
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    let req = make_request("RotateSecret", &rot.to_string());
+    svc.handle(req).await.unwrap();
+
+    let accts = state.read();
+    let s = accts.default_ref();
+    let secret = s.secrets.get("rot-defer").unwrap();
+    // Rotation config is saved and enabled.
+    assert_eq!(secret.rotation_enabled, Some(true));
+    assert!(secret.rotation_rules.is_some());
+    // But the value was NOT rotated: no new version, current unchanged,
+    // and LastRotatedDate is not set (no rotation happened).
+    assert!(!secret.versions.contains_key(token));
+    assert_eq!(
+        secret.current_version_id.as_deref(),
+        Some(original_vid.as_str())
+    );
+    assert!(secret.last_rotated_at.is_none());
+}
+
+#[tokio::test]
+async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-test-step", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // RotateImmediately=false with a Lambda: AWS still validates the config by
+    // running ONLY the testSecret step. The value is not rotated.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-test-step",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "RotationRules": { "AutomaticallyAfterDays": 30 },
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    // Capture the AWSCURRENT version id before rotation.
+    let original_current = {
+        let accts = state.read();
+        accts
+            .default_ref()
+            .secrets
+            .get("rot-test-step")
+            .unwrap()
+            .current_version_id
+            .clone()
+    };
+
+    let (_resp, invocation) = svc
+        .rotate_secret(&make_request("RotateSecret", &rot.to_string()))
+        .unwrap();
+    let inv = invocation.expect("a Lambda invocation must be scheduled to test the config");
+    assert_eq!(inv.steps, vec!["testSecret"]);
+    let cleanup = inv
+        .cleanup_pending
+        .expect("test-only rotation must stage a temporary AWSPENDING version to clean up");
+
+    {
+        let accts = state.read();
+        let secret = accts.default_ref().secrets.get("rot-test-step").unwrap();
+        // A temporary AWSPENDING version was staged for the testSecret step,
+        // carrying a copy of the current value.
+        let pending = secret
+            .versions
+            .get(token)
+            .expect("AWSPENDING test version must exist for the Lambda to read");
+        assert!(pending.stages.contains(&"AWSPENDING".to_string()));
+        assert_eq!(pending.secret_string.as_deref(), Some("original"));
+        // The current value is NOT rotated and LastRotatedDate is untouched.
+        assert_eq!(secret.current_version_id, original_current);
+        assert!(secret.last_rotated_at.is_none());
+    }
+
+    // The cleanup removes the temporary AWSPENDING version.
+    super::remove_rotation_test_pending(&state, &cleanup);
+    let accts = state.read();
+    let secret = accts.default_ref().secrets.get("rot-test-step").unwrap();
+    assert!(
+        !secret.versions.contains_key(token),
+        "temporary AWSPENDING version must be cleaned up after the test step"
+    );
+}
+
+/// A RotateImmediately=false rotation must NOT persist the temporary
+/// AWSPENDING test version: the mutating-action snapshot taken by `handle`
+/// must capture the post-cleanup state so a restart never restores a stale
+/// AWSPENDING version.
+#[tokio::test]
+async fn test_rotate_immediately_false_pending_not_persisted() {
+    #[derive(Default)]
+    struct RecordingStore {
+        bytes: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for RecordingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.bytes.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.bytes.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    let state = make_state();
+    let store = Arc::new(RecordingStore::default());
+    let svc = SecretsManagerService::new(state.clone())
+        .with_snapshot_store(store.clone() as Arc<dyn fakecloud_persistence::SnapshotStore>);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-persist", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // RotateImmediately=false with a Lambda but no delivery bus: the testSecret
+    // step is skipped, but the temporary AWSPENDING version is staged and then
+    // cleaned up synchronously before the snapshot is taken.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-persist",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    svc.handle(make_request("RotateSecret", &rot.to_string()))
+        .await
+        .unwrap();
+
+    // In-memory state is already clean.
+    {
+        let accts = state.read();
+        let secret = accts.default_ref().secrets.get("rot-persist").unwrap();
+        assert!(!secret.versions.contains_key(token));
+        assert!(secret
+            .versions
+            .values()
+            .all(|v| !v.stages.contains(&"AWSPENDING".to_string())));
+    }
+
+    // The persisted snapshot (taken by the mutating-action save at the end of
+    // `handle`) must also be free of the temporary AWSPENDING version.
+    let bytes = fakecloud_persistence::SnapshotStore::load(store.as_ref())
+        .unwrap()
+        .expect("RotateSecret must persist a snapshot");
+    let snap: crate::SecretsManagerSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let accounts = snap.accounts.expect("multi-account snapshot");
+    let persisted = &accounts.default_ref().secrets["rot-persist"];
+    // First prove we're inspecting the POST-RotateSecret snapshot (not the
+    // earlier CreateSecret one): the rotation config set by this RotateSecret
+    // call must be present. Otherwise "no AWSPENDING" would prove nothing.
+    assert_eq!(
+        persisted.rotation_enabled,
+        Some(true),
+        "snapshot must be the post-RotateSecret one (rotation enabled)"
+    );
+    assert_eq!(
+        persisted.rotation_lambda_arn.as_deref(),
+        Some("arn:aws:lambda:us-east-1:123456789012:function:rotator"),
+        "snapshot must be the post-RotateSecret one (rotation Lambda configured)"
+    );
+    assert!(
+        !persisted.versions.contains_key(token),
+        "temporary AWSPENDING version must not be persisted"
+    );
+    assert!(
+        persisted
+            .versions
+            .values()
+            .all(|v| !v.stages.contains(&"AWSPENDING".to_string())),
+        "no AWSPENDING version may remain in the persisted snapshot"
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_secret_immediately_with_lambda_runs_full_steps() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-full", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-full",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "ClientRequestToken": token,
+    });
+    let (_resp, invocation) = svc
+        .rotate_secret(&make_request("RotateSecret", &rot.to_string()))
+        .unwrap();
+    let inv = invocation.expect("full rotation must schedule a Lambda invocation");
+    assert_eq!(
+        inv.steps,
+        vec!["createSecret", "setSecret", "testSecret", "finishSecret"]
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_secret_rotate_immediately_default_true_rotates() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-now", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-now",
+        "ClientRequestToken": token,
+    });
+    svc.handle(make_request("RotateSecret", &rot.to_string()))
+        .await
+        .unwrap();
+
+    let accts = state.read();
+    let s = accts.default_ref();
+    let secret = s.secrets.get("rot-now").unwrap();
+    // Default (RotateImmediately omitted == true): value rotated.
+    assert_eq!(secret.current_version_id.as_deref(), Some(token));
+    assert!(secret.last_rotated_at.is_some());
+}
+
+#[tokio::test]
+async fn test_create_secret_with_add_replica_regions() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "replicated", "SecretString": "v1",
+            "AddReplicaRegions": [{"Region": "us-west-2"}, {"Region": "eu-west-1"}]}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let statuses = body["ReplicationStatus"].as_array().unwrap();
+    let regions: Vec<&str> = statuses
+        .iter()
+        .map(|s| s["Region"].as_str().unwrap())
+        .collect();
+    assert!(regions.contains(&"us-west-2"));
+    assert!(regions.contains(&"eu-west-1"));
+
+    // Persisted: DescribeSecret echoes ReplicationStatus too.
+    let req = make_request("DescribeSecret", r#"{"SecretId": "replicated"}"#);
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let dregions: Vec<&str> = body["ReplicationStatus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["Region"].as_str().unwrap())
+        .collect();
+    assert!(dregions.contains(&"us-west-2"));
+    assert!(dregions.contains(&"eu-west-1"));
+}

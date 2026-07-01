@@ -4,6 +4,8 @@ use super::*;
 pub(crate) fn partition_for_region(region: &str) -> &str {
     if region.starts_with("cn-") {
         "aws-cn"
+    } else if region.starts_with("us-gov-") {
+        "aws-us-gov"
     } else if region.starts_with("us-iso-") {
         "aws-iso"
     } else if region.starts_with("us-isob-") {

@@ -1329,6 +1329,85 @@ pub(crate) fn parse_member_list(params: &HashMap<String, String>, prefix: &str) 
     result
 }
 
+/// Parse the `EventDestination.KinesisFirehoseDestination.*` query params (SES
+/// v1 CreateConfigurationSetEventDestination). Returns `None` when neither
+/// field is present so we don't attach an empty destination.
+fn parse_kinesis_firehose_destination(
+    params: &HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let role = params.get("EventDestination.KinesisFirehoseDestination.IAMRoleARN");
+    let stream = params.get("EventDestination.KinesisFirehoseDestination.DeliveryStreamARN");
+    if role.is_none() && stream.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "IAMRoleARN": role.cloned().unwrap_or_default(),
+        "DeliveryStreamARN": stream.cloned().unwrap_or_default(),
+    }))
+}
+
+/// Parse the `EventDestination.CloudWatchDestination.DimensionConfigurations.*`
+/// query params (SES v1). Returns `None` when no dimension configurations were
+/// supplied.
+fn parse_cloudwatch_destination(params: &HashMap<String, String>) -> Option<serde_json::Value> {
+    let mut configs = Vec::new();
+    for i in 1.. {
+        let prefix =
+            format!("EventDestination.CloudWatchDestination.DimensionConfigurations.member.{i}");
+        let name = params.get(&format!("{prefix}.DimensionName"));
+        let source = params.get(&format!("{prefix}.DimensionValueSource"));
+        let default = params.get(&format!("{prefix}.DefaultDimensionValue"));
+        if name.is_none() && source.is_none() && default.is_none() {
+            break;
+        }
+        configs.push(serde_json::json!({
+            "DimensionName": name.cloned().unwrap_or_default(),
+            "DimensionValueSource": source.cloned().unwrap_or_default(),
+            "DefaultDimensionValue": default.cloned().unwrap_or_default(),
+        }));
+    }
+    if configs.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "DimensionConfigurations": configs }))
+    }
+}
+
+/// The three mutually-exclusive SES v1 event-destination targets. AWS allows
+/// exactly one target type per event destination.
+enum EventDestinationTarget {
+    Kinesis(serde_json::Value),
+    CloudWatch(serde_json::Value),
+    Sns(serde_json::Value),
+}
+
+/// Parse the single event-destination target from the request query params.
+/// Returns an error if more than one of Kinesis/CloudWatch/SNS is supplied
+/// (AWS permits only one), and `Ok(None)` when none is supplied.
+fn parse_event_destination_target(
+    params: &HashMap<String, String>,
+) -> Result<Option<EventDestinationTarget>, AwsServiceError> {
+    let kinesis = parse_kinesis_firehose_destination(params);
+    let cloudwatch = parse_cloudwatch_destination(params);
+    let sns = params
+        .get("EventDestination.SNSDestination.TopicARN")
+        .map(|arn| serde_json::json!({ "TopicArn": arn }));
+
+    let count = kinesis.is_some() as u8 + cloudwatch.is_some() as u8 + sns.is_some() as u8;
+    if count > 1 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "An event destination must specify exactly one destination type \
+             (KinesisFirehoseDestination, CloudWatchDestination, or SNSDestination).",
+        ));
+    }
+    Ok(kinesis
+        .map(EventDestinationTarget::Kinesis)
+        .or_else(|| cloudwatch.map(EventDestinationTarget::CloudWatch))
+        .or_else(|| sns.map(EventDestinationTarget::Sns)))
+}
+
 pub(crate) fn send_email(
     state: &SharedSesState,
     req: &AwsRequest,
@@ -2059,7 +2138,46 @@ pub(crate) fn describe_configuration_set(
             for et in &dest.matching_event_types {
                 inner.push_str(&format!("<member>{}</member>", xml_escape(et)));
             }
-            inner.push_str("</MatchingEventTypes></member>");
+            inner.push_str("</MatchingEventTypes>");
+            // Echo the configured destination target(s). Previously the
+            // describe response dropped these entirely, so a Kinesis /
+            // CloudWatch / SNS destination created against the set was
+            // invisible on read.
+            if let Some(k) = &dest.kinesis_firehose_destination {
+                inner.push_str(&format!(
+                    "<KinesisFirehoseDestination>\
+                     <IAMRoleARN>{}</IAMRoleARN>\
+                     <DeliveryStreamARN>{}</DeliveryStreamARN>\
+                     </KinesisFirehoseDestination>",
+                    xml_escape(k["IAMRoleARN"].as_str().unwrap_or("")),
+                    xml_escape(k["DeliveryStreamARN"].as_str().unwrap_or("")),
+                ));
+            }
+            if let Some(cw) = &dest.cloud_watch_destination {
+                inner.push_str("<CloudWatchDestination><DimensionConfigurations>");
+                if let Some(arr) = cw["DimensionConfigurations"].as_array() {
+                    for dc in arr {
+                        inner.push_str(&format!(
+                            "<member>\
+                             <DimensionName>{}</DimensionName>\
+                             <DimensionValueSource>{}</DimensionValueSource>\
+                             <DefaultDimensionValue>{}</DefaultDimensionValue>\
+                             </member>",
+                            xml_escape(dc["DimensionName"].as_str().unwrap_or("")),
+                            xml_escape(dc["DimensionValueSource"].as_str().unwrap_or("")),
+                            xml_escape(dc["DefaultDimensionValue"].as_str().unwrap_or("")),
+                        ));
+                    }
+                }
+                inner.push_str("</DimensionConfigurations></CloudWatchDestination>");
+            }
+            if let Some(sns) = &dest.sns_destination {
+                inner.push_str(&format!(
+                    "<SNSDestination><TopicARN>{}</TopicARN></SNSDestination>",
+                    xml_escape(sns["TopicArn"].as_str().unwrap_or("")),
+                ));
+            }
+            inner.push_str("</member>");
         }
         inner.push_str("</EventDestinations>");
     }
@@ -2118,16 +2236,28 @@ pub(crate) fn create_configuration_set_event_destination(
         }
     }
 
+    // AWS requires exactly one destination target per event destination.
+    let target = parse_event_destination_target(&req.query_params)?.ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "An event destination must specify exactly one destination type \
+             (KinesisFirehoseDestination, CloudWatchDestination, or SNSDestination).",
+        )
+    })?;
+    let (kinesis, cloudwatch, sns) = match target {
+        EventDestinationTarget::Kinesis(v) => (Some(v), None, None),
+        EventDestinationTarget::CloudWatch(v) => (None, Some(v), None),
+        EventDestinationTarget::Sns(v) => (None, None, Some(v)),
+    };
+
     let dest = EventDestination {
         name: dest_name.to_string(),
         enabled,
         matching_event_types: event_types,
-        kinesis_firehose_destination: None,
-        cloud_watch_destination: None,
-        sns_destination: req
-            .query_params
-            .get("EventDestination.SNSDestination.TopicARN")
-            .map(|arn| serde_json::json!({ "TopicArn": arn })),
+        kinesis_firehose_destination: kinesis,
+        cloud_watch_destination: cloudwatch,
+        sns_destination: sns,
         event_bridge_destination: None,
         pinpoint_destination: None,
     };
@@ -2150,6 +2280,12 @@ pub(crate) fn update_configuration_set_event_destination(
 ) -> Result<AwsResponse, AwsServiceError> {
     let config_set_name = required_param(&req.query_params, "ConfigurationSetName")?;
     let dest_name = required_param(&req.query_params, "EventDestination.Name")?;
+
+    // Parse + validate the (optional) target BEFORE mutating any state so a
+    // rejected request (multiple targets) leaves the destination untouched
+    // rather than persisting partial Enabled / MatchingEventTypes changes.
+    let target = parse_event_destination_target(&req.query_params)?;
+    let event_types = parse_member_list(&req.query_params, "EventDestination.MatchingEventTypes");
 
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
@@ -2177,9 +2313,23 @@ pub(crate) fn update_configuration_set_event_destination(
     if let Some(v) = req.query_params.get("EventDestination.Enabled") {
         dest.enabled = v == "true";
     }
-    let event_types = parse_member_list(&req.query_params, "EventDestination.MatchingEventTypes");
     if !event_types.is_empty() {
         dest.matching_event_types = event_types;
+    }
+    // Apply destination-target changes when supplied so an update that
+    // switches or (re)configures the target is reflected on the read side.
+    // Applying a new target clears the other two so a destination never ends
+    // up with more than one target type (which would make
+    // DescribeConfigurationSet report multiple targets).
+    if let Some(target) = target {
+        dest.kinesis_firehose_destination = None;
+        dest.cloud_watch_destination = None;
+        dest.sns_destination = None;
+        match target {
+            EventDestinationTarget::Kinesis(v) => dest.kinesis_firehose_destination = Some(v),
+            EventDestinationTarget::CloudWatch(v) => dest.cloud_watch_destination = Some(v),
+            EventDestinationTarget::Sns(v) => dest.sns_destination = Some(v),
+        }
     }
 
     Ok(xml_metadata_only(

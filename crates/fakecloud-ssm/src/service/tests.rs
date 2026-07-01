@@ -3267,6 +3267,68 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
     assert_eq!(err.code(), "InvalidKeyId");
 }
 
+/// The tier/policy conflict must be rejected BEFORE any KMS encryption work,
+/// so a SecureString + Standard-tier + Policies request surfaces the
+/// validation error rather than the KMS/InvalidKeyId error.
+#[test]
+fn put_parameter_validates_tier_policy_before_kms() {
+    use fakecloud_core::delivery::KmsHook;
+    use std::collections::HashMap;
+
+    struct AlwaysFailKms;
+    impl KmsHook for AlwaysFailKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, String> {
+            Err("KMS unavailable".into())
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, String> {
+            Err("KMS unavailable".into())
+        }
+    }
+
+    let svc = make_service().with_kms_hook(Arc::new(AlwaysFailKms));
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/secure-standard-policy",
+            "Value": "secret",
+            "Type": "SecureString",
+            "Policies": policies
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("standard tier + policies must be rejected"),
+    };
+    // The validation error (remapped from ValidationException) must win over
+    // the KMS InvalidKeyId error, proving validation runs first.
+    assert_ne!(err.code(), "InvalidKeyId");
+    assert!(
+        err.message().contains("Advanced"),
+        "expected the Advanced-tier validation message, got: {}",
+        err.message()
+    );
+}
+
 #[test]
 fn put_parameter_string_list() {
     let svc = make_service();
@@ -4808,4 +4870,203 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     // Must not panic; exercises the closure and the snapshot save path.
     hook().await;
+}
+
+/// UpdateAssociation must persist SyncCompliance, ApplyOnlyAtCronInterval,
+/// ScheduleOffset and OutputLocation, all of which DescribeAssociation
+/// echoes back (regression: previously silently dropped).
+#[test]
+fn update_association_persists_sync_compliance_and_friends() {
+    let svc = make_service();
+    let assoc_id = create_assoc_with_instance(&svc, "AWS-RunShellScript", "i-sync");
+    let output_location = json!({
+        "S3Location": {
+            "OutputS3BucketName": "my-bucket",
+            "OutputS3KeyPrefix": "ssm/",
+        }
+    });
+    let req = make_request(
+        "UpdateAssociation",
+        json!({
+            "AssociationId": assoc_id,
+            "ScheduleExpression": "cron(0 2 ? * SUN *)",
+            "SyncCompliance": "Manual",
+            "ApplyOnlyAtCronInterval": true,
+            "ScheduleOffset": 3,
+            "OutputLocation": output_location,
+        }),
+    );
+    let resp = svc.update_association(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let ad = &body["AssociationDescription"];
+    assert_eq!(ad["SyncCompliance"].as_str().unwrap(), "Manual");
+    assert!(ad["ApplyOnlyAtCronInterval"].as_bool().unwrap());
+    assert_eq!(ad["ScheduleOffset"].as_i64().unwrap(), 3);
+    assert_eq!(ad["OutputLocation"], output_location);
+
+    // Round-trips through DescribeAssociation too.
+    let desc = svc
+        .describe_association(&make_request(
+            "DescribeAssociation",
+            json!({"AssociationId": assoc_id}),
+        ))
+        .unwrap();
+    let dbody: Value = serde_json::from_slice(desc.body.expect_bytes()).unwrap();
+    let dad = &dbody["AssociationDescription"];
+    assert_eq!(dad["SyncCompliance"].as_str().unwrap(), "Manual");
+    assert!(dad["ApplyOnlyAtCronInterval"].as_bool().unwrap());
+    assert_eq!(dad["ScheduleOffset"].as_i64().unwrap(), 3);
+    assert_eq!(dad["OutputLocation"], output_location);
+}
+
+/// PutParameter(Overwrite=true) with Tier=Advanced must actually upgrade the
+/// stored tier and echo the new tier (regression: tier was never updated so
+/// the response echoed the old Standard tier).
+#[test]
+fn put_parameter_overwrite_upgrades_tier() {
+    let svc = make_service();
+    // Create a Standard-tier parameter.
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/tier-upgrade", "Value": "v1", "Type": "String"}),
+    ))
+    .unwrap();
+
+    // Overwrite to Advanced with a valid Expiration policy.
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let resp = svc
+        .put_parameter(&make_request(
+            "PutParameter",
+            json!({
+                "Name": "/tier-upgrade",
+                "Value": "v2",
+                "Overwrite": true,
+                "Tier": "Advanced",
+                "Policies": policies,
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Tier"].as_str().unwrap(), "Advanced");
+
+    // GetParameter (describe path) reports Advanced too.
+    let desc = svc
+        .describe_parameters(&make_request(
+            "DescribeParameters",
+            json!({"ParameterFilters": [{"Key": "Name", "Values": ["/tier-upgrade"]}]}),
+        ))
+        .unwrap();
+    let dbody: Value = serde_json::from_slice(desc.body.expect_bytes()).unwrap();
+    assert_eq!(dbody["Parameters"][0]["Tier"].as_str().unwrap(), "Advanced");
+}
+
+/// PutParameter overwrite must preserve the existing tier when Tier is
+/// omitted from the request (AWS never silently downgrades).
+#[test]
+fn put_parameter_overwrite_preserves_tier_when_omitted() {
+    let svc = make_service();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/tier-keep", "Value": "v1", "Type": "String", "Tier": "Advanced"}),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .put_parameter(&make_request(
+            "PutParameter",
+            json!({"Name": "/tier-keep", "Value": "v2", "Overwrite": true}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Tier"].as_str().unwrap(), "Advanced");
+}
+
+/// Overwriting an Advanced parameter (that carries policies) down to
+/// Standard while keeping the policies must be rejected: advanced-only
+/// policies cannot live on a Standard-tier parameter.
+#[test]
+fn put_parameter_overwrite_rejects_downgrade_with_policies() {
+    let svc = make_service();
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/tier-downgrade",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies,
+        }),
+    ))
+    .unwrap();
+
+    // Downgrade to Standard without clearing the policies -> rejected.
+    let err = match svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/tier-downgrade",
+            "Value": "v2",
+            "Overwrite": true,
+            "Tier": "Standard",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("downgrade with policies should fail"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.message().contains("Advanced"));
+}
+
+/// A duplicate PutParameter WITHOUT Overwrite must return ParameterAlreadyExists,
+/// even when the request would otherwise trip the tier/policy validation
+/// (which only matters for a write that is actually applied). The
+/// already-exists check must precede the tier/policy validation.
+#[test]
+fn put_parameter_duplicate_without_overwrite_reports_already_exists_first() {
+    let svc = make_service();
+    // Existing Advanced parameter carrying a policy.
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/dup-param",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies,
+        }),
+    ))
+    .unwrap();
+
+    // Re-put WITHOUT Overwrite, and with Tier=Standard (which, combined with
+    // the existing policy, would trip the tier/policy validation if it ran
+    // first). AWS returns ParameterAlreadyExists instead.
+    let err = match svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({
+            "Name": "/dup-param",
+            "Value": "v2",
+            "Type": "String",
+            "Tier": "Standard",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("duplicate without overwrite must fail"),
+    };
+    assert_eq!(err.code(), "ParameterAlreadyExists");
 }

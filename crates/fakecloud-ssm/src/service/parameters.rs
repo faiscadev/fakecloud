@@ -395,6 +395,10 @@ struct PutParameterInput {
     /// only overwrite an existing parameter's ``data_type`` when this is true.
     data_type_explicit: bool,
     tier: String,
+    /// Whether the caller explicitly included ``Tier`` in the request. On
+    /// overwrite we only change an existing parameter's tier when this is
+    /// true; otherwise the existing tier is preserved (matching AWS).
+    tier_explicit: bool,
     policies: Option<String>,
     /// Pre-parsed `policies` view, populated by ``from_body`` when the
     /// caller supplied a non-empty Policies array. Notification policies
@@ -468,28 +472,23 @@ impl PutParameterInput {
                 .collect()
         });
 
+        let tier_explicit = body["Tier"].as_str().is_some();
         let tier = body["Tier"].as_str().unwrap_or("Standard").to_string();
 
         // Parse + validate the Policies JSON up front so PutParameter
         // can return InvalidPolicyAttributeException without touching
         // state. Empty/absent Policies -> empty list -> no-op.
+        //
+        // Note: the "Policies require Advanced tier" check is NOT done
+        // here because the effective tier depends on whether this is a
+        // create (uses the request tier) or an overwrite (may preserve
+        // the existing parameter's tier). Both paths enforce it against
+        // the effective tier.
         let policies = body["Policies"].as_str().map(|s| s.to_string());
         let parsed_policies = match policies.as_deref() {
             Some(s) if !s.trim().is_empty() => parse_policies(s)?,
             _ => Vec::new(),
         };
-
-        // AWS only allows policies on Advanced-tier parameters. The
-        // real API rejects this with ValidationException; we mirror
-        // that.
-        if !parsed_policies.is_empty() && tier != "Advanced" {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                "Policies are only supported on Advanced-tier parameters. \
-                 Set Tier=Advanced when including Policies.",
-            ));
-        }
 
         Ok(Self {
             name,
@@ -502,6 +501,7 @@ impl PutParameterInput {
             data_type,
             data_type_explicit,
             tier,
+            tier_explicit,
             policies,
             parsed_policies,
             tags,
@@ -532,6 +532,17 @@ fn apply_overwrite(
             "Invalid request: tags and overwrite can't be used together.",
         ));
     }
+
+    // Derive the effective tier: an explicit Tier in the request wins,
+    // otherwise the existing parameter's tier is preserved across the
+    // overwrite (AWS never silently downgrades a tier when Tier is omitted).
+    // The tier/policy conflict is validated earlier in `put_parameter`,
+    // before any KMS work, so no re-check is needed here.
+    let effective_tier = if input.tier_explicit {
+        input.tier.clone()
+    } else {
+        existing.tier.clone()
+    };
 
     if existing.version >= PARAMETER_VERSION_LIMIT {
         let oldest_version = existing
@@ -605,6 +616,10 @@ fn apply_overwrite(
     if input.policies.is_some() {
         existing.policies = input.policies;
     }
+    // Apply the effective tier computed (and validated) above so the
+    // response echoes the correct tier and a Tier upgrade actually
+    // takes effect on the stored parameter.
+    existing.tier = effective_tier;
     existing.expiration_notified = false;
     existing.no_change_notified = false;
 
@@ -629,6 +644,8 @@ fn create_new_parameter(
         )
     })?;
 
+    // The tier/policy conflict (policies require Advanced tier) is validated
+    // earlier in `put_parameter`, before any KMS encryption work.
     let tag_map = input
         .tags
         .map(|list| list.into_iter().collect::<BTreeMap<_, _>>())
@@ -666,6 +683,52 @@ impl SsmService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // A non-overwrite write to a parameter that already exists fails fast
+        // with ParameterAlreadyExists, BEFORE the tier/policy validation (which
+        // only matters for a write that will actually be applied). Otherwise a
+        // duplicate PutParameter without Overwrite could surface the tier/policy
+        // error instead of the expected already-exists error.
+        if !input.overwrite && lookup_param(&state.parameters, &input.name).is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ParameterAlreadyExists",
+                "The parameter already exists. To overwrite this value, set the \
+                 overwrite option in the request to true.",
+            ));
+        }
+
+        // Validate the tier/policy conflict BEFORE any KMS encryption work.
+        // Policies are Advanced-tier only; rejecting a Standard-tier param
+        // that carries policies must happen ahead of encrypt_secure_value so
+        // a bad request never triggers KMS (and never surfaces InvalidKeyId
+        // ahead of the real validation error). The effective tier follows the
+        // overwrite rules: an explicit Tier wins, else the existing tier is
+        // preserved; a new parameter uses the request tier.
+        {
+            let existing = lookup_param(&state.parameters, &input.name);
+            let effective_tier = match existing {
+                Some(e) if !input.tier_explicit => e.tier.clone(),
+                _ => input.tier.clone(),
+            };
+            let policies_present = match input.policies.as_deref() {
+                Some(s) => !s.trim().is_empty(),
+                None => existing
+                    .and_then(|e| e.policies.as_deref())
+                    .is_some_and(|p| !p.trim().is_empty()),
+            };
+            if policies_present && effective_tier != "Advanced" {
+                return Err(remap_validation_to(
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "Policies are only supported on Advanced-tier parameters. \
+                         Set Tier=Advanced when including Policies.",
+                    ),
+                    "InvalidAllowedPatternException",
+                ));
+            }
+        }
 
         // Determine effective param_type for KMS encryption decision.
         // For overwrite, falls back to existing.param_type; for new params,

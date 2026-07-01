@@ -1564,6 +1564,310 @@ fn test_configuration_set_event_destination_lifecycle() {
         .is_empty());
 }
 
+#[test]
+fn test_event_destination_kinesis_and_cloudwatch_persist_and_describe() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs2")],
+        ),
+    )
+    .unwrap();
+
+    // Kinesis Firehose destination.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                ("EventDestination.Name", "firehose-dest"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/ses-firehose",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/ses-stream",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // CloudWatch destination with a dimension configuration.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                ("EventDestination.Name", "cw-dest"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "bounce"),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DimensionName",
+                    "ses:configuration-set",
+                ),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DimensionValueSource",
+                    "messageTag",
+                ),
+                (
+                    "EventDestination.CloudWatchDestination.DimensionConfigurations.member.1.DefaultDimensionValue",
+                    "default",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // Persisted on the state.
+    {
+        let mas = state.read();
+        let st = mas.default_ref();
+        let dests = st.event_destinations.get("cs2").unwrap();
+        let fh = dests.iter().find(|d| d.name == "firehose-dest").unwrap();
+        let k = fh.kinesis_firehose_destination.as_ref().unwrap();
+        assert_eq!(
+            k["DeliveryStreamARN"],
+            "arn:aws:firehose:us-east-1:123456789012:deliverystream/ses-stream"
+        );
+        let cw = dests.iter().find(|d| d.name == "cw-dest").unwrap();
+        let cwd = cw.cloud_watch_destination.as_ref().unwrap();
+        assert_eq!(
+            cwd["DimensionConfigurations"][0]["DimensionName"],
+            "ses:configuration-set"
+        );
+    }
+
+    // DescribeConfigurationSet echoes the destination targets.
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "DescribeConfigurationSet",
+            vec![
+                ("ConfigurationSetName", "cs2"),
+                (
+                    "ConfigurationSetAttributeNames.member.1",
+                    "eventDestinations",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        xml.contains("<KinesisFirehoseDestination>") && xml.contains("deliverystream/ses-stream"),
+        "describe must echo Kinesis destination, got: {xml}"
+    );
+    assert!(
+        xml.contains("<CloudWatchDestination>") && xml.contains("ses:configuration-set"),
+        "describe must echo CloudWatch destination, got: {xml}"
+    );
+}
+
+#[test]
+fn test_event_destination_rejects_multiple_and_zero_targets() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs3")],
+        ),
+    )
+    .unwrap();
+
+    // Two targets on one destination -> rejected.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs3"),
+                ("EventDestination.Name", "multi"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+                // A fully-valid Kinesis block (both IAMRoleARN and
+                // DeliveryStreamARN) so the ONLY reason for rejection is that
+                // two targets are supplied, not an incomplete Kinesis block.
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/ses-firehose",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("multiple targets must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+
+    // Zero targets -> rejected.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs3"),
+                ("EventDestination.Name", "none"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("zero targets must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+#[test]
+fn test_event_destination_update_switches_target_type() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs4")],
+        ),
+    )
+    .unwrap();
+
+    // Start with an SNS target.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs4"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // Switch to a Kinesis target: the SNS target must be cleared.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "UpdateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs4"),
+                ("EventDestination.Name", "d"),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/r",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let mas = state.read();
+    let st = mas.default_ref();
+    let dest = &st.event_destinations.get("cs4").unwrap()[0];
+    assert!(
+        dest.sns_destination.is_none(),
+        "old SNS target must be cleared after switching to Kinesis"
+    );
+    assert!(dest.kinesis_firehose_destination.is_some());
+    assert!(dest.cloud_watch_destination.is_none());
+}
+
+#[test]
+fn test_event_destination_update_multiple_targets_is_atomic() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs5")],
+        ),
+    )
+    .unwrap();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs5"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.Enabled", "true"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // A rejected update (two targets + Enabled=false) must not persist ANY of
+    // its changes: Enabled and MatchingEventTypes stay as they were.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "UpdateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs5"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.Enabled", "false"),
+                ("EventDestination.MatchingEventTypes.member.1", "bounce"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t2",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/r",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("multiple-target update must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+
+    let mas = state.read();
+    let st = mas.default_ref();
+    let dest = &st.event_destinations.get("cs5").unwrap()[0];
+    assert!(
+        dest.enabled,
+        "Enabled must be unchanged after a rejected update"
+    );
+    assert_eq!(dest.matching_event_types, vec!["send"]);
+    // The original SNS target is intact; no partial target swap happened.
+    assert!(dest.sns_destination.is_some());
+    assert!(dest.kinesis_firehose_destination.is_none());
+}
+
 // ── Account / Quota tests ──
 
 #[test]

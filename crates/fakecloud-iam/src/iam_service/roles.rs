@@ -914,11 +914,15 @@ impl IamService {
             ));
         }
 
+        // Derive the ARN partition from the request region so gov/cn/iso
+        // deployments get the right partition (aws-us-gov / aws-cn / ...)
+        // instead of a hardcoded `aws`.
+        let partition = partition_for_region(&req.region);
         let role = IamRole {
             role_id: format!("AROA{}", generate_id()),
             arn: format!(
-                "arn:aws:iam::{}:role{}{}",
-                state.account_id, path, role_name
+                "arn:{}:iam::{}:role{}{}",
+                partition, state.account_id, path, role_name
             ),
             role_name: role_name.clone(),
             path,

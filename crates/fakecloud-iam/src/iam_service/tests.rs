@@ -803,6 +803,53 @@ fn list_policy_versions() {
     // Should have v1 and v2
     assert!(body.contains("<VersionId>v1</VersionId>"));
     assert!(body.contains("<VersionId>v2</VersionId>"));
+    // AWS omits the Document from ListPolicyVersions; only GetPolicyVersion
+    // returns it.
+    assert!(
+        !body.contains("<Document>"),
+        "ListPolicyVersions must not include Document, got: {body}"
+    );
+}
+
+#[test]
+fn create_policy_version_omits_document_but_get_returns_it() {
+    let svc = make_service();
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let resp = svc
+        .create_policy(&make_request(
+            "CreatePolicy",
+            vec![("PolicyName", "doc-pol"), ("PolicyDocument", policy_doc)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    let policy_arn = extract_xml_tag(&body, "Arn").to_string();
+
+    // CreatePolicyVersion must NOT echo the Document (AWS omits it).
+    let resp = svc
+        .create_policy_version(&make_request(
+            "CreatePolicyVersion",
+            vec![("PolicyArn", &policy_arn), ("PolicyDocument", policy_doc)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    assert!(body.contains("<VersionId>v2</VersionId>"));
+    assert!(
+        !body.contains("<Document>"),
+        "CreatePolicyVersion must not include Document, got: {body}"
+    );
+
+    // GetPolicyVersion still returns the (URL-encoded) Document.
+    let resp = svc
+        .get_policy_version(&make_request(
+            "GetPolicyVersion",
+            vec![("PolicyArn", &policy_arn), ("VersionId", "v2")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    assert!(
+        body.contains("<Document>"),
+        "GetPolicyVersion must include Document"
+    );
 }
 
 #[test]
@@ -1165,6 +1212,24 @@ fn service_linked_role_lifecycle() {
     let resp = svc.get_service_linked_role_deletion_status(&req).unwrap();
     let body = String::from_utf8_lossy(resp.body.expect_bytes());
     assert!(body.contains("<Status>SUCCEEDED</Status>"));
+}
+
+#[test]
+fn create_service_linked_role_uses_region_partition() {
+    let svc = make_service();
+    // GovCloud region -> aws-us-gov partition in the role ARN.
+    let mut req = make_request(
+        "CreateServiceLinkedRole",
+        vec![("AWSServiceName", "elasticloadbalancing.amazonaws.com")],
+    );
+    req.region = "us-gov-west-1".to_string();
+    let resp = svc.create_service_linked_role(&req).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    assert!(
+        body.contains("arn:aws-us-gov:iam::"),
+        "SLR ARN must use the gov partition, got: {body}"
+    );
+    assert!(!body.contains("arn:aws:iam::"));
 }
 
 // ---- Permission Boundary Tests ----
