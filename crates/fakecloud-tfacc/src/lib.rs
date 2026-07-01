@@ -148,14 +148,20 @@ pub struct GoTestRunner<'a> {
     pub endpoint: String,
 }
 
-/// Go `-parallel` degree for a service's `go test` invocation. Defaults to 4;
-/// a few background-loop + waiter-heavy services drop to 2 so their lifecycle
-/// settle tasks don't starve for CPU under four concurrent terraform applies on
-/// a 2-core CI runner. `pipes` runs a 500ms source-poll loop alongside
-/// create/import/update/delete waiters and is the clearest such case.
+/// Go `-parallel` degree for a service's `go test` invocation. Defaults to 4.
+///
+/// `pipes` is special: unlike every other service it runs a persistent
+/// background execution loop (the Pipes runner) on the fakecloud side. That
+/// constant load *on top of* four concurrent terraform applies oversubscribes a
+/// 2-core CI runner badly enough that the server stops serving the provider's
+/// delete/`gone` poll requests promptly — a pipe hangs in DELETING and even
+/// unrelated SQS DeleteQueue waiters time out. Other services have no such loop,
+/// so parallel-4 is fine for them. Run the pipes acceptance tests serially so
+/// they don't oversubscribe the box; the suite is small and its behaviour is
+/// unchanged, this only bounds concurrency on constrained runners.
 fn parallelism_for(service: &str) -> u32 {
     match service {
-        "pipes" => 2,
+        "pipes" => 1,
         _ => 4,
     }
 }

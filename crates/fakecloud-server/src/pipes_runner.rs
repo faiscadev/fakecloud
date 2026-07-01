@@ -112,10 +112,18 @@ impl PipesRunner {
     }
 
     pub async fn run(self) {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        // Sleep *after* each poll rather than using a fixed-rate `interval`:
+        // `interval` with the default Burst behaviour fires back-to-back to
+        // "catch up" whenever a poll runs long, which on an oversubscribed
+        // 2-core CI runner turns the runner into a busy loop that starves the
+        // request handlers. A trailing sleep guarantees at least this gap
+        // between polls no matter how long a poll took. One second is well
+        // within Pipes' delivery-latency tolerance and keeps the runner's
+        // constant background load low so it doesn't tip a constrained runner
+        // over when it runs alongside concurrent terraform applies.
         loop {
-            interval.tick().await;
             self.poll().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 

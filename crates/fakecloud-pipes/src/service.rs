@@ -775,28 +775,42 @@ fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
 /// genuinely-starved settles.
 pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64) {
     let now = now_epoch_secs();
-    let mut accounts = state.write();
-    for st in accounts.accounts.values_mut() {
-        let due: Vec<String> = st
-            .pipes
-            .iter()
-            .filter(|(_, pipe)| {
+
+    // Read-lock-first: collect the overdue `(account, name)` pairs under a
+    // shared read lock, and only escalate to the write lock when there is
+    // actually something to settle. The common case — no transient pipe past
+    // the age gate — takes only the read lock, so the runner's per-tick drain
+    // does not convoy against the provider's DescribePipe read flood.
+    let overdue: Vec<(String, String)> = {
+        let accounts = state.read();
+        let mut out = Vec::new();
+        for (account_id, st) in &accounts.accounts {
+            for (name, pipe) in &st.pipes {
                 let cur = pipe
                     .get("CurrentState")
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !is_transient_state(cur) {
-                    return false;
+                    continue;
                 }
                 let last = pipe
                     .get("LastModifiedTime")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0);
-                now - last >= min_age_secs
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in due {
+                if now - last >= min_age_secs {
+                    out.push((account_id.clone(), name.clone()));
+                }
+            }
+        }
+        out
+    };
+    if overdue.is_empty() {
+        return;
+    }
+
+    let mut accounts = state.write();
+    for (account_id, name) in overdue {
+        if let Some(st) = accounts.accounts.get_mut(&account_id) {
             settle_pipe(st, &name);
         }
     }
