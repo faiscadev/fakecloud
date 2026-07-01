@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 45 AWS services with 3,760 total operations. 125,770/125,770 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 46 AWS services with 3,783 total operations. 126,556/126,556 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -33,6 +33,7 @@ fakecloud implements 45 AWS services with 3,760 total operations. 125,770/125,77
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | RDS Data API           |   6 | Real SQL on the backing Postgres/MySQL container; typed params/results incl. `bytea`/`BLOB`, transactions, batch |
 | Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
+| Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |

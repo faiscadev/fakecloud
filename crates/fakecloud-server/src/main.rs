@@ -452,6 +452,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let resource_groups_state: fakecloud_resource_groups::SharedResourceGroupsState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let cloudcontrol_state: fakecloud_cloudcontrol::SharedCloudControlState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3814,6 +3821,37 @@ async fn main() {
     // converge; the ticker owns its own snapshot write-through.
     dsql_service.start_ticker();
     registry.register(Arc::new(dsql_service));
+
+    // Resource Groups control plane.
+    let resource_groups_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("resource-groups").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_resource_groups::persistence::load_into(&store, &resource_groups_state)
+            {
+                Ok(fakecloud_resource_groups::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded resource-groups persistence snapshot");
+                }
+                Ok(fakecloud_resource_groups::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no resource-groups persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut resource_groups_service =
+        fakecloud_resource_groups::ResourceGroupsService::new(resource_groups_state.clone());
+    if let Some(store) = resource_groups_snapshot_store {
+        resource_groups_service = resource_groups_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(resource_groups_service));
 
     let cloudformation_service = cloudformation_service
         .with_s3_store(s3_store.clone())

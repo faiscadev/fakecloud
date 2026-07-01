@@ -196,6 +196,7 @@ jobs:
           publish fakecloud-rds
           publish fakecloud-rds-data        # depends on rds
           publish fakecloud-dsql
+          publish fakecloud-resource-groups  # only core/persistence/aws deps
           publish fakecloud-elasticache
           publish fakecloud-kinesis
           publish fakecloud-scheduler

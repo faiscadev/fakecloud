@@ -1587,6 +1587,32 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UntagResource`
 - `UpdateCluster`
 
+## [Resource Groups](@/docs/services/resource-groups.md)
+
+- `CancelTagSyncTask`
+- `CreateGroup`
+- `DeleteGroup`
+- `GetAccountSettings`
+- `GetGroup`
+- `GetGroupConfiguration`
+- `GetGroupQuery`
+- `GetTagSyncTask`
+- `GetTags`
+- `GroupResources`
+- `ListGroupResources`
+- `ListGroupingStatuses`
+- `ListGroups`
+- `ListTagSyncTasks`
+- `PutGroupConfiguration`
+- `SearchResources`
+- `StartTagSyncTask`
+- `Tag`
+- `UngroupResources`
+- `Untag`
+- `UpdateAccountSettings`
+- `UpdateGroup`
+- `UpdateGroupQuery`
+
 ## [ElastiCache](@/docs/services/elasticache.md)
 
 - `AddTagsToResource`

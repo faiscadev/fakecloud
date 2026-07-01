@@ -812,6 +812,10 @@ impl TestServer {
         aws_sdk_cloudcontrol::Client::new(&self.aws_config().await)
     }
 
+    pub async fn resourcegroups_client(&self) -> aws_sdk_resourcegroups::Client {
+        aws_sdk_resourcegroups::Client::new(&self.aws_config().await)
+    }
+
     pub async fn ecr_client(&self) -> aws_sdk_ecr::Client {
         aws_sdk_ecr::Client::new(&self.aws_config().await)
     }
