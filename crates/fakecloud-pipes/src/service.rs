@@ -582,9 +582,14 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
-            // Atomic guard: reject a mutation while the pipe is mid-transition,
-            // holding the write lock so a concurrent DeletePipe/Start/Stop can't
-            // flip the state between this check and the write below.
+            // Stabilize a fresh transient pipe on demand (CREATING/STARTING/
+            // STOPPING/UPDATING -> steady state) so Update on a just-created pipe
+            // succeeds like real AWS; DELETING is left for the guard below.
+            settle_transient_obj(obj);
+            // Atomic guard: reject a mutation only while the pipe is DELETING
+            // (the sole remaining transient state after the settle above),
+            // holding the write lock so a concurrent DeletePipe can't flip the
+            // state between this check and the write below.
             if let Some(err) = transient_conflict(obj, &name) {
                 return Err(err);
             }
@@ -680,8 +685,13 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
-            // Atomic guard in the same critical section as the mutation: a
-            // concurrent DeletePipe can't flip the state between check and write.
+            // Stabilize a fresh transient pipe on demand so Start/Stop on a
+            // just-created pipe succeeds like real AWS; DELETING is left for the
+            // guard below.
+            settle_transient_obj(obj);
+            // Atomic guard in the same critical section as the mutation: reject
+            // only a DELETING pipe, so a concurrent DeletePipe can't be raced
+            // between check and write.
             if let Some(err) = transient_conflict(obj, &name) {
                 return Err(err);
             }
@@ -848,6 +858,50 @@ fn is_mutating(action: &str) -> bool {
 /// Advance a transient pipe to its settled state. Removes the pipe (and tags)
 /// when it was DELETING; otherwise resolves to its DesiredState or the natural
 /// terminus of the in-flight transition.
+/// Force a *non-DELETING* transient pipe to its steady state in place, ignoring
+/// the `SETTLE_DELAY` window. fakecloud has no real provisioning latency, so a
+/// just-created `CREATING` pipe (and `STARTING`/`STOPPING`/`UPDATING`)
+/// stabilizes on demand — real AWS lets Start/Stop/Update on a freshly-created
+/// pipe succeed with 200 because the pipe stabilizes almost instantly. Called
+/// under the state write lock immediately before the transient guard, so a
+/// fresh pipe becomes RUNNING/STOPPED and the guard only ever rejects a pipe
+/// that is genuinely `DELETING` (preserving the anti-resurrection fix).
+fn settle_transient_obj(obj: &mut Map<String, Value>) {
+    let cur = obj
+        .get("CurrentState")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // DELETING is left untouched so the guard can still reject it; a settled
+    // state needs no work.
+    if cur == STATE_DELETING || !is_transient_state(cur) {
+        return;
+    }
+    let desired = obj
+        .get("DesiredState")
+        .and_then(Value::as_str)
+        .unwrap_or(STATE_RUNNING)
+        .to_string();
+    let settled = match cur {
+        STATE_STARTING => STATE_RUNNING,
+        STATE_STOPPING => STATE_STOPPED,
+        // CREATING / UPDATING resolve to whatever the client asked for.
+        _ => {
+            if desired == STATE_STOPPED {
+                STATE_STOPPED
+            } else {
+                STATE_RUNNING
+            }
+        }
+    };
+    obj.insert("CurrentState".into(), json!(settled));
+    let reason = if settled == STATE_RUNNING {
+        "Pipe is running"
+    } else {
+        "Pipe is stopped"
+    };
+    obj.insert("StateReason".into(), json!(reason));
+}
+
 fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
     let Some(pipe) = st.pipes.get(name) else {
         return;
@@ -1358,30 +1412,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn start_rejects_creating_pipe_with_conflict() {
-        let (svc, _state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
+    #[tokio::test]
+    async fn start_settles_fresh_creating_pipe_then_succeeds() {
+        // Real AWS lets StartPipe on a just-created (CREATING) pipe succeed —
+        // the pipe stabilizes almost instantly. fakecloud force-settles it to
+        // RUNNING on demand, so Start proceeds (200) and moves it to STARTING.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
         let req = make_request(Method::POST, "/v1/pipes/p1/start");
-        let Err(err) = svc.start_pipe(&req) else {
-            panic!("StartPipe on a CREATING pipe must be rejected");
-        };
-        assert_eq!(err.code(), "ConflictException");
+        assert!(
+            svc.start_pipe(&req).is_ok(),
+            "StartPipe on a fresh CREATING pipe must succeed, not 409"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_STARTING
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_settles_fresh_updating_pipe_then_succeeds() {
+        let (svc, state) = service_with_pipe(STATE_UPDATING, STATE_RUNNING, 0.0);
+        let req = make_request(Method::POST, "/v1/pipes/p1/stop");
+        assert!(
+            svc.stop_pipe(&req).is_ok(),
+            "StopPipe on a fresh UPDATING pipe must succeed, not 409"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_STOPPING
+        );
     }
 
     #[test]
-    fn stop_rejects_updating_pipe_with_conflict() {
-        let (svc, _state) = service_with_pipe(STATE_UPDATING, STATE_RUNNING, 0.0);
-        let req = make_request(Method::POST, "/v1/pipes/p1/stop");
-        let Err(err) = svc.stop_pipe(&req) else {
-            panic!("StopPipe on an UPDATING pipe must be rejected");
-        };
-        assert_eq!(err.code(), "ConflictException");
+    fn start_and_stop_reject_deleting_pipe_with_conflict() {
+        // The anti-resurrection guard: Start/Stop on a DELETING pipe still 409s
+        // and does not flip it out of DELETING.
+        for op in ["start", "stop"] {
+            let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 0.0);
+            let req = make_request(Method::POST, &format!("/v1/pipes/p1/{op}"));
+            let res = if op == "start" {
+                svc.start_pipe(&req)
+            } else {
+                svc.stop_pipe(&req)
+            };
+            let Err(err) = res else {
+                panic!("{op} on a DELETING pipe must be rejected");
+            };
+            assert_eq!(err.code(), "ConflictException", "{op} must conflict");
+            assert_eq!(
+                state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+                STATE_DELETING,
+                "{op} must not resurrect the DELETING pipe"
+            );
+        }
     }
 
     #[test]
     fn transient_conflict_flags_only_transient_states() {
-        // The in-lock guard treats settled states as modifiable and every
-        // transient state as a ConflictException.
+        // Raw helper contract: settled states are modifiable, every transient
+        // state maps to ConflictException. In the live Update/Start/Stop path a
+        // non-DELETING transient is force-settled *before* this runs, so only
+        // DELETING actually reaches it — but the helper itself flags all of them.
         let mut obj = Map::new();
         obj.insert("CurrentState".into(), json!(STATE_RUNNING));
         assert!(transient_conflict(&obj, "p1").is_none());
