@@ -597,6 +597,15 @@ pub struct ElastiCacheState {
     /// Active migrations keyed by replication group id.
     #[serde(default)]
     pub migrations: BTreeMap<String, Migration>,
+    /// Available service updates keyed by ServiceUpdateName, seeded with a
+    /// small realistic set and read by DescribeServiceUpdates.
+    #[serde(default)]
+    pub service_updates: BTreeMap<String, ServiceUpdate>,
+    /// Update actions keyed by "{service_update_name}#{target_kind}#{id}".
+    /// Materialized lazily from (service_updates x clusters/replication groups)
+    /// and transitioned by BatchApplyUpdateAction / BatchStopUpdateAction.
+    #[serde(default)]
+    pub update_actions: BTreeMap<String, UpdateAction>,
 }
 
 impl ElastiCacheState {
@@ -635,6 +644,8 @@ impl ElastiCacheState {
             parameter_group_parameters: BTreeMap::new(),
             events: Vec::new(),
             migrations: BTreeMap::new(),
+            service_updates: default_service_updates(),
+            update_actions: BTreeMap::new(),
         }
     }
 
@@ -665,6 +676,31 @@ impl ElastiCacheState {
         self.parameter_group_parameters.clear();
         self.events.clear();
         self.migrations.clear();
+        self.service_updates = default_service_updates();
+        self.update_actions.clear();
+    }
+
+    /// Ensure an UpdateAction exists for every (service_update, target) pair,
+    /// where targets are this account's cache clusters and replication groups.
+    /// AWS auto-creates these when a service update is released; we materialize
+    /// them lazily so DescribeUpdateActions and the batch ops share state.
+    pub fn ensure_update_actions(&mut self) {
+        let cluster_ids: Vec<String> = self.cache_clusters.keys().cloned().collect();
+        let group_ids: Vec<String> = self.replication_groups.keys().cloned().collect();
+        for su in self.service_updates.values() {
+            for cc in &cluster_ids {
+                let key = format!("{}#cc#{}", su.service_update_name, cc);
+                self.update_actions
+                    .entry(key)
+                    .or_insert_with(|| new_update_action(su, None, Some(cc.clone())));
+            }
+            for rg in &group_ids {
+                let key = format!("{}#rg#{}", su.service_update_name, rg);
+                self.update_actions
+                    .entry(key)
+                    .or_insert_with(|| new_update_action(su, Some(rg.clone()), None));
+            }
+        }
     }
 
     pub fn begin_cache_cluster_creation(&mut self, cache_cluster_id: &str) -> bool {
@@ -776,6 +812,80 @@ impl ElastiCacheState {
 
     pub fn has_arn(&self, arn: &str) -> bool {
         self.tags.contains_key(arn)
+    }
+}
+
+/// A small, realistic set of always-available service updates. AWS accounts
+/// always have some outstanding service updates; these are read by
+/// DescribeServiceUpdates and drive DescribeUpdateActions / batch ops.
+fn default_service_updates() -> BTreeMap<String, ServiceUpdate> {
+    let mut m = BTreeMap::new();
+    for (name, release, end, apply_by, severity, engine, desc) in [
+        (
+            "elasticache-20240301-redis-security",
+            "2024-03-01T00:00:00Z",
+            "2024-09-01T00:00:00Z",
+            "2024-04-01T00:00:00Z",
+            "important",
+            "redis",
+            "Security update for ElastiCache for Redis",
+        ),
+        (
+            "elasticache-20240601-memcached-security",
+            "2024-06-01T00:00:00Z",
+            "2024-12-01T00:00:00Z",
+            "2024-07-01T00:00:00Z",
+            "medium",
+            "memcached",
+            "Security update for ElastiCache for Memcached",
+        ),
+    ] {
+        m.insert(
+            name.to_string(),
+            ServiceUpdate {
+                service_update_name: name.to_string(),
+                service_update_release_date: release.to_string(),
+                service_update_end_date: end.to_string(),
+                service_update_severity: severity.to_string(),
+                service_update_status: "available".to_string(),
+                service_update_recommended_apply_by_date: apply_by.to_string(),
+                service_update_type: "security-update".to_string(),
+                engine: engine.to_string(),
+                engine_version: String::new(),
+                auto_update_after_recommended_apply_by_date: true,
+                estimated_update_time: "30 minutes".to_string(),
+                service_update_description: desc.to_string(),
+            },
+        );
+    }
+    m
+}
+
+/// Build a fresh, not-yet-applied UpdateAction for a service update against a
+/// single target (replication group or cache cluster).
+fn new_update_action(
+    su: &ServiceUpdate,
+    replication_group_id: Option<String>,
+    cache_cluster_id: Option<String>,
+) -> UpdateAction {
+    UpdateAction {
+        replication_group_id,
+        cache_cluster_id,
+        service_update_name: su.service_update_name.clone(),
+        service_update_release_date: su.service_update_release_date.clone(),
+        service_update_severity: su.service_update_severity.clone(),
+        service_update_status: su.service_update_status.clone(),
+        service_update_recommended_apply_by_date: su
+            .service_update_recommended_apply_by_date
+            .clone(),
+        service_update_type: su.service_update_type.clone(),
+        update_action_available_date: su.service_update_release_date.clone(),
+        update_action_status: "not-applied".to_string(),
+        nodes_updated: "0/0".to_string(),
+        update_action_status_modified_date: su.service_update_release_date.clone(),
+        sla_met: "n/a".to_string(),
+        estimated_update_time: su.estimated_update_time.clone(),
+        engine: su.engine.clone(),
     }
 }
 

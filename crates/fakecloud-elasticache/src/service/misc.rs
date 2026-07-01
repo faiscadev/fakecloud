@@ -723,13 +723,29 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body = "<ServiceUpdates/>";
+        let name_filter = optional_query_param(request, "ServiceUpdateName");
+        let status_filter = collect_indexed_strings(request, "ServiceUpdateStatus.member");
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let members: String = state
+            .service_updates
+            .values()
+            .filter(|su| {
+                name_filter
+                    .as_ref()
+                    .is_none_or(|n| &su.service_update_name == n)
+                    && (status_filter.is_empty()
+                        || status_filter.contains(&su.service_update_status))
+            })
+            .map(render_service_update)
+            .collect();
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
                 "DescribeServiceUpdates",
                 ELASTICACHE_NS,
-                body,
+                &format!("<ServiceUpdates>{members}</ServiceUpdates>"),
                 &request.request_id,
             ),
         ))
@@ -739,13 +755,48 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body = "<UpdateActions/>";
+        let name_filter = optional_query_param(request, "ServiceUpdateName");
+        let cluster_filter = collect_indexed_strings(request, "CacheClusterIds.member");
+        let group_filter = collect_indexed_strings(request, "ReplicationGroupIds.member");
+        let status_filter = collect_indexed_strings(request, "UpdateActionStatus.member");
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        // Materialize the (service_update x target) actions before reading so
+        // callers see actions for their actual clusters/replication groups.
+        state.ensure_update_actions();
+        let members: String = state
+            .update_actions
+            .values()
+            .filter(|ua| {
+                let name_ok = name_filter
+                    .as_ref()
+                    .is_none_or(|n| &ua.service_update_name == n);
+                let status_ok =
+                    status_filter.is_empty() || status_filter.contains(&ua.update_action_status);
+                // CacheClusterIds and ReplicationGroupIds are OR'd; an empty
+                // pair means "all targets".
+                let target_ok = if cluster_filter.is_empty() && group_filter.is_empty() {
+                    true
+                } else {
+                    ua.cache_cluster_id
+                        .as_ref()
+                        .is_some_and(|c| cluster_filter.contains(c))
+                        || ua
+                            .replication_group_id
+                            .as_ref()
+                            .is_some_and(|g| group_filter.contains(g))
+                };
+                name_ok && status_ok && target_ok
+            })
+            .map(render_update_action)
+            .collect();
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
                 "DescribeUpdateActions",
                 ELASTICACHE_NS,
-                body,
+                &format!("<UpdateActions>{members}</UpdateActions>"),
                 &request.request_id,
             ),
         ))
@@ -755,14 +806,14 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.batch_update_action(request, "BatchApplyUpdateAction", "stopping")
+        self.batch_update_action(request, "BatchApplyUpdateAction", "waiting-to-start")
     }
 
     pub(super) fn batch_stop_update_action(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.batch_update_action(request, "BatchStopUpdateAction", "stopped")
+        self.batch_update_action(request, "BatchStopUpdateAction", "stopping")
     }
 
     pub(super) fn batch_update_action(
@@ -774,28 +825,120 @@ impl ElastiCacheService {
         let svc_update = required_query_param(request, "ServiceUpdateName")?;
         let cluster_ids = collect_indexed_strings(request, "CacheClusterIds.member");
         let group_ids = collect_indexed_strings(request, "ReplicationGroupIds.member");
-        let processed: Vec<String> = cluster_ids
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        state.ensure_update_actions();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // (kind, id) where kind is "cc" or "rg"; processed = transitioned,
+        // unprocessed = no matching update action for that (service update, id).
+        let mut processed: Vec<(&str, String)> = Vec::new();
+        let mut unprocessed: Vec<(&str, String)> = Vec::new();
+        for (kind, id) in cluster_ids
             .iter()
-            .chain(group_ids.iter())
-            .cloned()
-            .collect();
+            .map(|c| ("cc", c))
+            .chain(group_ids.iter().map(|g| ("rg", g)))
+        {
+            let key = format!("{svc_update}#{kind}#{id}");
+            if let Some(ua) = state.update_actions.get_mut(&key) {
+                ua.update_action_status = new_status.to_string();
+                ua.update_action_status_modified_date = now.clone();
+                processed.push((kind, id.clone()));
+            } else {
+                unprocessed.push((kind, id.clone()));
+            }
+        }
+
         let processed_xml: String = processed
             .iter()
-            .map(|id| {
+            .map(|(kind, id)| {
+                let target = target_element(kind, id);
                 format!(
-                    "<member><ServiceUpdateName>{}</ServiceUpdateName><ReplicationGroupId>{}</ReplicationGroupId><UpdateActionStatus>{}</UpdateActionStatus></member>",
+                    "<member><ServiceUpdateName>{}</ServiceUpdateName>{target}<UpdateActionStatus>{}</UpdateActionStatus></member>",
                     xml_escape(&svc_update),
-                    xml_escape(id),
                     xml_escape(new_status),
                 )
             })
             .collect();
+        let unprocessed_xml: String = unprocessed
+            .iter()
+            .map(|(kind, id)| {
+                let target = target_element(kind, id);
+                format!(
+                    "<member><ServiceUpdateName>{}</ServiceUpdateName>{target}<ErrorType>UpdateActionNotFoundFault</ErrorType><ErrorMessage>No update action found for the given service update and target</ErrorMessage></member>",
+                    xml_escape(&svc_update),
+                )
+            })
+            .collect();
         let body = format!(
-            "<ProcessedUpdateActions>{processed_xml}</ProcessedUpdateActions><UnprocessedUpdateActions/>"
+            "<ProcessedUpdateActions>{processed_xml}</ProcessedUpdateActions><UnprocessedUpdateActions>{unprocessed_xml}</UnprocessedUpdateActions>"
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(action, ELASTICACHE_NS, &body, &request.request_id),
         ))
     }
+}
+
+/// Render `<ReplicationGroupId>` or `<CacheClusterId>` for a batch member.
+fn target_element(kind: &str, id: &str) -> String {
+    if kind == "rg" {
+        format!(
+            "<ReplicationGroupId>{}</ReplicationGroupId>",
+            xml_escape(id)
+        )
+    } else {
+        format!("<CacheClusterId>{}</CacheClusterId>", xml_escape(id))
+    }
+}
+
+fn render_service_update(su: &crate::state::ServiceUpdate) -> String {
+    format!(
+        "<member><ServiceUpdateName>{}</ServiceUpdateName><ServiceUpdateReleaseDate>{}</ServiceUpdateReleaseDate><ServiceUpdateEndDate>{}</ServiceUpdateEndDate><ServiceUpdateSeverity>{}</ServiceUpdateSeverity><ServiceUpdateStatus>{}</ServiceUpdateStatus><ServiceUpdateRecommendedApplyByDate>{}</ServiceUpdateRecommendedApplyByDate><ServiceUpdateType>{}</ServiceUpdateType><Engine>{}</Engine><EngineVersion>{}</EngineVersion><AutoUpdateAfterRecommendedApplyByDate>{}</AutoUpdateAfterRecommendedApplyByDate><EstimatedUpdateTime>{}</EstimatedUpdateTime><ServiceUpdateDescription>{}</ServiceUpdateDescription></member>",
+        xml_escape(&su.service_update_name),
+        xml_escape(&su.service_update_release_date),
+        xml_escape(&su.service_update_end_date),
+        xml_escape(&su.service_update_severity),
+        xml_escape(&su.service_update_status),
+        xml_escape(&su.service_update_recommended_apply_by_date),
+        xml_escape(&su.service_update_type),
+        xml_escape(&su.engine),
+        xml_escape(&su.engine_version),
+        su.auto_update_after_recommended_apply_by_date,
+        xml_escape(&su.estimated_update_time),
+        xml_escape(&su.service_update_description),
+    )
+}
+
+fn render_update_action(ua: &crate::state::UpdateAction) -> String {
+    let mut target = String::new();
+    if let Some(rg) = &ua.replication_group_id {
+        target.push_str(&format!(
+            "<ReplicationGroupId>{}</ReplicationGroupId>",
+            xml_escape(rg)
+        ));
+    }
+    if let Some(cc) = &ua.cache_cluster_id {
+        target.push_str(&format!(
+            "<CacheClusterId>{}</CacheClusterId>",
+            xml_escape(cc)
+        ));
+    }
+    format!(
+        "<member>{target}<ServiceUpdateName>{}</ServiceUpdateName><ServiceUpdateReleaseDate>{}</ServiceUpdateReleaseDate><ServiceUpdateSeverity>{}</ServiceUpdateSeverity><ServiceUpdateStatus>{}</ServiceUpdateStatus><ServiceUpdateRecommendedApplyByDate>{}</ServiceUpdateRecommendedApplyByDate><ServiceUpdateType>{}</ServiceUpdateType><UpdateActionAvailableDate>{}</UpdateActionAvailableDate><UpdateActionStatus>{}</UpdateActionStatus><NodesUpdated>{}</NodesUpdated><UpdateActionStatusModifiedDate>{}</UpdateActionStatusModifiedDate><SlaMet>{}</SlaMet><EstimatedUpdateTime>{}</EstimatedUpdateTime><Engine>{}</Engine></member>",
+        xml_escape(&ua.service_update_name),
+        xml_escape(&ua.service_update_release_date),
+        xml_escape(&ua.service_update_severity),
+        xml_escape(&ua.service_update_status),
+        xml_escape(&ua.service_update_recommended_apply_by_date),
+        xml_escape(&ua.service_update_type),
+        xml_escape(&ua.update_action_available_date),
+        xml_escape(&ua.update_action_status),
+        xml_escape(&ua.nodes_updated),
+        xml_escape(&ua.update_action_status_modified_date),
+        xml_escape(&ua.sla_met),
+        xml_escape(&ua.estimated_update_time),
+        xml_escape(&ua.engine),
+    )
 }

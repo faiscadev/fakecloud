@@ -3965,25 +3965,149 @@ fn describe_events_returns_empty() {
 }
 
 #[test]
-fn describe_service_updates_returns_empty() {
+fn describe_service_updates_returns_seeded_set() {
     let svc = fresh_service();
     let req = request("DescribeServiceUpdates", &[]);
     let resp = svc.describe_service_updates(&req).unwrap();
-    assert!(body(resp).contains("ServiceUpdates"));
+    let b = body(resp);
+    assert!(b.contains("<ServiceUpdates>"));
+    // Seeded, realistic service updates are returned (not an empty stub).
+    assert!(
+        b.contains("<ServiceUpdateName>elasticache-20240301-redis-security</ServiceUpdateName>")
+    );
+    assert!(b.contains("<ServiceUpdateStatus>available</ServiceUpdateStatus>"));
 }
 
 #[test]
-fn batch_apply_update_action_round_trip() {
+fn describe_service_updates_filters_by_name() {
     let svc = fresh_service();
+    let req = request(
+        "DescribeServiceUpdates",
+        &[(
+            "ServiceUpdateName",
+            "elasticache-20240601-memcached-security",
+        )],
+    );
+    let b = body(svc.describe_service_updates(&req).unwrap());
+    assert!(b.contains("elasticache-20240601-memcached-security"));
+    assert!(!b.contains("elasticache-20240301-redis-security"));
+}
+
+fn insert_test_cluster(svc: &ElastiCacheService, id: &str) {
+    let mut state = svc.state.write();
+    let account = state.get_or_create("123456789012");
+    account.cache_clusters.insert(
+        id.to_string(),
+        CacheCluster {
+            cache_cluster_id: id.to_string(),
+            cache_node_type: "cache.t4g.micro".to_string(),
+            engine: "redis".to_string(),
+            engine_version: "7.1".to_string(),
+            cache_cluster_status: "available".to_string(),
+            num_cache_nodes: 1,
+            preferred_availability_zone: "us-east-1a".to_string(),
+            cache_subnet_group_name: None,
+            auto_minor_version_upgrade: true,
+            arn: format!("arn:aws:elasticache:us-east-1:123456789012:cluster:{id}"),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: 6379,
+            container_id: "abc123".to_string(),
+            host_port: 6379,
+            replication_group_id: None,
+            cache_parameter_group_name: None,
+            security_group_ids: Vec::new(),
+            log_delivery_configurations: Vec::new(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            auth_token_enabled: false,
+            port: 6379,
+            preferred_maintenance_window: None,
+            preferred_availability_zones: Vec::new(),
+            notification_topic_arn: None,
+            cache_security_group_names: Vec::new(),
+            snapshot_arns: Vec::new(),
+            snapshot_name: None,
+            snapshot_retention_limit: 0,
+            snapshot_window: None,
+            outpost_mode: None,
+            preferred_outpost_arn: None,
+            network_type: None,
+            ip_discovery: None,
+            az_mode: None,
+            auth_token: None,
+            kms_key_id: None,
+            transit_encryption_mode: None,
+            data_tiering_enabled: None,
+            cluster_mode: None,
+            preferred_outpost_arns: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn describe_update_actions_materializes_for_clusters() {
+    let svc = fresh_service();
+    insert_test_cluster(&svc, "cc-1");
+
+    let req = request("DescribeUpdateActions", &[]);
+    let b = body(svc.describe_update_actions(&req).unwrap());
+    // An action exists for the caller's cluster, initially not-applied.
+    assert!(b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+    assert!(b.contains("<UpdateActionStatus>not-applied</UpdateActionStatus>"));
+
+    // Filtering by an unrelated cluster id returns none.
+    let req = request(
+        "DescribeUpdateActions",
+        &[("CacheClusterIds.member.1", "other")],
+    );
+    let b = body(svc.describe_update_actions(&req).unwrap());
+    assert!(!b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+}
+
+#[test]
+fn batch_apply_update_action_transitions_state() {
+    let svc = fresh_service();
+    insert_test_cluster(&svc, "cc-1");
+    let su = "elasticache-20240301-redis-security";
+
+    // Apply the update action for the cluster.
     let req = request(
         "BatchApplyUpdateAction",
         &[
-            ("ServiceUpdateName", "svc-1"),
-            ("ReplicationGroupIds.member.1", "rg"),
+            ("ServiceUpdateName", su),
+            ("CacheClusterIds.member.1", "cc-1"),
         ],
     );
-    let resp = svc.batch_apply_update_action(&req).unwrap();
-    assert!(body(resp).contains("ProcessedUpdateActions"));
+    let b = body(svc.batch_apply_update_action(&req).unwrap());
+    assert!(b.contains("<ProcessedUpdateActions>"));
+    assert!(b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+    assert!(b.contains("<UpdateActionStatus>waiting-to-start</UpdateActionStatus>"));
+
+    // The transition persisted: DescribeUpdateActions scoped to this service
+    // update now shows the new status (the other seeded update is untouched).
+    let b = body(
+        svc.describe_update_actions(&request(
+            "DescribeUpdateActions",
+            &[("ServiceUpdateName", su)],
+        ))
+        .unwrap(),
+    );
+    assert!(b.contains("<UpdateActionStatus>waiting-to-start</UpdateActionStatus>"));
+    assert!(!b.contains("<UpdateActionStatus>not-applied</UpdateActionStatus>"));
+
+    // An unknown cluster is reported as unprocessed, not fake-success.
+    let req = request(
+        "BatchApplyUpdateAction",
+        &[
+            ("ServiceUpdateName", su),
+            ("CacheClusterIds.member.1", "ghost"),
+        ],
+    );
+    let b = body(svc.batch_apply_update_action(&req).unwrap());
+    assert!(b.contains("<UnprocessedUpdateActions>"));
+    assert!(b.contains("<CacheClusterId>ghost</CacheClusterId>"));
+    assert!(b.contains("UpdateActionNotFoundFault"));
 }
 
 #[test]

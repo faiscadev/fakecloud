@@ -1211,6 +1211,17 @@ impl GlueService {
         if input["PartitionKeys"].is_array() {
             t.partition_keys = parse_columns(&input["PartitionKeys"]);
         }
+        // CreateTable persists these and GetTable reads them, but UpdateTable
+        // used to drop them silently (half fix) — apply them here too.
+        if let Some(v) = input["ViewOriginalText"].as_str() {
+            t.view_original_text = Some(v.to_string());
+        }
+        if let Some(v) = input["ViewExpandedText"].as_str() {
+            t.view_expanded_text = Some(v.to_string());
+        }
+        if let Some(r) = input["Retention"].as_i64() {
+            t.retention = r;
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 

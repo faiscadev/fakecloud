@@ -463,3 +463,51 @@ fn constraint_validation_rejects_bad_input() {
     );
     assert!(ok.is_ok());
 }
+
+#[test]
+fn update_table_applies_view_text_and_retention() {
+    let svc = GlueService::default();
+    svc.create_database(&req(
+        "CreateDatabase",
+        json!({"DatabaseInput": {"Name": "db"}}),
+    ))
+    .unwrap();
+    svc.create_table(&req(
+        "CreateTable",
+        json!({
+            "DatabaseName": "db",
+            "TableInput": {
+                "Name": "v",
+                "TableType": "VIRTUAL_VIEW",
+                "ViewOriginalText": "SELECT 1",
+                "ViewExpandedText": "SELECT 1 FROM db.t",
+                "Retention": 5,
+            }
+        }),
+    ))
+    .unwrap();
+
+    // Update the view text and retention.
+    svc.update_table(&req(
+        "UpdateTable",
+        json!({
+            "DatabaseName": "db",
+            "TableInput": {
+                "Name": "v",
+                "TableType": "VIRTUAL_VIEW",
+                "ViewOriginalText": "SELECT 2",
+                "ViewExpandedText": "SELECT 2 FROM db.t",
+                "Retention": 9,
+            }
+        }),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.get_table(&req("GetTable", json!({"DatabaseName": "db", "Name": "v"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Table"]["ViewOriginalText"], "SELECT 2");
+    assert_eq!(got["Table"]["ViewExpandedText"], "SELECT 2 FROM db.t");
+    assert_eq!(got["Table"]["Retention"], 9);
+}

@@ -14,6 +14,15 @@ impl AthenaService {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let configuration = body.get("Configuration").cloned();
+        // The workgroup's EngineVersion comes from its Configuration; it must
+        // round-trip into ListWorkGroups' summary, not be hardcoded to AUTO.
+        let engine_version = configuration
+            .as_ref()
+            .and_then(|c| c.get("EngineVersion"))
+            .and_then(|ev| ev.get("SelectedEngineVersion"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some("AUTO".to_string()));
         let tags = parse_tags(body.get("Tags"))?;
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
@@ -26,7 +35,7 @@ impl AthenaService {
             description,
             configuration,
             creation_time: Utc::now(),
-            engine_version: Some("AUTO".to_string()),
+            engine_version,
         };
         let arn = workgroup_arn(&req.account_id, &req.region, &name);
         account.work_groups.insert(name, wg);
@@ -160,6 +169,14 @@ impl AthenaService {
                     }
                 }
                 config.insert("ResultConfiguration".to_string(), Value::Object(rc));
+            }
+            // Keep the summary's EngineVersion in sync with the merged config.
+            if let Some(sev) = config
+                .get("EngineVersion")
+                .and_then(|ev| ev.get("SelectedEngineVersion"))
+                .and_then(Value::as_str)
+            {
+                wg.engine_version = Some(sev.to_string());
             }
             wg.configuration = Some(Value::Object(config));
         }

@@ -1188,4 +1188,131 @@ mod managed_rule_set_validation_tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(body["ManagedRuleSets"].as_array().unwrap().len(), 0);
     }
+
+    // GetManagedRuleSet reads the set published via PutManagedRuleSetVersions
+    // rather than fabricating a 200 for a never-published set.
+    #[test]
+    fn get_managed_rule_set_reads_state() {
+        let svc = Wafv2Service::default();
+
+        // Unknown (scope, name) -> WAFNonexistentItemException.
+        let res = svc.get_managed_rule_set(&req_json(
+            "GetManagedRuleSet",
+            json!({"Name": "Nope", "Id": "abc123", "Scope": "REGIONAL"}),
+        ));
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+
+        // Publish a set.
+        svc.put_managed_rule_set_versions(&req_json(
+            "PutManagedRuleSetVersions",
+            json!({
+                "Name": "MyRuleSet",
+                "Id": "abc123",
+                "Scope": "REGIONAL",
+                "LockToken": "tok",
+                "RecommendedVersion": "Version_1.0",
+                "VersionsToPublish": {
+                    "Version_1.0": {"ForecastedLifetime": 30, "AssociatedRuleGroupArn": "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/rg/1"},
+                },
+            }),
+        ))
+        .unwrap();
+
+        // Mismatched Id -> still nonexistent.
+        let res = svc.get_managed_rule_set(&req_json(
+            "GetManagedRuleSet",
+            json!({"Name": "MyRuleSet", "Id": "wrong", "Scope": "REGIONAL"}),
+        ));
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+
+        // Correct lookup returns the stored set and its published versions.
+        let resp = svc
+            .get_managed_rule_set(&req_json(
+                "GetManagedRuleSet",
+                json!({"Name": "MyRuleSet", "Id": "abc123", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let set = &body["ManagedRuleSet"];
+        assert_eq!(set["Name"].as_str(), Some("MyRuleSet"));
+        assert_eq!(set["Id"].as_str(), Some("abc123"));
+        assert_eq!(set["RecommendedVersion"].as_str(), Some("Version_1.0"));
+        let pv = &set["PublishedVersions"]["Version_1.0"];
+        assert_eq!(pv["ForecastedLifetime"].as_i64(), Some(30));
+        assert_eq!(
+            pv["AssociatedRuleGroupArn"].as_str(),
+            Some("arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/rg/1")
+        );
+    }
+
+    // UpdateWebACL is full-replace: an optional member omitted from the update
+    // request is cleared, not carried over from the previous version.
+    #[test]
+    fn update_web_acl_clears_omitted_optional_members() {
+        let svc = Wafv2Service::default();
+        let create = svc
+            .create_web_acl(&req_json(
+                "CreateWebACL",
+                json!({
+                    "Name": "acl1",
+                    "Scope": "REGIONAL",
+                    "DefaultAction": {"Allow": {}},
+                    "VisibilityConfig": {
+                        "SampledRequestsEnabled": true,
+                        "CloudWatchMetricsEnabled": true,
+                        "MetricName": "acl1",
+                    },
+                    "CustomResponseBodies": {
+                        "body1": {"ContentType": "TEXT_PLAIN", "Content": "hi"},
+                    },
+                    "TokenDomains": ["example.com"],
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(create.body.expect_bytes()).unwrap();
+        let id = body["Summary"]["Id"].as_str().unwrap().to_string();
+        let lock = body["Summary"]["LockToken"].as_str().unwrap().to_string();
+
+        // Update without CustomResponseBodies / TokenDomains -> both cleared.
+        svc.update_web_acl(&req_json(
+            "UpdateWebACL",
+            json!({
+                "Name": "acl1",
+                "Scope": "REGIONAL",
+                "Id": id,
+                "LockToken": lock,
+                "DefaultAction": {"Allow": {}},
+                "VisibilityConfig": {
+                    "SampledRequestsEnabled": true,
+                    "CloudWatchMetricsEnabled": true,
+                    "MetricName": "acl1",
+                },
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .get_web_acl(&req_json(
+                "GetWebACL",
+                json!({"Name": "acl1", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let acl = &body["WebACL"];
+        // CustomResponseBodies is now empty (either absent or {}).
+        let crb = acl.get("CustomResponseBodies");
+        assert!(
+            crb.is_none()
+                || crb
+                    .unwrap()
+                    .as_object()
+                    .map(|m| m.is_empty())
+                    .unwrap_or(true),
+            "CustomResponseBodies should be cleared, got {crb:?}"
+        );
+        // TokenDomains cleared -> no ApplicationIntegrationURL surfaced.
+        assert!(body.get("ApplicationIntegrationURL").is_none());
+    }
 }
