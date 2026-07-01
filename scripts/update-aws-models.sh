@@ -63,6 +63,7 @@ SERVICES=(
     "pipes:pipes"
     "cloudcontrolapi:cloudcontrol"
     "resource-groups:resource-groups"
+    "tagging:resource-groups-tagging-api"
 )
 
 # Sparse checkout only the models we need

@@ -58,6 +58,7 @@ SERVICES=(
     "rds-data|RDS Data|rds-data"
     "dsql|Aurora DSQL|dsql"
     "resource-groups|Resource Groups|resource-groups"
+    "tagging|Resource Groups Tagging API|tagging"
     "elasticache|ElastiCache|elasticache"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"

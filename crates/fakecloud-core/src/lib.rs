@@ -10,5 +10,6 @@ pub mod protocol;
 pub mod query;
 pub mod registry;
 pub mod service;
+pub mod tag_index;
 pub mod tags;
 pub mod validation;

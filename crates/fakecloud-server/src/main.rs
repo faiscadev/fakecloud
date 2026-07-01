@@ -459,6 +459,14 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let resource_groups_tagging_state:
+        fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let cloudcontrol_state: fakecloud_cloudcontrol::SharedCloudControlState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3852,6 +3860,50 @@ async fn main() {
         resource_groups_service = resource_groups_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(resource_groups_service));
+
+    // Resource Groups Tagging API. Reads aggregate every service's live tags
+    // through a shared TagProviderRegistry; providers are wired per service.
+    let tag_provider_registry = fakecloud_core::tag_index::TagProviderRegistry::new();
+    let resource_groups_tagging_snapshot_store: Option<
+        Arc<dyn fakecloud_persistence::SnapshotStore>,
+    > = if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+        let data_path = persistence_config
+            .data_path
+            .as_ref()
+            .expect("validated above")
+            .clone();
+        let path = data_path
+            .join("resource-groups-tagging")
+            .join("snapshot.json");
+        let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+        match fakecloud_resource_groups_tagging::persistence::load_into(
+            &store,
+            &resource_groups_tagging_state,
+        ) {
+            Ok(fakecloud_resource_groups_tagging::persistence::LoadOutcome::Loaded(accounts)) => {
+                tracing::info!(
+                    accounts,
+                    "loaded resource-groups-tagging persistence snapshot"
+                );
+            }
+            Ok(fakecloud_resource_groups_tagging::persistence::LoadOutcome::Empty) => {
+                tracing::info!(
+                    "no resource-groups-tagging persistence snapshot found; starting empty"
+                );
+            }
+            Err(err) => fatal_exit(format_args!("{err}")),
+        }
+        Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+    } else {
+        None
+    };
+    registry.register(Arc::new(
+        fakecloud_resource_groups_tagging::ResourceGroupsTaggingService::new(
+            resource_groups_tagging_state.clone(),
+            tag_provider_registry.clone(),
+            resource_groups_tagging_snapshot_store,
+        ),
+    ));
 
     let cloudformation_service = cloudformation_service
         .with_s3_store(s3_store.clone())

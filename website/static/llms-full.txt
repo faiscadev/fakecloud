@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 46 services (3,783 operations) are shipped today, all at true 100% conformance — 126,556/126,556 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 47 services (3,792 operations) are shipped today, all at true 100% conformance — 126,816/126,816 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 126,556/126,556 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 126,816/126,816 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 23 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -87,10 +87,10 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 46 services persist their durable state: S3, SQS, SNS, EventBridge,
+All 47 services persist their durable state: S3, SQS, SNS, EventBridge,
 EventBridge Pipes, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager,
 CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, Cloud Control API, SES,
-Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, ElastiCache,
+Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, Resource Groups Tagging API, ElastiCache,
 Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Agent,
 Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2,
 CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue,
@@ -370,6 +370,14 @@ CreateGroup, GetGroup, GetGroupQuery, UpdateGroup, UpdateGroupQuery, DeleteGroup
 Features: resource groups defined by a tag or CloudFormation-stack `ResourceQuery`, or by a service `Configuration` with explicit membership; group lifecycle and pagination, resource-query storage, explicit membership (query-based groups reject explicit `GroupResources`/`UngroupResources`), free-standing `SearchResources`, group configuration, tagging keyed by group ARN, account settings for group lifecycle events, grouping statuses, and tag-sync tasks. Account-partitioned and persisted. Query-based membership resolution across live resources lands with the Resource Groups Tagging API tag index.
 
 Protocol: REST (restJson1, path-based routing, JSON responses)
+
+### Resource Groups Tagging API (9 actions)
+
+GetResources, GetTagKeys, GetTagValues, TagResources, UntagResources, GetComplianceSummary, StartReportCreation, DescribeReportCreation, ListRequiredTags
+
+Features: cross-service tag reads and writes from one endpoint. `GetResources` returns every resource with its tags, honoring `ResourceARNList`, `ResourceTypeFilters` (`service` or `service:type`), `TagFilters`, and pagination; `GetTagKeys`/`GetTagValues` enumerate distinct keys/values. `TagResources`/`UntagResources` apply/remove tags on any ARN (partial failures in `FailedResourcesMap`). `GetComplianceSummary`/`ListRequiredTags` evaluate Organizations tag policies (empty with none in effect). `StartReportCreation`/`DescribeReportCreation` drive the async account-wide tag report. Reads aggregate a cross-service tag-provider registry (each service exposes its live tags) plus tags applied directly through this API; per-service providers roll out incrementally. Account-partitioned and persisted.
+
+Protocol: awsJson1.1 (`X-Amz-Target: ResourceGroupsTaggingAPI_20170126.<Operation>`)
 
 ### ECR (58 actions)
 
