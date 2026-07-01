@@ -67,6 +67,16 @@ impl TxnEntry {
             *t = Instant::now();
         }
     }
+
+    /// Has this transaction been idle longer than [`TXN_IDLE_TIMEOUT`] as of
+    /// `now`? A poisoned `last_used` lock is treated as not-stale so a spurious
+    /// panic elsewhere can never trigger a rollback.
+    fn is_stale(&self, now: Instant) -> bool {
+        self.last_used
+            .lock()
+            .map(|t| now.duration_since(*t) > TXN_IDLE_TIMEOUT)
+            .unwrap_or(false)
+    }
 }
 
 type TxnMap = Arc<Mutex<HashMap<String, Arc<TxnEntry>>>>;
@@ -327,14 +337,14 @@ impl RdsDataService {
             match held {
                 HeldConn::Pg(client) => {
                     for set in run_each(&sets) {
-                        pg_run(client, sql, set, false, false).await?;
-                        results.push(json!({ "generatedFields": [] }));
+                        let v = pg_run(client, sql, set, false, false).await?;
+                        results.push(batch_update_result(&v));
                     }
                 }
                 HeldConn::MySql(conn) => {
                     for set in run_each(&sets) {
-                        my_run(conn, sql, set, false, false).await?;
-                        results.push(json!({ "generatedFields": [] }));
+                        let v = my_run(conn, sql, set, false, false).await?;
+                        results.push(batch_update_result(&v));
                     }
                 }
             }
@@ -347,17 +357,19 @@ impl RdsDataService {
         if engine.contains("postgres") {
             let client = pg_connect(&conn).await?;
             for set in run_each(&sets) {
-                pg_run(&client, sql, set, false, false).await?;
-                results.push(json!({ "generatedFields": [] }));
+                let v = pg_run(&client, sql, set, false, false).await?;
+                results.push(batch_update_result(&v));
             }
         } else if is_mysql(&engine) {
             let mut c = my_connect(&conn).await?;
             for set in run_each(&sets) {
-                if let Err(e) = my_run(&mut c, sql, set, false, false).await {
-                    let _ = c.disconnect().await;
-                    return Err(e);
+                match my_run(&mut c, sql, set, false, false).await {
+                    Ok(v) => results.push(batch_update_result(&v)),
+                    Err(e) => {
+                        let _ = c.disconnect().await;
+                        return Err(e);
+                    }
                 }
-                results.push(json!({ "generatedFields": [] }));
             }
             let _ = c.disconnect().await;
         } else {
@@ -465,26 +477,46 @@ async fn reap_idle_transactions(transactions: TxnMap) {
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
-        let now = Instant::now();
-        let stale: Vec<(String, Arc<TxnEntry>)> = {
-            let map = transactions.lock().await;
-            map.iter()
-                .filter(|(_, e)| {
-                    e.last_used
-                        .lock()
-                        .map(|t| now.duration_since(*t) > TXN_IDLE_TIMEOUT)
-                        .unwrap_or(false)
-                })
-                .map(|(id, e)| (id.clone(), e.clone()))
-                .collect()
-        };
-        for (id, entry) in stale {
-            transactions.lock().await.remove(&id);
-            if let Some(held) = entry.conn.lock().await.take() {
-                let _ = finish_held(held, "ROLLBACK").await;
-            }
+        reap_once(&transactions).await;
+    }
+}
+
+/// Sample the transactions that look idle as of `now`, cloning the `Arc`s so the
+/// map lock is dropped before any connection is touched.
+async fn collect_stale(transactions: &TxnMap, now: Instant) -> Vec<(String, Arc<TxnEntry>)> {
+    let map = transactions.lock().await;
+    map.iter()
+        .filter(|(_, e)| e.is_stale(now))
+        .map(|(id, e)| (id.clone(), e.clone()))
+        .collect()
+}
+
+/// Roll back and release each sampled-stale transaction — but only after
+/// re-verifying, under the map lock, that it is *still* idle and still the same
+/// entry. Without this recheck a statement that reactivated the transaction
+/// between the sample and the removal (`touch()` on an in-flight
+/// `ExecuteStatement`) would have its live connection rolled back out from under
+/// it — a TOCTOU that silently corrupts an active transaction.
+async fn reap_stale(transactions: &TxnMap, stale: Vec<(String, Arc<TxnEntry>)>) {
+    for (id, entry) in stale {
+        let mut map = transactions.lock().await;
+        let still_stale =
+            entry.is_stale(Instant::now()) && map.get(&id).is_some_and(|e| Arc::ptr_eq(e, &entry));
+        if !still_stale {
+            continue;
+        }
+        map.remove(&id);
+        drop(map);
+        if let Some(held) = entry.conn.lock().await.take() {
+            let _ = finish_held(held, "ROLLBACK").await;
         }
     }
+}
+
+/// One reaper sweep: sample the idle set, then roll back each after a re-check.
+async fn reap_once(transactions: &TxnMap) {
+    let stale = collect_stale(transactions, Instant::now()).await;
+    reap_stale(transactions, stale).await;
 }
 
 /// A single positional SQL parameter resolved from an AWS `SqlParameter`.
@@ -622,6 +654,59 @@ fn mysql_literal(v: &SqlValue) -> String {
     }
 }
 
+/// Is the statement a data-modifying `INSERT`/`UPDATE`/`DELETE ... RETURNING`?
+/// These come back through the row-returning path (they have a result set) but,
+/// unlike a plain `SELECT`, they also change rows — so `numberOfRecordsUpdated`
+/// must reflect the affected count rather than 0.
+fn is_returning_dml(sql: &str) -> bool {
+    let head = sql.trim_start().to_ascii_uppercase();
+    (head.starts_with("INSERT") || head.starts_with("UPDATE") || head.starts_with("DELETE"))
+        && head.contains(" RETURNING ")
+}
+
+/// Build one `updateResults[]` entry for BatchExecuteStatement from a single
+/// statement's run output, carrying through any `generatedFields` the write
+/// produced (e.g. a MySQL auto-increment id) rather than always emitting `[]`.
+fn batch_update_result(run_output: &Value) -> Value {
+    let generated = run_output
+        .get("generatedFields")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    json!({ "generatedFields": generated })
+}
+
+/// AWS-shaped `columnMetadata` for a Postgres result description.
+fn pg_column_metadata(cols: &[tokio_postgres::Column]) -> Value {
+    Value::Array(
+        cols.iter()
+            .map(|c| {
+                json!({
+                    "name": c.name(),
+                    "label": c.name(),
+                    "typeName": c.type_().name(),
+                    "nullable": 2, // unknown
+                })
+            })
+            .collect(),
+    )
+}
+
+/// AWS-shaped `columnMetadata` for a MySQL result description.
+fn my_column_metadata(cols: &[mysql_async::Column]) -> Value {
+    Value::Array(
+        cols.iter()
+            .map(|c| {
+                json!({
+                    "name": c.name_str().to_string(),
+                    "label": c.name_str().to_string(),
+                    "typeName": format!("{:?}", c.column_type()),
+                    "nullable": 2,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Does the SQL statement return a result set (vs. an affected-rows write)?
 fn returns_rows(sql: &str) -> bool {
     let head = sql.trim_start().to_ascii_uppercase();
@@ -693,34 +778,43 @@ async fn pg_run(
         return Ok(Value::Object(out));
     }
 
-    let rows = client
-        .query(stmt.as_str(), no_params)
+    // Prepare first, then run the prepared statement: the `Statement`'s column
+    // description is available even when the query returns zero rows, so a
+    // `SELECT ... WHERE 1=0` still reports its columns under
+    // `includeResultMetadata` (a bare `client.query()` would leave us with no
+    // row to read columns from).
+    let statement = client
+        .prepare(stmt.as_str())
         .await
         .map_err(|e| bad_request(format!("{e}")))?;
+    let rows = client
+        .query(&statement, no_params)
+        .await
+        .map_err(|e| bad_request(format!("{e}")))?;
+    let cols = statement.columns();
+
+    // A pure SELECT never updates rows (numberOfRecordsUpdated = 0); a DML
+    // `... RETURNING` (INSERT/UPDATE/DELETE) reports the affected count, which
+    // equals the number of returned rows. Emit the field unconditionally so
+    // typed SDKs read a present value rather than defaulting it silently.
+    let updated = if is_returning_dml(&stmt) {
+        rows.len() as i64
+    } else {
+        0
+    };
+    out.insert("numberOfRecordsUpdated".into(), json!(updated));
+
+    if include_metadata {
+        out.insert("columnMetadata".into(), pg_column_metadata(cols));
+    }
+
     if rows.is_empty() {
-        out.insert("numberOfRecordsUpdated".into(), json!(0));
         if format_json {
             out.insert("formattedRecords".into(), json!("[]"));
         } else {
             out.insert("records".into(), json!([]));
         }
         return Ok(Value::Object(out));
-    }
-
-    let cols = rows[0].columns();
-    if include_metadata {
-        let md: Vec<Value> = cols
-            .iter()
-            .map(|c| {
-                json!({
-                    "name": c.name(),
-                    "label": c.name(),
-                    "typeName": c.type_().name(),
-                    "nullable": 2, // unknown
-                })
-            })
-            .collect();
-        out.insert("columnMetadata".into(), Value::Array(md));
     }
 
     let mut records: Vec<Value> = Vec::with_capacity(rows.len());
@@ -886,36 +980,44 @@ async fn my_run(
         return Ok(Value::Object(out));
     }
 
-    let rows: Vec<Row> = c
-        .query(stmt.as_str())
+    // Run through `query_iter` so the result-set column definitions are read off
+    // the wire (and captured) before the rows are drained — a zero-row result
+    // (`WHERE 1=0`) therefore still exposes its columns under
+    // `includeResultMetadata`, which `rows[0].columns()` cannot do when there is
+    // no row 0.
+    let result = c
+        .query_iter(stmt.as_str())
+        .await
+        .map_err(|e| bad_request(format!("{e}")))?;
+    let cols: std::sync::Arc<[Column]> = result
+        .columns()
+        .unwrap_or_else(|| std::sync::Arc::from(Vec::<Column>::new()));
+    let rows: Vec<Row> = result
+        .collect_and_drop::<Row>()
         .await
         .map_err(|e| bad_request(format!("{e}")))?;
     let affected = c.affected_rows();
 
+    // A pure SELECT never updates rows; a DML `... RETURNING` (MariaDB) reports
+    // the affected count. Keep the field consistent with the Postgres arm.
+    let updated = if is_returning_dml(&stmt) {
+        affected as i64
+    } else {
+        0
+    };
+    out.insert("numberOfRecordsUpdated".into(), json!(updated));
+
+    if include_metadata {
+        out.insert("columnMetadata".into(), my_column_metadata(&cols));
+    }
+
     if rows.is_empty() {
-        out.insert("numberOfRecordsUpdated".into(), json!(affected));
         if format_json {
             out.insert("formattedRecords".into(), json!("[]"));
         } else {
             out.insert("records".into(), json!([]));
         }
         return Ok(Value::Object(out));
-    }
-
-    let cols: std::sync::Arc<[Column]> = rows[0].columns();
-    if include_metadata {
-        let md: Vec<Value> = cols
-            .iter()
-            .map(|c| {
-                json!({
-                    "name": c.name_str().to_string(),
-                    "label": c.name_str().to_string(),
-                    "typeName": format!("{:?}", c.column_type()),
-                    "nullable": 2,
-                })
-            })
-            .collect();
-        out.insert("columnMetadata".into(), Value::Array(md));
     }
 
     let mut records: Vec<Value> = Vec::with_capacity(rows.len());
@@ -1060,4 +1162,91 @@ fn b64_decode(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_returning_dml_matches_only_dml_returning() {
+        assert!(is_returning_dml("INSERT INTO t VALUES (1) RETURNING id"));
+        assert!(is_returning_dml("  update t set x = 1 returning *"));
+        assert!(is_returning_dml("DELETE FROM t WHERE id = 1 RETURNING id"));
+        // A plain SELECT is not a write, even when a column is named `returning`.
+        assert!(!is_returning_dml("SELECT 1"));
+        assert!(!is_returning_dml("SELECT returning_col FROM t"));
+        // An INSERT without RETURNING goes through the affected-rows write path.
+        assert!(!is_returning_dml("INSERT INTO t VALUES (1)"));
+    }
+
+    #[test]
+    fn batch_update_result_carries_generated_fields() {
+        // The MySQL write path populates generatedFields; the batch entry must
+        // surface it rather than discarding it for an empty list.
+        let out = json!({
+            "numberOfRecordsUpdated": 1,
+            "generatedFields": [{ "longValue": 42 }],
+            "records": [],
+        });
+        assert_eq!(
+            batch_update_result(&out),
+            json!({ "generatedFields": [{ "longValue": 42 }] })
+        );
+    }
+
+    #[test]
+    fn batch_update_result_defaults_to_empty_generated_fields() {
+        // A statement that produced no generated key (e.g. Postgres, or a
+        // non-auto-increment INSERT) still yields a well-formed entry.
+        let out = json!({ "numberOfRecordsUpdated": 1, "records": [] });
+        assert_eq!(batch_update_result(&out), json!({ "generatedFields": [] }));
+    }
+
+    fn idle_entry(last_used: Instant) -> Arc<TxnEntry> {
+        // conn = None so the reaper never tries to touch a real database.
+        Arc::new(TxnEntry {
+            conn: Mutex::new(None),
+            last_used: StdMutex::new(last_used),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaper_rolls_back_idle_transaction() {
+        let transactions: TxnMap = Arc::new(Mutex::new(HashMap::new()));
+        let base = Instant::now();
+        transactions
+            .lock()
+            .await
+            .insert("tx1".to_string(), idle_entry(base));
+        // Advance past the idle window, then sweep.
+        tokio::time::advance(TXN_IDLE_TIMEOUT + Duration::from_secs(1)).await;
+        reap_once(&transactions).await;
+        assert!(
+            transactions.lock().await.is_empty(),
+            "a genuinely idle transaction is reaped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaper_rechecks_staleness_before_rollback() {
+        let transactions: TxnMap = Arc::new(Mutex::new(HashMap::new()));
+        let base = Instant::now();
+        let entry = idle_entry(base);
+        transactions
+            .lock()
+            .await
+            .insert("tx1".to_string(), entry.clone());
+        tokio::time::advance(TXN_IDLE_TIMEOUT + Duration::from_secs(1)).await;
+        // The reaper samples the entry as stale...
+        let stale = collect_stale(&transactions, Instant::now()).await;
+        assert_eq!(stale.len(), 1, "entry sampled as stale");
+        // ...but an in-flight ExecuteStatement reactivates it before removal.
+        entry.touch();
+        reap_stale(&transactions, stale).await;
+        assert!(
+            transactions.lock().await.contains_key("tx1"),
+            "a reactivated transaction is NOT rolled back (TOCTOU guarded)"
+        );
+    }
 }

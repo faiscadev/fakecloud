@@ -1487,6 +1487,7 @@ impl ResourceProvisioner {
             "AWS::SNS::Topic" => Some(self.update_sns_topic(existing, new_def)?),
             "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
+            "AWS::Pipes::Pipe" => Some(self.update_pipes_pipe(existing, new_def)?),
             _ => None,
         };
 
@@ -1600,6 +1601,7 @@ impl ResourceProvisioner {
             "AWS::CloudFormation::Stack" => {
                 self.get_att_cloudformation_stack(&resource.physical_id, attribute)
             }
+            "AWS::Pipes::Pipe" => self.get_att_pipes_pipe(&resource.physical_id, attribute),
             _ => None,
         }
     }
@@ -6455,6 +6457,130 @@ mod tests {
         assert_eq!(policy.default_version_id, "v2");
         let default = policy.versions.iter().find(|v| v.is_default).unwrap();
         assert!(default.document.contains("Deny"));
+    }
+
+    fn pipe_props(name: &str, target: &str, description: Option<&str>) -> serde_json::Value {
+        let mut m = serde_json::json!({
+            "Name": name,
+            "Source": "arn:aws:sqs:us-east-1:123456789012:src",
+            "Target": target,
+            "RoleArn": "arn:aws:iam::123456789012:role/pipe",
+        });
+        if let Some(d) = description {
+            m["Description"] = serde_json::json!(d);
+        }
+        m
+    }
+
+    #[test]
+    fn update_stack_applies_pipes_pipe_change() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                pipe_props(
+                    "my-pipe",
+                    "arn:aws:sqs:us-east-1:123456789012:dst",
+                    Some("v1"),
+                ),
+            ))
+            .expect("pipe provisions");
+
+        // UpdateStack on a Pipes resource previously fell through to `_ => None`,
+        // so CFN reported UPDATE_COMPLETE while discarding the change.
+        let updated = prov
+            .update_resource(
+                &created,
+                &make_resource(
+                    "AWS::Pipes::Pipe",
+                    "P",
+                    pipe_props(
+                        "my-pipe",
+                        "arn:aws:sqs:us-east-1:123456789012:dst2",
+                        Some("v2"),
+                    ),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("Pipes::Pipe is updatable (not a silent no-op)");
+        assert_eq!(updated.status, "UPDATE_COMPLETE");
+
+        // The change is actually applied to the pipes service state.
+        let pipes = prov.pipes_state.read();
+        let pipe = pipes
+            .get("123456789012")
+            .unwrap()
+            .pipes
+            .get("my-pipe")
+            .unwrap();
+        assert_eq!(pipe["Description"], "v2");
+        assert_eq!(pipe["Target"], "arn:aws:sqs:us-east-1:123456789012:dst2");
+        // CFN provisioning is synchronous, so the pipe stays settled.
+        assert_eq!(pipe["CurrentState"], "RUNNING");
+    }
+
+    #[test]
+    fn update_stack_clears_omitted_pipe_field() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                pipe_props(
+                    "p2",
+                    "arn:aws:sqs:us-east-1:123456789012:dst",
+                    Some("drop-me"),
+                ),
+            ))
+            .expect("pipe provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                pipe_props("p2", "arn:aws:sqs:us-east-1:123456789012:dst", None),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("updatable");
+        let pipes = prov.pipes_state.read();
+        let pipe = pipes.get("123456789012").unwrap().pipes.get("p2").unwrap();
+        assert!(
+            pipe.get("Description").is_none(),
+            "an omitted updatable field is cleared (full-replace semantics)"
+        );
+    }
+
+    #[test]
+    fn create_pipe_rejects_empty_required_field() {
+        let prov = make_provisioner();
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::Pipes::Pipe",
+                "P",
+                serde_json::json!({
+                    "Name": "p3",
+                    "Source": "",
+                    "Target": "arn:aws:sqs:us-east-1:123456789012:dst",
+                    "RoleArn": "arn:aws:iam::123456789012:role/pipe",
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.contains("Source"), "empty Source rejected: {err}");
+    }
+
+    #[test]
+    fn create_pipe_rejects_duplicate_name() {
+        let prov = make_provisioner();
+        let props = pipe_props("dup", "arn:aws:sqs:us-east-1:123456789012:dst", None);
+        prov.create_resource(&make_resource("AWS::Pipes::Pipe", "P", props.clone()))
+            .expect("first create ok");
+        // A second resource with the same Name must conflict, not overwrite.
+        let err = prov
+            .create_resource(&make_resource("AWS::Pipes::Pipe", "P2", props))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "duplicate rejected: {err}");
     }
 
     #[test]
