@@ -618,6 +618,14 @@ async fn rds_restore_from_snapshot() {
     assert_eq!(restored_instance.master_username(), Some("admin"));
     assert_eq!(restored_instance.db_name(), Some("appdb"));
 
+    // RestoreDBInstanceFromDBSnapshot is backgrounded (same client-timeout fix
+    // as CreateDBInstance): it returns `creating` with no endpoint yet, then the
+    // backing container is provisioned and the instance flips to `available`
+    // with its endpoint populated. A real client waits for `available` before
+    // connecting, so poll for it rather than reading the endpoint synchronously.
+    assert_eq!(restored_instance.db_instance_status(), Some("creating"));
+    helpers::wait_for_db_available(&client, "orders-restored-db", 180).await;
+
     let describe_response = client
         .describe_db_instances()
         .db_instance_identifier("orders-restored-db")
