@@ -119,9 +119,11 @@ pub(crate) fn evaluate_single_filter_condition(
     }
 
     if let Some((attr_ref, value_refs)) = parse_in_expression(part) {
-        let attr_name = resolve_attr_name(attr_ref, expr_attr_names);
-        let actual = item.get(&attr_name);
-        return evaluate_in_match(actual, &value_refs, expr_attr_values);
+        // Resolve the left operand as a full document path so `a.b IN (...)`
+        // and `a[0] IN (...)` work, not just a top-level attribute name
+        // (bug-hunt 2026-07-01).
+        let actual = resolve_path(attr_ref, item, expr_attr_names);
+        return evaluate_in_match(actual.as_ref(), &value_refs, expr_attr_values);
     }
 
     evaluate_single_key_condition(part, item, expr_attr_names, expr_attr_values)
@@ -211,7 +213,11 @@ pub(crate) fn eval_contains(
     }
     if let Some(set) = a.get("NS").and_then(|v| v.as_array()) {
         if let Some(val) = e.get("N") {
-            return set.contains(val);
+            // Number-set membership is canonical: "1" contains "1.0"
+            // (bug-hunt 2026-07-01).
+            return set
+                .iter()
+                .any(|s| values_equal(Some(&json!({ "N": s })), Some(&json!({ "N": val }))));
         }
     }
     if let Some(set) = a.get("BS").and_then(|v| v.as_array()) {
@@ -220,7 +226,9 @@ pub(crate) fn eval_contains(
         }
     }
     if let Some(list) = a.get("L").and_then(|v| v.as_array()) {
-        return list.contains(e);
+        // List membership compares elements canonically so numeric entries
+        // match regardless of scale (bug-hunt 2026-07-01).
+        return list.iter().any(|el| values_equal(Some(el), Some(e)));
     }
     false
 }
@@ -301,7 +309,9 @@ pub(crate) fn evaluate_in_match(
 ) -> bool {
     value_refs.iter().any(|v_ref| {
         let expected = expr_attr_values.get(*v_ref);
-        matches!((actual, expected), (Some(a), Some(e)) if a == e)
+        // Canonical compare so `{"N":"1"} IN ({"N":"1.0"})` matches, mirroring
+        // DynamoDB's numeric equality (bug-hunt 2026-07-01).
+        matches!((actual, expected), (Some(a), Some(e)) if values_equal(Some(a), Some(e)))
     })
 }
 
@@ -909,5 +919,88 @@ mod set_rhs_tests {
         let item: HashMap<String, AttributeValue> = HashMap::new();
         let r = evaluate_set_rhs("if_not_exists(#c, :zero)", &item, &names(), &values()).unwrap();
         assert_eq!(r, Some(json!({"N": "0"})));
+    }
+}
+
+// bug-hunt 2026-07-01 LOW findings 79/80: FilterExpression `IN` / `contains`
+// used raw serde_json equality (so `1` != `1.0`) and `IN` ignored nested
+// document paths. Both must mirror DynamoDB's canonical numeric equality and
+// full path resolution.
+#[cfg(test)]
+mod filter_in_contains_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn no_names() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    // `a.b IN (:v)` must resolve the nested path, not look up a top-level `a.b`.
+    #[test]
+    fn in_matches_nested_path() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("a".to_string(), json!({"M": {"b": {"N": "5"}}}))]);
+        let values = HashMap::from([(":v".to_string(), json!({"N": "5"}))]);
+        assert!(evaluate_single_filter_condition(
+            "a.b IN (:v)",
+            &item,
+            &no_names(),
+            &values
+        ));
+    }
+
+    // `IN` numeric comparison is canonical: 5 matches "5.0".
+    #[test]
+    fn in_matches_canonical_number() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("n".to_string(), json!({"N": "5"}))]);
+        let values = HashMap::from([(":v".to_string(), json!({"N": "5.0"}))]);
+        assert!(evaluate_single_filter_condition(
+            "n IN (:v)",
+            &item,
+            &no_names(),
+            &values
+        ));
+    }
+
+    // A missing attribute never matches IN.
+    #[test]
+    fn in_missing_attribute_no_match() {
+        let item: HashMap<String, AttributeValue> = HashMap::new();
+        let values = HashMap::from([(":v".to_string(), json!({"N": "5"}))]);
+        assert!(!evaluate_single_filter_condition(
+            "n IN (:v)",
+            &item,
+            &no_names(),
+            &values
+        ));
+    }
+
+    // contains() over a number set is canonical: NS {"1"} contains "1.0".
+    #[test]
+    fn contains_number_set_canonical() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("s".to_string(), json!({"NS": ["1", "2"]}))]);
+        let values = HashMap::from([(":v".to_string(), json!({"N": "1.0"}))]);
+        assert!(evaluate_single_filter_condition(
+            "contains(s, :v)",
+            &item,
+            &no_names(),
+            &values
+        ));
+    }
+
+    // contains() over a list is canonical for numeric elements.
+    #[test]
+    fn contains_list_canonical_number() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("l".to_string(), json!({"L": [{"N": "3"}, {"S": "x"}]}))]);
+        let values = HashMap::from([(":v".to_string(), json!({"N": "3.00"}))]);
+        assert!(evaluate_single_filter_condition(
+            "contains(l, :v)",
+            &item,
+            &no_names(),
+            &values
+        ));
     }
 }
