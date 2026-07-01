@@ -758,7 +758,11 @@ impl ElastiCacheService {
         let name_filter = optional_query_param(request, "ServiceUpdateName");
         let cluster_filter = collect_indexed_strings(request, "CacheClusterIds.member");
         let group_filter = collect_indexed_strings(request, "ReplicationGroupIds.member");
-        let status_filter = collect_indexed_strings(request, "UpdateActionStatus.member");
+        let action_status_filter = collect_indexed_strings(request, "UpdateActionStatus.member");
+        // ServiceUpdateStatus filters on the *service update's* status
+        // (available/cancelled/expired); Engine filters on redis/memcached.
+        let su_status_filter = collect_indexed_strings(request, "ServiceUpdateStatus.member");
+        let engine_filter = optional_query_param(request, "Engine");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -772,8 +776,11 @@ impl ElastiCacheService {
                 let name_ok = name_filter
                     .as_ref()
                     .is_none_or(|n| &ua.service_update_name == n);
-                let status_ok =
-                    status_filter.is_empty() || status_filter.contains(&ua.update_action_status);
+                let action_status_ok = action_status_filter.is_empty()
+                    || action_status_filter.contains(&ua.update_action_status);
+                let su_status_ok = su_status_filter.is_empty()
+                    || su_status_filter.contains(&ua.service_update_status);
+                let engine_ok = engine_filter.as_ref().is_none_or(|e| &ua.engine == e);
                 // CacheClusterIds and ReplicationGroupIds are OR'd; an empty
                 // pair means "all targets".
                 let target_ok = if cluster_filter.is_empty() && group_filter.is_empty() {
@@ -787,7 +794,7 @@ impl ElastiCacheService {
                             .as_ref()
                             .is_some_and(|g| group_filter.contains(g))
                 };
-                name_ok && status_ok && target_ok
+                name_ok && action_status_ok && su_status_ok && engine_ok && target_ok
             })
             .map(render_update_action)
             .collect();

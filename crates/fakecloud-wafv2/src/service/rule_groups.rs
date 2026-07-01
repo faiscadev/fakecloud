@@ -334,11 +334,23 @@ impl Wafv2Service {
             .filter(|s| s.id == id)
             .ok_or_else(|| not_found("ManagedRuleSet"))?;
 
-        let published: serde_json::Map<String, Value> = set
-            .published_version_details
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // Build PublishedVersions from the authoritative version-name list,
+        // using the per-version detail when present. Snapshots written before
+        // published_version_details existed only carry the names, so synthesize
+        // a minimal detail for those rather than dropping the version.
+        let mut published = serde_json::Map::new();
+        for v in &set.published_versions {
+            let detail = set
+                .published_version_details
+                .get(v)
+                .cloned()
+                .unwrap_or_else(|| json!({ "Capacity": 50 }));
+            published.insert(v.clone(), detail);
+        }
+        // Include any detail-only entries (defensive) not in the name list.
+        for (v, d) in &set.published_version_details {
+            published.entry(v.clone()).or_insert_with(|| d.clone());
+        }
         let mut managed = serde_json::Map::new();
         managed.insert("Name".to_string(), json!(set.name));
         managed.insert("Id".to_string(), json!(set.id));
@@ -542,7 +554,15 @@ impl Wafv2Service {
                 "Capacity".to_string(),
                 json!(cfg.get("Capacity").and_then(Value::as_i64).unwrap_or(50)),
             );
-            detail.insert("PublishTimestamp".to_string(), json!(now_ts));
+            // Preserve the original PublishTimestamp when republishing an
+            // existing version; only LastUpdateTimestamp advances.
+            let publish_ts = entry
+                .published_version_details
+                .get(vname)
+                .and_then(|d| d.get("PublishTimestamp"))
+                .and_then(Value::as_f64)
+                .unwrap_or(now_ts);
+            detail.insert("PublishTimestamp".to_string(), json!(publish_ts));
             detail.insert("LastUpdateTimestamp".to_string(), json!(now_ts));
             entry
                 .published_version_details

@@ -1315,4 +1315,102 @@ mod managed_rule_set_validation_tests {
         // TokenDomains cleared -> no ApplicationIntegrationURL surfaced.
         assert!(body.get("ApplicationIntegrationURL").is_none());
     }
+
+    // A snapshot written before published_version_details existed carries only
+    // the version names; GetManagedRuleSet must still surface those versions.
+    #[test]
+    fn get_managed_rule_set_synthesizes_detail_for_legacy_versions() {
+        let svc = Wafv2Service::default();
+        {
+            let mut state = svc.state.write();
+            let account = account_mut(&mut state, "123456789012");
+            account.managed_rule_sets.insert(
+                ("REGIONAL".to_string(), "Legacy".to_string()),
+                crate::state::ManagedRuleSet {
+                    id: "legacy-id".to_string(),
+                    name: "Legacy".to_string(),
+                    scope: "REGIONAL".to_string(),
+                    description: None,
+                    lock_token: "tok".to_string(),
+                    label_namespace: "awswaf:managed:Legacy".to_string(),
+                    recommended_version: Some("Version_1.0".to_string()),
+                    published_versions: vec!["Version_1.0".to_string()],
+                    // Legacy snapshot: names present, no per-version detail.
+                    published_version_details: std::collections::BTreeMap::new(),
+                    created_time: Utc::now(),
+                },
+            );
+        }
+        let resp = svc
+            .get_managed_rule_set(&req_json(
+                "GetManagedRuleSet",
+                json!({"Name": "Legacy", "Id": "legacy-id", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let pv = &body["ManagedRuleSet"]["PublishedVersions"];
+        assert!(
+            pv.get("Version_1.0").is_some(),
+            "legacy published version must not be dropped, got {pv:?}"
+        );
+    }
+
+    // Republishing an existing version keeps its original PublishTimestamp and
+    // only advances LastUpdateTimestamp.
+    #[test]
+    fn republish_preserves_publish_timestamp() {
+        let svc = Wafv2Service::default();
+        svc.put_managed_rule_set_versions(&req_json(
+            "PutManagedRuleSetVersions",
+            json!({
+                "Name": "Rs", "Id": "id1", "Scope": "REGIONAL", "LockToken": "t",
+                "VersionsToPublish": {"Version_1.0": {"ForecastedLifetime": 30}},
+            }),
+        ))
+        .unwrap();
+        // Force a distinct, old PublishTimestamp on the stored detail.
+        {
+            let mut state = svc.state.write();
+            let account = account_mut(&mut state, "123456789012");
+            let set = account
+                .managed_rule_sets
+                .get_mut(&("REGIONAL".to_string(), "Rs".to_string()))
+                .unwrap();
+            let detail = set
+                .published_version_details
+                .get_mut("Version_1.0")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            detail.insert("PublishTimestamp".to_string(), json!(1000.0));
+            detail.insert("LastUpdateTimestamp".to_string(), json!(1000.0));
+        }
+        // Republish the same version.
+        svc.put_managed_rule_set_versions(&req_json(
+            "PutManagedRuleSetVersions",
+            json!({
+                "Name": "Rs", "Id": "id1", "Scope": "REGIONAL", "LockToken": "t",
+                "VersionsToPublish": {"Version_1.0": {"ForecastedLifetime": 60}},
+            }),
+        ))
+        .unwrap();
+        let resp = svc
+            .get_managed_rule_set(&req_json(
+                "GetManagedRuleSet",
+                json!({"Name": "Rs", "Id": "id1", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let pv = &body["ManagedRuleSet"]["PublishedVersions"]["Version_1.0"];
+        assert_eq!(
+            pv["PublishTimestamp"].as_f64(),
+            Some(1000.0),
+            "PublishTimestamp must be preserved on republish"
+        );
+        assert_ne!(
+            pv["LastUpdateTimestamp"].as_f64(),
+            Some(1000.0),
+            "LastUpdateTimestamp must be refreshed on republish"
+        );
+    }
 }

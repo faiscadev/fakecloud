@@ -4111,6 +4111,83 @@ fn batch_apply_update_action_transitions_state() {
 }
 
 #[test]
+fn describe_update_actions_filters_by_engine_and_service_update_status() {
+    let svc = fresh_service();
+    insert_test_cluster(&svc, "cc-1");
+
+    // Engine filter -> only the memcached service update's action.
+    let b = body(
+        svc.describe_update_actions(&request(
+            "DescribeUpdateActions",
+            &[("Engine", "memcached")],
+        ))
+        .unwrap(),
+    );
+    assert!(b.contains("elasticache-20240601-memcached-security"));
+    assert!(!b.contains("elasticache-20240301-redis-security"));
+
+    // ServiceUpdateStatus=available matches both seeded updates.
+    let b = body(
+        svc.describe_update_actions(&request(
+            "DescribeUpdateActions",
+            &[("ServiceUpdateStatus.member.1", "available")],
+        ))
+        .unwrap(),
+    );
+    assert!(b.contains("elasticache-20240601-memcached-security"));
+    assert!(b.contains("elasticache-20240301-redis-security"));
+
+    // A non-matching service-update status filters everything out.
+    let b = body(
+        svc.describe_update_actions(&request(
+            "DescribeUpdateActions",
+            &[("ServiceUpdateStatus.member.1", "expired")],
+        ))
+        .unwrap(),
+    );
+    assert!(!b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+}
+
+#[test]
+fn update_actions_pruned_when_target_deleted() {
+    let svc = fresh_service();
+    insert_test_cluster(&svc, "cc-1");
+
+    // Materialize the actions, then delete the target cluster from state.
+    let b = body(
+        svc.describe_update_actions(&request("DescribeUpdateActions", &[]))
+            .unwrap(),
+    );
+    assert!(b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+    {
+        let mut state = svc.state.write();
+        let account = state.get_or_create("123456789012");
+        account.cache_clusters.remove("cc-1");
+    }
+
+    // Describe now reconciles: no action for the deleted cluster remains.
+    let b = body(
+        svc.describe_update_actions(&request("DescribeUpdateActions", &[]))
+            .unwrap(),
+    );
+    assert!(!b.contains("<CacheClusterId>cc-1</CacheClusterId>"));
+
+    // BatchApply against the deleted target reports it unprocessed, not success.
+    let b = body(
+        svc.batch_apply_update_action(&request(
+            "BatchApplyUpdateAction",
+            &[
+                ("ServiceUpdateName", "elasticache-20240301-redis-security"),
+                ("CacheClusterIds.member.1", "cc-1"),
+            ],
+        ))
+        .unwrap(),
+    );
+    assert!(b.contains("<UnprocessedUpdateActions>"));
+    assert!(b.contains("UpdateActionNotFoundFault"));
+}
+
+#[test]
 fn copy_snapshot_unknown_source_errors() {
     let svc = fresh_service();
     let req = request(

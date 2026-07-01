@@ -687,6 +687,18 @@ impl ElastiCacheState {
     pub fn ensure_update_actions(&mut self) {
         let cluster_ids: Vec<String> = self.cache_clusters.keys().cloned().collect();
         let group_ids: Vec<String> = self.replication_groups.keys().cloned().collect();
+        // Reconcile: drop actions whose target cluster/replication group (or
+        // service update) no longer exists, so deleted targets aren't treated
+        // as valid on subsequent Describe/BatchApply/BatchStop calls.
+        self.update_actions.retain(|_, ua| {
+            let su_exists = self.service_updates.contains_key(&ua.service_update_name);
+            let target_exists = match (&ua.cache_cluster_id, &ua.replication_group_id) {
+                (Some(cc), _) => cluster_ids.contains(cc),
+                (None, Some(rg)) => group_ids.contains(rg),
+                (None, None) => false,
+            };
+            su_exists && target_exists
+        });
         for su in self.service_updates.values() {
             for cc in &cluster_ids {
                 let key = format!("{}#cc#{}", su.service_update_name, cc);
