@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 44 AWS services with 3,750 total operations. 125,345/125,345 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 45 AWS services with 3,760 total operations. 125,770/125,770 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -16,6 +16,7 @@ fakecloud implements 44 AWS services with 3,750 total operations. 125,345/125,34
 | SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies, **KMS audit-trail on `KmsMasterKeyId` topics** |
 | EventBridge            |  57 | Pattern matching, schedules, archives, replay, API destinations        |
 | EventBridge Scheduler  |  12 | at/rate/cron, SQS targets, DLQ routing, one-shot self-delete           |
+| EventBridge Pipes      |  10 | Source -> filter -> Lambda enrichment -> target, InputTemplate transform, real background runner |
 | Lambda                 |  70 | Real Docker, 23 runtimes, ESM with FilterCriteria + partial-batch failure |
 | DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams, **KMS audit-trail on SSE-KMS tables** |
 | IAM                    | 176 | Users, roles, policies, groups, OIDC/SAML, **PassRole trust enforcement** |

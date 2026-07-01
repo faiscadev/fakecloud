@@ -235,6 +235,11 @@ jobs:
           # Layer 6: depends on layer 5
           publish fakecloud-stepfunctions  # depends on dynamodb
 
+          # EventBridge Pipes: control plane depends only on core/aws/persistence,
+          # but cloudformation provisions AWS::Pipes::Pipe, so publish it before
+          # cloudformation.
+          publish fakecloud-pipes
+
           # Layer 7: depends on all services
           publish fakecloud-cloudformation
 

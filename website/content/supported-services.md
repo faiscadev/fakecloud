@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,750 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,760 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,750 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,760 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 43
 - **Total Operations**: 3,750
-- **Conformance Engine**: 125,345 Smithy-based test variants
+- **Conformance Engine**: 125,770 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -35,7 +35,8 @@ fakecloud provides 100% API conformance across 3,750 operations. Unlike mocks, f
 ### Messaging & Integration
 - **SQS**: 23 operations. Standard and FIFO queues, Dead Letter Queues (DLQ).
 - **SNS**: 42 operations. Topic management and fan-out to SQS/Lambda.
-- **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) is a separate service.
+- **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) and EventBridge Pipes (10 operations) are separate services.
+- **EventBridge Pipes**: 10 operations. Point-to-point source -> filter -> Lambda enrichment -> target integrations with per-target InputTemplate transforms, driven by a real background runner.
 
 ### Security & Management
 - **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.

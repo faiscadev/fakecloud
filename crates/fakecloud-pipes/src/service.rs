@@ -244,6 +244,17 @@ impl PipesService {
     /// path + method, per the Pipes Smithy `@http` traits.
     fn resolve_action(req: &AwsRequest) -> Option<&'static str> {
         let segs = &req.path_segments;
+        // `path_segments` splits on `/` and strips empty parts, so a request
+        // like `POST /v1/pipes/` collapses to `["v1","pipes"]` (a 2-segment
+        // collection route) and `GET /tags/` collapses to `["tags"]`. AWS's
+        // contract for these single-resource paths is that an empty path label
+        // (Name / resourceArn) is a ValidationException, not "operation not
+        // found." Detect the trailing slash on the original URI and promote the
+        // request to the resource route with an empty label so the handler
+        // returns the right validation error instead of a 404.
+        let raw = req.raw_path.split('?').next().unwrap_or(&req.raw_path);
+        let trailing_slash = raw.ends_with('/') && raw.matches('/').count() >= 2;
+
         // Tag family: /tags/{resourceArn}
         if segs.first().map(String::as_str) == Some("tags") {
             return match req.method {
@@ -259,7 +270,15 @@ impl PipesService {
         if segs.get(1).map(String::as_str) != Some("pipes") {
             return None;
         }
-        match (segs.len(), &req.method) {
+        // A trailing slash on `/v1/pipes/` means an empty {Name} path label:
+        // route to the single-resource op so the handler emits a
+        // ValidationException rather than falling through to ListPipes / 404.
+        let effective_len = if segs.len() == 2 && trailing_slash {
+            3
+        } else {
+            segs.len()
+        };
+        match (effective_len, &req.method) {
             // /v1/pipes
             (2, &Method::GET) => Some("ListPipes"),
             // /v1/pipes/{Name}
@@ -436,11 +455,42 @@ impl PipesService {
         let current = q.get("CurrentState").map(String::as_str);
         let source_prefix = q.get("SourcePrefix").map(String::as_str);
         let target_prefix = q.get("TargetPrefix").map(String::as_str);
-        let limit: usize = q
-            .get("Limit")
-            .and_then(|s| s.parse().ok())
-            .filter(|n| (1..=100).contains(n))
-            .unwrap_or(100);
+
+        // Validate the query-string filters against their Smithy constraints so
+        // that malformed inputs return a ValidationException instead of being
+        // silently ignored (which would mask a client bug behind an empty page).
+        if let Some(p) = name_prefix {
+            validate_pipe_name(p)?;
+        }
+        if let Some(v) = current {
+            validate_pipe_state(v)?;
+        }
+        if let Some(v) = desired {
+            validate_requested_pipe_state(v)?;
+        }
+        if let Some(v) = source_prefix {
+            validate_resource_arn_len("SourcePrefix", v)?;
+        }
+        if let Some(v) = target_prefix {
+            validate_resource_arn_len("TargetPrefix", v)?;
+        }
+        if let Some(t) = q.get("NextToken") {
+            if t.is_empty() || t.len() > 2048 {
+                return Err(validation_error("NextToken must be 1-2048 characters"));
+            }
+        }
+        let limit: usize = match q.get("Limit") {
+            Some(raw) => {
+                let n: i64 = raw
+                    .parse()
+                    .map_err(|_| validation_error("Limit must be an integer"))?;
+                if !(1..=100).contains(&n) {
+                    return Err(validation_error("Limit must be between 1 and 100"));
+                }
+                n as usize
+            }
+            None => 100,
+        };
         let after = q.get("NextToken").cloned();
 
         let accounts = self.state.read();
@@ -924,7 +974,72 @@ fn resource_arn_from_path(req: &AwsRequest) -> Result<String, AwsServiceError> {
     if arn.is_empty() {
         return Err(validation_error("resourceArn is required"));
     }
+    // Smithy `PipeArn` is length 1..1600; reject oversize labels rather than
+    // silently accepting a garbage ARN.
+    if arn.len() > 1600 {
+        return Err(validation_error("resourceArn must be 1-1600 characters"));
+    }
+    // `PipeArn` carries the pattern `^arn:aws...`. A value that is not an ARN
+    // (e.g. an SDK-omitted `{resourceArn}` label left literal by a probe) is a
+    // ValidationException, matching real EventBridge Pipes.
+    if !arn.starts_with("arn:") {
+        return Err(validation_error(format!(
+            "resourceArn does not match the required ARN pattern: {arn}"
+        )));
+    }
     Ok(arn)
+}
+
+/// Validate a `ResourceArn`-shaped value (length 1..1600). Shared by the
+/// ListPipes `SourcePrefix` / `TargetPrefix` query filters.
+fn validate_resource_arn_len(field: &str, value: &str) -> Result<(), AwsServiceError> {
+    if value.is_empty() || value.len() > 1600 {
+        return Err(validation_error(format!(
+            "{field} must be 1-1600 characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Valid `PipeState` enum values (CurrentState filter on ListPipes).
+const PIPE_STATES: &[&str] = &[
+    "RUNNING",
+    "STOPPED",
+    "CREATING",
+    "UPDATING",
+    "DELETING",
+    "STARTING",
+    "STOPPING",
+    "CREATE_FAILED",
+    "UPDATE_FAILED",
+    "START_FAILED",
+    "STOP_FAILED",
+    "DELETE_FAILED",
+    "CREATE_ROLLBACK_FAILED",
+    "DELETE_ROLLBACK_FAILED",
+    "UPDATE_ROLLBACK_FAILED",
+];
+
+fn validate_pipe_state(value: &str) -> Result<(), AwsServiceError> {
+    if PIPE_STATES.contains(&value) {
+        Ok(())
+    } else {
+        Err(validation_error(format!(
+            "CurrentState must be one of: {}",
+            PIPE_STATES.join(", ")
+        )))
+    }
+}
+
+/// Valid `RequestedPipeState` enum values (DesiredState filter on ListPipes).
+fn validate_requested_pipe_state(value: &str) -> Result<(), AwsServiceError> {
+    if matches!(value, "RUNNING" | "STOPPED") {
+        Ok(())
+    } else {
+        Err(validation_error(
+            "DesiredState must be one of: RUNNING, STOPPED",
+        ))
+    }
 }
 
 fn validate_pipe_name(name: &str) -> Result<(), AwsServiceError> {
@@ -1229,6 +1344,132 @@ mod tests {
         assert_eq!(
             pipe["SourceParameters"]["FilterCriteria"]["Filters"][0]["Pattern"],
             "{\"x\":[1]}"
+        );
+    }
+
+    fn make_request(method: Method, path: &str) -> AwsRequest {
+        use http::HeaderMap;
+        let (p, q) = match path.find('?') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => (path, ""),
+        };
+        let path_segments: Vec<String> = p
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let query_params: std::collections::HashMap<String, String> = q
+            .split('&')
+            .filter(|s| !s.is_empty())
+            .filter_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect();
+        AwsRequest {
+            service: "pipes".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: HeaderMap::new(),
+            query_params,
+            body: Default::default(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments,
+            raw_path: p.to_string(),
+            raw_query: q.to_string(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn pipe_state_enum_validation() {
+        assert!(validate_pipe_state("RUNNING").is_ok());
+        assert!(validate_pipe_state("CREATE_FAILED").is_ok());
+        let err = validate_pipe_state("BOGUS").unwrap_err();
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[test]
+    fn requested_pipe_state_enum_validation() {
+        assert!(validate_requested_pipe_state("RUNNING").is_ok());
+        assert!(validate_requested_pipe_state("STOPPED").is_ok());
+        // CREATING is a valid PipeState but not a valid *requested* state.
+        assert_eq!(
+            validate_requested_pipe_state("CREATING")
+                .unwrap_err()
+                .code(),
+            "ValidationException"
+        );
+    }
+
+    #[test]
+    fn resource_arn_len_validation() {
+        assert!(validate_resource_arn_len("SourcePrefix", "arn:aws:sqs:us-east-1:1:q").is_ok());
+        assert_eq!(
+            validate_resource_arn_len("SourcePrefix", "")
+                .unwrap_err()
+                .code(),
+            "ValidationException"
+        );
+        let long = "a".repeat(1601);
+        assert_eq!(
+            validate_resource_arn_len("TargetPrefix", &long)
+                .unwrap_err()
+                .code(),
+            "ValidationException"
+        );
+    }
+
+    #[test]
+    fn resource_arn_from_path_rejects_non_arn_and_oversize() {
+        // A valid ARN passes.
+        let req = make_request(
+            Method::GET,
+            "/tags/arn%3Aaws%3Apipes%3Aus-east-1%3A1%3Apipe%2Fp",
+        );
+        assert_eq!(
+            resource_arn_from_path(&req).unwrap(),
+            "arn:aws:pipes:us-east-1:1:pipe/p"
+        );
+        // A literal `{resourceArn}` placeholder (SDK-omitted label) is rejected.
+        let req = make_request(Method::GET, "/tags/{resourceArn}");
+        assert_eq!(
+            resource_arn_from_path(&req).unwrap_err().code(),
+            "ValidationException"
+        );
+        // Empty label is rejected.
+        let req = make_request(Method::GET, "/tags/");
+        assert_eq!(
+            resource_arn_from_path(&req).unwrap_err().code(),
+            "ValidationException"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_routes_to_single_resource_op() {
+        // `POST /v1/pipes/` (empty {Name}) must reach CreatePipe (which then
+        // rejects the empty name) rather than collapsing to a 404 or ListPipes.
+        assert_eq!(
+            PipesService::resolve_action(&make_request(Method::POST, "/v1/pipes/")),
+            Some("CreatePipe")
+        );
+        assert_eq!(
+            PipesService::resolve_action(&make_request(Method::GET, "/v1/pipes/")),
+            Some("DescribePipe")
+        );
+        assert_eq!(
+            PipesService::resolve_action(&make_request(Method::DELETE, "/v1/pipes/")),
+            Some("DeletePipe")
+        );
+        // No trailing slash: the collection GET is still ListPipes.
+        assert_eq!(
+            PipesService::resolve_action(&make_request(Method::GET, "/v1/pipes")),
+            Some("ListPipes")
         );
     }
 }

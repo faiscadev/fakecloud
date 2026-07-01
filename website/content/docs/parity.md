@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **44 AWS services** with **3,750 operations**. **125,345/125,345 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **45 AWS services** with **3,760 operations**. **125,770/125,770 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -13,6 +13,7 @@ fakecloud implements **44 AWS services** with **3,750 operations**. **125,345/12
 | [SNS](@/docs/services/sns.md) | 42 | JSON 1.1 (Query) | Full | Full | Email subscriptions deliver via SMTP relay when `FAKECLOUD_SMTP_RELAY_*` env is configured; otherwise they land in the introspection ledger. |
 | [EventBridge](@/docs/services/eventbridge.md) | 57 | JSON 1.1 | Full | Full | — |
 | [EventBridge Scheduler](@/docs/services/scheduler.md) | 12 | JSON 1.1 | Full | Full | — |
+| [EventBridge Pipes](@/docs/services/pipes.md) | 10 | REST-JSON | Full | Full | Source (SQS/Kinesis/DynamoDB Streams) -> optional filter -> optional Lambda enrichment -> target (Lambda/SQS/SNS/Step Functions/EventBridge bus/Kinesis), with per-target InputTemplate transform, all driven by a real background runner. |
 | [Lambda](@/docs/services/lambda.md) | 70 | REST-JSON | Full | Full | `UpdateFunctionCode` fetches real bytes from S3 and recomputes `CodeSha256`. Reserved concurrency is recorded but not yet enforced at invoke time. Provisioned concurrency is a roadmap item. |
 | [DynamoDB](@/docs/services/dynamodb.md) | 57 | JSON 1.1 | Full | Full | — |
 | [IAM](@/docs/services/iam.md) | 176 | JSON 1.1 (Query) | Full | Full | — |
@@ -61,7 +62,7 @@ fakecloud implements **44 AWS services** with **3,750 operations**. **125,345/12
 
 ## What "100% conformance" means
 
-fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **125,345 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
+fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **125,770 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
 

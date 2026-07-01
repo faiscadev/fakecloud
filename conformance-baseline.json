@@ -1,6 +1,6 @@
 {
-  "variants_passed": 125345,
-  "total_variants": 125345,
+  "variants_passed": 125770,
+  "total_variants": 125770,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -125,6 +125,10 @@
     "organizations": {
       "passed": 2050,
       "total": 2050
+    },
+    "pipes": {
+      "passed": 425,
+      "total": 425
     },
     "rds": {
       "passed": 5487,

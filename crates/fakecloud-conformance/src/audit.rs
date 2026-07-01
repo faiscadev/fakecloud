@@ -32,6 +32,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service/mod.rs", "service.rs"],
             &["events"],
         ),
+        ("pipes", "pipes", &["service.rs"], &["pipes"]),
         (
             "iam",
             "iam",
