@@ -379,6 +379,10 @@ impl ResourceProvisioner {
         alarm.comparison_operator = comparison_operator;
         alarm.treat_missing_data = treat_missing_data;
         alarm.evaluate_low_sample_count_percentile = evaluate_low_sample_count_percentile;
+        alarm.threshold_metric_id = props
+            .get("ThresholdMetricId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         alarm.metrics = parse_cfn_alarm_metrics(props);
         alarm.configuration_updated_timestamp = now;
         alarm.alarm_configuration_updated_timestamp = now;

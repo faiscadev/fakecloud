@@ -6385,9 +6385,9 @@ mod tests {
                 "A",
                 serde_json::json!({
                     "AlarmName": "math-alarm",
-                    "ComparisonOperator": "GreaterThanThreshold",
+                    "ComparisonOperator": "GreaterThanUpperThreshold",
                     "EvaluationPeriods": 1,
-                    "Threshold": 10,
+                    "ThresholdMetricId": "ad1",
                     "Metrics": [
                         {"Id": "e1", "Expression": "m1", "Label": "expr", "ReturnData": true},
                         {"Id": "m1", "ReturnData": false, "MetricStat": {
@@ -6416,6 +6416,7 @@ mod tests {
             assert_eq!(alarm.metrics[0].id, "e1");
             assert_eq!(alarm.metrics[0].expression.as_deref(), Some("m1"));
             assert_eq!(alarm.metrics[0].return_data, Some(true));
+            assert_eq!(alarm.threshold_metric_id.as_deref(), Some("ad1"));
             let stat = alarm.metrics[1].metric_stat.as_ref().unwrap();
             assert_eq!(stat.metric_name.as_deref(), Some("CPUUtilization"));
             assert_eq!(
@@ -6426,7 +6427,7 @@ mod tests {
             assert_eq!(stat.period, Some(300));
         }
 
-        // Update replaces the Metrics list on the update path.
+        // Update replaces the Metrics list AND refreshes ThresholdMetricId.
         prov.update_resource(
             &created,
             &make_resource(
@@ -6434,9 +6435,9 @@ mod tests {
                 "A",
                 serde_json::json!({
                     "AlarmName": "math-alarm",
-                    "ComparisonOperator": "GreaterThanThreshold",
+                    "ComparisonOperator": "GreaterThanUpperThreshold",
                     "EvaluationPeriods": 1,
-                    "Threshold": 20,
+                    "ThresholdMetricId": "ad2",
                     "Metrics": [{"Id": "e2", "Expression": "m1*2", "ReturnData": true}]
                 }),
             ),
@@ -6454,6 +6455,12 @@ mod tests {
         assert_eq!(alarm.metrics.len(), 1, "Metrics re-parsed on update");
         assert_eq!(alarm.metrics[0].id, "e2");
         assert_eq!(alarm.metrics[0].expression.as_deref(), Some("m1*2"));
+        // ThresholdMetricId reflects the updated definition, not the stale one.
+        assert_eq!(
+            alarm.threshold_metric_id.as_deref(),
+            Some("ad2"),
+            "ThresholdMetricId refreshed on update"
+        );
     }
 
     #[test]
