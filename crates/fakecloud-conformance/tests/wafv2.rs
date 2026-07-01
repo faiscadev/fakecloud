@@ -813,10 +813,26 @@ async fn waf_describe_managed_rule_group() {
 #[tokio::test]
 async fn waf_get_managed_rule_set() {
     let server = TestServer::start().await;
-    server
-        .wafv2_client()
+    let waf = server.wafv2_client().await;
+    // GetManagedRuleSet resolves a customer-managed rule set that was published
+    // via PutManagedRuleSetVersions; publish it first (with a version so the
+    // set carries published version detail) before reading it back.
+    waf.put_managed_rule_set_versions()
+        .name("MyManagedRuleSet")
+        .id("mrs-1")
+        .scope(Scope::Regional)
+        .lock_token("any")
+        .recommended_version("Version_1.0")
+        .versions_to_publish(
+            "Version_1.0",
+            aws_sdk_wafv2::types::VersionToPublish::builder()
+                .forecasted_lifetime(30)
+                .build(),
+        )
+        .send()
         .await
-        .get_managed_rule_set()
+        .unwrap();
+    waf.get_managed_rule_set()
         .name("MyManagedRuleSet")
         .id("mrs-1")
         .scope(Scope::Regional)
