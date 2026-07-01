@@ -148,6 +148,18 @@ pub struct GoTestRunner<'a> {
     pub endpoint: String,
 }
 
+/// Go `-parallel` degree for a service's `go test` invocation. Defaults to 4;
+/// a few background-loop + waiter-heavy services drop to 2 so their lifecycle
+/// settle tasks don't starve for CPU under four concurrent terraform applies on
+/// a 2-core CI runner. `pipes` runs a 500ms source-poll loop alongside
+/// create/import/update/delete waiters and is the clearest such case.
+fn parallelism_for(service: &str) -> u32 {
+    match service {
+        "pipes" => 2,
+        _ => 4,
+    }
+}
+
 impl<'a> GoTestRunner<'a> {
     pub fn run_service(&self, service: &Service) -> GoTestResult {
         self.run_go_tests(service.name, service.run_regex, service.deny)
@@ -169,13 +181,21 @@ impl<'a> GoTestRunner<'a> {
             format!("^({})$", deny.join("|"))
         };
 
-        // `-parallel 4` lets Go's test runner execute up to 4 `t.Parallel()`
+        // `-parallel N` lets Go's test runner execute up to N `t.Parallel()`
         // subtests concurrently within a single `go test` invocation. We use 4
         // (rather than 8 or runner core count) because some upstream tests
         // poll fakecloud aggressively under parallel load and can starve the
         // request loop, surfacing as suite-wide hangs. CI fan-out across
         // services is handled by the GitHub Actions matrix, so wall time
         // scales with the slowest single service, not their sum.
+        //
+        // A few services drive a fakecloud-side background loop plus multi-step
+        // create/update/delete lifecycle waiters, and on a constrained 2-core CI
+        // runner four of those in parallel saturate the CPU enough that the
+        // lifecycle settle tasks starve and the provider's delete/update waiters
+        // time out (observed as a 30-minute stuck DELETING pipe). Those run at a
+        // lower parallelism; see `parallelism_for`.
+        let parallel = parallelism_for(service);
         let mut cmd = Command::new("go");
         let mut args: Vec<String> = vec![
             "test".into(),
@@ -187,7 +207,7 @@ impl<'a> GoTestRunner<'a> {
             "90m".into(),
             "-count=1".into(),
             "-parallel".into(),
-            "4".into(),
+            parallel.to_string(),
         ];
         if !skip_re.is_empty() {
             args.push("-skip".into());

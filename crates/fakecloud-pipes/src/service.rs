@@ -101,6 +101,13 @@ pub fn ensure_source_param_defaults(pipe: &mut Map<String, Value>, source_arn: &
 /// get overwritten"), and then asserts the attribute is absent. Strip an empty
 /// `InputTemplate` from the target/enrichment parameter blocks, and drop a
 /// block that becomes empty so it reads back as absent.
+///
+/// The same "empty to overwrite" pattern applies to the source filter: to clear
+/// `filter_criteria` the provider sends `SourceParameters.FilterCriteria = {}`
+/// (an empty `FilterCriteria` with no `Filters`; see `expandUpdatePipeSourceParameters`),
+/// and AWS's flatten emits a `filter_criteria` block only when `FilterCriteria`
+/// is non-nil. So a FilterCriteria carrying no filters must read back as absent —
+/// strip it, or the provider sees one (empty) block where it expects zero.
 pub fn normalize_empty_input_templates(pipe: &mut Map<String, Value>) {
     for key in ["TargetParameters", "EnrichmentParameters"] {
         let drop = match pipe.get_mut(key).and_then(Value::as_object_mut) {
@@ -114,6 +121,24 @@ pub fn normalize_empty_input_templates(pipe: &mut Map<String, Value>) {
         };
         if drop {
             pipe.remove(key);
+        }
+    }
+
+    // Drop an empty `SourceParameters.FilterCriteria` (Filters absent or empty)
+    // so it reads back as no filter at all. Leave the surrounding
+    // SourceParameters block in place — it still carries the source-typed
+    // parameter defaults (e.g. SqsQueueParameters).
+    if let Some(sp) = pipe.get_mut("SourceParameters").and_then(Value::as_object_mut) {
+        let drop_fc = match sp.get("FilterCriteria").and_then(Value::as_object) {
+            Some(fc) => fc
+                .get("Filters")
+                .and_then(Value::as_array)
+                .map(|f| f.is_empty())
+                .unwrap_or(true),
+            None => false,
+        };
+        if drop_fc {
+            sp.remove("FilterCriteria");
         }
     }
 }
@@ -998,5 +1023,51 @@ mod tests {
         pipe.insert("TargetParameters".into(), json!({"InputTemplate": "<$.x>"}));
         normalize_empty_input_templates(&mut pipe);
         assert_eq!(pipe["TargetParameters"]["InputTemplate"], "<$.x>");
+    }
+
+    #[test]
+    fn empty_filter_criteria_stripped_defaults_kept() {
+        // Clearing a source filter sends FilterCriteria = {} alongside the
+        // source-typed defaults. The empty FilterCriteria must be dropped so it
+        // reads back as absent, but SqsQueueParameters must survive.
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({
+                "SqsQueueParameters": {"BatchSize": 10, "MaximumBatchingWindowInSeconds": 0},
+                "FilterCriteria": {},
+            }),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe["SourceParameters"].get("FilterCriteria").is_none());
+        assert_eq!(
+            pipe["SourceParameters"]["SqsQueueParameters"]["BatchSize"],
+            10
+        );
+    }
+
+    #[test]
+    fn empty_filters_array_filter_criteria_stripped() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({"FilterCriteria": {"Filters": []}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert!(pipe["SourceParameters"].get("FilterCriteria").is_none());
+    }
+
+    #[test]
+    fn non_empty_filter_criteria_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({"FilterCriteria": {"Filters": [{"Pattern": "{\"x\":[1]}"}]}}),
+        );
+        normalize_empty_input_templates(&mut pipe);
+        assert_eq!(
+            pipe["SourceParameters"]["FilterCriteria"]["Filters"][0]["Pattern"],
+            "{\"x\":[1]}"
+        );
     }
 }
