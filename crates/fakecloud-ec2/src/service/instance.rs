@@ -1729,9 +1729,18 @@ pub(crate) fn describe_instance_credit_specifications(
         .values()
         .filter(|i| wanted.is_empty() || wanted.contains(&i.instance_id))
         .map(|i| {
+            // Burstable families (t2/t3/t3a/t4g) default to `unlimited` on AWS
+            // except t2 (`standard`); non-burstable have no credit spec. We only
+            // track the value once explicitly set, else report `standard`.
+            let credits = state
+                .instance_credit_specs
+                .get(&i.instance_id)
+                .cloned()
+                .unwrap_or_else(|| "standard".to_string());
             format!(
-                "{}<cpuCredits>standard</cpuCredits>",
-                ec2_elem("instanceId", &i.instance_id)
+                "{}{}",
+                ec2_elem("instanceId", &i.instance_id),
+                ec2_elem("cpuCredits", &credits)
             )
         })
         .collect();
@@ -1743,13 +1752,43 @@ pub(crate) fn describe_instance_credit_specifications(
 }
 
 pub(crate) fn modify_instance_credit_specification(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let p = &req.query_params;
+    let mut successful = Vec::new();
+    let mut unsuccessful = Vec::new();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let mut n = 1usize;
+        loop {
+            let id_key = format!("InstanceCreditSpecification.{n}.InstanceId");
+            let Some(instance_id) = p.get(&id_key).cloned() else {
+                break;
+            };
+            let credits = p
+                .get(&format!("InstanceCreditSpecification.{n}.CpuCredits"))
+                .cloned()
+                .unwrap_or_else(|| "standard".to_string());
+            if state.instances.contains_key(&instance_id) {
+                state
+                    .instance_credit_specs
+                    .insert(instance_id.clone(), credits);
+                successful.push(ec2_elem("instanceId", &instance_id));
+            } else {
+                unsuccessful.push(format!(
+                    "{}<error><code>InvalidInstanceID.NotFound</code><message>The instance ID '{instance_id}' does not exist</message></error>",
+                    ec2_elem("instanceId", &instance_id)
+                ));
+            }
+            n += 1;
+        }
+    }
     let body = format!(
         "{}{}",
-        ec2_list("successfulInstanceCreditSpecificationSet", &[]),
-        ec2_list("unsuccessfulInstanceCreditSpecificationSet", &[]),
+        ec2_list("successfulInstanceCreditSpecificationSet", &successful),
+        ec2_list("unsuccessfulInstanceCreditSpecificationSet", &unsuccessful),
     );
     Ok(Ec2Service::respond(
         "ModifyInstanceCreditSpecification",
@@ -1759,40 +1798,82 @@ pub(crate) fn modify_instance_credit_specification(
 }
 
 pub(crate) fn get_instance_metadata_defaults(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state.read();
+    let d = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.instance_metadata_defaults.clone())
+        .unwrap_or_default();
+    let mut inner = String::new();
+    if let Some(v) = &d.http_tokens {
+        inner.push_str(&ec2_elem("httpTokens", v));
+    }
+    if let Some(v) = &d.http_endpoint {
+        inner.push_str(&ec2_elem("httpEndpoint", v));
+    }
+    if let Some(v) = d.http_put_response_hop_limit {
+        inner.push_str(&ec2_elem("httpPutResponseHopLimit", &v.to_string()));
+    }
+    if let Some(v) = &d.instance_metadata_tags {
+        inner.push_str(&ec2_elem("instanceMetadataTags", v));
+    }
+    if let Some(v) = &d.http_tokens_enforced {
+        inner.push_str(&ec2_elem("httpTokensEnforced", v));
+    }
     Ok(Ec2Service::respond(
         "GetInstanceMetadataDefaults",
         &req.request_id,
-        "<accountLevel><httpTokens>optional</httpTokens><httpEndpoint>enabled</httpEndpoint></accountLevel>",
+        &format!("<accountLevel>{inner}</accountLevel>"),
     ))
 }
 
 pub(crate) fn modify_instance_metadata_defaults(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let p = &req.query_params;
+    validate_enum(p, "HttpTokens", &["optional", "required", "no-preference"])?;
+    validate_enum(p, "HttpEndpoint", &["disabled", "enabled", "no-preference"])?;
     validate_enum(
-        &req.query_params,
-        "HttpTokens",
-        &["optional", "required", "no-preference"],
-    )?;
-    validate_enum(
-        &req.query_params,
-        "HttpEndpoint",
-        &["disabled", "enabled", "no-preference"],
-    )?;
-    validate_enum(
-        &req.query_params,
+        p,
         "InstanceMetadataTags",
         &["disabled", "enabled", "no-preference"],
     )?;
     validate_enum(
-        &req.query_params,
+        p,
         "HttpTokensEnforced",
         &["disabled", "enabled", "no-preference"],
     )?;
+    // `no-preference` resets that setting to the account default (drop it).
+    let apply = |cur: &mut Option<String>, key: &str| {
+        if let Some(v) = p.get(key) {
+            *cur = if v == "no-preference" {
+                None
+            } else {
+                Some(v.clone())
+            };
+        }
+    };
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let d = state
+            .instance_metadata_defaults
+            .get_or_insert_with(Default::default);
+        apply(&mut d.http_tokens, "HttpTokens");
+        apply(&mut d.http_endpoint, "HttpEndpoint");
+        apply(&mut d.instance_metadata_tags, "InstanceMetadataTags");
+        apply(&mut d.http_tokens_enforced, "HttpTokensEnforced");
+        if let Some(v) = p
+            .get("HttpPutResponseHopLimit")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            // -1 clears the account default per the EC2 API.
+            d.http_put_response_hop_limit = if v < 0 { None } else { Some(v) };
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyInstanceMetadataDefaults",
         &req.request_id,
@@ -1801,44 +1882,99 @@ pub(crate) fn modify_instance_metadata_defaults(
 }
 
 pub(crate) fn register_event_notification_attributes(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // InstanceTagAttribute is a required struct with no required members, so an
-    // empty one is wire-invisible (== omission) — not validated here.
+    let keys = indexed_sub_keys(&req.query_params);
+    let include_all = req
+        .query_params
+        .get("InstanceTagAttribute.IncludeAllTagsOfInstance")
+        .map(|v| v == "true");
+    let xml = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        for k in keys {
+            if !state.event_notification_tag_keys.contains(&k) {
+                state.event_notification_tag_keys.push(k);
+            }
+        }
+        if let Some(v) = include_all {
+            state.event_notification_include_all_tags = v;
+        }
+        event_tag_attribute(state)
+    };
     Ok(Ec2Service::respond(
         "RegisterInstanceEventNotificationAttributes",
         &req.request_id,
-        &event_tag_attribute(),
+        &xml,
     ))
 }
 
 pub(crate) fn deregister_event_notification_attributes(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let keys = indexed_sub_keys(&req.query_params);
+    let include_all = req
+        .query_params
+        .get("InstanceTagAttribute.IncludeAllTagsOfInstance")
+        .map(|v| v == "true");
+    let xml = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state
+            .event_notification_tag_keys
+            .retain(|k| !keys.contains(k));
+        // Deregistering with IncludeAllTagsOfInstance=true clears the flag.
+        if include_all == Some(true) {
+            state.event_notification_include_all_tags = false;
+        }
+        event_tag_attribute(state)
+    };
     Ok(Ec2Service::respond(
         "DeregisterInstanceEventNotificationAttributes",
         &req.request_id,
-        &event_tag_attribute(),
+        &xml,
     ))
 }
 
 pub(crate) fn describe_event_notification_attributes(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
     Ok(Ec2Service::respond(
         "DescribeInstanceEventNotificationAttributes",
         &req.request_id,
-        &event_tag_attribute(),
+        &event_tag_attribute(state),
     ))
 }
 
-fn event_tag_attribute() -> String {
+/// Collect `InstanceTagAttribute.InstanceTagKey.N` values.
+fn indexed_sub_keys(params: &HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut n = 1usize;
+    while let Some(v) = params.get(&format!("InstanceTagAttribute.InstanceTagKey.{n}")) {
+        out.push(v.clone());
+        n += 1;
+    }
+    out
+}
+
+fn event_tag_attribute(state: &Ec2State) -> String {
+    // `ec2_list` already wraps each element in <item>; pass the (escaped) key
+    // strings directly so the shape is <item>key</item>, not a nested pair.
+    let keys: Vec<String> = state
+        .event_notification_tag_keys
+        .iter()
+        .map(|k| fakecloud_aws::xml::xml_escape(k))
+        .collect();
     format!(
-        "<instanceTagAttribute><includeAllTagsOfInstance>false</includeAllTagsOfInstance>{}</instanceTagAttribute>",
-        ec2_list("instanceTagKeySet", &[])
+        "<instanceTagAttribute><includeAllTagsOfInstance>{}</includeAllTagsOfInstance>{}</instanceTagAttribute>",
+        state.event_notification_include_all_tags,
+        ec2_list("instanceTagKeySet", &keys)
     )
 }
 
@@ -1886,5 +2022,216 @@ mod tests {
         assert_eq!(subnet_ip_prefix("not-a-cidr"), "10.0.0");
         // IPv6 / non-dotted-quad falls back rather than producing nonsense
         assert_eq!(subnet_ip_prefix("fd00::/8"), "10.0.0");
+    }
+}
+
+#[cfg(test)]
+mod modify_tests {
+    use super::*;
+
+    fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    fn seed_instance(svc: &Ec2Service, id: &str) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        let inst = Instance {
+            instance_id: id.into(),
+            image_id: "ami-1".into(),
+            instance_type: "t3.micro".into(),
+            state_code: 16,
+            state_name: "running".into(),
+            private_ip: "10.0.0.5".into(),
+            public_ip: None,
+            subnet_id: Some("subnet-1".into()),
+            vpc_id: Some("vpc-1".into()),
+            key_name: None,
+            security_group_ids: vec![],
+            reservation_id: "r-1".into(),
+            ami_launch_index: 0,
+            monitoring: false,
+            az: "us-east-1a".into(),
+            launch_time: "2024-01-01T00:00:00.000Z".into(),
+            container_id: None,
+            disable_api_termination: false,
+            disable_api_stop: false,
+            source_dest_check: true,
+            ebs_optimized: false,
+            instance_initiated_shutdown_behavior: "stop".into(),
+            user_data: None,
+            metadata_options: Default::default(),
+            cpu_options: None,
+            bandwidth_weighting: None,
+            maintenance_options: Default::default(),
+            placement_tenancy: None,
+            placement_affinity: None,
+            placement_group_name: None,
+            private_dns_hostname_type: None,
+            enable_resource_name_dns_a_record: false,
+            enable_resource_name_dns_aaaa_record: false,
+        };
+        state.instances.insert(id.to_string(), inst);
+    }
+
+    #[test]
+    fn modify_instance_credit_specification_round_trips() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        modify_instance_credit_specification(
+            &svc,
+            &req(
+                "ModifyInstanceCreditSpecification",
+                &[
+                    ("InstanceCreditSpecification.1.InstanceId", "i-1"),
+                    ("InstanceCreditSpecification.1.CpuCredits", "unlimited"),
+                ],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            describe_instance_credit_specifications(
+                &svc,
+                &req(
+                    "DescribeInstanceCreditSpecifications",
+                    &[("InstanceId.1", "i-1")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            out.contains("<cpuCredits>unlimited</cpuCredits>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn modify_instance_credit_specification_unknown_is_unsuccessful() {
+        let svc = Ec2Service::new();
+        let out = body(
+            modify_instance_credit_specification(
+                &svc,
+                &req(
+                    "ModifyInstanceCreditSpecification",
+                    &[("InstanceCreditSpecification.1.InstanceId", "i-missing")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(out.contains("InvalidInstanceID.NotFound"), "got: {out}");
+    }
+
+    #[test]
+    fn instance_metadata_defaults_round_trip_and_reset() {
+        let svc = Ec2Service::new();
+        modify_instance_metadata_defaults(
+            &svc,
+            &req(
+                "ModifyInstanceMetadataDefaults",
+                &[
+                    ("HttpTokens", "required"),
+                    ("HttpEndpoint", "enabled"),
+                    ("HttpTokensEnforced", "enabled"),
+                ],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            get_instance_metadata_defaults(&svc, &req("GetInstanceMetadataDefaults", &[])).unwrap(),
+        );
+        assert!(
+            out.contains("<httpTokens>required</httpTokens>"),
+            "got: {out}"
+        );
+        assert!(out.contains("<httpEndpoint>enabled</httpEndpoint>"));
+        // HttpTokensEnforced must persist too (Cubic P2 on #2057).
+        assert!(out.contains("<httpTokensEnforced>enabled</httpTokensEnforced>"));
+
+        // `no-preference` drops the stored default.
+        modify_instance_metadata_defaults(
+            &svc,
+            &req(
+                "ModifyInstanceMetadataDefaults",
+                &[("HttpTokens", "no-preference")],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            get_instance_metadata_defaults(&svc, &req("GetInstanceMetadataDefaults", &[])).unwrap(),
+        );
+        assert!(
+            !out.contains("<httpTokens>"),
+            "no-preference should clear it: {out}"
+        );
+    }
+
+    #[test]
+    fn event_notification_attributes_persist_keys() {
+        let svc = Ec2Service::new();
+        register_event_notification_attributes(
+            &svc,
+            &req(
+                "RegisterInstanceEventNotificationAttributes",
+                &[
+                    ("InstanceTagAttribute.InstanceTagKey.1", "Name"),
+                    ("InstanceTagAttribute.InstanceTagKey.2", "env"),
+                ],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            describe_event_notification_attributes(
+                &svc,
+                &req("DescribeInstanceEventNotificationAttributes", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(out.contains("<item>Name</item>"), "got: {out}");
+        assert!(out.contains("<item>env</item>"));
+        // Keys must not be double-wrapped as <item><item>key</item></item>
+        // (Cubic P2 on #2057).
+        assert!(!out.contains("<item><item>"), "got: {out}");
+
+        deregister_event_notification_attributes(
+            &svc,
+            &req(
+                "DeregisterInstanceEventNotificationAttributes",
+                &[("InstanceTagAttribute.InstanceTagKey.1", "Name")],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            describe_event_notification_attributes(
+                &svc,
+                &req("DescribeInstanceEventNotificationAttributes", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(!out.contains("<item>Name</item>"), "got: {out}");
+        assert!(out.contains("<item>env</item>"));
     }
 }

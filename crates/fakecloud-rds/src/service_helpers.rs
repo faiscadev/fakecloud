@@ -617,6 +617,19 @@ pub(crate) fn build_s3_restored_instance(
     }
 }
 
+/// A zero-valued `RunningDbContainer` used to seed a `creating` placeholder row
+/// before the real container is started in the background. The finalize task
+/// overwrites `endpoint_address`/`endpoint_port`/`host_port`/`container_id` once
+/// `ensure_postgres` returns.
+pub(crate) fn creating_placeholder_container() -> crate::runtime::RunningDbContainer {
+    crate::runtime::RunningDbContainer {
+        container_id: String::new(),
+        host_port: 0,
+        endpoint_address: String::new(),
+        endpoint_port: 0,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_pit_restored_instance(
     db_instance_identifier: &str,
