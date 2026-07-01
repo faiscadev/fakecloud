@@ -191,21 +191,6 @@ impl PipesService {
         .await;
     }
 
-    /// Fire-and-forget snapshot save for sync call sites (the lazy DescribePipe
-    /// settle) so they don't have to become async just to persist. No-op in
-    /// memory mode.
-    fn spawn_save_snapshot(&self) {
-        if self.snapshot_store.is_none() {
-            return;
-        }
-        let state = self.state.clone();
-        let store = self.snapshot_store.clone();
-        let lock = self.snapshot_lock.clone();
-        tokio::spawn(async move {
-            save_snapshot_static(state, store, lock).await;
-        });
-    }
-
     /// Re-drive any pipe left mid-transition by a restart. Called once at boot
     /// after the snapshot is loaded; a single pass under the write lock resets
     /// transient pipes and spawns exactly one settle task each, so no pipe ends
@@ -421,13 +406,10 @@ impl PipesService {
         // converge on the poll cadence with no dependency on background
         // scheduling — the waiter that is asking "is it gone yet?" is exactly
         // what finishes the deletion.
-        if self.settle_if_overdue(&req.account_id, &name) {
-            // Persist the settle (a DELETING removal + checkpoint purge) so it
-            // survives a restart driven purely by describe polls. Detached so
-            // the describe response isn't held for the disk write, mirroring the
-            // spawn_settle path.
-            self.spawn_save_snapshot();
-        }
+        // The lazy settle + its durable persist run in the async `handle`
+        // wrapper before this read, so a DELETING pipe removed by a describe
+        // poll is already flushed to disk (a restart right after the waiter
+        // sees NotFound must not resurrect it). Here we only read the result.
         let accounts = self.state.read();
         let pipe = accounts
             .get(&req.account_id)
@@ -806,6 +788,19 @@ impl AwsService for PipesService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
+        // DescribePipe lazily settles an overdue transient pipe (converging the
+        // provider's delete/create waiter on its own poll). When that settle
+        // removes a DELETING pipe we must persist BEFORE returning, so a restart
+        // right after the waiter observes deletion doesn't resurrect the pipe
+        // (and its stale checkpoints). Done here in the async path so the flush
+        // is awaited, not fire-and-forget (Cubic P2 on #2058).
+        if action == "DescribePipe" {
+            if let Ok(name) = pipe_name_from_path(&req) {
+                if self.settle_if_overdue(&req.account_id, &name) {
+                    self.save_snapshot().await;
+                }
+            }
+        }
         let result = self.dispatch(action, &req);
         if matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) && is_mutating(action) {
             self.save_snapshot().await;
