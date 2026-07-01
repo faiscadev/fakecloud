@@ -191,16 +191,28 @@ async fn cf_list_domain_conflicts() {
 async fn cf_update_domain_association() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
-    cf.update_domain_association()
+    // UpdateDomainAssociation validates that the target resource exists (AWS
+    // returns EntityNotFound otherwise), so move the domain onto a real
+    // distribution created here rather than a hardcoded id.
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("conf6b-domainassoc"))
+        .send()
+        .await
+        .unwrap();
+    let target_id = create.distribution().unwrap().id().to_string();
+    let resp = cf
+        .update_domain_association()
         .domain("docs.example.com")
         .target_resource(
             DistributionResourceId::builder()
-                .distribution_id("E1234")
+                .distribution_id(&target_id)
                 .build(),
         )
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.resource_id(), Some(target_id.as_str()));
 }
 
 #[test_action("cloudfront", "VerifyDnsConfiguration", checksum = "5ae578cb")]
