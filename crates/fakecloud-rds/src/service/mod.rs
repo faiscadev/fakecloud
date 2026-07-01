@@ -815,7 +815,15 @@ impl RdsService {
             tracing::error!(%error, db_instance_identifier=%id, "restore/replica background finalize failed");
             {
                 let mut accounts = state_handle.write();
-                accounts.get_or_create(account_id).instances.remove(id);
+                let state = accounts.get_or_create(account_id);
+                state.instances.remove(id);
+                // A read replica registered itself against its source
+                // synchronously; drop that reverse linkage so the source
+                // doesn't keep a dangling replica id after this failure.
+                for inst in state.instances.values_mut() {
+                    inst.read_replica_db_instance_identifiers
+                        .retain(|r| r != id);
+                }
             }
             runtime.stop_container(id).await;
             save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
