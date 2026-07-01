@@ -9,10 +9,12 @@
 //! via `/_fakecloud/cloudfront/distributions` and connect to
 //! `http://127.0.0.1:{bound_port}/...`.
 //!
-//! This module lands in stages: Task 2 wires the listener lifecycle and serves
-//! a fixed `200`. Path-pattern origin routing (Task 3) and CustomErrorResponses
-//! (Task 4) extend `handle_request`. There is no global edge network — this is a
-//! single local origin-serving node, matching the ALB/API Gateway precedent.
+//! `handle_request` selects a cache behavior by path pattern, resolves its
+//! origin, reverse-proxies to it, and applies CustomErrorResponses (e.g. the
+//! SPA `404 -> /index.html` served as `200`). There is no global edge network —
+//! this is a single local origin-serving node, matching the ALB/API Gateway
+//! precedent. Deferred (not implemented): in-path CloudFront Functions /
+//! Lambda@Edge, TTL caching / invalidation, and OAC/SigV4 to private S3.
 
 use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
@@ -227,36 +229,113 @@ async fn handle_request(
         .map(|c| c.to_bytes())
         .unwrap_or_default();
 
-    // Resolve the origin domain for this path under the read lock (return an
-    // owned value so the guard drops at the end of the block).
-    let origin_domain: Option<String> = {
+    // Resolve the route under the read lock (owned snapshot so the guard drops
+    // at the end of the block).
+    let route: Option<RouteResolution> = {
         let accs = dp.state.read();
         let resolved = accs
             .all_distributions()
             .find(|(_, d)| d.id == dist_id)
-            .and_then(|(_, d)| resolve_origin_for_path(&d.config, &path));
+            .and_then(|(_, d)| resolve_route(&d.config, &path));
         resolved
     };
-    let Some(origin_domain) = origin_domain else {
+    let Some(route) = route else {
         return canned(502, "distribution or matching origin not found");
     };
 
-    let (authority, host_header) = resolve_upstream(&origin_domain, &dp.s3_endpoint);
+    let (authority, host_header) = resolve_upstream(&route.origin_domain, &dp.s3_endpoint);
     let url = format!("http://{authority}{path_and_query}");
-    trace!(dist = %dist_id, %path, origin = %origin_domain, "CloudFront data plane: proxying");
-    fetch_origin(dp, &method, &url, &host_header, &req_headers, &body_bytes).await
+    trace!(dist = %dist_id, %path, origin = %route.origin_domain, "CloudFront data plane: proxying");
+    let resp = fetch_origin(dp, &method, &url, &host_header, &req_headers, &body_bytes).await;
+
+    // CustomErrorResponses: if the origin status matches a configured rule with
+    // a response page path, serve that page from the DEFAULT origin and return
+    // it with the rule's response code (the SPA deep-link fallback, e.g.
+    // 404 -> /index.html returned as 200).
+    if let Some(rule) = match_error_rule(&route.error_rules, resp.status().as_u16()) {
+        let (auth, host) = resolve_upstream(&route.default_origin_domain, &dp.s3_endpoint);
+        let url = format!("http://{auth}{}", rule.page_path);
+        let mut err_resp = fetch_origin(
+            dp,
+            &Method::GET,
+            &url,
+            &host,
+            &HeaderMap::new(),
+            &Bytes::new(),
+        )
+        .await;
+        if let Some(code) = rule.response_code {
+            if let Ok(status) = http::StatusCode::from_u16(code) {
+                *err_resp.status_mut() = status;
+            }
+        }
+        return err_resp;
+    }
+    resp
 }
 
-/// Pick the cache behavior matching `path` (ordered `CacheBehaviors`, else the
-/// default) and return its origin's `domain_name`.
-fn resolve_origin_for_path(cfg: &DistributionConfig, path: &str) -> Option<String> {
-    let target = select_target_origin(cfg, path);
+/// Owned per-request routing snapshot (taken under the state read lock).
+struct RouteResolution {
+    /// Origin domain for the matched cache behavior.
+    origin_domain: String,
+    /// Origin domain of the default cache behavior (where CustomErrorResponse
+    /// pages are fetched from).
+    default_origin_domain: String,
+    /// CustomErrorResponses that have a response page path.
+    error_rules: Vec<ErrorRule>,
+}
+
+#[derive(Clone)]
+struct ErrorRule {
+    error_code: u16,
+    page_path: String,
+    response_code: Option<u16>,
+}
+
+/// Resolve the matched origin, the default origin, and the custom-error rules
+/// for a request path.
+fn resolve_route(cfg: &DistributionConfig, path: &str) -> Option<RouteResolution> {
     let items = cfg.origins.items.as_ref()?;
-    items
+    let target = select_target_origin(cfg, path);
+    let origin_domain = items
         .origin
         .iter()
         .find(|o| o.id == target)
+        .map(|o| o.domain_name.clone())?;
+    let default_target = cfg.default_cache_behavior.target_origin_id.as_str();
+    let default_origin_domain = items
+        .origin
+        .iter()
+        .find(|o| o.id == default_target)
         .map(|o| o.domain_name.clone())
+        .unwrap_or_else(|| origin_domain.clone());
+    let error_rules = cfg
+        .custom_error_responses
+        .as_ref()
+        .and_then(|c| c.items.as_ref())
+        .map(|it| {
+            it.custom_error_response
+                .iter()
+                .filter_map(|r| {
+                    r.response_page_path.as_ref().map(|p| ErrorRule {
+                        error_code: r.error_code as u16,
+                        page_path: p.clone(),
+                        response_code: r.response_code.as_ref().and_then(|s| s.parse().ok()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(RouteResolution {
+        origin_domain,
+        default_origin_domain,
+        error_rules,
+    })
+}
+
+/// First custom-error rule whose error code matches the origin status.
+fn match_error_rule(rules: &[ErrorRule], status: u16) -> Option<ErrorRule> {
+    rules.iter().find(|r| r.error_code == status).cloned()
 }
 
 fn select_target_origin<'a>(cfg: &'a DistributionConfig, path: &str) -> &'a str {

@@ -36,6 +36,7 @@ pub async fn make_spa_distribution(
         api_origin_domain,
         &format!("spa-{}", uuid_like()),
         true,
+        true,
     );
     let create = cf
         .create_distribution()
@@ -57,6 +58,7 @@ fn spa_config(
     api_origin_domain: Option<&str>,
     caller_reference: &str,
     enabled: bool,
+    with_error_rule: bool,
 ) -> DistributionConfig {
     let mut origins_items = vec![Origin::builder()
         .id("o1")
@@ -139,8 +141,10 @@ fn spa_config(
                 .min_ttl(0)
                 .build()
                 .unwrap(),
-        )
-        .custom_error_responses(
+        );
+
+    if with_error_rule {
+        config_builder = config_builder.custom_error_responses(
             CustomErrorResponses::builder()
                 .quantity(1)
                 .set_items(Some(vec![CustomErrorResponse::builder()
@@ -153,6 +157,7 @@ fn spa_config(
                 .build()
                 .unwrap(),
         );
+    }
 
     if cache_behaviors_len > 0 {
         config_builder = config_builder.cache_behaviors(
@@ -260,6 +265,7 @@ async fn disable_distribution(
         api_origin_domain,
         &caller_reference,
         false,
+        true,
     );
     cf.update_distribution()
         .id(id)
@@ -487,4 +493,69 @@ async fn rebinds_enabled_distribution_on_restart_persistent() {
     wait_for_bound_port(&server, &id, Duration::from_secs(10))
         .await
         .expect("enabled distribution should rebind on startup in persistent mode");
+}
+
+/// A distribution with an S3-website default origin and NO CustomErrorResponses,
+/// so origin errors pass through unrewritten.
+async fn make_static_distribution(
+    cf: &aws_sdk_cloudfront::Client,
+    default_origin_domain: &str,
+) -> aws_sdk_cloudfront::types::Distribution {
+    let config = spa_config(
+        default_origin_domain,
+        None,
+        &format!("static-{}", uuid_like()),
+        true,
+        false,
+    );
+    let create = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .expect("create_distribution");
+    create.distribution().expect("distribution").clone()
+}
+
+#[tokio::test]
+async fn spa_deep_route_falls_back_to_index_200() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    make_website_bucket(&s3, "spa").await;
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(&cf, "spa.s3-website-us-east-1.amazonaws.com", None).await;
+    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
+        .await
+        .expect("bind");
+
+    // Deep client-side route: no such S3 key -> origin 404 -> CustomErrorResponse
+    // (404 -> /index.html) served as 200.
+    let r = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/orders/123"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "<html>HOME</html>");
+}
+
+#[tokio::test]
+async fn missing_path_stays_404_without_error_rule() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    make_website_bucket(&s3, "static").await;
+    let cf = server.cloudfront_client().await;
+    let dist = make_static_distribution(&cf, "static.s3-website-us-east-1.amazonaws.com").await;
+    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
+        .await
+        .expect("bind");
+
+    // With no CustomErrorResponses, a genuinely missing path keeps the origin's
+    // 404 (the data plane does not rewrite it to 200).
+    let r = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/assets/nope.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
 }
