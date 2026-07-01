@@ -34,6 +34,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "batch",
     "pipes",
     "rds-data",
+    "dsql",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

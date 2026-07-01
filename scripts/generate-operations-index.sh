@@ -55,6 +55,7 @@ SERVICES=(
     "kinesis|Kinesis|kinesis"
     "rds|RDS|rds"
     "rds-data|RDS Data|rds-data"
+    "dsql|Aurora DSQL|dsql"
     "elasticache|ElastiCache|elasticache"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"

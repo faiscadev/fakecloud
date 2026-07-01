@@ -92,6 +92,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "scheduler" => Protocol::Rest,
         // RDS Data API: restJson1, runs real SQL on the backing RDS container.
         "rds-data" => Protocol::Rest,
+        // Aurora DSQL: restJson1 control plane (clusters, streams, policies).
+        "dsql" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
