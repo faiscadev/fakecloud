@@ -397,6 +397,23 @@ pub struct MetadataOptions {
     pub instance_metadata_tags: String,
 }
 
+/// Account/region-level IMDS defaults (ModifyInstanceMetadataDefaults). Each
+/// field is `None` until explicitly set; a set of `no-preference` clears it
+/// back to `None` (AWS drops the default rather than storing the sentinel).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InstanceMetadataDefaults {
+    #[serde(default)]
+    pub http_tokens: Option<String>,
+    #[serde(default)]
+    pub http_endpoint: Option<String>,
+    #[serde(default)]
+    pub http_put_response_hop_limit: Option<i64>,
+    #[serde(default)]
+    pub instance_metadata_tags: Option<String>,
+    #[serde(default)]
+    pub http_tokens_enforced: Option<String>,
+}
+
 impl Default for MetadataOptions {
     fn default() -> Self {
         Self {
@@ -484,6 +501,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub locked: bool,
     pub lock_mode: Option<String>,
+    /// createVolumePermission grantees: account IDs, or the literal `all` for
+    /// the public group. Managed by ModifySnapshotAttribute.
+    #[serde(default)]
+    pub create_volume_permissions: Vec<String>,
 }
 
 /// An AMI (machine image).
@@ -604,6 +625,9 @@ pub struct VpcEndpoint {
     pub route_table_ids: Vec<String>,
     #[serde(default)]
     pub private_dns_enabled: bool,
+    /// Security groups attached to an Interface endpoint's ENIs.
+    #[serde(default)]
+    pub security_group_ids: Vec<String>,
 }
 
 /// A VPC endpoint service configuration (PrivateLink provider side).
@@ -1484,6 +1508,22 @@ pub struct Ec2State {
     /// set by ModifyDefaultCreditSpecification, read by GetDefaultCreditSpecification.
     #[serde(default)]
     pub default_credit_specs: BTreeMap<String, String>,
+    /// instance id -> CpuCredits (`standard` | `unlimited`), set by
+    /// ModifyInstanceCreditSpecification, read by DescribeInstanceCreditSpecifications.
+    #[serde(default)]
+    pub instance_credit_specs: BTreeMap<String, String>,
+    /// Account/region IMDS defaults (ModifyInstanceMetadataDefaults /
+    /// GetInstanceMetadataDefaults). `None` reports the AWS defaults.
+    #[serde(default)]
+    pub instance_metadata_defaults: Option<InstanceMetadataDefaults>,
+    /// Instance-tag keys surfaced in instance-state-change events
+    /// (Register/Describe InstanceEventNotificationAttributes).
+    #[serde(default)]
+    pub event_notification_tag_keys: Vec<String>,
+    /// When true, all instance tags are included in event notifications
+    /// (`IncludeAllTagsOfInstance`).
+    #[serde(default)]
+    pub event_notification_include_all_tags: bool,
     /// VPC block-public-access `InternetGatewayBlockMode` (account/region
     /// singleton). `None` reports the default `off`.
     #[serde(default)]

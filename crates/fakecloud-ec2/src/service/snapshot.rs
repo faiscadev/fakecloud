@@ -6,8 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, require_struct, validate_enum,
-    validate_int_range, validate_max_results, Filter,
+    gen_id, indexed_list, invalid_parameter_value, parse_filters, require, require_struct,
+    validate_enum, validate_int_range, validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Snapshot, Tag};
 
@@ -42,6 +42,7 @@ fn build_snapshot(volume_id: String, description: String) -> Snapshot {
         in_recycle_bin: false,
         locked: false,
         lock_mode: None,
+        create_volume_permissions: Vec::new(),
     }
 }
 
@@ -199,7 +200,7 @@ pub(crate) fn copy_snapshot(
 }
 
 pub(crate) fn describe_snapshot_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "SnapshotId")?;
@@ -211,7 +212,25 @@ pub(crate) fn describe_snapshot_attribute(
     )?;
     let attr_xml = match attr.as_str() {
         "productCodes" => ec2_list("productCodes", &[]),
-        _ => ec2_list("createVolumePermission", &[]),
+        _ => {
+            let accounts = svc.state.read();
+            let perms = accounts
+                .get(&req.account_id)
+                .and_then(|s| s.snapshots.get(&id))
+                .map(|s| s.create_volume_permissions.clone())
+                .unwrap_or_default();
+            let items: Vec<String> = perms
+                .iter()
+                .map(|g| {
+                    if g == "all" {
+                        ec2_elem("group", "all")
+                    } else {
+                        ec2_elem("userId", g)
+                    }
+                })
+                .collect();
+            ec2_list("createVolumePermission", &items)
+        }
     };
     Ok(Ec2Service::respond(
         "DescribeSnapshotAttribute",
@@ -221,16 +240,90 @@ pub(crate) fn describe_snapshot_attribute(
 }
 
 pub(crate) fn modify_snapshot_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "SnapshotId")?;
+    let id = require(&req.query_params, "SnapshotId")?;
     validate_enum(
         &req.query_params,
         "Attribute",
         &["productCodes", "createVolumePermission"],
     )?;
     validate_enum(&req.query_params, "OperationType", &["add", "remove"])?;
+    let p = &req.query_params;
+    // The only volume-permission group AWS recognizes is `all` (public).
+    let validate_group = |g: &str| -> Result<(), AwsServiceError> {
+        if g == "all" {
+            Ok(())
+        } else {
+            Err(invalid_parameter_value(format!(
+                "Invalid group '{g}' for createVolumePermission"
+            )))
+        }
+    };
+    // Collect grantees from both the structured Add/Remove lists and the
+    // legacy OperationType + UserId.N / UserGroup.N form.
+    let collect = |kind: &str| -> Result<Vec<String>, AwsServiceError> {
+        let mut out = Vec::new();
+        let mut n = 1usize;
+        loop {
+            let uid = p.get(&format!("CreateVolumePermission.{kind}.{n}.UserId"));
+            let grp = p.get(&format!("CreateVolumePermission.{kind}.{n}.Group"));
+            match (uid, grp) {
+                (Some(u), _) => out.push(u.clone()),
+                (None, Some(g)) => {
+                    validate_group(g)?;
+                    out.push("all".to_string());
+                }
+                (None, None) => break,
+            }
+            n += 1;
+        }
+        Ok(out)
+    };
+    let mut add = collect("Add")?;
+    let mut remove = collect("Remove")?;
+    if add.is_empty() && remove.is_empty() {
+        let op = p.get("OperationType").map(|s| s.as_str()).unwrap_or("");
+        let mut legacy = indexed_list(p, "UserId");
+        for g in indexed_list(p, "UserGroup") {
+            validate_group(&g)?;
+            legacy.push("all".to_string());
+        }
+        match op {
+            "add" => add = legacy,
+            "remove" => remove = legacy,
+            _ => {}
+        }
+    }
+    // AWS rejects a request that both adds and removes permissions in one call.
+    if !add.is_empty() && !remove.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            "A single ModifySnapshotAttribute request cannot both add and remove createVolumePermission",
+        ));
+    }
+    {
+        let mut accounts = svc.state.write();
+        let s = accounts
+            .get_or_create(&req.account_id)
+            .snapshots
+            .get_mut(&id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "InvalidSnapshot.NotFound",
+                    format!("The snapshot '{id}' does not exist"),
+                )
+            })?;
+        for g in add {
+            if !s.create_volume_permissions.contains(&g) {
+                s.create_volume_permissions.push(g);
+            }
+        }
+        s.create_volume_permissions.retain(|g| !remove.contains(g));
+    }
     Ok(Ec2Service::respond(
         "ModifySnapshotAttribute",
         &req.request_id,
@@ -239,16 +332,26 @@ pub(crate) fn modify_snapshot_attribute(
 }
 
 pub(crate) fn reset_snapshot_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "SnapshotId")?;
-    require(&req.query_params, "Attribute")?;
+    let id = require(&req.query_params, "SnapshotId")?;
+    let attr = require(&req.query_params, "Attribute")?;
     validate_enum(
         &req.query_params,
         "Attribute",
         &["productCodes", "createVolumePermission"],
     )?;
+    if attr == "createVolumePermission" {
+        let mut accounts = svc.state.write();
+        if let Some(s) = accounts
+            .get_or_create(&req.account_id)
+            .snapshots
+            .get_mut(&id)
+        {
+            s.create_volume_permissions.clear();
+        }
+    }
     Ok(Ec2Service::respond(
         "ResetSnapshotAttribute",
         &req.request_id,
@@ -585,4 +688,176 @@ pub(crate) fn describe_fast_snapshot_restores(
         &req.request_id,
         &ec2_list("fastSnapshotRestoreSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod modify_tests {
+    use super::*;
+
+    fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn seed_snapshot(svc: &Ec2Service) {
+        let mut accounts = svc.state.write();
+        accounts.get_or_create("000000000000").snapshots.insert(
+            "snap-1".to_string(),
+            build_snapshot("vol-1".into(), "d".into()),
+        );
+    }
+
+    fn describe_perms(svc: &Ec2Service) -> String {
+        let resp = describe_snapshot_attribute(
+            svc,
+            &req(
+                "DescribeSnapshotAttribute",
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                ],
+            ),
+        )
+        .unwrap();
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_snapshot_attribute_round_trips_create_volume_permission() {
+        // The handler validated then dropped the grant (bug-hunt 2026-07-01).
+        let svc = Ec2Service::new();
+        seed_snapshot(&svc);
+        modify_snapshot_attribute(
+            &svc,
+            &req(
+                "ModifySnapshotAttribute",
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                    ("OperationType", "add"),
+                    ("CreateVolumePermission.Add.1.UserId", "111122223333"),
+                ],
+            ),
+        )
+        .unwrap();
+        assert!(describe_perms(&svc).contains("111122223333"));
+
+        modify_snapshot_attribute(
+            &svc,
+            &req(
+                "ModifySnapshotAttribute",
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                    ("OperationType", "remove"),
+                    ("CreateVolumePermission.Remove.1.UserId", "111122223333"),
+                ],
+            ),
+        )
+        .unwrap();
+        assert!(!describe_perms(&svc).contains("111122223333"));
+    }
+
+    #[test]
+    fn reset_snapshot_attribute_clears_permissions() {
+        let svc = Ec2Service::new();
+        seed_snapshot(&svc);
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .snapshots
+            .get_mut("snap-1")
+            .unwrap()
+            .create_volume_permissions = vec!["all".into()];
+        reset_snapshot_attribute(
+            &svc,
+            &req(
+                "ResetSnapshotAttribute",
+                &[
+                    ("SnapshotId", "snap-1"),
+                    ("Attribute", "createVolumePermission"),
+                ],
+            ),
+        )
+        .unwrap();
+        assert!(
+            svc.state.read().get("000000000000").unwrap().snapshots["snap-1"]
+                .create_volume_permissions
+                .is_empty()
+        );
+    }
+
+    fn expect_err(svc: &Ec2Service, query: &[(&str, &str)]) -> AwsServiceError {
+        match modify_snapshot_attribute(svc, &req("ModifySnapshotAttribute", query)) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn modify_snapshot_attribute_unknown_id_errors() {
+        // Cubic P2 on #2057: unknown SnapshotId was a silent no-op success.
+        let svc = Ec2Service::new();
+        let err = expect_err(
+            &svc,
+            &[
+                ("SnapshotId", "snap-missing"),
+                ("Attribute", "createVolumePermission"),
+                ("OperationType", "add"),
+                ("CreateVolumePermission.Add.1.UserId", "111122223333"),
+            ],
+        );
+        assert!(format!("{err:?}").contains("InvalidSnapshot.NotFound"));
+    }
+
+    #[test]
+    fn modify_snapshot_attribute_rejects_add_and_remove_together() {
+        let svc = Ec2Service::new();
+        seed_snapshot(&svc);
+        let err = expect_err(
+            &svc,
+            &[
+                ("SnapshotId", "snap-1"),
+                ("Attribute", "createVolumePermission"),
+                ("CreateVolumePermission.Add.1.UserId", "111122223333"),
+                ("CreateVolumePermission.Remove.1.UserId", "444455556666"),
+            ],
+        );
+        assert!(format!("{err:?}").contains("InvalidParameterCombination"));
+    }
+
+    #[test]
+    fn modify_snapshot_attribute_rejects_invalid_group() {
+        let svc = Ec2Service::new();
+        seed_snapshot(&svc);
+        let err = expect_err(
+            &svc,
+            &[
+                ("SnapshotId", "snap-1"),
+                ("Attribute", "createVolumePermission"),
+                ("OperationType", "add"),
+                ("CreateVolumePermission.Add.1.Group", "everyone"),
+            ],
+        );
+        assert!(format!("{err:?}").contains("InvalidParameterValue"));
+    }
 }

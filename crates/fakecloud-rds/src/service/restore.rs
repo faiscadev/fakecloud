@@ -150,49 +150,6 @@ impl RdsService {
         };
         let created_at = Utc::now();
 
-        let running = match runtime
-            .ensure_postgres(
-                &target_id,
-                &source_instance.engine,
-                &source_instance.engine_version,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-                &request.account_id,
-                &request.region,
-                &tags,
-            )
-            .await
-        {
-            Ok(running) => running,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&target_id);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
-
-        if let Err(e) = runtime
-            .restore_database(
-                &target_id,
-                &source_instance.engine,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-                &dump_data,
-            )
-            .await
-        {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_instance_creation(&target_id);
-            runtime.stop_container(&target_id).await;
-            return Err(runtime_error_to_service_error(e));
-        }
-
         let restore_to_time = required_query_param(request, "RestoreTime")
             .ok()
             .or_else(|| required_query_param(request, "RestoreToTime").ok());
@@ -201,16 +158,23 @@ impl RdsService {
             .map(|s| s.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // Build a `creating` placeholder with no endpoint yet; the backgrounded
+        // container start (below) fills in the endpoint and flips to
+        // `available`, mirroring CreateDBInstance so the client isn't held for
+        // the cold-image pull.
         let mut instance = build_pit_restored_instance(
             &target_id,
-            db_instance_arn,
+            db_instance_arn.clone(),
             dbi_resource_id,
             created_at,
             vpc_security_group_ids,
             &source_instance,
-            &running,
-            tags,
+            &creating_placeholder_container(),
+            tags.clone(),
         );
+        instance.db_instance_status = "creating".to_string();
+        instance.endpoint_address = String::new();
+        instance.port = 0;
 
         if let Some(t) = restore_to_time.as_ref() {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(t) {
@@ -225,13 +189,20 @@ impl RdsService {
             .get_or_create(&request.account_id)
             .finish_instance_creation(instance.clone());
 
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &target_id,
-            &instance.db_instance_arn,
-            "RDS-EVENT-0008",
-            &["creation"],
-            "DB instance restored to point in time",
+        self.spawn_finalize_restored_instance(
+            runtime.clone(),
+            request.account_id.clone(),
+            request.region.clone(),
+            target_id.clone(),
+            db_instance_arn,
+            source_instance.engine.clone(),
+            source_instance.engine_version.clone(),
+            source_instance.master_username.clone(),
+            source_instance.master_user_password.clone(),
+            db_name,
+            tags,
+            Some(dump_data),
+            ("RDS-EVENT-0008", "DB instance restored to point in time"),
         );
 
         Ok(AwsResponse::xml(
@@ -321,78 +292,47 @@ impl RdsService {
         let db_name = db_name_opt.unwrap_or_else(|| default_db_name(&engine).to_string());
         let created_at = Utc::now();
 
-        let running = match runtime
-            .ensure_postgres(
-                &db_instance_identifier,
-                &engine,
-                &engine_version,
-                &master_username,
-                &master_user_password,
-                &db_name,
-                &request.account_id,
-                &request.region,
-                &tags,
-            )
-            .await
-        {
-            Ok(running) => running,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&db_instance_identifier);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
-
-        if let Err(e) = runtime
-            .restore_database(
-                &db_instance_identifier,
-                &engine,
-                &master_username,
-                &master_user_password,
-                &db_name,
-                &dump_data,
-            )
-            .await
-        {
-            self.state
-                .write()
-                .get_or_create(&request.account_id)
-                .cancel_instance_creation(&db_instance_identifier);
-            runtime.stop_container(&db_instance_identifier).await;
-            return Err(runtime_error_to_service_error(e));
-        }
-
-        let instance = build_s3_restored_instance(
+        // Build a `creating` placeholder; the backgrounded container start
+        // (below) fills in the endpoint and flips to `available`.
+        let mut instance = build_s3_restored_instance(
             &db_instance_identifier,
-            db_instance_arn,
+            db_instance_arn.clone(),
             dbi_resource_id,
             created_at,
             allocated_storage,
             db_instance_class,
             engine.clone(),
-            engine_version,
-            master_username,
-            master_user_password,
-            db_name,
+            engine_version.clone(),
+            master_username.clone(),
+            master_user_password.clone(),
+            db_name.clone(),
             vpc_security_group_ids,
-            &running,
-            tags,
+            &creating_placeholder_container(),
+            tags.clone(),
         );
+        instance.db_instance_status = "creating".to_string();
+        instance.endpoint_address = String::new();
+        instance.port = 0;
 
         self.state
             .write()
             .get_or_create(&request.account_id)
             .finish_instance_creation(instance.clone());
 
-        self.emit_event(
-            RdsSourceType::DbInstance,
-            &db_instance_identifier,
-            &instance.db_instance_arn,
-            "RDS-EVENT-0043",
-            &["creation"],
-            "DB instance restored from S3 backup",
+        self.spawn_finalize_restored_instance(
+            runtime.clone(),
+            request.account_id.clone(),
+            request.region.clone(),
+            db_instance_identifier.clone(),
+            db_instance_arn,
+            engine,
+            engine_version,
+            master_username,
+            master_user_password,
+            db_name,
+            tags,
+            Some(dump_data),
+            ("RDS-EVENT-0043", "DB instance restored from S3 backup"),
         );
 
         Ok(AwsResponse::xml(

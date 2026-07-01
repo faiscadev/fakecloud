@@ -287,7 +287,39 @@ pub(crate) fn modify_transit_gateway_vpc_attachment(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    modify_accept_reject_vpc_att(svc, req, "ModifyTransitGatewayVpcAttachment", "")
+    let id = require(&req.query_params, "TransitGatewayAttachmentId")?;
+    let owner = req.account_id.clone();
+    let add = indexed_list(&req.query_params, "AddSubnetIds");
+    let remove = indexed_list(&req.query_params, "RemoveSubnetIds");
+    {
+        let mut accounts = svc.state.write();
+        let stored = accounts
+            .get_or_create(&req.account_id)
+            .tgw_attachments
+            .get_mut(&id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "InvalidTransitGatewayAttachmentID.NotFound",
+                    format!("Transit gateway attachment {id} was not found"),
+                )
+            })?;
+        for s in &add {
+            if !stored.subnet_ids.contains(s) {
+                stored.subnet_ids.push(s.clone());
+            }
+        }
+        stored.subnet_ids.retain(|s| !remove.contains(s));
+    }
+    let a = att_lookup(svc, req, &id);
+    Ok(Ec2Service::respond(
+        "ModifyTransitGatewayVpcAttachment",
+        &req.request_id,
+        &format!(
+            "<transitGatewayVpcAttachment>{}</transitGatewayVpcAttachment>",
+            vpc_att_xml(&a, &[], &owner)
+        ),
+    ))
 }
 pub(crate) fn accept_transit_gateway_vpc_attachment(
     svc: &Ec2Service,
@@ -884,4 +916,71 @@ pub(crate) fn get_transit_gateway_prefix_list_references(
         &req.request_id,
         &ec2_list("transitGatewayPrefixListReferenceSet", &items),
     ))
+}
+
+#[cfg(test)]
+mod modify_tests {
+    use super::*;
+
+    fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn modify_transit_gateway_vpc_attachment_persists_subnets() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            accounts
+                .get_or_create("000000000000")
+                .tgw_attachments
+                .insert(
+                    "tgw-attach-1".to_string(),
+                    crate::state::TgwAttachment {
+                        id: "tgw-attach-1".into(),
+                        tgw_id: "tgw-1".into(),
+                        resource_id: "vpc-1".into(),
+                        resource_type: "vpc".into(),
+                        subnet_ids: vec!["subnet-a".into()],
+                        state: "available".into(),
+                    },
+                );
+        }
+        modify_transit_gateway_vpc_attachment(
+            &svc,
+            &req(
+                "ModifyTransitGatewayVpcAttachment",
+                &[
+                    ("TransitGatewayAttachmentId", "tgw-attach-1"),
+                    ("AddSubnetIds.1", "subnet-b"),
+                    ("RemoveSubnetIds.1", "subnet-a"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let a = &accounts.get("000000000000").unwrap().tgw_attachments["tgw-attach-1"];
+        assert_eq!(a.subnet_ids, vec!["subnet-b".to_string()]);
+    }
 }

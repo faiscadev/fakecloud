@@ -12,6 +12,15 @@ const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
 // ---- VPC endpoints ----
 
+/// Render the endpoint `<groupSet>` from attached security-group ids.
+fn groups_xml(group_ids: &[String]) -> String {
+    let items: Vec<String> = group_ids
+        .iter()
+        .map(|g| format!("<groupId>{}</groupId>", fakecloud_aws::xml::xml_escape(g)))
+        .collect();
+    ec2_list("groupSet", &items)
+}
+
 fn endpoint_xml(e: &VpcEndpoint, tags: &[Tag], owner: &str) -> String {
     format!(
         "{}{}{}{}{}<privateDnsEnabled>{}</privateDnsEnabled><requesterManaged>false</requesterManaged>\
@@ -24,7 +33,7 @@ fn endpoint_xml(e: &VpcEndpoint, tags: &[Tag], owner: &str) -> String {
         e.private_dns_enabled,
         ec2_elem("ipAddressType", "ipv4"),
         ec2_list("subnetIdSet", &e.subnet_ids),
-        ec2_list("groupSet", &[]),
+        groups_xml(&e.security_group_ids),
         ec2_list("routeTableIdSet", &e.route_table_ids),
         ec2_list("networkInterfaceIdSet", &[]),
         ec2_elem("creationTimestamp", FIXED_TIME),
@@ -76,6 +85,7 @@ pub(crate) fn create_vpc_endpoint(
             .get("PrivateDnsEnabled")
             .map(|v| v == "true")
             .unwrap_or(false),
+        security_group_ids: indexed_list(&req.query_params, "SecurityGroupId"),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -147,15 +157,57 @@ pub(crate) fn describe_vpc_endpoints(
 }
 
 pub(crate) fn modify_vpc_endpoint(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "VpcEndpointId")?;
+    let id = require(&req.query_params, "VpcEndpointId")?;
     validate_enum(
         &req.query_params,
         "IpAddressType",
         &["ipv4", "dualstack", "ipv6"],
     )?;
+    let add_subnets = indexed_list(&req.query_params, "AddSubnetId");
+    let remove_subnets = indexed_list(&req.query_params, "RemoveSubnetId");
+    let add_rts = indexed_list(&req.query_params, "AddRouteTableId");
+    let remove_rts = indexed_list(&req.query_params, "RemoveRouteTableId");
+    let add_sgs = indexed_list(&req.query_params, "AddSecurityGroupId");
+    let remove_sgs = indexed_list(&req.query_params, "RemoveSecurityGroupId");
+    let private_dns = req
+        .query_params
+        .get("PrivateDnsEnabled")
+        .map(|v| v == "true");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let e = state.vpc_endpoints.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidVpcEndpointId.NotFound",
+                format!("The Vpc Endpoint Id '{id}' does not exist"),
+            )
+        })?;
+        for s in &add_subnets {
+            if !e.subnet_ids.contains(s) {
+                e.subnet_ids.push(s.clone());
+            }
+        }
+        e.subnet_ids.retain(|s| !remove_subnets.contains(s));
+        for r in &add_rts {
+            if !e.route_table_ids.contains(r) {
+                e.route_table_ids.push(r.clone());
+            }
+        }
+        e.route_table_ids.retain(|r| !remove_rts.contains(r));
+        for g in &add_sgs {
+            if !e.security_group_ids.contains(g) {
+                e.security_group_ids.push(g.clone());
+            }
+        }
+        e.security_group_ids.retain(|g| !remove_sgs.contains(g));
+        if let Some(v) = private_dns {
+            e.private_dns_enabled = v;
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyVpcEndpoint",
         &req.request_id,
@@ -677,4 +729,128 @@ pub(crate) fn get_flow_logs_integration_template(
         &req.request_id,
         &ec2_elem("result", "https://s3.amazonaws.com/flow-logs-template.json"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        AwsRequest {
+            service: "ec2".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn seed_endpoint(svc: &Ec2Service) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        state.vpc_endpoints.insert(
+            "vpce-1".to_string(),
+            VpcEndpoint {
+                id: "vpce-1".into(),
+                endpoint_type: "Interface".into(),
+                vpc_id: "vpc-1".into(),
+                service_name: "com.amazonaws.us-east-1.s3".into(),
+                state: "available".into(),
+                subnet_ids: vec!["subnet-a".into()],
+                route_table_ids: vec![],
+                private_dns_enabled: false,
+                security_group_ids: vec![],
+            },
+        );
+    }
+
+    #[test]
+    fn modify_vpc_endpoint_persists_subnets_and_dns() {
+        // The handler validated then returned true without persisting
+        // (bug-hunt 2026-07-01, Tier-0 EC2 Modify*).
+        let svc = Ec2Service::new();
+        seed_endpoint(&svc);
+        modify_vpc_endpoint(
+            &svc,
+            &req(
+                "ModifyVpcEndpoint",
+                &[
+                    ("VpcEndpointId", "vpce-1"),
+                    ("AddSubnetId.1", "subnet-b"),
+                    ("RemoveSubnetId.1", "subnet-a"),
+                    ("AddRouteTableId.1", "rtb-1"),
+                    ("PrivateDnsEnabled", "true"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let e = &accounts.get("000000000000").unwrap().vpc_endpoints["vpce-1"];
+        assert_eq!(e.subnet_ids, vec!["subnet-b".to_string()]);
+        assert_eq!(e.route_table_ids, vec!["rtb-1".to_string()]);
+        assert!(e.private_dns_enabled);
+    }
+
+    #[test]
+    fn modify_vpc_endpoint_persists_security_groups() {
+        // Add/RemoveSecurityGroupId were silently dropped (Cubic P2 on #2057).
+        let svc = Ec2Service::new();
+        seed_endpoint(&svc);
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .vpc_endpoints
+            .get_mut("vpce-1")
+            .unwrap()
+            .security_group_ids = vec!["sg-old".into()];
+        modify_vpc_endpoint(
+            &svc,
+            &req(
+                "ModifyVpcEndpoint",
+                &[
+                    ("VpcEndpointId", "vpce-1"),
+                    ("AddSecurityGroupId.1", "sg-new"),
+                    ("RemoveSecurityGroupId.1", "sg-old"),
+                ],
+            ),
+        )
+        .unwrap();
+        {
+            let accounts = svc.state.read();
+            let e = &accounts.get("000000000000").unwrap().vpc_endpoints["vpce-1"];
+            assert_eq!(e.security_group_ids, vec!["sg-new".to_string()]);
+        }
+        // And the groupSet round-trips in DescribeVpcEndpoints.
+        let resp = describe_vpc_endpoints(&svc, &req("DescribeVpcEndpoints", &[])).unwrap();
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(body.contains("<groupId>sg-new</groupId>"), "got: {body}");
+    }
+
+    #[test]
+    fn modify_vpc_endpoint_unknown_id_errors() {
+        let svc = Ec2Service::new();
+        let err = match modify_vpc_endpoint(
+            &svc,
+            &req("ModifyVpcEndpoint", &[("VpcEndpointId", "vpce-missing")]),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("expected NotFound error"),
+        };
+        assert!(format!("{err:?}").contains("InvalidVpcEndpointId.NotFound"));
+    }
 }
