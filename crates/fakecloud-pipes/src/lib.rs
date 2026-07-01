@@ -12,7 +12,7 @@
 pub mod service;
 pub mod state;
 
-pub use service::PipesService;
+pub use service::{ensure_source_param_defaults, PipesService};
 pub use state::{
     PipesAccounts, PipesSnapshot, PipesState, SharedPipesState, PIPES_SNAPSHOT_SCHEMA_VERSION,
 };

@@ -83,6 +83,10 @@ impl ResourceProvisioner {
         pipe.insert("StateReason".into(), json!("Pipe is healthy"));
         pipe.insert("CreationTime".into(), json!(now));
         pipe.insert("LastModifiedTime".into(), json!(now));
+        // Echo the source-typed default parameter block (e.g. SqsQueueParameters)
+        // just like the direct CreatePipe handler, so a CFN-created pipe reads
+        // back identically on DescribePipe.
+        fakecloud_pipes::ensure_source_param_defaults(&mut pipe, &source);
 
         // Tags: AWS::Pipes::Pipe carries a JSON map; mirror the direct handler,
         // which both embeds the Tags map on the pipe and indexes it in the tag

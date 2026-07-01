@@ -603,6 +603,17 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "pipes",
+        // EventBridge Pipes: the control-plane smokes for aws_pipes_pipe — basic
+        // SQS source->target, disappears, description, desired_state, role ARN,
+        // generated/prefixed names, target update, source filter criteria, and
+        // the target InputTemplate transform. Real-only surfaces (Kafka/MSK/MQ
+        // sources, Redshift/SageMaker/Batch/ECS targets, KMS, CloudWatch-Logs
+        // log configuration) are left out of the smoke.
+        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState|roleARN|nameGenerated|namePrefix|tags|targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
+        deny: &[],
+    },
+    Service {
         name: "sesv2",
         // SES v2: the `_basic` smoke for configuration sets (+ event destination
         // + data source), dedicated IP pools (+ data source), and email identity
@@ -1143,6 +1154,12 @@ pub const SHARDS: &[Shard] = &[
         name: "scheduler",
         service: "scheduler",
         run_regex: "^TestAccScheduler[A-Za-z0-9]+_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "pipes",
+        service: "pipes",
+        run_regex: "^TestAccPipesPipe_(basicSQS|disappears|description|desiredState|roleARN|nameGenerated|namePrefix|tags|targetUpdate|sourceParameters_filterCriteria|targetParameters_inputTemplate)$",
         extra_deny: &[],
     },
     Shard {

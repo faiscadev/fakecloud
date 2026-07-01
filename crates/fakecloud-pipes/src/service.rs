@@ -63,6 +63,37 @@ const PIPE_UPDATE_FIELDS: &[&str] = &[
     "KmsKeyIdentifier",
 ];
 
+/// AWS always echoes the source-typed parameter sub-block on DescribePipe,
+/// populated with defaults, even when the caller sent no `SourceParameters`.
+/// For an SQS source that block is `SqsQueueParameters` with `BatchSize=10`
+/// and `MaximumBatchingWindowInSeconds=0`; the terraform-provider-aws
+/// `aws_pipes_pipe` resource reads it back unconditionally, so a pipe created
+/// without source parameters must still report these defaults. Existing
+/// values (e.g. a caller-supplied batch size, or a `FilterCriteria` alongside)
+/// are preserved.
+pub fn ensure_source_param_defaults(pipe: &mut Map<String, Value>, source_arn: &str) {
+    if !source_arn.contains(":sqs:") {
+        return;
+    }
+    let source_params = pipe
+        .entry("SourceParameters".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(source_params) = source_params.as_object_mut() else {
+        return;
+    };
+    let sqs_params = source_params
+        .entry("SqsQueueParameters".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(sqs_params) = sqs_params.as_object_mut() {
+        sqs_params
+            .entry("BatchSize".to_string())
+            .or_insert_with(|| json!(10));
+        sqs_params
+            .entry("MaximumBatchingWindowInSeconds".to_string())
+            .or_insert_with(|| json!(0));
+    }
+}
+
 pub struct PipesService {
     state: SharedPipesState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
@@ -254,6 +285,7 @@ impl PipesService {
         pipe.insert("StateReason".into(), json!("Pipe is being created"));
         pipe.insert("CreationTime".into(), json!(now));
         pipe.insert("LastModifiedTime".into(), json!(now));
+        ensure_source_param_defaults(&mut pipe, &source);
 
         let tags = tag_map_from(body.get("Tags"));
 
@@ -417,6 +449,13 @@ impl PipesService {
             obj.insert("CurrentState".into(), json!(STATE_UPDATING));
             obj.insert("StateReason".into(), json!("Pipe is being updated"));
             obj.insert("LastModifiedTime".into(), json!(now));
+            if let Some(source) = obj
+                .get("Source")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                ensure_source_param_defaults(obj, &source);
+            }
             let arn = obj
                 .get("Arn")
                 .and_then(Value::as_str)
@@ -848,5 +887,50 @@ async fn save_snapshot_static(
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::error!(%err, "failed to write pipes snapshot"),
         Err(err) => tracing::error!(%err, "pipes snapshot task panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SQS: &str = "arn:aws:sqs:us-east-1:000000000000:src";
+
+    #[test]
+    fn sqs_source_gets_default_sqs_queue_parameters() {
+        let mut pipe = Map::new();
+        ensure_source_param_defaults(&mut pipe, SQS);
+        let sqp = &pipe["SourceParameters"]["SqsQueueParameters"];
+        assert_eq!(sqp["BatchSize"], json!(10));
+        assert_eq!(sqp["MaximumBatchingWindowInSeconds"], json!(0));
+    }
+
+    #[test]
+    fn existing_values_and_sibling_params_preserved() {
+        let mut pipe = Map::new();
+        pipe.insert(
+            "SourceParameters".into(),
+            json!({
+                "FilterCriteria": {"Filters": [{"Pattern": "{}"}]},
+                "SqsQueueParameters": {"BatchSize": 5}
+            }),
+        );
+        ensure_source_param_defaults(&mut pipe, SQS);
+        let sp = &pipe["SourceParameters"];
+        // A caller-supplied batch size is kept; only the missing window default
+        // is filled, and the sibling FilterCriteria is untouched.
+        assert_eq!(sp["SqsQueueParameters"]["BatchSize"], json!(5));
+        assert_eq!(
+            sp["SqsQueueParameters"]["MaximumBatchingWindowInSeconds"],
+            json!(0)
+        );
+        assert!(sp["FilterCriteria"]["Filters"].is_array());
+    }
+
+    #[test]
+    fn non_sqs_source_untouched() {
+        let mut pipe = Map::new();
+        ensure_source_param_defaults(&mut pipe, "arn:aws:kinesis:us-east-1:000000000000:stream/s");
+        assert!(pipe.get("SourceParameters").is_none());
     }
 }
