@@ -83,6 +83,10 @@
         "repo_dir": "cloudcontrol",
         "service_name": "cloudcontrolapi"
     },
+    "resource-groups": {
+        "repo_dir": "resource-groups",
+        "service_name": "resource-groups"
+    },
     "elasticache": {
         "repo_dir": "elasticache",
         "service_name": "elasticache"

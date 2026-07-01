@@ -1,6 +1,6 @@
 {
-  "variants_passed": 125770,
-  "total_variants": 125770,
+  "variants_passed": 126556,
+  "total_variants": 126556,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -137,6 +137,10 @@
     "rds-data": {
       "passed": 253,
       "total": 253
+    },
+    "resource-groups": {
+      "passed": 786,
+      "total": 786
     },
     "route53": {
       "passed": 2398,

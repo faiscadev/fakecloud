@@ -99,6 +99,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "rds-data" => Protocol::Rest,
         // Aurora DSQL: restJson1 control plane (clusters, streams, policies).
         "dsql" => Protocol::Rest,
+        // Resource Groups: restJson1 control plane (groups, queries, tagging).
+        "resource-groups" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
