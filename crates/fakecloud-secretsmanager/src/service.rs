@@ -24,6 +24,10 @@ struct RotationInvocation {
     lambda_arn: String,
     secret_id: String,
     client_request_token: String,
+    /// The rotation steps to invoke, in order. A full rotation runs
+    /// createSecret/setSecret/testSecret/finishSecret; RotateImmediately=false
+    /// with a Lambda runs only testSecret to validate the configuration.
+    steps: Vec<&'static str>,
 }
 
 /// Result of an idempotency check against an existing
@@ -1390,9 +1394,14 @@ impl SecretsManagerService {
             body["RotationLambdaARN"].as_str().is_some() || secret.rotation_lambda_arn.is_some();
         let lambda_arn = secret.rotation_lambda_arn.clone();
 
-        // If the secret has a value, perform rotation (only when
-        // RotateImmediately is true; otherwise the config is saved and the
-        // value is left untouched until the next scheduled window).
+        // Rotation behavior:
+        // - RotateImmediately (default): a full rotation. With a Lambda, the
+        //   Lambda runs all four steps; without one, the value is rotated
+        //   in-place (new AWSCURRENT, old -> AWSPREVIOUS).
+        // - RotateImmediately=false: the value is NOT rotated now. But when a
+        //   rotation Lambda is configured, AWS still validates the rotation
+        //   configuration by running ONLY the testSecret step (matching real
+        //   Secrets Manager). LastRotatedDate is only set on an actual rotation.
         let mut invocation = None;
         if rotate_immediately {
             secret.last_rotated_at = Some(now);
@@ -1406,12 +1415,18 @@ impl SecretsManagerService {
                         // PutSecretValue with VersionStages=[AWSPENDING] during the
                         // createSecret step (matching real AWS Secrets Manager behavior).
 
-                        // Schedule Lambda invocation
+                        // Schedule Lambda invocation (full rotation steps).
                         if let Some(ref arn) = lambda_arn {
                             invocation = Some(RotationInvocation {
                                 lambda_arn: arn.clone(),
                                 secret_id: secret.arn.clone(),
                                 client_request_token: version_id.clone(),
+                                steps: vec![
+                                    "createSecret",
+                                    "setSecret",
+                                    "testSecret",
+                                    "finishSecret",
+                                ],
                             });
                         }
                     } else {
@@ -1434,6 +1449,18 @@ impl SecretsManagerService {
                         secret.current_version_id = Some(version_id.clone());
                     }
                 }
+            }
+        } else if has_lambda {
+            // RotateImmediately=false with a Lambda: validate the rotation
+            // configuration by running only the testSecret step. The value is
+            // not rotated and LastRotatedDate is left untouched.
+            if let Some(ref arn) = lambda_arn {
+                invocation = Some(RotationInvocation {
+                    lambda_arn: arn.clone(),
+                    secret_id: secret.arn.clone(),
+                    client_request_token: version_id.clone(),
+                    steps: vec!["testSecret"],
+                });
             }
         }
 
@@ -2130,8 +2157,7 @@ impl AwsService for SecretsManagerService {
                         let bus = bus.clone();
                         // AWS invokes the rotation Lambda asynchronously for each step.
                         tokio::spawn(async move {
-                            for step in &["createSecret", "setSecret", "testSecret", "finishSecret"]
-                            {
+                            for step in &inv.steps {
                                 let payload = serde_json::json!({
                                     "SecretId": inv.secret_id,
                                     "ClientRequestToken": inv.client_request_token,

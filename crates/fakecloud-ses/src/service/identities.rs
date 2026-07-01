@@ -86,11 +86,13 @@ impl SesV2Service {
         let byo_private_key = dkim["DomainSigningPrivateKey"].as_str();
         let (dkim_origin, dkim_private_key, dkim_selector, dkim_key_length, dkim_public_key) =
             if let (Some(selector), Some(private_key)) = (byo_selector, byo_private_key) {
-                // BYODKIM: honor the caller's selector + private key. There
-                // is no AWS-generated public key in this mode.
+                // BYODKIM: honor the caller's selector + private key. AWS
+                // supplies the key as base64-encoded DER, so normalize it to
+                // the PEM form the signer expects before storing. There is no
+                // AWS-generated public key in this mode.
                 (
                     "EXTERNAL".to_string(),
-                    Some(private_key.to_string()),
+                    Some(crate::dkim::normalize_byodkim_private_key(private_key)),
                     Some(selector.to_string()),
                     None,
                     None,
@@ -600,7 +602,10 @@ impl SesV2Service {
 
         if let Some(attrs) = body.get("SigningAttributes") {
             if let Some(key) = attrs["DomainSigningPrivateKey"].as_str() {
-                identity.dkim_domain_signing_private_key = Some(key.to_string());
+                // AWS supplies BYODKIM keys as base64-encoded DER; normalize to
+                // the PEM form the signer expects so signing actually works.
+                identity.dkim_domain_signing_private_key =
+                    Some(crate::dkim::normalize_byodkim_private_key(key));
                 identity.dkim_public_key_b64 = None;
             }
             if let Some(selector) = attrs["DomainSigningSelector"].as_str() {

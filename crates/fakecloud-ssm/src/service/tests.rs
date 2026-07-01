@@ -3267,6 +3267,68 @@ fn put_parameter_secure_string_hard_fails_when_kms_rejects() {
     assert_eq!(err.code(), "InvalidKeyId");
 }
 
+/// The tier/policy conflict must be rejected BEFORE any KMS encryption work,
+/// so a SecureString + Standard-tier + Policies request surfaces the
+/// validation error rather than the KMS/InvalidKeyId error.
+#[test]
+fn put_parameter_validates_tier_policy_before_kms() {
+    use fakecloud_core::delivery::KmsHook;
+    use std::collections::HashMap;
+
+    struct AlwaysFailKms;
+    impl KmsHook for AlwaysFailKms {
+        fn encrypt(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            _key_id: &str,
+            _plaintext: &[u8],
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<String, String> {
+            Err("KMS unavailable".into())
+        }
+        fn decrypt(
+            &self,
+            _account_id: &str,
+            _ciphertext_b64: &str,
+            _service_principal: &str,
+            _ec: HashMap<String, String>,
+        ) -> Result<Vec<u8>, String> {
+            Err("KMS unavailable".into())
+        }
+    }
+
+    let svc = make_service().with_kms_hook(Arc::new(AlwaysFailKms));
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/secure-standard-policy",
+            "Value": "secret",
+            "Type": "SecureString",
+            "Policies": policies
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("standard tier + policies must be rejected"),
+    };
+    // The validation error (remapped from ValidationException) must win over
+    // the KMS InvalidKeyId error, proving validation runs first.
+    assert_ne!(err.code(), "InvalidKeyId");
+    assert!(
+        err.message().contains("Advanced"),
+        "expected the Advanced-tier validation message, got: {}",
+        err.message()
+    );
+}
+
 #[test]
 fn put_parameter_string_list() {
     let svc = make_service();

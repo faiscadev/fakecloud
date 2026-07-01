@@ -55,6 +55,30 @@ pub fn generate_easy_dkim_keypair() -> (String, String) {
     cached_easy_dkim_keypair().clone()
 }
 
+/// Normalize a BYODKIM `DomainSigningPrivateKey` for storage. AWS supplies
+/// the key as base64-encoded DER (PKCS#8 or PKCS#1), so it must be decoded and
+/// re-encoded to the PEM form the signer ([`sign_message`] via
+/// [`parse_private_key`]) expects — otherwise valid AWS keys fail to parse and
+/// no DKIM signatures are ever produced. Values already in PEM form, or that
+/// can't be decoded/parsed, are returned unchanged as a best-effort fallback.
+pub fn normalize_byodkim_private_key(raw: &str) -> String {
+    if raw.contains("-----BEGIN") {
+        return raw.to_string();
+    }
+    // AWS base64 material may carry wrapping whitespace/newlines; strip them.
+    let compact: String = raw.split_whitespace().collect();
+    let Ok(der) = base64::engine::general_purpose::STANDARD.decode(compact.as_bytes()) else {
+        return raw.to_string();
+    };
+    let key = RsaPrivateKey::from_pkcs8_der(&der)
+        .ok()
+        .or_else(|| RsaPrivateKey::from_pkcs1_der(&der).ok());
+    match key.and_then(|k| k.to_pkcs8_pem(LineEnding::LF).ok()) {
+        Some(pem) => pem.to_string(),
+        None => raw.to_string(),
+    }
+}
+
 /// Sign the given message and return a fully-formed `DKIM-Signature`
 /// header value (without the leading `DKIM-Signature: ` prefix). Returns
 /// `None` when the private key cannot be parsed. Uses relaxed/relaxed
@@ -297,6 +321,38 @@ mod tests {
     fn sign_returns_none_for_garbage_pem() {
         let headers = vec![("From".to_string(), "x".to_string())];
         assert!(sign_message("not a key", "d", "s", &headers, "body").is_none());
+    }
+
+    #[test]
+    fn normalize_byodkim_decodes_base64_der_to_signable_pem() {
+        // AWS supplies BYODKIM keys as base64-encoded DER. Build one from the
+        // Easy-DKIM PEM: decode the PEM, re-encode to DER, base64 it.
+        let (pem, _) = generate_easy_dkim_keypair();
+        let key = parse_private_key(&pem).unwrap();
+        let der = key.to_pkcs8_der().unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+
+        // Base64 DER -> normalized PEM that the signer can parse and use.
+        let normalized = normalize_byodkim_private_key(&b64);
+        assert!(
+            normalized.contains("-----BEGIN"),
+            "normalized BYODKIM key must be PEM, got: {normalized}"
+        );
+        assert!(
+            parse_private_key(&normalized).is_some(),
+            "normalized BYODKIM key must be parseable by the signer"
+        );
+        let headers = vec![("From".to_string(), "alice@example.com".to_string())];
+        assert!(
+            sign_message(&normalized, "example.com", "byo", &headers, "body").is_some(),
+            "signer must produce a DKIM signature from the normalized key"
+        );
+    }
+
+    #[test]
+    fn normalize_byodkim_passes_pem_through_unchanged() {
+        let (pem, _) = generate_easy_dkim_keypair();
+        assert_eq!(normalize_byodkim_private_key(&pem), pem);
     }
 
     #[test]

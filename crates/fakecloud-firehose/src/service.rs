@@ -779,7 +779,14 @@ impl FirehoseService {
         let name = body["DeliveryStreamName"]
             .as_str()
             .ok_or_else(|| missing("DeliveryStreamName"))?;
-        let current_version = body["CurrentDeliveryStreamVersionId"].as_str();
+        // CurrentDeliveryStreamVersionId and DestinationId are both REQUIRED
+        // by AWS UpdateDestination.
+        let current_version = body["CurrentDeliveryStreamVersionId"]
+            .as_str()
+            .ok_or_else(|| missing("CurrentDeliveryStreamVersionId"))?;
+        let destination_id = body["DestinationId"]
+            .as_str()
+            .ok_or_else(|| missing("DestinationId"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         let stream = state
@@ -789,19 +796,30 @@ impl FirehoseService {
 
         // AWS requires CurrentDeliveryStreamVersionId to match the stream's
         // current version and rejects a mismatch with a concurrent-modification
-        // error. Validate only when supplied so callers that omit it still work.
-        if let Some(cur) = current_version {
-            if cur != stream.version_id {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ConcurrentModificationException",
-                    format!(
-                        "The current delivery stream version {} does not match \
-                         the supplied version {cur}.",
-                        stream.version_id
-                    ),
-                ));
-            }
+        // error (this is the optimistic-concurrency guard).
+        if current_version != stream.version_id {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ConcurrentModificationException",
+                format!(
+                    "The current delivery stream version {} does not match \
+                     the supplied version {current_version}.",
+                    stream.version_id
+                ),
+            ));
+        }
+
+        // DestinationId must identify the stream's current destination.
+        let current_dest_id = stream
+            .destination
+            .as_ref()
+            .map(|d| d.destination_id.clone())
+            .unwrap_or_else(|| "destinationId-000000000001".to_string());
+        if destination_id != current_dest_id {
+            return Err(invalid_argument(format!(
+                "DestinationId {destination_id} does not match the current \
+                 destination {current_dest_id} for delivery stream {name}."
+            )));
         }
 
         // Apply the S3 / ExtendedS3 update. The `*Update` shapes make every
@@ -1272,9 +1290,7 @@ mod tests {
         assert_eq!(after["VersionId"], "2");
     }
 
-    #[test]
-    fn update_destination_rejects_stale_version() {
-        let svc = service();
+    fn create_ver_stream(svc: &FirehoseService) -> String {
         svc.create_delivery_stream(&request(
             "CreateDeliveryStream",
             json!({
@@ -1286,6 +1302,16 @@ mod tests {
             }),
         ))
         .unwrap();
+        describe(svc, "ver-stream")["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn update_destination_rejects_stale_version() {
+        let svc = service();
+        let dest_id = create_ver_stream(&svc);
 
         // Wrong CurrentDeliveryStreamVersionId -> ConcurrentModificationException.
         let err = match svc.update_destination(&request(
@@ -1293,6 +1319,7 @@ mod tests {
             json!({
                 "DeliveryStreamName": "ver-stream",
                 "CurrentDeliveryStreamVersionId": "99",
+                "DestinationId": dest_id,
                 "ExtendedS3DestinationUpdate": { "Prefix": "x/" }
             }),
         )) {
@@ -1300,5 +1327,59 @@ mod tests {
             Ok(_) => panic!("stale version must be rejected"),
         };
         assert_eq!(err.code(), "ConcurrentModificationException");
+    }
+
+    #[test]
+    fn update_destination_requires_current_version_and_destination_id() {
+        let svc = service();
+        let dest_id = create_ver_stream(&svc);
+
+        // Missing CurrentDeliveryStreamVersionId -> rejected.
+        let err = match svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "ver-stream",
+                "DestinationId": dest_id,
+                "ExtendedS3DestinationUpdate": { "Prefix": "x/" }
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("missing CurrentDeliveryStreamVersionId must be rejected"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        // Missing DestinationId -> rejected.
+        let err = match svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "ver-stream",
+                "CurrentDeliveryStreamVersionId": "1",
+                "ExtendedS3DestinationUpdate": { "Prefix": "x/" }
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("missing DestinationId must be rejected"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn update_destination_rejects_mismatched_destination_id() {
+        let svc = service();
+        create_ver_stream(&svc);
+
+        let err = match svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "ver-stream",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": "destinationId-wrong",
+                "ExtendedS3DestinationUpdate": { "Prefix": "x/" }
+            }),
+        )) {
+            Err(e) => e,
+            Ok(_) => panic!("mismatched DestinationId must be rejected"),
+        };
+        assert_eq!(err.code(), "InvalidArgumentException");
     }
 }

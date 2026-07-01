@@ -1671,6 +1671,123 @@ fn test_event_destination_kinesis_and_cloudwatch_persist_and_describe() {
     );
 }
 
+#[test]
+fn test_event_destination_rejects_multiple_and_zero_targets() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs3")],
+        ),
+    )
+    .unwrap();
+
+    // Two targets on one destination -> rejected.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs3"),
+                ("EventDestination.Name", "multi"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("multiple targets must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+
+    // Zero targets -> rejected.
+    let err = match handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs3"),
+                ("EventDestination.Name", "none"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+            ],
+        ),
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("zero targets must be rejected"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+#[test]
+fn test_event_destination_update_switches_target_type() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSet",
+            vec![("ConfigurationSet.Name", "cs4")],
+        ),
+    )
+    .unwrap();
+
+    // Start with an SNS target.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "CreateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs4"),
+                ("EventDestination.Name", "d"),
+                ("EventDestination.MatchingEventTypes.member.1", "send"),
+                (
+                    "EventDestination.SNSDestination.TopicARN",
+                    "arn:aws:sns:us-east-1:123456789012:t",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    // Switch to a Kinesis target: the SNS target must be cleared.
+    handle_v1_action(
+        &state,
+        &make_v1_request(
+            "UpdateConfigurationSetEventDestination",
+            vec![
+                ("ConfigurationSetName", "cs4"),
+                ("EventDestination.Name", "d"),
+                (
+                    "EventDestination.KinesisFirehoseDestination.DeliveryStreamARN",
+                    "arn:aws:firehose:us-east-1:123456789012:deliverystream/s",
+                ),
+                (
+                    "EventDestination.KinesisFirehoseDestination.IAMRoleARN",
+                    "arn:aws:iam::123456789012:role/r",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let mas = state.read();
+    let st = mas.default_ref();
+    let dest = &st.event_destinations.get("cs4").unwrap()[0];
+    assert!(
+        dest.sns_destination.is_none(),
+        "old SNS target must be cleared after switching to Kinesis"
+    );
+    assert!(dest.kinesis_firehose_destination.is_some());
+    assert!(dest.cloud_watch_destination.is_none());
+}
+
 // ── Account / Quota tests ──
 
 #[test]

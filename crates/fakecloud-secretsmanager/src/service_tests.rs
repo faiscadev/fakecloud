@@ -2500,6 +2500,70 @@ async fn test_rotate_secret_rotate_immediately_false_does_not_rotate_value() {
 }
 
 #[tokio::test]
+async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-test-step", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // RotateImmediately=false with a Lambda: AWS still validates the config by
+    // running ONLY the testSecret step. The value is not rotated.
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-test-step",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "RotationRules": { "AutomaticallyAfterDays": 30 },
+        "ClientRequestToken": token,
+        "RotateImmediately": false,
+    });
+    let (_resp, invocation) = svc
+        .rotate_secret(&make_request("RotateSecret", &rot.to_string()))
+        .unwrap();
+    let inv = invocation.expect("a Lambda invocation must be scheduled to test the config");
+    assert_eq!(inv.steps, vec!["testSecret"]);
+
+    // Value not rotated: no new version, current version unchanged, no
+    // LastRotatedDate.
+    let accts = state.read();
+    let secret = accts.default_ref().secrets.get("rot-test-step").unwrap();
+    assert!(!secret.versions.contains_key(token));
+    assert!(secret.last_rotated_at.is_none());
+}
+
+#[tokio::test]
+async fn test_rotate_secret_immediately_with_lambda_runs_full_steps() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rot-full", "SecretString": "original"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let token = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let rot = serde_json::json!({
+        "SecretId": "rot-full",
+        "RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+        "ClientRequestToken": token,
+    });
+    let (_resp, invocation) = svc
+        .rotate_secret(&make_request("RotateSecret", &rot.to_string()))
+        .unwrap();
+    let inv = invocation.expect("full rotation must schedule a Lambda invocation");
+    assert_eq!(
+        inv.steps,
+        vec!["createSecret", "setSecret", "testSecret", "finishSecret"]
+    );
+}
+
+#[tokio::test]
 async fn test_rotate_secret_rotate_immediately_default_true_rotates() {
     let state = make_state();
     let svc = SecretsManagerService::new(state.clone());

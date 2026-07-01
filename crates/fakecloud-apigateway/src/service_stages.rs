@@ -190,15 +190,27 @@ impl ApiGatewayService {
                     || path.contains("/caching/") =>
                 {
                     if let Some((map_key, field)) = method_setting_key_and_field(path) {
-                        let entry = s
-                            .method_settings
-                            .entry(map_key)
-                            .or_insert_with(|| serde_json::json!({}));
-                        if let Some(m) = entry.as_object_mut() {
-                            if op == "remove" {
-                                m.remove(&field);
-                            } else if let Some(coerced) = coerce_method_setting_value(&field, value)
-                            {
+                        if op == "remove" {
+                            // Remove just the field; if that empties the
+                            // MethodSetting object, drop the whole map entry so
+                            // GetStage doesn't return an empty settings block
+                            // (which reintroduces a perpetual Terraform diff).
+                            if let Some(entry) = s.method_settings.get_mut(&map_key) {
+                                if let Some(m) = entry.as_object_mut() {
+                                    m.remove(&field);
+                                }
+                                let now_empty =
+                                    entry.as_object().map(|m| m.is_empty()).unwrap_or(true);
+                                if now_empty {
+                                    s.method_settings.remove(&map_key);
+                                }
+                            }
+                        } else if let Some(coerced) = coerce_method_setting_value(&field, value) {
+                            let entry = s
+                                .method_settings
+                                .entry(map_key)
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let Some(m) = entry.as_object_mut() {
                                 m.insert(field, coerced);
                             }
                         }
@@ -484,10 +496,42 @@ mod patch_tests {
             &params,
         )
         .unwrap();
+        {
+            let accounts = state.read();
+            let s = &accounts.get("123456789012").unwrap().stages["api1"]["prod"];
+            let ms = s.method_settings.get("*/*").unwrap();
+            assert!(ms.get("loggingLevel").is_none());
+            assert_eq!(ms["metricsEnabled"], json!(true));
+        }
+
+        // Removing every remaining field drops the whole map entry (no empty
+        // methodSettings block left behind to cause a perpetual diff).
+        let resp = svc
+            .update_stage(
+                &patch_req(json!([
+                    { "op": "remove", "path": "/*/*/metrics/enabled" },
+                    { "op": "remove", "path": "/*/*/logging/dataTrace" },
+                    { "op": "remove", "path": "/*/*/throttling/burstLimit" },
+                    { "op": "remove", "path": "/*/*/throttling/rateLimit" },
+                    { "op": "remove", "path": "/*/*/caching/ttlInSeconds" },
+                ])),
+                &params,
+            )
+            .unwrap();
         let accounts = state.read();
         let s = &accounts.get("123456789012").unwrap().stages["api1"]["prod"];
-        let ms = s.method_settings.get("*/*").unwrap();
-        assert!(ms.get("loggingLevel").is_none());
-        assert_eq!(ms["metricsEnabled"], json!(true));
+        assert!(
+            !s.method_settings.contains_key("*/*"),
+            "emptied method settings entry must be removed"
+        );
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(
+            body["methodSettings"]
+                .as_object()
+                .map(|m| m.is_empty())
+                .unwrap_or(true),
+            "methodSettings must not contain an empty entry, got: {}",
+            body["methodSettings"]
+        );
     }
 }

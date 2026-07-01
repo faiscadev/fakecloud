@@ -1373,6 +1373,41 @@ fn parse_cloudwatch_destination(params: &HashMap<String, String>) -> Option<serd
     }
 }
 
+/// The three mutually-exclusive SES v1 event-destination targets. AWS allows
+/// exactly one target type per event destination.
+enum EventDestinationTarget {
+    Kinesis(serde_json::Value),
+    CloudWatch(serde_json::Value),
+    Sns(serde_json::Value),
+}
+
+/// Parse the single event-destination target from the request query params.
+/// Returns an error if more than one of Kinesis/CloudWatch/SNS is supplied
+/// (AWS permits only one), and `Ok(None)` when none is supplied.
+fn parse_event_destination_target(
+    params: &HashMap<String, String>,
+) -> Result<Option<EventDestinationTarget>, AwsServiceError> {
+    let kinesis = parse_kinesis_firehose_destination(params);
+    let cloudwatch = parse_cloudwatch_destination(params);
+    let sns = params
+        .get("EventDestination.SNSDestination.TopicARN")
+        .map(|arn| serde_json::json!({ "TopicArn": arn }));
+
+    let count = kinesis.is_some() as u8 + cloudwatch.is_some() as u8 + sns.is_some() as u8;
+    if count > 1 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "An event destination must specify exactly one destination type \
+             (KinesisFirehoseDestination, CloudWatchDestination, or SNSDestination).",
+        ));
+    }
+    Ok(kinesis
+        .map(EventDestinationTarget::Kinesis)
+        .or_else(|| cloudwatch.map(EventDestinationTarget::CloudWatch))
+        .or_else(|| sns.map(EventDestinationTarget::Sns)))
+}
+
 pub(crate) fn send_email(
     state: &SharedSesState,
     req: &AwsRequest,
@@ -2201,16 +2236,28 @@ pub(crate) fn create_configuration_set_event_destination(
         }
     }
 
+    // AWS requires exactly one destination target per event destination.
+    let target = parse_event_destination_target(&req.query_params)?.ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "An event destination must specify exactly one destination type \
+             (KinesisFirehoseDestination, CloudWatchDestination, or SNSDestination).",
+        )
+    })?;
+    let (kinesis, cloudwatch, sns) = match target {
+        EventDestinationTarget::Kinesis(v) => (Some(v), None, None),
+        EventDestinationTarget::CloudWatch(v) => (None, Some(v), None),
+        EventDestinationTarget::Sns(v) => (None, None, Some(v)),
+    };
+
     let dest = EventDestination {
         name: dest_name.to_string(),
         enabled,
         matching_event_types: event_types,
-        kinesis_firehose_destination: parse_kinesis_firehose_destination(&req.query_params),
-        cloud_watch_destination: parse_cloudwatch_destination(&req.query_params),
-        sns_destination: req
-            .query_params
-            .get("EventDestination.SNSDestination.TopicARN")
-            .map(|arn| serde_json::json!({ "TopicArn": arn })),
+        kinesis_firehose_destination: kinesis,
+        cloud_watch_destination: cloudwatch,
+        sns_destination: sns,
         event_bridge_destination: None,
         pinpoint_destination: None,
     };
@@ -2265,19 +2312,19 @@ pub(crate) fn update_configuration_set_event_destination(
         dest.matching_event_types = event_types;
     }
     // Apply destination-target changes when supplied so an update that
-    // switches or (re)configures Kinesis/CloudWatch/SNS destinations is
-    // reflected on the read side.
-    if let Some(k) = parse_kinesis_firehose_destination(&req.query_params) {
-        dest.kinesis_firehose_destination = Some(k);
-    }
-    if let Some(cw) = parse_cloudwatch_destination(&req.query_params) {
-        dest.cloud_watch_destination = Some(cw);
-    }
-    if let Some(arn) = req
-        .query_params
-        .get("EventDestination.SNSDestination.TopicARN")
-    {
-        dest.sns_destination = Some(serde_json::json!({ "TopicArn": arn }));
+    // switches or (re)configures the target is reflected on the read side.
+    // Applying a new target clears the other two so a destination never ends
+    // up with more than one target type (which would make
+    // DescribeConfigurationSet report multiple targets).
+    if let Some(target) = parse_event_destination_target(&req.query_params)? {
+        dest.kinesis_firehose_destination = None;
+        dest.cloud_watch_destination = None;
+        dest.sns_destination = None;
+        match target {
+            EventDestinationTarget::Kinesis(v) => dest.kinesis_firehose_destination = Some(v),
+            EventDestinationTarget::CloudWatch(v) => dest.cloud_watch_destination = Some(v),
+            EventDestinationTarget::Sns(v) => dest.sns_destination = Some(v),
+        }
     }
 
     Ok(xml_metadata_only(
