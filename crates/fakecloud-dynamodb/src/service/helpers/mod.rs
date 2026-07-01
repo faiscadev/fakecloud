@@ -147,9 +147,22 @@ pub(crate) fn eval_begins_with(
     let expected = expr_attr_values.get(val_ref.trim());
     match (actual.as_ref(), expected) {
         (Some(a), Some(e)) => {
-            let a_str = a.get("S").and_then(|v| v.as_str());
-            let e_str = e.get("S").and_then(|v| v.as_str());
-            matches!((a_str, e_str), (Some(a), Some(e)) if a.starts_with(e))
+            // begins_with works on String OR Binary (bug-hunt 2026-07-01).
+            if let (Some(a), Some(e)) = (
+                a.get("S").and_then(|v| v.as_str()),
+                e.get("S").and_then(|v| v.as_str()),
+            ) {
+                a.starts_with(e)
+            } else if let (Some(a), Some(e)) = (
+                a.get("B").and_then(|v| v.as_str()),
+                e.get("B").and_then(|v| v.as_str()),
+            ) {
+                use base64::Engine;
+                let dec = |s: &str| base64::engine::general_purpose::STANDARD.decode(s).ok();
+                matches!((dec(a), dec(e)), (Some(a), Some(e)) if a.starts_with(&e))
+            } else {
+                false
+            }
         }
         _ => false,
     }
@@ -801,7 +814,7 @@ pub(crate) fn count_params_in_str(s: &str) -> usize {
 mod conditions;
 mod keys;
 mod metrics;
-mod partiql;
+pub(crate) mod partiql;
 mod paths;
 mod request;
 pub(crate) mod schemas;

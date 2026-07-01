@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// Numeric-aware primary-key equality: two keys are equal when their hash (and
+/// range, if any) attributes are the same DynamoDB value, so `{"N":"1"}` equals
+/// `{"N":"1.0"}`. Used to detect duplicate keys in BatchGetItem.
+pub(crate) fn keys_equal(
+    table: &DynamoTable,
+    a: &HashMap<String, AttributeValue>,
+    b: &HashMap<String, AttributeValue>,
+) -> bool {
+    use super::partiql::values_equal;
+    let hash_key = table.hash_key_name();
+    if !values_equal(a.get(hash_key), b.get(hash_key)) {
+        return false;
+    }
+    match table.range_key_name() {
+        Some(rk) => values_equal(a.get(rk), b.get(rk)),
+        None => true,
+    }
+}
+
 pub(crate) fn extract_key(
     table: &DynamoTable,
     item: &HashMap<String, AttributeValue>,

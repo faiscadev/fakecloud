@@ -436,16 +436,27 @@ impl DynamoDbService {
         // - UPDATED_NEW: only attributes that changed, with NEW values
         // - UPDATED_OLD: only attributes that changed, with OLD values
         // - NONE      : nothing
+        // On an upsert-insert there is no pre-existing item, so the OLD-value
+        // return modes yield nothing — not the key-only stub we just pushed.
+        // AWS returns no Attributes for ALL_OLD/UPDATED_OLD on an insert
+        // (bug-hunt 2026-07-01, DynamoDB ALL_OLD-on-insert).
+        let old_snapshot = if is_insert {
+            None
+        } else {
+            pre_update_item.as_ref()
+        };
         let response_attributes: Option<HashMap<String, AttributeValue>> = match return_values {
             "ALL_NEW" => Some(table.items[idx].clone()),
-            "ALL_OLD" => pre_update_item.clone(),
+            "ALL_OLD" => old_snapshot.cloned(),
+            // UPDATED_NEW diffs against the pre-update image (the key-only stub
+            // on insert) so it returns only the attributes the update set.
             "UPDATED_NEW" => Some(diff_updated_attributes(
                 pre_update_item.as_ref(),
                 &table.items[idx],
                 UpdatedSide::New,
             )),
             "UPDATED_OLD" => Some(diff_updated_attributes(
-                pre_update_item.as_ref(),
+                old_snapshot,
                 &table.items[idx],
                 UpdatedSide::Old,
             )),
@@ -727,6 +738,101 @@ mod tests {
         let post = map(&[("a", "1"), ("b", "2")]);
         let got = diff_updated_attributes(None, &post, UpdatedSide::New);
         assert_eq!(got, post);
+    }
+
+    #[tokio::test]
+    async fn all_old_on_upsert_insert_returns_no_attributes() {
+        // ReturnValues=ALL_OLD on an insert-via-update must return no Attributes
+        // (there was no prior item), not the key-only stub (bug-hunt 2026-07-01).
+        use crate::state::{
+            DynamoTable, KeySchemaElement, ProvisionedThroughput, SharedDynamoDbState,
+        };
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let state: SharedDynamoDbState = Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        {
+            let mut accts = state.write();
+            let s = accts.get_or_create("123456789012");
+            s.tables.insert(
+                "T".to_string(),
+                DynamoTable {
+                    name: "T".into(),
+                    arn: "arn:aws:dynamodb:us-east-1:123456789012:table/T".into(),
+                    table_id: "id".into(),
+                    key_schema: vec![KeySchemaElement {
+                        attribute_name: "pk".into(),
+                        key_type: "HASH".into(),
+                    }],
+                    attribute_definitions: vec![],
+                    provisioned_throughput: ProvisionedThroughput {
+                        read_capacity_units: 0,
+                        write_capacity_units: 0,
+                    },
+                    items: vec![],
+                    gsi: vec![],
+                    lsi: vec![],
+                    tags: BTreeMap::new(),
+                    created_at: chrono::Utc::now(),
+                    status: "ACTIVE".into(),
+                    item_count: 0,
+                    size_bytes: 0,
+                    billing_mode: "PAY_PER_REQUEST".into(),
+                    ttl_attribute: None,
+                    ttl_enabled: false,
+                    resource_policy: None,
+                    pitr_enabled: false,
+                    kinesis_destinations: vec![],
+                    contributor_insights_status: "DISABLED".into(),
+                    contributor_insights_counters: BTreeMap::new(),
+                    stream_enabled: false,
+                    stream_view_type: None,
+                    stream_arn: None,
+                    stream_records: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                    sse_type: None,
+                    sse_kms_key_arn: None,
+                    deletion_protection_enabled: false,
+                    on_demand_throughput: None,
+                    table_class: "STANDARD".into(),
+                },
+            );
+        }
+        let svc = DynamoDbService::new(state);
+        let req = AwsRequest {
+            service: "dynamodb".into(),
+            action: "UpdateItem".into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "r".into(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "TableName": "T",
+                    "Key": {"pk": {"S": "new"}},
+                    "UpdateExpression": "SET x = :x",
+                    "ExpressionAttributeValues": {":x": {"N": "1"}},
+                    "ReturnValues": "ALL_OLD"
+                }))
+                .unwrap(),
+            ),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let resp = svc.update_item(&req).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(
+            body.get("Attributes").is_none(),
+            "ALL_OLD on insert must return no Attributes, got: {body}"
+        );
     }
 
     #[test]
