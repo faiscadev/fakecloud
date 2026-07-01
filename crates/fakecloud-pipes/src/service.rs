@@ -568,12 +568,12 @@ impl PipesService {
     fn update_pipe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
         let body = req.json_body();
-        if body
-            .get("RoleArn")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .is_none()
-        {
+        // Validate the request body first, before any state is read or mutated.
+        // The overdue lazy-settle for this op runs in the async `handle` wrapper
+        // (so its persist can be awaited even when this dispatch then errors),
+        // and the wrapper gates that settle on the same validity check — so an
+        // invalid UpdatePipe never settles/removes a pipe.
+        if !has_valid_role_arn(&body) {
             return Err(validation_error("RoleArn is required"));
         }
         let now = now_epoch_secs();
@@ -585,6 +585,19 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // Stabilize a fresh transient pipe on demand (CREATING/STARTING/
+            // STOPPING/UPDATING -> steady state) so Update on a just-created pipe
+            // succeeds like real AWS; DELETING is left for the guard below. Runs
+            // only after request validation has passed, so a rejected update
+            // never mutates state.
+            settle_transient_obj(obj);
+            // Atomic guard: reject a mutation only while the pipe is DELETING
+            // (the sole remaining transient state after the settle above),
+            // holding the write lock so a concurrent DeletePipe can't flip the
+            // state between this check and the write below.
+            if let Some(err) = transient_conflict(obj, &name) {
+                return Err(err);
+            }
             // UpdatePipe is a full replace of the updatable fields: a field the
             // client omits is cleared, not left at its previous value. AWS does
             // this (e.g. dropping `TargetParameters.InputTemplate` on a later
@@ -658,6 +671,10 @@ impl PipesService {
         desired: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = pipe_name_from_path(req)?;
+        // The overdue lazy-settle for Start/Stop runs in the async `handle`
+        // wrapper (so a removed overdue-DELETING pipe is persisted before this
+        // dispatch returns NotFound). The authoritative transient check runs
+        // under the write lock below, atomically with the mutation.
         let now = now_epoch_secs();
         let response = {
             let mut accounts = self.state.write();
@@ -666,6 +683,16 @@ impl PipesService {
             let obj = pipe
                 .as_object_mut()
                 .ok_or_else(|| validation_error("corrupt pipe state"))?;
+            // Stabilize a fresh transient pipe on demand so Start/Stop on a
+            // just-created pipe succeeds like real AWS; DELETING is left for the
+            // guard below.
+            settle_transient_obj(obj);
+            // Atomic guard in the same critical section as the mutation: reject
+            // only a DELETING pipe, so a concurrent DeletePipe can't be raced
+            // between check and write.
+            if let Some(err) = transient_conflict(obj, &name) {
+                return Err(err);
+            }
             obj.insert("DesiredState".into(), json!(desired));
             obj.insert("CurrentState".into(), json!(transient));
             obj.insert("LastModifiedTime".into(), json!(now));
@@ -788,13 +815,24 @@ impl AwsService for PipesService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
-        // DescribePipe lazily settles an overdue transient pipe (converging the
-        // provider's delete/create waiter on its own poll). When that settle
-        // removes a DELETING pipe we must persist BEFORE returning, so a restart
-        // right after the waiter observes deletion doesn't resurrect the pipe
-        // (and its stale checkpoints). Done here in the async path so the flush
-        // is awaited, not fire-and-forget (Cubic P2 on #2058).
-        if action == "DescribePipe" {
+        // Lazily settle an overdue transient pipe for the ops that depend on
+        // lifecycle convergence, and persist the settle here — BEFORE dispatch —
+        // so the flush is awaited, not fire-and-forget (the #2058 DescribePipe
+        // fix). This also covers the case where the settle *removes* an overdue
+        // DELETING pipe and the subsequent dispatch then returns NotFound: doing
+        // the settle+persist in this wrapper means the removal reaches disk even
+        // though the dispatch errors, so a restart can't resurrect the pipe (and
+        // its stale checkpoints).
+        //
+        // For UpdatePipe the settle is gated on a valid request body, so an
+        // invalid update never settles or removes a pipe (leaves state
+        // untouched); Start/Stop/Describe have no such body validation.
+        let settle_before_dispatch = match action {
+            "DescribePipe" | "StartPipe" | "StopPipe" => true,
+            "UpdatePipe" => has_valid_role_arn(&req.json_body()),
+            _ => false,
+        };
+        if settle_before_dispatch {
             if let Ok(name) = pipe_name_from_path(&req) {
                 if self.settle_if_overdue(&req.account_id, &name) {
                     self.save_snapshot().await;
@@ -829,6 +867,50 @@ fn is_mutating(action: &str) -> bool {
 /// Advance a transient pipe to its settled state. Removes the pipe (and tags)
 /// when it was DELETING; otherwise resolves to its DesiredState or the natural
 /// terminus of the in-flight transition.
+/// Force a *non-DELETING* transient pipe to its steady state in place, ignoring
+/// the `SETTLE_DELAY` window. fakecloud has no real provisioning latency, so a
+/// just-created `CREATING` pipe (and `STARTING`/`STOPPING`/`UPDATING`)
+/// stabilizes on demand — real AWS lets Start/Stop/Update on a freshly-created
+/// pipe succeed with 200 because the pipe stabilizes almost instantly. Called
+/// under the state write lock immediately before the transient guard, so a
+/// fresh pipe becomes RUNNING/STOPPED and the guard only ever rejects a pipe
+/// that is genuinely `DELETING` (preserving the anti-resurrection fix).
+fn settle_transient_obj(obj: &mut Map<String, Value>) {
+    let cur = obj
+        .get("CurrentState")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // DELETING is left untouched so the guard can still reject it; a settled
+    // state needs no work.
+    if cur == STATE_DELETING || !is_transient_state(cur) {
+        return;
+    }
+    let desired = obj
+        .get("DesiredState")
+        .and_then(Value::as_str)
+        .unwrap_or(STATE_RUNNING)
+        .to_string();
+    let settled = match cur {
+        STATE_STARTING => STATE_RUNNING,
+        STATE_STOPPING => STATE_STOPPED,
+        // CREATING / UPDATING resolve to whatever the client asked for.
+        _ => {
+            if desired == STATE_STOPPED {
+                STATE_STOPPED
+            } else {
+                STATE_RUNNING
+            }
+        }
+    };
+    obj.insert("CurrentState".into(), json!(settled));
+    let reason = if settled == STATE_RUNNING {
+        "Pipe is running"
+    } else {
+        "Pipe is stopped"
+    };
+    obj.insert("StateReason".into(), json!(reason));
+}
+
 fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
     let Some(pipe) = st.pipes.get(name) else {
         return;
@@ -1024,7 +1106,7 @@ fn resource_arn_from_path(req: &AwsRequest) -> Result<String, AwsServiceError> {
 
 /// Validate a `ResourceArn`-shaped value (length 1..1600). Shared by the
 /// ListPipes `SourcePrefix` / `TargetPrefix` query filters.
-fn validate_resource_arn_len(field: &str, value: &str) -> Result<(), AwsServiceError> {
+pub fn validate_resource_arn_len(field: &str, value: &str) -> Result<(), AwsServiceError> {
     if value.is_empty() || value.len() > 1600 {
         return Err(validation_error(format!(
             "{field} must be 1-1600 characters"
@@ -1074,7 +1156,7 @@ fn validate_requested_pipe_state(value: &str) -> Result<(), AwsServiceError> {
     }
 }
 
-fn validate_pipe_name(name: &str) -> Result<(), AwsServiceError> {
+pub fn validate_pipe_name(name: &str) -> Result<(), AwsServiceError> {
     if name.is_empty() || name.len() > 64 {
         return Err(validation_error(
             "Pipe name must be between 1 and 64 characters",
@@ -1123,6 +1205,36 @@ fn not_found(name: &str) -> AwsServiceError {
         "NotFoundException",
         format!("Pipe {name} does not exist."),
     )
+}
+
+/// Does the UpdatePipe request body carry a non-empty `RoleArn` (the one
+/// required field)? Used both to reject an invalid UpdatePipe and to gate the
+/// pre-dispatch overdue settle in `handle`, so an invalid update never mutates
+/// state.
+fn has_valid_role_arn(body: &Value) -> bool {
+    body.get("RoleArn")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// If a pipe object is mid-transition, produce the `ConflictException` a
+/// mutating lifecycle op (Update/Start/Stop) must return. Callers invoke this
+/// while holding the state write lock, in the same critical section as the
+/// mutation, so a concurrent Delete/Start/Stop can't flip the state between the
+/// check and the write.
+fn transient_conflict(obj: &Map<String, Value>, name: &str) -> Option<AwsServiceError> {
+    let cur = obj
+        .get("CurrentState")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if is_transient_state(cur) {
+        Some(conflict_error(
+            format!("Pipe '{name}' is in state {cur} and cannot be modified until it stabilizes."),
+            name,
+        ))
+    } else {
+        None
+    }
 }
 
 fn conflict_error(msg: impl Into<String>, resource_id: &str) -> AwsServiceError {
@@ -1299,6 +1411,253 @@ mod tests {
         assert_eq!(
             state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
             STATE_CREATING
+        );
+    }
+
+    /// A PUT /v1/pipes/p1 request carrying a valid RoleArn body, so UpdatePipe
+    /// passes request validation and reaches the transient/conflict logic.
+    fn update_request_with_role() -> AwsRequest {
+        let mut req = make_request(Method::PUT, "/v1/pipes/p1");
+        req.body = serde_json::to_vec(&json!({
+            "RoleArn": "arn:aws:iam::123456789012:role/p"
+        }))
+        .unwrap()
+        .into();
+        req
+    }
+
+    #[test]
+    fn update_rejects_deleting_pipe_with_conflict() {
+        // A racing UpdatePipe must not resurrect a fresh DELETING pipe: AWS
+        // returns ConflictException while the pipe is mid-transition. The request
+        // carries a valid RoleArn so it reaches the guard rather than failing
+        // request validation first.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 0.0);
+        let req = update_request_with_role();
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe on a DELETING pipe must be rejected");
+        };
+        assert_eq!(err.code(), "ConflictException");
+        // The pipe is untouched — still DELETING, not flipped back to UPDATING.
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_DELETING
+        );
+    }
+
+    #[tokio::test]
+    async fn start_settles_fresh_creating_pipe_then_succeeds() {
+        // Real AWS lets StartPipe on a just-created (CREATING) pipe succeed —
+        // the pipe stabilizes almost instantly. fakecloud force-settles it to
+        // RUNNING on demand, so Start proceeds (200) and moves it to STARTING.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
+        let req = make_request(Method::POST, "/v1/pipes/p1/start");
+        assert!(
+            svc.start_pipe(&req).is_ok(),
+            "StartPipe on a fresh CREATING pipe must succeed, not 409"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_STARTING
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_settles_fresh_updating_pipe_then_succeeds() {
+        let (svc, state) = service_with_pipe(STATE_UPDATING, STATE_RUNNING, 0.0);
+        let req = make_request(Method::POST, "/v1/pipes/p1/stop");
+        assert!(
+            svc.stop_pipe(&req).is_ok(),
+            "StopPipe on a fresh UPDATING pipe must succeed, not 409"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_STOPPING
+        );
+    }
+
+    #[test]
+    fn start_and_stop_reject_deleting_pipe_with_conflict() {
+        // The anti-resurrection guard: Start/Stop on a DELETING pipe still 409s
+        // and does not flip it out of DELETING.
+        for op in ["start", "stop"] {
+            let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 0.0);
+            let req = make_request(Method::POST, &format!("/v1/pipes/p1/{op}"));
+            let res = if op == "start" {
+                svc.start_pipe(&req)
+            } else {
+                svc.stop_pipe(&req)
+            };
+            let Err(err) = res else {
+                panic!("{op} on a DELETING pipe must be rejected");
+            };
+            assert_eq!(err.code(), "ConflictException", "{op} must conflict");
+            assert_eq!(
+                state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+                STATE_DELETING,
+                "{op} must not resurrect the DELETING pipe"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_conflict_flags_only_transient_states() {
+        // Raw helper contract: settled states are modifiable, every transient
+        // state maps to ConflictException. In the live Update/Start/Stop path a
+        // non-DELETING transient is force-settled *before* this runs, so only
+        // DELETING actually reaches it — but the helper itself flags all of them.
+        let mut obj = Map::new();
+        obj.insert("CurrentState".into(), json!(STATE_RUNNING));
+        assert!(transient_conflict(&obj, "p1").is_none());
+        obj.insert("CurrentState".into(), json!(STATE_STOPPED));
+        assert!(transient_conflict(&obj, "p1").is_none());
+        for st in [
+            STATE_CREATING,
+            STATE_UPDATING,
+            STATE_STARTING,
+            STATE_STOPPING,
+            STATE_DELETING,
+        ] {
+            obj.insert("CurrentState".into(), json!(st));
+            assert_eq!(
+                transient_conflict(&obj, "p1").unwrap().code(),
+                "ConflictException",
+                "{st} must conflict"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_update_leaves_fresh_transient_pipe_untouched() {
+        // A missing RoleArn is rejected BEFORE the on-demand settle, so an
+        // invalid UpdatePipe on a fresh CREATING pipe returns ValidationException
+        // without force-settling it (no failed-update side effect).
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 0.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING,
+            "a rejected UpdatePipe must not force-settle (state unchanged)"
+        );
+    }
+
+    #[test]
+    fn invalid_update_leaves_overdue_transient_pipe_untouched() {
+        // Request validation runs before settle_if_overdue, so an invalid
+        // UpdatePipe on an OVERDUE CREATING pipe returns ValidationException
+        // without settling it to RUNNING.
+        let (svc, state) = service_with_pipe(STATE_CREATING, STATE_RUNNING, 5.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_CREATING,
+            "a rejected UpdatePipe must not settle an overdue pipe"
+        );
+    }
+
+    #[test]
+    fn invalid_update_does_not_remove_overdue_deleting_pipe() {
+        // The most damaging case: an overdue DELETING pipe would be REMOVED by
+        // settle_if_overdue. Request validation must run first, so a missing
+        // RoleArn returns ValidationException and the pipe still exists.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let req = make_request(Method::PUT, "/v1/pipes/p1");
+        let Err(err) = svc.update_pipe(&req) else {
+            panic!("UpdatePipe with no RoleArn must error");
+        };
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            state
+                .read()
+                .get("123456789012")
+                .unwrap()
+                .pipes
+                .contains_key("p1"),
+            "a rejected UpdatePipe must not remove an overdue DELETING pipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_allows_settled_pipe() {
+        // A RUNNING pipe with a valid request passes the transient guard and is
+        // updated (CurrentState -> UPDATING), rather than being rejected.
+        let (svc, state) = service_with_pipe(STATE_RUNNING, STATE_RUNNING, 0.0);
+        let req = update_request_with_role();
+        assert!(
+            svc.update_pipe(&req).is_ok(),
+            "UpdatePipe on a RUNNING pipe must succeed"
+        );
+        assert_eq!(
+            state.read().get("123456789012").unwrap().pipes["p1"]["CurrentState"],
+            STATE_UPDATING
+        );
+    }
+
+    #[tokio::test]
+    async fn update_settles_overdue_deleting_then_reports_not_found() {
+        // Through the full `handle` path: an overdue DELETING pipe is settled
+        // (removed) by the pre-dispatch wrapper, so a valid UpdatePipe sees
+        // NotFound rather than a spurious Conflict, and the pipe is gone.
+        let (svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let Err(err) = svc.handle(update_request_with_role()).await else {
+            panic!("UpdatePipe on a removed pipe must error");
+        };
+        assert_eq!(err.code(), "NotFoundException");
+        assert!(state.read().get("123456789012").unwrap().pipes.is_empty());
+    }
+
+    /// A test `SnapshotStore` that retains the last saved bytes so a test can
+    /// assert what was persisted (the real `MemorySnapshotStore` is a no-op).
+    #[derive(Default)]
+    struct CapturingStore {
+        saved: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+    impl fakecloud_persistence::SnapshotStore for CapturingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.saved.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_update_on_overdue_deleting_pipe_persists_removal() {
+        // The resurrection bug: a valid UpdatePipe against an overdue DELETING
+        // pipe removes it in memory, then returns NotFound. That removal must be
+        // flushed to the snapshot store (awaited) so a restart from the snapshot
+        // doesn't bring the deleted pipe back.
+        let (svc, _state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        let store = Arc::new(CapturingStore::default());
+        let svc = svc.with_snapshot_store(store.clone());
+
+        let Err(err) = svc.handle(update_request_with_role()).await else {
+            panic!("UpdatePipe on a removed pipe must error");
+        };
+        assert_eq!(err.code(), "NotFoundException");
+
+        // Deserialize the persisted snapshot and assert the pipe is gone.
+        let bytes = store
+            .load()
+            .unwrap()
+            .expect("the settle/removal was flushed to the snapshot store");
+        let snapshot: PipesSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("snapshot carries account state");
+        let still_present = accounts
+            .get("123456789012")
+            .is_some_and(|st| st.pipes.contains_key("p1"));
+        assert!(
+            !still_present,
+            "the removed DELETING pipe must not survive in the snapshot (no resurrection)"
         );
     }
 

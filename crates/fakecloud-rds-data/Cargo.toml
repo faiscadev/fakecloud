@@ -29,4 +29,4 @@ uuid = { workspace = true }
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

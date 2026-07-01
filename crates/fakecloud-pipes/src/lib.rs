@@ -14,7 +14,7 @@ pub mod state;
 
 pub use service::{
     drain_overdue_transient_pipes, ensure_source_param_defaults, normalize_empty_input_templates,
-    PipesService,
+    validate_pipe_name, validate_resource_arn_len, PipesService,
 };
 pub use state::{
     PipesAccounts, PipesSnapshot, PipesState, SharedPipesState, PIPES_SNAPSHOT_SCHEMA_VERSION,

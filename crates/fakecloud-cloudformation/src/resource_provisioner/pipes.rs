@@ -27,6 +27,21 @@ const PIPE_INPUT_FIELDS: &[&str] = &[
     "KmsKeyIdentifier",
 ];
 
+/// The updatable `UpdatePipe` fields. `Source` is intentionally absent: it is
+/// immutable on a pipe (a change forces a CloudFormation replacement), so an
+/// in-place update never rewrites it. Mirrors the direct `UpdatePipe` handler.
+const PIPE_UPDATE_FIELDS: &[&str] = &[
+    "Description",
+    "SourceParameters",
+    "Enrichment",
+    "EnrichmentParameters",
+    "Target",
+    "TargetParameters",
+    "RoleArn",
+    "LogConfiguration",
+    "KmsKeyIdentifier",
+];
+
 impl ResourceProvisioner {
     pub(super) fn create_pipes_pipe(
         &self,
@@ -38,22 +53,15 @@ impl ResourceProvisioner {
             .and_then(Value::as_str)
             .map(String::from)
             .unwrap_or_else(|| resource.logical_id.clone());
+        // Apply the same validation the direct CreatePipe handler enforces, so a
+        // CFN-created pipe can't slip past name/ARN constraints the API rejects.
+        fakecloud_pipes::validate_pipe_name(&name).map_err(|e| e.message())?;
 
-        let source = props
-            .get("Source")
-            .and_then(Value::as_str)
-            .ok_or("AWS::Pipes::Pipe requires Source")?
-            .to_string();
-        let target = props
-            .get("Target")
-            .and_then(Value::as_str)
-            .ok_or("AWS::Pipes::Pipe requires Target")?
-            .to_string();
-        let role_arn = props
-            .get("RoleArn")
-            .and_then(Value::as_str)
-            .ok_or("AWS::Pipes::Pipe requires RoleArn")?
-            .to_string();
+        // Source/Target/RoleArn are required and must be non-empty (a bare
+        // `as_str` would accept `""`), and are bounded to the 1-1600 ARN length.
+        let source = require_arn_field(props, "Source")?;
+        let target = require_arn_field(props, "Target")?;
+        let role_arn = require_arn_field(props, "RoleArn")?;
 
         let arn = format!(
             "arn:aws:pipes:{}:{}:pipe/{name}",
@@ -66,6 +74,19 @@ impl ResourceProvisioner {
             _ => "RUNNING",
         };
         let now = epoch_secs();
+
+        // Reject a same-name collision instead of silently overwriting an
+        // existing pipe (the direct CreatePipe handler returns ConflictException
+        // here). CloudFormation provisions a stack single-threaded, so a plain
+        // read-then-write is race-free.
+        if self
+            .pipes_state
+            .read()
+            .get(&self.account_id)
+            .is_some_and(|st| st.pipes.contains_key(&name))
+        {
+            return Err(format!("Pipe with Name {name} already exists."));
+        }
 
         let mut pipe = Map::new();
         pipe.insert("Name".into(), json!(name));
@@ -128,6 +149,114 @@ impl ResourceProvisioner {
             .with("LastModifiedTime", now.to_string()))
     }
 
+    /// Apply a stack UpdateStack change to an existing pipe: re-write the
+    /// updatable fields (full replace — an omitted field is cleared, matching
+    /// the direct `UpdatePipe` handler) and re-settle it. Without this arm the
+    /// generic `update_resource` dispatcher returns `Ok(None)` for
+    /// `AWS::Pipes::Pipe`, so CloudFormation reports `UPDATE_COMPLETE` while
+    /// silently discarding the property change.
+    ///
+    /// `Source` is replacement-required on `AWS::Pipes::Pipe` (the CFN resource
+    /// schema marks Source create-only: "Update requires: Replacement"). A
+    /// changed Source therefore cannot be applied in place — doing so would leave
+    /// the pipe reading from the old source while reporting success. When Source
+    /// changes we perform a replacement (delete the old record + recreate from
+    /// the new properties) so the new Source actually takes effect.
+    pub(super) fn update_pipes_pipe(
+        &self,
+        existing: &super::StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        // The physical id of a pipe is its Name.
+        let name = existing.physical_id.clone();
+        let now = epoch_secs();
+
+        // Replacement-required Source change: recreate instead of in-place update.
+        let old_source = self
+            .pipes_state
+            .read()
+            .get(&self.account_id)
+            .and_then(|st| st.pipes.get(&name))
+            .and_then(|p| p.get("Source").and_then(Value::as_str).map(String::from));
+        let new_source = props.get("Source").and_then(Value::as_str);
+        if let (Some(old), Some(new)) = (old_source.as_deref(), new_source) {
+            if new != old {
+                // Drop the old record so the recreate's same-name conflict check
+                // passes, then rebuild the pipe from scratch with the new Source.
+                self.delete_pipes_pipe(&name);
+                return self.create_pipes_pipe(resource);
+            }
+        }
+
+        // Target/RoleArn stay required and non-empty on update; Source is
+        // unchanged here (a change took the replacement path above). Called for
+        // validation only — the applied value flows through PIPE_UPDATE_FIELDS.
+        require_arn_field(props, "Target")?;
+        require_arn_field(props, "RoleArn")?;
+
+        let desired = match props.get("DesiredState").and_then(Value::as_str) {
+            Some("STOPPED") => "STOPPED",
+            _ => "RUNNING",
+        };
+
+        let mut state = self.pipes_state.write();
+        let acct = state.get_or_create(&self.account_id);
+        let pipe = acct
+            .pipes
+            .get_mut(&name)
+            .ok_or_else(|| format!("AWS::Pipes::Pipe {name} not yet provisioned"))?;
+        let obj = pipe
+            .as_object_mut()
+            .ok_or_else(|| format!("corrupt pipe state for {name}"))?;
+
+        for field in PIPE_UPDATE_FIELDS {
+            match props.get(*field) {
+                Some(v) => {
+                    obj.insert((*field).to_string(), v.clone());
+                }
+                None => {
+                    obj.remove(*field);
+                }
+            }
+        }
+        obj.insert("DesiredState".into(), json!(desired));
+        // CFN provisioning is synchronous, so the pipe stays settled.
+        obj.insert("CurrentState".into(), json!(desired));
+        obj.insert("StateReason".into(), json!("Pipe is healthy"));
+        obj.insert("LastModifiedTime".into(), json!(now));
+        let source = obj
+            .get("Source")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        fakecloud_pipes::ensure_source_param_defaults(obj, &source);
+        fakecloud_pipes::normalize_empty_input_templates(obj);
+        let arn = obj
+            .get("Arn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        Ok(ProvisionResult::new(name)
+            .with("Arn", arn)
+            .with("CurrentState", desired)
+            .with("StateReason", "Pipe is healthy")
+            .with("LastModifiedTime", now.to_string()))
+    }
+
+    /// Live-state `Fn::GetAtt` for a pipe: resolves `Arn` from the pipes service
+    /// state (the create path also pre-captures it, so this is the consistency
+    /// overlay used when reading back a persisted stack).
+    pub(super) fn get_att_pipes_pipe(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let state = self.pipes_state.read();
+        let pipe = state.get(&self.account_id)?.pipes.get(physical_id)?;
+        match attribute {
+            "Arn" => pipe.get("Arn").and_then(Value::as_str).map(String::from),
+            _ => None,
+        }
+    }
+
     /// Delete a pipe by physical id (its name). Also drops the tag-store entry
     /// keyed by the pipe's ARN.
     pub(super) fn delete_pipes_pipe(&self, physical_id: &str) {
@@ -139,6 +268,19 @@ impl ResourceProvisioner {
             }
         }
     }
+}
+
+/// Extract a required ARN-shaped property (`Source`/`Target`/`RoleArn`),
+/// rejecting a missing, empty, or oversize value with the same non-empty +
+/// 1-1600 length bound the direct CreatePipe/UpdatePipe handler enforces.
+fn require_arn_field(props: &Value, field: &str) -> Result<String, String> {
+    let value = props
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("AWS::Pipes::Pipe requires a non-empty {field}"))?;
+    fakecloud_pipes::validate_resource_arn_len(field, value).map_err(|e| e.message())?;
+    Ok(value.to_string())
 }
 
 /// Seconds since the Unix epoch. CloudFormation provisioning is not on the
