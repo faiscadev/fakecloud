@@ -298,13 +298,15 @@ impl ApiGatewayV2Service {
             }
         }
 
-        if let Some(settings) = body.get("routeSettings").and_then(|v| v.as_object()) {
-            stage.route_settings = Some(
-                settings
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            );
+        if let Some(settings) = body.get("routeSettings") {
+            // Distinguish an explicit null (clear) from an absent field
+            // (preserve), mirroring defaultRouteSettings above.
+            if settings.is_null() {
+                stage.route_settings = None;
+            } else if let Some(obj) = settings.as_object() {
+                stage.route_settings =
+                    Some(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+            }
         }
 
         if let Some(tags) = parse_string_map(&body["tags"]) {

@@ -2754,6 +2754,16 @@ async fn route_persists_extended_fields() {
     );
     assert_eq!(b["routeResponseSelectionExpression"], "$default");
 
+    // Arbitrary-key maps must be stored verbatim — no synthetic
+    // first-letter-swapped sibling keys ("Application/json", etc).
+    assert_eq!(b["requestModels"].as_object().unwrap().len(), 1);
+    assert!(b["requestModels"].get("Application/json").is_none());
+    let params = b["requestParameters"].as_object().unwrap();
+    assert_eq!(params.len(), 1);
+    assert!(params.get("Route.request.header.x").is_none());
+    // ...but the nested modeled struct's member is still case-normalized.
+    assert_eq!(params["route.request.header.x"]["required"], true);
+
     // Update one field; the rest must stay.
     let body = serde_json::json!({"operationName": "Renamed"});
     let req = make_request(
@@ -2817,6 +2827,35 @@ async fn stage_persists_extended_fields() {
     assert_eq!(b["clientCertificateId"], "cert-999");
     assert_eq!(b["tags"]["env"], "staging");
     // Untouched field preserved.
+    assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
+    // routeSettings map key ("GET /items") is arbitrary and kept verbatim.
+    let rs = b["routeSettings"].as_object().unwrap();
+    assert_eq!(rs.len(), 1);
+    assert!(rs.contains_key("GET /items"));
+
+    // Explicit null routeSettings clears them; absent field preserves.
+    let body = serde_json::json!({ "routeSettings": null });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/stages/prod"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("routeSettings").is_none());
+    // A subsequent patch that omits routeSettings must not resurrect them.
+    let body = serde_json::json!({ "description": "d" });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/apis/{api_id}/stages/prod"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert!(b.get("routeSettings").is_none());
+    // defaultRouteSettings untouched by the routeSettings clears.
     assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
 }
 
@@ -3012,7 +3051,8 @@ async fn reimport_api_replaces_routes() {
     // Unknown API id 404s.
     let body = serde_json::json!({"body": petstore_spec()});
     let req = make_request(Method::PUT, "/v2/apis/does-not-exist", &body.to_string());
-    assert!(svc.handle(req).await.is_err());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
 }
 
 /// ExportApi emits a real OpenAPI document derived from the API's routes.
@@ -3046,15 +3086,20 @@ async fn export_api_validates() {
     let svc = ApiGatewayV2Service::new(state);
     let api_id = create_api(&svc);
 
-    // Missing OutputType.
+    // Missing OutputType. The apigatewayv2 model marks OutputType
+    // @required (the clientOptional trait only nulls it in the generated
+    // SDK; the server still rejects it), so this is a 400 BadRequestException
+    // rather than a defaulted export.
     let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/exports/OAS30"), "");
-    assert!(svc.handle(req).await.is_err());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
 
     // Unknown API.
     let mut req = make_request(Method::GET, "/v2/apis/nope/exports/OAS30", "");
     req.query_params
         .insert("outputType".to_string(), "JSON".to_string());
-    assert!(svc.handle(req).await.is_err());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
 }
 
 /// DeleteCorsConfiguration clears the stored CORS config and persists it.
@@ -3086,7 +3131,8 @@ async fn delete_cors_configuration_clears_config() {
 
     // Unknown API 404s.
     let req = make_request(Method::DELETE, "/v2/apis/missing/cors", "");
-    assert!(svc.handle(req).await.is_err());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
 }
 
 /// DeleteAccessLogSettings clears the stage's access log settings.
