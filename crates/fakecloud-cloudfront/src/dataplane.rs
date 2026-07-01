@@ -406,9 +406,13 @@ async fn fetch_origin(
 }
 
 /// Match a CloudFront cache-behavior path pattern (`*` = any sequence, `?` = one
-/// character) against a request path.
+/// character) against a request path. AWS path patterns are relative (no leading
+/// slash, e.g. `api/*`); normalize both sides so a canonical `api/*` and a
+/// slash-prefixed `/api/*` both match a request path like `/api/orders`.
 fn path_pattern_matches(pattern: &str, path: &str) -> bool {
-    glob_match(pattern.as_bytes(), path.as_bytes())
+    let pat = pattern.trim_start_matches('/');
+    let p = path.trim_start_matches('/');
+    glob_match(pat.as_bytes(), p.as_bytes())
 }
 
 fn glob_match(pat: &[u8], text: &[u8]) -> bool {

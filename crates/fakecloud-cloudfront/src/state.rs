@@ -130,7 +130,9 @@ pub struct StoredDistribution {
     /// Data-plane listener port (fakecloud extension; None until the
     /// supervisor binds a listener for an enabled distribution). Not part
     /// of the AWS API surface — surfaced only via /_fakecloud/cloudfront/*.
-    #[serde(default)]
+    /// Runtime-only: never persisted (restarts get a fresh port on the first
+    /// reconcile tick), mirroring the ELBv2 data plane's `bound_port`.
+    #[serde(skip)]
     pub bound_port: Option<u16>,
 }
 

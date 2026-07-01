@@ -85,7 +85,9 @@ fn spa_config(
         );
         cache_behaviors_items.push(
             CacheBehavior::builder()
-                .path_pattern("/api/*")
+                // AWS path patterns are relative (no leading slash); the data
+                // plane normalizes, so this must still match `/api/...`.
+                .path_pattern("api/*")
                 .target_origin_id("o2")
                 .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
                 .forwarded_values(
