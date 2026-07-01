@@ -191,6 +191,21 @@ impl PipesService {
         .await;
     }
 
+    /// Fire-and-forget snapshot save for sync call sites (the lazy DescribePipe
+    /// settle) so they don't have to become async just to persist. No-op in
+    /// memory mode.
+    fn spawn_save_snapshot(&self) {
+        if self.snapshot_store.is_none() {
+            return;
+        }
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            save_snapshot_static(state, store, lock).await;
+        });
+    }
+
     /// Re-drive any pipe left mid-transition by a restart. Called once at boot
     /// after the snapshot is loaded; a single pass under the write lock resets
     /// transient pipes and spawns exactly one settle task each, so no pipe ends
@@ -406,7 +421,13 @@ impl PipesService {
         // converge on the poll cadence with no dependency on background
         // scheduling — the waiter that is asking "is it gone yet?" is exactly
         // what finishes the deletion.
-        self.settle_if_overdue(&req.account_id, &name);
+        if self.settle_if_overdue(&req.account_id, &name) {
+            // Persist the settle (a DELETING removal + checkpoint purge) so it
+            // survives a restart driven purely by describe polls. Detached so
+            // the describe response isn't held for the disk write, mirroring the
+            // spawn_settle path.
+            self.spawn_save_snapshot();
+        }
         let accounts = self.state.read();
         let pipe = accounts
             .get(&req.account_id)
@@ -419,7 +440,10 @@ impl PipesService {
     /// state longer than `SETTLE_DELAY`. Read-locks to check first and only
     /// takes the write lock when there is actually work to do, so the common
     /// case (a settled pipe) stays on the read path.
-    fn settle_if_overdue(&self, account_id: &str, name: &str) {
+    /// Returns `true` when it actually settled the pipe, so the async caller can
+    /// persist the change (settling a DELETING pipe removes it and purges its
+    /// checkpoints; that must reach disk or a restart resurrects both).
+    fn settle_if_overdue(&self, account_id: &str, name: &str) -> bool {
         let now = now_epoch_secs();
         let overdue = {
             let accounts = self.state.read();
@@ -440,12 +464,13 @@ impl PipesService {
                 .unwrap_or(false)
         };
         if !overdue {
-            return;
+            return false;
         }
         let mut accounts = self.state.write();
         if let Some(st) = accounts.accounts.get_mut(account_id) {
             settle_pipe(st, name);
         }
+        true
     }
 
     fn list_pipes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -874,7 +899,9 @@ fn settle_pipe(st: &mut crate::state::PipesState, name: &str) {
 /// path: under normal load the spawned task settles within `SETTLE_DELAY` and
 /// the pipe is gone before it ages past the threshold, so this rescues only
 /// genuinely-starved settles.
-pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64) {
+/// Returns the number of pipes settled, so the caller can persist when it was
+/// non-zero (a settled DELETING pipe removes it and purges its checkpoints).
+pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64) -> usize {
     let now = now_epoch_secs();
 
     // Read-lock-first: collect the overdue `(account, name)` pairs under a
@@ -906,15 +933,18 @@ pub fn drain_overdue_transient_pipes(state: &SharedPipesState, min_age_secs: f64
         out
     };
     if overdue.is_empty() {
-        return;
+        return 0;
     }
 
+    let mut count = 0;
     let mut accounts = state.write();
     for (account_id, name) in overdue {
         if let Some(st) = accounts.accounts.get_mut(&account_id) {
             settle_pipe(st, &name);
+            count += 1;
         }
     }
+    count
 }
 
 /// Build a `Pipe` list summary (a subset of the full describe object).
@@ -1238,11 +1268,22 @@ mod tests {
                 "x".into(),
             );
         }
-        svc.settle_if_overdue("123456789012", "p1");
+        // Settling a DELETING pipe reports `true` so the caller persists the
+        // removal + purge (durability, Cubic P2 on #2058).
+        assert!(svc.settle_if_overdue("123456789012", "p1"));
         let st = state.read();
         let cps = &st.get("123456789012").unwrap().source_checkpoints;
         assert!(!cps.keys().any(|k| k.starts_with(arn)));
         assert!(cps.contains_key("arn:aws:pipes:us-east-1:123456789012:pipe/other"));
+    }
+
+    #[test]
+    fn drain_reports_settled_count_for_persistence() {
+        // The runner uses a non-zero count to trigger a snapshot flush.
+        let (_svc, state) = service_with_pipe(STATE_DELETING, "STOPPED", 5.0);
+        assert_eq!(drain_overdue_transient_pipes(&state, 1.0), 1);
+        // Already drained -> nothing to settle -> no flush.
+        assert_eq!(drain_overdue_transient_pipes(&state, 1.0), 0);
     }
 
     #[test]

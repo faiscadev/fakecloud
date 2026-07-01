@@ -153,7 +153,12 @@ impl PipesRunner {
         // still settles even when a CPU-starved runner delays its spawned
         // settle task past the provider's waiter timeout. Cheap (a single
         // write lock over the pipe map) and a no-op under normal load.
-        fakecloud_pipes::drain_overdue_transient_pipes(&self.pipes_state, 1.0);
+        // A settled DELETING pipe removes it and purges its checkpoints; mark
+        // dirty so the poll's snapshot flush persists that removal (otherwise a
+        // restart resurrects the pipe and its stale checkpoints).
+        if fakecloud_pipes::drain_overdue_transient_pipes(&self.pipes_state, 1.0) > 0 {
+            self.checkpoints_dirty.store(true, Ordering::Relaxed);
+        }
 
         // Process each pipe concurrently. Serially awaiting them let one pipe
         // whose target is slow (or momentarily unreachable) stall delivery for
