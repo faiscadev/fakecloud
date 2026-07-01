@@ -1376,10 +1376,20 @@ fn cert_matches_x509(cert: &StoredCertificate, x: &Value) -> bool {
             .any(|san| string_filter_matches(dns, san));
     }
     if let Some(eku) = x.get("ExtendedKeyUsage").and_then(Value::as_str) {
-        return CERT_EKUS.contains(&eku.to_ascii_uppercase().as_str());
+        let eku = eku.to_ascii_uppercase();
+        // The `ANY` sentinel matches any cert that has at least one EKU;
+        // otherwise the specific value must be one the cert carries.
+        return match eku.as_str() {
+            "ANY" => !CERT_EKUS.is_empty(),
+            v => CERT_EKUS.contains(&v),
+        };
     }
     if let Some(ku) = x.get("KeyUsage").and_then(Value::as_str) {
-        return CERT_KEY_USAGES.contains(&ku.to_ascii_uppercase().as_str());
+        let ku = ku.to_ascii_uppercase();
+        return match ku.as_str() {
+            "ANY" => !CERT_KEY_USAGES.is_empty(),
+            v => CERT_KEY_USAGES.contains(&v),
+        };
     }
     if let Some(alg) = x.get("KeyAlgorithm").and_then(Value::as_str) {
         return cert.key_algorithm.eq_ignore_ascii_case(alg);
@@ -2767,6 +2777,40 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(count(&body), 0, "non-matching EKU should drop all certs");
+
+        // The `ANY` sentinel matches any cert that has at least one EKU.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "X509AttributeFilter": { "ExtendedKeyUsage": "ANY" } }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(count(&body), 2, "ANY EKU should match all certs with EKUs");
+
+        // Same `ANY` semantics for KeyUsage.
+        let resp = svc
+            .handle(make_req(
+                "SearchCertificates",
+                json!({
+                    "FilterStatement": {
+                        "Filter": { "X509AttributeFilter": { "KeyUsage": "ANY" } }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            count(&body),
+            2,
+            "ANY KeyUsage should match all certs with key usages"
+        );
     }
 
     #[tokio::test]
