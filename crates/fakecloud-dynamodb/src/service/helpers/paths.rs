@@ -39,7 +39,7 @@ pub(crate) fn project_item(
     body: &Value,
 ) -> HashMap<String, AttributeValue> {
     let projection = body["ProjectionExpression"].as_str();
-    match projection {
+    let mut result = match projection {
         Some(proj) if !proj.is_empty() => {
             let expr_attr_names = parse_expression_attribute_names(body);
             project_with_expression(item, proj, &expr_attr_names)
@@ -59,8 +59,34 @@ pub(crate) fn project_item(
                     }
                     result
                 }
-                _ => item.clone(),
+                _ => return item.clone(),
             }
+        }
+    };
+    // A list-index projection (`MyList[2]`) builds a sparse `L` padded with
+    // bare `Value::Null` placeholders; AWS returns only the projected elements,
+    // compacted in index order. Drop the padding so the result is a valid,
+    // compacted AttributeValue rather than one carrying bare nulls (bug-hunt
+    // 2026-07-01, DynamoDB ProjectionExpression list-index).
+    for v in result.values_mut() {
+        compact_projected_lists(v);
+    }
+    result
+}
+
+/// Recursively remove the bare-`null` padding that `wrap_value_in_path` inserts
+/// for list-index projections, so projected `L` values contain only the
+/// requested elements (in index order). Real list elements are never a bare
+/// JSON `null` (DynamoDB null is `{"NULL": true}`), so this only strips padding.
+fn compact_projected_lists(value: &mut Value) {
+    if let Some(list) = value.get_mut("L").and_then(Value::as_array_mut) {
+        list.retain(|e| !e.is_null());
+        for e in list.iter_mut() {
+            compact_projected_lists(e);
+        }
+    } else if let Some(map) = value.get_mut("M").and_then(Value::as_object_mut) {
+        for e in map.values_mut() {
+            compact_projected_lists(e);
         }
     }
 }
@@ -297,4 +323,36 @@ pub(crate) fn merge_attribute_values(a: Value, b: Value) -> Value {
         return json!({"L": out});
     }
     b
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn list_index_projection_compacts_padding() {
+        // Projecting `items[2]` used to emit {"L":[null,null,elem]}; AWS returns
+        // only the projected element, compacted (bug-hunt 2026-07-01).
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [{"S": "a"}, {"S": "b"}, {"S": "c"}]}),
+        );
+        let body = json!({"ProjectionExpression": "items[2]"});
+        let projected = project_item(&item, &body);
+        assert_eq!(projected["items"], json!({"L": [{"S": "c"}]}));
+    }
+
+    #[test]
+    fn multiple_list_indices_project_in_order() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert(
+            "items".to_string(),
+            json!({"L": [{"S": "a"}, {"S": "b"}, {"S": "c"}]}),
+        );
+        let body = json!({"ProjectionExpression": "items[0], items[2]"});
+        let projected = project_item(&item, &body);
+        assert_eq!(projected["items"], json!({"L": [{"S": "a"}, {"S": "c"}]}));
+    }
 }

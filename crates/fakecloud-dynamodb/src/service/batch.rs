@@ -21,7 +21,7 @@ type PendingKinesis = (
 
 use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
-    extract_key, get_table, get_table_mut, parse_expression_attribute_names,
+    extract_key, get_table, get_table_mut, keys_equal, parse_expression_attribute_names,
     parse_expression_attribute_values, require_str_with_code, return_consumed_mode,
     return_icm_mode, validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
 };
@@ -82,14 +82,34 @@ impl DynamoDbService {
                     "Keys is required",
                 )
             })?;
+            // AWS rejects an empty Keys list rather than returning an empty,
+            // successful response (bug-hunt 2026-07-01, DynamoDB BatchGetItem).
+            if keys.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "1 validation error detected: Value '[]' at 'requestItems' failed to \
+                     satisfy constraint: Member must have length greater than or equal to 1",
+                ));
+            }
 
             let mut items = Vec::new();
+            let mut seen_keys: Vec<HashMap<String, AttributeValue>> = Vec::new();
             for key_val in keys {
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(key_val.clone()).unwrap_or_default();
                 // Reject malformed/under-specified keys the same way
                 // GetItem does instead of coercing to `{}`.
                 validate_key_attributes_in_key(table, &key)?;
+                // AWS rejects a Keys list containing duplicate primary keys.
+                if seen_keys.iter().any(|k| keys_equal(table, k, &key)) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "Provided list of item keys contains duplicates",
+                    ));
+                }
+                seen_keys.push(key.clone());
                 if let Some(idx) = table.find_item_index(&key) {
                     // Honor the per-table ProjectionExpression /
                     // AttributesToGet so callers only get the attributes
@@ -674,6 +694,31 @@ impl DynamoDbService {
                 StatusCode::BAD_REQUEST,
                 serde_json::to_vec(&error_body).unwrap(),
             ));
+        }
+
+        // Validate the primary key of every write BEFORE mutating anything.
+        // A Put whose Item is missing a key attribute (or a Delete/Update with
+        // a malformed Key) is a structural error: real DDB returns a plain
+        // ValidationException, not a TransactionCanceledException. Previously
+        // the apply pass parsed the item with `unwrap_or_default()` and never
+        // validated it, so an item with no PK stored an orphan row and returned
+        // success (bug-hunt 2026-07-01, DynamoDB TransactWriteItems).
+        for ti in transact_items {
+            if let Some(put) = ti.get("Put") {
+                let table_name = put["TableName"].as_str().unwrap_or_default();
+                let item: HashMap<String, AttributeValue> =
+                    serde_json::from_value(put["Item"].clone()).unwrap_or_default();
+                if let Some(table) = state.tables.get(table_name) {
+                    validate_key_in_item(table, &item)?;
+                }
+            } else if let Some(op) = ti.get("Delete").or_else(|| ti.get("Update")) {
+                let table_name = op["TableName"].as_str().unwrap_or_default();
+                let key: HashMap<String, AttributeValue> =
+                    serde_json::from_value(op["Key"].clone()).unwrap_or_default();
+                if let Some(table) = state.tables.get(table_name) {
+                    validate_key_attributes_in_key(table, &key)?;
+                }
+            }
         }
 
         // Snapshot the items vector of every referenced table so we can
@@ -1520,6 +1565,58 @@ mod tests {
             .err()
             .expect("over-100 batch rejected");
         assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn batch_get_item_rejects_empty_and_duplicate_keys() {
+        // bug-hunt 2026-07-01: empty Keys and duplicate keys are both
+        // ValidationExceptions, not a silent success / doubled item.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        let empty = svc
+            .batch_get_item(&req_for(
+                "BatchGetItem",
+                json!({"RequestItems": {"Widgets": {"Keys": []}}}),
+            ))
+            .err()
+            .expect("empty Keys rejected");
+        assert!(format!("{empty:?}").contains("ValidationException"));
+
+        let dup = svc
+            .batch_get_item(&req_for(
+                "BatchGetItem",
+                json!({"RequestItems": {"Widgets": {"Keys": [
+                    {"pk": {"S": "a"}}, {"pk": {"S": "a"}}
+                ]}}}),
+            ))
+            .err()
+            .expect("duplicate keys rejected");
+        assert!(format!("{dup:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn transact_write_items_validates_put_key() {
+        // A Put whose Item lacks the primary key is a ValidationException, not a
+        // stored orphan row (bug-hunt 2026-07-01).
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"notpk": {"S": "x"}}}}
+                ]}),
+            ))
+            .err()
+            .expect("missing-key Put rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+        // No orphan row was stored.
+        assert!(state.read().get("123456789012").unwrap().tables["Widgets"]
+            .items
+            .is_empty());
     }
 
     /// 1.14: BatchWriteItem must reject >25 requests.

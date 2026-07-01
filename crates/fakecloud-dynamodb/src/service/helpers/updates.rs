@@ -188,6 +188,11 @@ pub(crate) fn apply_add_assignment(
     let add_val = expr_attr_values.get(val_ref);
 
     if let Some(add_val) = add_val {
+        // ADD only supports Number (increment) and Set (union). Anything else,
+        // or a value whose type doesn't match the existing attribute's type, is
+        // a ValidationException on real DynamoDB — not a silent no-op (bug-hunt
+        // 2026-07-01, DynamoDB ADD/DELETE type mismatch).
+        let set_types = ["SS", "NS", "BS"];
         if let Some(existing) = item.get(&attr) {
             if let (Some(existing_num), Some(add_num)) = (
                 existing.get("N").and_then(|n| n.as_str()),
@@ -197,43 +202,99 @@ pub(crate) fn apply_add_assignment(
                 if let Some(num_str) = decimal_add_sub(existing_num, add_num, true) {
                     item.insert(attr, json!({"N": num_str}));
                 }
-            } else if let Some(existing_set) = existing.get("SS").and_then(|v| v.as_array()) {
-                if let Some(add_set) = add_val.get("SS").and_then(|v| v.as_array()) {
-                    let mut merged: Vec<Value> = existing_set.clone();
-                    for v in add_set {
-                        if !merged.contains(v) {
-                            merged.push(v.clone());
-                        }
+            } else if let Some(set_type) = set_types
+                .iter()
+                .find(|t| existing.get(**t).and_then(|v| v.as_array()).is_some())
+            {
+                let existing_set = existing.get(*set_type).and_then(|v| v.as_array()).unwrap();
+                let Some(add_set) = add_val.get(*set_type).and_then(|v| v.as_array()) else {
+                    return Err(add_type_mismatch(&attr));
+                };
+                let mut merged: Vec<Value> = existing_set.clone();
+                for v in add_set {
+                    if !merged.contains(v) {
+                        merged.push(v.clone());
                     }
-                    item.insert(attr, json!({"SS": merged}));
                 }
-            } else if let Some(existing_set) = existing.get("NS").and_then(|v| v.as_array()) {
-                if let Some(add_set) = add_val.get("NS").and_then(|v| v.as_array()) {
-                    let mut merged: Vec<Value> = existing_set.clone();
-                    for v in add_set {
-                        if !merged.contains(v) {
-                            merged.push(v.clone());
-                        }
-                    }
-                    item.insert(attr, json!({"NS": merged}));
-                }
-            } else if let Some(existing_set) = existing.get("BS").and_then(|v| v.as_array()) {
-                if let Some(add_set) = add_val.get("BS").and_then(|v| v.as_array()) {
-                    let mut merged: Vec<Value> = existing_set.clone();
-                    for v in add_set {
-                        if !merged.contains(v) {
-                            merged.push(v.clone());
-                        }
-                    }
-                    item.insert(attr, json!({"BS": merged}));
-                }
+                let mut obj = serde_json::Map::new();
+                obj.insert((*set_type).to_string(), json!(merged));
+                item.insert(attr, Value::Object(obj));
+            } else {
+                // Existing attribute is neither Number nor Set, or the add value
+                // is a different type than the existing Number/Set.
+                return Err(add_type_mismatch(&attr));
             }
         } else {
+            // New attribute: ADD only allows a WELL-FORMED Number or Set value.
+            // A bare type-tag check (`get("N").is_some()`) would persist
+            // malformed AttributeValues like {"N":5} (not a string),
+            // {"N":"abc"} (unparseable) or {"SS":"x"} (not an array). AWS
+            // rejects these with ValidationException (Cubic P2, 2026-07-01).
+            if !is_wellformed_add_operand(add_val) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "An operand in the update expression has an incorrect data type",
+                ));
+            }
             item.insert(attr, add_val.clone());
         }
     }
 
     Ok(())
+}
+
+/// Whether an ADD operand for a brand-new attribute is a well-formed Number or
+/// Set. Number: `{"N": "<decimal>"}` with a parseable string. String set:
+/// `{"SS": [strings]}`. Number set: `{"NS": [decimal strings]}`. Binary set:
+/// `{"BS": [base64 strings]}`. Anything else is rejected so malformed
+/// AttributeValues never reach storage.
+fn is_wellformed_add_operand(v: &Value) -> bool {
+    use crate::service::helpers::partiql::is_valid_number;
+    if let Some(n) = v.get("N") {
+        return n.as_str().map(is_valid_number).unwrap_or(false);
+    }
+    if let Some(ss) = v.get("SS") {
+        return ss
+            .as_array()
+            .map(|a| !a.is_empty() && a.iter().all(|e| e.is_string()))
+            .unwrap_or(false);
+    }
+    if let Some(ns) = v.get("NS") {
+        return ns
+            .as_array()
+            .map(|a| {
+                !a.is_empty()
+                    && a.iter()
+                        .all(|e| e.as_str().map(is_valid_number).unwrap_or(false))
+            })
+            .unwrap_or(false);
+    }
+    if let Some(bs) = v.get("BS") {
+        use base64::Engine;
+        return bs
+            .as_array()
+            .map(|a| {
+                !a.is_empty()
+                    && a.iter().all(|e| {
+                        e.as_str()
+                            .map(|s| base64::engine::general_purpose::STANDARD.decode(s).is_ok())
+                            .unwrap_or(false)
+                    })
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
+/// ADD requires the operand type to match the existing attribute (Number to a
+/// Number, a set of the same element type to a set).
+fn add_type_mismatch(attr: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!("Type mismatch for attribute to update: {attr}"),
+    )
 }
 
 pub(crate) fn apply_delete_assignment(
@@ -294,6 +355,16 @@ pub(crate) fn apply_delete_assignment(
             } else {
                 item.insert(attr, json!({"BS": filtered}));
             }
+        } else {
+            // DELETE `attr :val` removes set elements; the existing attribute
+            // and the operand must be sets of the same element type. Any other
+            // pairing is a ValidationException, not a silent no-op (bug-hunt
+            // 2026-07-01, DynamoDB ADD/DELETE type mismatch).
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!("Type mismatch for attribute to update: {attr}"),
+            ));
         }
     }
 
@@ -307,6 +378,107 @@ mod remove_path_tests {
 
     fn names() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    fn vals(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn add_number_to_existing_set_is_type_mismatch() {
+        // ADD :n to an existing SS attribute is a ValidationException, not a
+        // silent no-op (bug-hunt 2026-07-01, DynamoDB ADD/DELETE mismatch).
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["x"]}));
+        let err = apply_add_assignment(
+            &mut item,
+            "tags :n",
+            &names(),
+            &vals(&[(":n", json!({"N": "1"}))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("ValidationException"));
+        // The set is unchanged.
+        assert_eq!(item["tags"], json!({"SS": ["x"]}));
+    }
+
+    #[test]
+    fn add_string_to_new_attribute_is_rejected() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        let err = apply_add_assignment(
+            &mut item,
+            "note :s",
+            &names(),
+            &vals(&[(":s", json!({"S": "hi"}))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    #[test]
+    fn add_malformed_number_to_new_attribute_is_rejected() {
+        // {"N": 5} is not a string, {"N":"abc"} is unparseable, {"SS":"x"} is
+        // not an array -- none may reach storage (Cubic P2, 2026-07-01).
+        for bad in [
+            json!({"N": 5}),
+            json!({"N": "abc"}),
+            json!({"SS": "x"}),
+            json!({"BS": ["not base64!"]}),
+        ] {
+            let mut item: HashMap<String, AttributeValue> = HashMap::new();
+            let err = apply_add_assignment(
+                &mut item,
+                "note :v",
+                &names(),
+                &vals(&[(":v", bad.clone())]),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:?}").contains("ValidationException"),
+                "expected rejection for {bad:?}"
+            );
+            assert!(item.is_empty(), "malformed operand persisted: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn add_number_increments_and_set_unions() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "5"}));
+        item.insert("tags".to_string(), json!({"SS": ["x"]}));
+        apply_add_assignment(
+            &mut item,
+            "count :n",
+            &names(),
+            &vals(&[(":n", json!({"N": "3"}))]),
+        )
+        .unwrap();
+        apply_add_assignment(
+            &mut item,
+            "tags :s",
+            &names(),
+            &vals(&[(":s", json!({"SS": ["y"]}))]),
+        )
+        .unwrap();
+        assert_eq!(item["count"], json!({"N": "8"}));
+        assert_eq!(item["tags"], json!({"SS": ["x", "y"]}));
+    }
+
+    #[test]
+    fn delete_on_non_set_is_type_mismatch() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "5"}));
+        let err = apply_delete_assignment(
+            &mut item,
+            "count :s",
+            &names(),
+            &vals(&[(":s", json!({"SS": ["y"]}))]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("ValidationException"));
     }
 
     // bug-audit 2026-06-27, T1.3: REMOVE of a nested map path / list index used

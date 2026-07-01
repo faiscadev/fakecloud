@@ -11,6 +11,9 @@ use super::*;
 /// unparseable. Handles exponent notation and negative zero.
 fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // A malformed Number string has no defined ordering; callers that care about
+    // equality (values_equal) pre-check validity, so leaving this Equal keeps
+    // range/order comparisons undefined rather than inventing a lexical order.
     let (xn, xd) = match normalize_decimal(x) {
         Some(v) => v,
         None => return Ordering::Equal,
@@ -32,6 +35,13 @@ fn compare_number_strings(x: &str, y: &str) -> std::cmp::Ordering {
     } else {
         mag
     }
+}
+
+/// Whether `s` is a well-formed DynamoDB Number literal (a decimal string that
+/// `normalize_decimal` can parse). Used to reject malformed `{"N":...}` operands
+/// before they are persisted (ADD on a new attribute, bug-hunt 2026-07-01).
+pub(crate) fn is_valid_number(s: &str) -> bool {
+    normalize_decimal(s).is_some()
 }
 
 /// Decompose a decimal string into `(is_negative, (int_digits, frac_digits))`
@@ -283,8 +293,19 @@ pub(crate) fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
             if let (Some(("N", an)), Some(("N", bn))) =
                 (attribute_type_and_value(av), attribute_type_and_value(bv))
             {
-                compare_number_strings(an.as_str().unwrap_or("0"), bn.as_str().unwrap_or("0"))
-                    == std::cmp::Ordering::Equal
+                let (an, bn) = (
+                    an.as_str().unwrap_or_default(),
+                    bn.as_str().unwrap_or_default(),
+                );
+                // Only canonicalize when BOTH are valid numbers. A malformed
+                // operand ({"N":"abc"}) must not compare equal to a valid stored
+                // key, so fall back to strict byte-equality there -- otherwise
+                // DeleteItem could delete the wrong row (Cubic P1, 2026-07-01).
+                if is_valid_number(an) && is_valid_number(bn) {
+                    compare_number_strings(an, bn) == std::cmp::Ordering::Equal
+                } else {
+                    av == bv
+                }
             } else {
                 av == bv
             }

@@ -348,20 +348,21 @@ impl DynamoTable {
         let hash_key = self.hash_key_name();
         let range_key = self.range_key_name();
 
+        // Compare keys with numeric-aware equality: a Number key stored as
+        // `{"N":"1"}` must match a lookup of `{"N":"1.0"}` (they are the same
+        // DynamoDB number). Raw JSON `==` treated them as distinct, so the
+        // write/lookup path could miss an existing item or store a duplicate
+        // even though the compare/filter path was already canonical
+        // (bug-hunt 2026-07-01, DynamoDB write-path number-canon).
+        use crate::service::helpers::partiql::values_equal;
         self.items.iter().position(|item| {
-            let hash_match = match (item.get(hash_key), key.get(hash_key)) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            };
+            let hash_match =
+                values_equal(item.get(hash_key), key.get(hash_key)) && item.get(hash_key).is_some();
             if !hash_match {
                 return false;
             }
             match range_key {
-                Some(rk) => match (item.get(rk), key.get(rk)) {
-                    (Some(a), Some(b)) => a == b,
-                    (None, None) => true,
-                    _ => false,
-                },
+                Some(rk) => values_equal(item.get(rk), key.get(rk)),
                 None => true,
             }
         })
@@ -677,6 +678,40 @@ mod tests {
         item.insert("other".to_string(), json!({"N": "42"}));
         t.record_item_access(&item);
         assert_eq!(t.contributor_insights_counters.values().sum::<u64>(), 1);
+    }
+
+    #[test]
+    fn find_item_index_canonicalizes_number_keys() {
+        // Write path stored `{"N":"1.0"}`; a lookup of `{"N":"1"}` must find it
+        // (same DynamoDB number) rather than miss/duplicate (bug-hunt 2026-07-01).
+        let mut t = table_with_hash_key("pk");
+        let mut item = HashMap::new();
+        item.insert("pk".to_string(), json!({"N": "1.0"}));
+        t.items.push(item);
+
+        let mut lookup = HashMap::new();
+        lookup.insert("pk".to_string(), json!({"N": "1"}));
+        assert_eq!(t.find_item_index(&lookup), Some(0));
+
+        // A different number still misses.
+        let mut other = HashMap::new();
+        other.insert("pk".to_string(), json!({"N": "2"}));
+        assert_eq!(t.find_item_index(&other), None);
+    }
+
+    #[test]
+    fn find_item_index_malformed_number_key_does_not_match_valid() {
+        // A malformed Number operand must not compare equal to a valid stored
+        // numeric key -- otherwise DeleteItem{"N":"abc"} could delete the wrong
+        // row (Cubic P1, 2026-07-01).
+        let mut t = table_with_hash_key("pk");
+        let mut item = HashMap::new();
+        item.insert("pk".to_string(), json!({"N": "5"}));
+        t.items.push(item);
+
+        let mut bad = HashMap::new();
+        bad.insert("pk".to_string(), json!({"N": "abc"}));
+        assert_eq!(t.find_item_index(&bad), None);
     }
 
     #[test]
