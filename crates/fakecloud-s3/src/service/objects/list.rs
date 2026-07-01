@@ -132,7 +132,12 @@ impl S3Service {
             ));
         }
 
-        let next_marker = if is_truncated {
+        // Per the S3 ListObjects (v1) contract, NextMarker is only returned
+        // for a truncated listing when a Delimiter was supplied. Without a
+        // delimiter the client must resume from the last returned key itself,
+        // and AWS omits NextMarker entirely. Emitting it unconditionally
+        // misleads clients that key off its presence.
+        let next_marker = if is_truncated && delimiter.is_some() {
             format!("<NextMarker>{}</NextMarker>", xml_escape(&last_key))
         } else {
             String::new()

@@ -280,8 +280,14 @@ pub(crate) fn process_batch_send_entry(
     } else {
         None
     };
+    // Scope the dedup cache key per message group when the queue's
+    // DeduplicationScope is `messageGroup`; queue-wide otherwise. The stored
+    // MessageDeduplicationId echoed to receivers stays the raw value.
+    let dedup_key = effective_dedup_id
+        .as_deref()
+        .map(|d| dedup_cache_key(queue, d, message_group_id.as_deref()));
     if cfg.is_fifo {
-        if let Some(ref dedup_id) = effective_dedup_id {
+        if let Some(ref dedup_id) = dedup_key {
             queue.dedup_cache.retain(|_, e| e.expiry > cfg.now);
             if let Some(existing) = queue.dedup_cache.get(dedup_id) {
                 let mut entry_resp = json!({
@@ -306,7 +312,7 @@ pub(crate) fn process_batch_send_entry(
     let sequence_number = if cfg.is_fifo {
         let seq = queue.next_sequence_number;
         queue.next_sequence_number += 1;
-        Some(seq.to_string())
+        Some(format_sequence_number(seq))
     } else {
         None
     };
@@ -346,7 +352,7 @@ pub(crate) fn process_batch_send_entry(
     queue.messages.push_back(msg);
 
     if cfg.is_fifo {
-        if let Some(dedup_id) = effective_dedup_id {
+        if let Some(dedup_id) = dedup_key {
             queue.dedup_cache.insert(
                 dedup_id,
                 crate::state::DedupEntry {
@@ -1277,6 +1283,75 @@ pub(crate) fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:064x}", hasher.finalize())
+}
+
+/// Compute the key used to look up / store a FIFO dedup-cache entry.
+///
+/// AWS FIFO queues support two `DeduplicationScope` values:
+///  - `queue` (the default): deduplication is queue-wide — the same
+///    MessageDeduplicationId (or content hash) anywhere on the queue is a
+///    duplicate regardless of message group.
+///  - `messageGroup`: deduplication is scoped per message group — the same
+///    dedup id in two DIFFERENT groups is NOT a duplicate and both messages
+///    must be delivered.
+///
+/// The stored/echoed `MessageDeduplicationId` on the message is unchanged
+/// (callers still see the raw id); only the cache key is scoped. The group
+/// id is length-prefixed so `(group="a", dedup="b:c")` can't collide with
+/// `(group="a:b", dedup="c")`.
+pub(crate) fn dedup_cache_key(
+    queue: &SqsQueue,
+    dedup_id: &str,
+    message_group_id: Option<&str>,
+) -> String {
+    let per_group = queue
+        .attributes
+        .get("DeduplicationScope")
+        .map(String::as_str)
+        == Some("messageGroup");
+    if per_group {
+        let group = message_group_id.unwrap_or("");
+        format!("{}:{}:{}", group.len(), group, dedup_id)
+    } else {
+        dedup_id.to_string()
+    }
+}
+
+/// Base offset that projects the internal per-queue send counter onto the
+/// ~20-digit space AWS uses for FIFO `SequenceNumber` values. Real AWS
+/// returns large monotonic numbers (e.g. `18850381454051329024`), not the
+/// small consecutive integers a bare counter would produce.
+pub(crate) const SEQUENCE_NUMBER_BASE: u64 = 10_000_000_000_000_000_000;
+
+/// Render a FIFO sequence number: a fixed 20-digit base plus the queue's
+/// monotonic send counter. Strictly increasing per queue (each send bumps
+/// the counter), matching AWS's contract that SequenceNumber grows with
+/// send order while looking like a real AWS value.
+pub(crate) fn format_sequence_number(counter: u64) -> String {
+    (SEQUENCE_NUMBER_BASE + counter).to_string()
+}
+
+/// Encode a `ListQueues` pagination cursor. The token carries the last
+/// queue URL emitted on the page rather than a positional offset, so a
+/// concurrent create/delete between pages can't shift the window and cause
+/// the next page to skip or duplicate queues. Base64 keeps it opaque on the
+/// wire.
+pub(crate) fn encode_list_queues_token(marker: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(marker.as_bytes())
+}
+
+/// Decode a `ListQueues` pagination cursor produced by
+/// [`encode_list_queues_token`]. Falls back to treating the token as a raw
+/// marker for forward-compat with any client that doesn't round-trip the
+/// opaque form.
+pub(crate) fn decode_list_queues_token(token: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.as_bytes())
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_else(|| token.to_string())
 }
 
 /// Find the message_id associated with a receipt handle by checking both the

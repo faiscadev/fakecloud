@@ -190,8 +190,15 @@ impl SqsService {
                 None
             };
 
+            // Cache key is scoped per message group when the queue's
+            // DeduplicationScope is `messageGroup`; queue-wide otherwise. The
+            // message's own dedup id (echoed to receivers) stays the raw value.
+            let dedup_key = effective_dedup_id
+                .as_deref()
+                .map(|d| dedup_cache_key(queue, d, message_group_id.as_deref()));
+
             if queue.is_fifo {
-                if let Some(ref dedup_id) = effective_dedup_id {
+                if let Some(ref dedup_id) = dedup_key {
                     let now = Utc::now();
                     queue.dedup_cache.retain(|_, e| e.expiry > now);
                     if let Some(entry) = queue.dedup_cache.get(dedup_id) {
@@ -257,7 +264,7 @@ impl SqsService {
             let sequence_number = if queue.is_fifo {
                 let seq = queue.next_sequence_number;
                 queue.next_sequence_number += 1;
-                Some(seq.to_string())
+                Some(format_sequence_number(seq))
             } else {
                 None
             };
@@ -300,9 +307,9 @@ impl SqsService {
             // the queue. Earlier failures (encryption, size limit) leave
             // the dedup_id un-cached so the caller's retry can succeed.
             if queue.is_fifo {
-                if let Some(ref dedup_id) = effective_dedup_id {
+                if let Some(dedup_id) = dedup_key {
                     queue.dedup_cache.insert(
-                        dedup_id.clone(),
+                        dedup_id,
                         crate::state::DedupEntry {
                             message_id: message_id.clone(),
                             sequence_number: sequence_number.clone(),
