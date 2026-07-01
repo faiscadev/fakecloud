@@ -11,6 +11,7 @@
 //! an *allow*-list rather than a deny-list to match fakecloud's
 //! parity-per-implemented-service invariant.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -209,12 +210,59 @@ impl<'a> GoTestRunner<'a> {
             cmd.env(key, &self.endpoint);
         }
 
-        let output = cmd.output().expect("run go test");
+        // Stream `go test` output live (echo each line to our own stdout/stderr
+        // as it arrives) instead of buffering until exit. `go test -v` can run
+        // for many minutes; if a single subtest hangs and CI kills the job on
+        // its timeout, a buffered `cmd.output()` would discard everything and
+        // the CI log would show no `=== RUN` / `--- PASS` lines — leaving the
+        // culprit invisible (exactly the blind spot a pipes-shard hang hit).
+        // Streaming means the last un-paired `=== RUN` in the job log names the
+        // hung test even when the process is killed mid-run. We still collect
+        // the bytes so `assert_pass` can parse the failure summary.
+        let mut child = cmd.spawn().expect("spawn go test");
+        let child_stdout = child.stdout.take().expect("piped stdout");
+        let child_stderr = child.stderr.take().expect("piped stderr");
+        let stdout_handle = std::thread::spawn(move || tee(child_stdout, false));
+        let stderr_handle = std::thread::spawn(move || tee(child_stderr, true));
+        let status = child.wait().expect("wait for go test");
+        let stdout = stdout_handle.join().unwrap_or_default();
+        let stderr = stderr_handle.join().unwrap_or_default();
         GoTestResult {
-            success: output.status.success(),
-            output,
+            success: status.success(),
+            output: Output {
+                status,
+                stdout,
+                stderr,
+            },
         }
     }
+}
+
+/// Read a child pipe line by line, echoing each line to the parent's stdout
+/// (or stderr) as it arrives so the output survives a timeout-kill, while
+/// accumulating the raw bytes for later parsing.
+fn tee<R: std::io::Read>(pipe: R, is_stderr: bool) -> Vec<u8> {
+    let mut collected = Vec::new();
+    let mut reader = BufReader::new(pipe);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                collected.extend_from_slice(&line);
+                if is_stderr {
+                    let _ = std::io::stderr().write_all(&line);
+                    let _ = std::io::stderr().flush();
+                } else {
+                    let _ = std::io::stdout().write_all(&line);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    collected
 }
 
 pub struct GoTestResult {
