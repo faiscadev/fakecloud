@@ -8,6 +8,7 @@ mod streams;
 mod tables;
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -247,21 +248,16 @@ impl DynamoDbService {
         }
     }
 
-    /// Persist the current in-memory state as a snapshot. Called after
-    /// every state-mutating action. A noop when no snapshot store is
-    /// configured (i.e. `StorageMode::Memory`).
+    /// Persist the current in-memory state to the provided snapshot store.
     ///
     /// The snapshot lock serializes the full clone + serialize + write
     /// so concurrent mutators cannot leave older bytes on disk, and
     /// serialization + the blocking file write are offloaded to the
     /// blocking pool to keep Tokio workers responsive.
-    async fn save_snapshot(&self) {
-        save_dynamodb_snapshot(
-            &self.state,
-            self.snapshot_store.clone(),
-            &self.snapshot_lock,
-        )
-        .await;
+    pub async fn save_snapshot_to_store(&self, store: Arc<dyn SnapshotStore>) -> io::Result<()> {
+        save_dynamodb_snapshot(&self.state, Some(store), &self.snapshot_lock)
+            .await
+            .map(|_| ())
     }
 
     /// Build a hook that persists the current DynamoDB state when invoked, or
@@ -278,9 +274,23 @@ impl DynamoDbService {
             let store = store.clone();
             let lock = lock.clone();
             Box::pin(async move {
-                save_dynamodb_snapshot(&state, Some(store), &lock).await;
+                if let Err(err) = save_dynamodb_snapshot(&state, Some(store), &lock).await {
+                    tracing::error!(%err, "dynamodb snapshot save failed");
+                }
             })
         }))
+    }
+
+    /// Persist the current in-memory state to the configured snapshot store.
+    /// Returns `Ok(false)` when no snapshot store is configured (i.e.
+    /// `StorageMode::Memory`).
+    pub async fn save_snapshot(&self) -> io::Result<bool> {
+        save_dynamodb_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await
     }
 
     fn kinesis_target(table: &DynamoTable) -> Option<KinesisDeliveryTarget> {
@@ -396,9 +406,9 @@ pub async fn save_dynamodb_snapshot(
     state: &SharedDynamoDbState,
     store: Option<Arc<dyn SnapshotStore>>,
     lock: &tokio::sync::Mutex<()>,
-) {
+) -> io::Result<bool> {
     let Some(store) = store else {
-        return;
+        return Ok(false);
     };
     let _guard = lock.lock().await;
     let snapshot = DynamoDbSnapshot {
@@ -413,9 +423,15 @@ pub async fn save_dynamodb_snapshot(
     })
     .await;
     match join {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::error!(%err, "failed to write dynamodb snapshot"),
-        Err(err) => tracing::error!(%err, "dynamodb snapshot task panicked"),
+        Ok(Ok(())) => Ok(true),
+        Ok(Err(err)) => Err(io::Error::new(
+            err.kind(),
+            format!("failed to write dynamodb snapshot: {err}"),
+        )),
+        Err(err) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("dynamodb snapshot task panicked: {err}"),
+        )),
     }
 }
 
@@ -513,7 +529,9 @@ impl AwsService for DynamoDbService {
             )),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
-            self.save_snapshot().await;
+            if let Err(err) = self.save_snapshot().await {
+                tracing::error!(%err, "dynamodb snapshot save failed");
+            }
         }
         result
     }

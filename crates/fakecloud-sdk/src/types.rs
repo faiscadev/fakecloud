@@ -786,6 +786,12 @@ pub struct TtlTickResponse {
     pub expired_items: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamoDbSnapshotSaveRequest {
+    pub data_path: Option<String>,
+}
+
 // ── SecretsManager ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

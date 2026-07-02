@@ -1,6 +1,8 @@
 mod helpers;
 
 use std::collections::HashMap;
+use std::io;
+use std::path::Path;
 
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{
@@ -9,6 +11,273 @@ use aws_sdk_dynamodb::types::{
     ScalarAttributeType, TimeToLiveSpecification,
 };
 use helpers::TestServer;
+
+async fn create_snapshot_test_table(client: &aws_sdk_dynamodb::Client, table_name: &str) {
+    client
+        .create_table()
+        .table_name(table_name)
+        .billing_mode(BillingMode::PayPerRequest)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+async fn put_snapshot_test_item(
+    client: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    pk: &str,
+    payload: &str,
+) {
+    client
+        .put_item()
+        .table_name(table_name)
+        .item("pk", AttributeValue::S(pk.to_string()))
+        .item("payload", AttributeValue::S(payload.to_string()))
+        .send()
+        .await
+        .unwrap();
+}
+
+async fn assert_snapshot_test_item(
+    client: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    pk: &str,
+    payload: &str,
+) {
+    let resp = client
+        .get_item()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(pk.to_string()))
+        .send()
+        .await
+        .unwrap();
+    let item = resp.item().expect("snapshot test item should exist");
+    assert_eq!(
+        item.get("payload"),
+        Some(&AttributeValue::S(payload.to_string())),
+    );
+}
+
+async fn post_snapshot_save(endpoint: &str, body: Option<serde_json::Value>) -> reqwest::Response {
+    let request =
+        reqwest::Client::new().post(format!("{endpoint}/_fakecloud/dynamodb/snapshot/save",));
+    let request = if let Some(body) = body {
+        request.json(&body)
+    } else {
+        request
+    };
+    request.send().await.unwrap()
+}
+
+fn assert_snapshot_file_contains_item(
+    snapshot_path: &Path,
+    table_name: &str,
+    pk: &str,
+    payload: &str,
+) {
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+    assert_eq!(
+        snapshot.get("schema_version").and_then(|v| v.as_u64()),
+        Some(2),
+    );
+
+    let table = snapshot
+        .pointer("/accounts/accounts")
+        .and_then(|v| v.as_object())
+        .and_then(|accounts| {
+            accounts.values().find_map(|account| {
+                account
+                    .get("tables")
+                    .and_then(|tables| tables.get(table_name))
+            })
+        })
+        .unwrap_or_else(|| panic!("snapshot should contain table {table_name}: {snapshot}"));
+
+    let items = table
+        .get("items")
+        .and_then(|v| v.as_array())
+        .expect("snapshot table should contain items");
+    assert!(
+        items.iter().any(|item| {
+            item.get("pk")
+                .and_then(|v| v.get("S"))
+                .and_then(|v| v.as_str())
+                == Some(pk)
+                && item
+                    .get("payload")
+                    .and_then(|v| v.get("S"))
+                    .and_then(|v| v.as_str())
+                    == Some(payload)
+        }),
+        "snapshot should contain item {pk}: {items:?}",
+    );
+}
+
+fn remove_file_if_exists(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => panic!("failed to remove {}: {err}", path.display()),
+    }
+}
+
+fn write_fakecloud_version_file(data_path: &Path) {
+    std::fs::write(
+        data_path.join("fakecloud.version.toml"),
+        format!(
+            "format_version = 1\nfakecloud_version = {:?}\ncreated_at = \"test\"\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn snapshot_save_endpoint_writes_requested_data_path_and_reloads() {
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let server = TestServer::start_persistent(source.path()).await;
+    let client = server.dynamodb_client().await;
+
+    create_snapshot_test_table(&client, "ManualSnapshot").await;
+    put_snapshot_test_item(&client, "ManualSnapshot", "manual#1", "explicit-path").await;
+
+    let resp = post_snapshot_save(
+        server.endpoint(),
+        Some(serde_json::json!({
+            "dataPath": target.path().display().to_string(),
+        })),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["saved"].as_bool(),
+        Some(true),
+    );
+
+    let snapshot_path = target.path().join("dynamodb").join("snapshot.json");
+    assert!(!target.path().join("fakecloud.version.toml").exists());
+    assert_snapshot_file_contains_item(
+        &snapshot_path,
+        "ManualSnapshot",
+        "manual#1",
+        "explicit-path",
+    );
+
+    write_fakecloud_version_file(target.path());
+    drop(server);
+    let restored = TestServer::start_persistent(target.path()).await;
+    let client = restored.dynamodb_client().await;
+    assert_snapshot_test_item(&client, "ManualSnapshot", "manual#1", "explicit-path").await;
+}
+
+#[tokio::test]
+async fn snapshot_save_endpoint_writes_requested_data_path_without_configured_store() {
+    let target = tempfile::tempdir().unwrap();
+    let server = TestServer::start_with_env(&[("FAKECLOUD_CONTAINER_CLI", "false")]).await;
+    let client = server.dynamodb_client().await;
+
+    create_snapshot_test_table(&client, "MemorySnapshot").await;
+    put_snapshot_test_item(&client, "MemorySnapshot", "memory#1", "explicit-path").await;
+
+    let resp = post_snapshot_save(
+        server.endpoint(),
+        Some(serde_json::json!({
+            "dataPath": target.path().display().to_string(),
+        })),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["saved"].as_bool(),
+        Some(true),
+    );
+
+    let snapshot_path = target.path().join("dynamodb").join("snapshot.json");
+    assert!(!target.path().join("fakecloud.version.toml").exists());
+    assert_snapshot_file_contains_item(
+        &snapshot_path,
+        "MemorySnapshot",
+        "memory#1",
+        "explicit-path",
+    );
+
+    write_fakecloud_version_file(target.path());
+    drop(server);
+    let restored = TestServer::start_persistent(target.path()).await;
+    let client = restored.dynamodb_client().await;
+    assert_snapshot_test_item(&client, "MemorySnapshot", "memory#1", "explicit-path").await;
+}
+
+#[tokio::test]
+async fn snapshot_save_endpoint_rejects_missing_store_without_data_path() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_CONTAINER_CLI", "false")]).await;
+
+    let resp = post_snapshot_save(server.endpoint(), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("dynamodb snapshot store is not configured and request body did not include dataPath"),
+    );
+}
+
+#[tokio::test]
+async fn snapshot_save_endpoint_uses_configured_store_without_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.dynamodb_client().await;
+
+    create_snapshot_test_table(&client, "ConfiguredSnapshot").await;
+    put_snapshot_test_item(
+        &client,
+        "ConfiguredSnapshot",
+        "configured#1",
+        "configured-store",
+    )
+    .await;
+
+    let snapshot_path = tmp.path().join("dynamodb").join("snapshot.json");
+    remove_file_if_exists(&snapshot_path);
+
+    let resp = post_snapshot_save(server.endpoint(), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["saved"].as_bool(),
+        Some(true),
+    );
+    assert_snapshot_file_contains_item(
+        &snapshot_path,
+        "ConfiguredSnapshot",
+        "configured#1",
+        "configured-store",
+    );
+
+    server.restart().await;
+    let client = server.dynamodb_client().await;
+    assert_snapshot_test_item(
+        &client,
+        "ConfiguredSnapshot",
+        "configured#1",
+        "configured-store",
+    )
+    .await;
+}
 
 /// Full round-trip: create tables, populate items across every attribute
 /// type, configure TTL + tags + GSIs + LSIs, restart, and assert everything
