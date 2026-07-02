@@ -120,6 +120,14 @@ pub(crate) fn resolve_override(
     s.custom_responses.get(model_id).cloned()
 }
 
+/// Serializes tests across this crate that mutate the process-global
+/// `FAKECLOUD_BEDROCK_ECHO` / `BEDROCK_ECHO` env vars. The `test` CI job runs
+/// `cargo test` (one process, threaded), so without this lock the echo-mode
+/// tests in `streaming.rs` and `prompt.rs` race on the shared environment.
+/// Poison-tolerant: a panicking holder must not wedge the rest of the suite.
+#[cfg(test)]
+pub(crate) static ECHO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +330,7 @@ mod tests {
 
     #[test]
     fn echo_enabled_reads_canonical_var() {
+        let _env = ECHO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_canonical = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
         let prev_legacy = std::env::var("BEDROCK_ECHO").ok();
         // SAFETY: env is process-global; we restore both vars below.
