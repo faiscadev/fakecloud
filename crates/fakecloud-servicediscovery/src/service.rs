@@ -107,6 +107,23 @@ impl ServiceDiscoveryService {
         )
         .await;
     }
+
+    /// Persist hook for the CloudFormation provisioner; `None` in memory mode.
+    /// Lets a CFN-provisioned Cloud Map namespace/service/instance survive a
+    /// restart, matching the direct-API persistence path (#1766 class).
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
 }
 
 #[async_trait]

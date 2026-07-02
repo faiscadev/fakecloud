@@ -2518,6 +2518,145 @@ mod tests {
         assert_eq!(parse_s3_url("https://s3.amazonaws.com/bucket-only"), None);
     }
 
+    use crate::template::ResourceDefinition;
+    use serde_json::json;
+
+    fn resource(logical_id: &str, ty: &str, props: serde_json::Value) -> ResourceDefinition {
+        ResourceDefinition {
+            logical_id: logical_id.to_string(),
+            resource_type: ty.to_string(),
+            properties: props,
+        }
+    }
+
+    #[test]
+    fn cfn_provisions_eks_cluster_write_through() {
+        let service = svc();
+        let prov = service.provisioner("stack-id", "000000000000", "us-east-1");
+        let res = prov
+            .create_resource(&resource(
+                "MyCluster",
+                "AWS::EKS::Cluster",
+                json!({
+                    "Name": "prod",
+                    "RoleArn": "arn:aws:iam::000000000000:role/eks",
+                    "ResourcesVpcConfig": {
+                        "SubnetIds": ["subnet-1", "subnet-2"],
+                        "SecurityGroupIds": ["sg-abc"],
+                    },
+                    "Version": "1.30",
+                    "Tags": { "env": "prod" },
+                }),
+            ))
+            .expect("cluster provisions");
+
+        // Ref (physical id) is the cluster name.
+        assert_eq!(res.physical_id, "prod");
+        // Write-through: the owning EKS service now sees the cluster.
+        {
+            let accounts = prov.eks_state.read();
+            let state = accounts.get("000000000000").expect("account exists");
+            let cluster = state.clusters.get("prod").expect("cluster present");
+            assert_eq!(cluster.version, "1.30");
+            assert_eq!(cluster.status, "ACTIVE");
+            assert_eq!(cluster.tags.get("env").map(String::as_str), Some("prod"));
+        }
+        // GetAtt resolves the real Arn / Endpoint the service computed.
+        assert_eq!(
+            prov.get_att(&res, "Arn").as_deref(),
+            Some("arn:aws:eks:us-east-1:000000000000:cluster/prod")
+        );
+        let endpoint = prov.get_att(&res, "Endpoint").expect("endpoint present");
+        assert!(endpoint.starts_with("https://") && endpoint.contains(".eks.amazonaws.com"));
+        assert!(prov
+            .get_att(&res, "ClusterSecurityGroupId")
+            .expect("sg id present")
+            .starts_with("sg-"));
+        assert!(prov
+            .get_att(&res, "OpenIdConnectIssuerUrl")
+            .expect("oidc present")
+            .starts_with("https://oidc.eks.amazonaws.com/id/"));
+
+        // Delete removes it from the owning service.
+        prov.delete_resource(&res).expect("delete ok");
+        assert!(prov
+            .eks_state
+            .read()
+            .get("000000000000")
+            .map(|s| s.clusters.is_empty())
+            .unwrap_or(true));
+    }
+
+    #[test]
+    fn cfn_provisions_servicediscovery_namespace_and_service() {
+        let service = svc();
+        let prov = service.provisioner("stack-id", "000000000000", "us-east-1");
+
+        let ns = prov
+            .create_resource(&resource(
+                "Ns",
+                "AWS::ServiceDiscovery::HttpNamespace",
+                json!({ "Name": "my-namespace", "Description": "test" }),
+            ))
+            .expect("namespace provisions");
+        let ns_id = ns.physical_id.clone();
+        assert!(ns_id.starts_with("ns-"));
+        // Write-through: the namespace is visible in Cloud Map state.
+        {
+            let accounts = prov.servicediscovery_state.read();
+            let state = accounts.get("000000000000").expect("account");
+            assert!(state.namespaces.contains_key(&ns_id));
+        }
+        // Namespace GetAtt.
+        assert!(prov
+            .get_att(&ns, "Arn")
+            .expect("ns arn")
+            .contains(":namespace/ns-"));
+        assert_eq!(prov.get_att(&ns, "Id").as_deref(), Some(ns_id.as_str()));
+
+        // Service registered into the namespace.
+        let svc_res = prov
+            .create_resource(&resource(
+                "Svc",
+                "AWS::ServiceDiscovery::Service",
+                json!({ "Name": "web", "NamespaceId": ns_id }),
+            ))
+            .expect("service provisions");
+        let svc_id = svc_res.physical_id.clone();
+        assert!(svc_id.starts_with("srv-"));
+        // Write-through: the service is visible and bumped the namespace count.
+        {
+            let accounts = prov.servicediscovery_state.read();
+            let state = accounts.get("000000000000").expect("account");
+            let stored = state.services.get(&svc_id).expect("service present");
+            assert_eq!(stored.name, "web");
+            let namespace = state.namespaces.get(&ns.physical_id).expect("ns");
+            assert_eq!(namespace.service_count, 1);
+        }
+        // Service GetAtt: Id / Arn / Name.
+        assert_eq!(
+            prov.get_att(&svc_res, "Id").as_deref(),
+            Some(svc_id.as_str())
+        );
+        assert!(prov
+            .get_att(&svc_res, "Arn")
+            .expect("svc arn")
+            .contains(":service/srv-"));
+        assert_eq!(prov.get_att(&svc_res, "Name").as_deref(), Some("web"));
+
+        // Delete decrements the namespace's service count.
+        prov.delete_resource(&svc_res).expect("delete svc");
+        {
+            let accounts = prov.servicediscovery_state.read();
+            let state = accounts.get("000000000000").expect("account");
+            assert!(!state.services.contains_key(&svc_id));
+            assert_eq!(
+                state.namespaces.get(&ns.physical_id).unwrap().service_count,
+                0
+            );
+        }
+    }
+
     fn deps() -> CloudFormationDeps {
         use fakecloud_dynamodb::DynamoDbState;
         use fakecloud_ecr::EcrState;
@@ -2590,6 +2729,8 @@ mod tests {
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
+            eks: shared::<fakecloud_eks::state::EksState>(),
+            servicediscovery: shared::<fakecloud_servicediscovery::state::ServiceDiscoveryState>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

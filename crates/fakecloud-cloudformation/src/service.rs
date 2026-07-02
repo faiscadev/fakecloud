@@ -127,6 +127,8 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Batch" => "batch",
         "ApplicationAutoScaling" => "application-autoscaling",
         "Pipes" => "pipes",
+        "EKS" => "eks",
+        "ServiceDiscovery" => "servicediscovery",
         _ => return None,
     })
 }
@@ -354,6 +356,8 @@ pub struct CloudFormationDeps {
     pub athena: fakecloud_athena::SharedAthenaState,
     pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub glue: fakecloud_glue::SharedGlueState,
+    pub eks: fakecloud_eks::state::SharedEksState,
+    pub servicediscovery: fakecloud_servicediscovery::state::SharedServiceDiscoveryState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -800,6 +804,8 @@ impl CloudFormationService {
             athena_state: self.deps.athena.clone(),
             firehose_state: self.deps.firehose.clone(),
             glue_state: self.deps.glue.clone(),
+            eks_state: self.deps.eks.clone(),
+            servicediscovery_state: self.deps.servicediscovery.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3033,6 +3039,20 @@ mod tests {
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
+            eks: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            servicediscovery: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

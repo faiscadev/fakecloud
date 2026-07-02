@@ -998,6 +998,8 @@ async fn main() {
             athena: athena_state.clone(),
             firehose: firehose_state.clone(),
             glue: glue_state.clone(),
+            eks: eks_state.clone(),
+            servicediscovery: servicediscovery_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -3949,6 +3951,9 @@ async fn main() {
     if let Some(store) = servicediscovery_snapshot_store {
         servicediscovery_service = servicediscovery_service.with_snapshot_store(store);
     }
+    if let Some(h) = servicediscovery_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("servicediscovery", h);
+    }
     registry.register(Arc::new(servicediscovery_service));
 
     // EKS cluster control plane.
@@ -3977,6 +3982,9 @@ async fn main() {
     let mut eks_service = fakecloud_eks::EksService::new(eks_state.clone());
     if let Some(store) = eks_snapshot_store {
         eks_service = eks_service.with_snapshot_store(store);
+    }
+    if let Some(h) = eks_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("eks", h);
     }
     registry.register(Arc::new(eks_service));
 

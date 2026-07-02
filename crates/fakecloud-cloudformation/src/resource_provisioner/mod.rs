@@ -63,6 +63,7 @@ use fakecloud_ecs::{
     CapacityProvider as EcsCapacityProvider, Cluster as EcsCluster, Service as EcsService,
     SharedEcsState, TagEntry as EcsTagEntry, TaskDefinition as EcsTaskDefinition,
 };
+use fakecloud_eks::state::SharedEksState;
 use fakecloud_elasticache::{
     CacheCluster as EcCacheCluster, CacheParameterGroup, CacheSecurityGroup, CacheSubnetGroup,
     ElastiCacheUser as EcUser, ElastiCacheUserGroup as EcUserGroup,
@@ -104,6 +105,7 @@ use fakecloud_route53::{
 use fakecloud_s3::persistence::bucket_meta_snapshot;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
+use fakecloud_servicediscovery::state::SharedServiceDiscoveryState;
 use fakecloud_ses::{
     ConfigurationSet as SesConfigurationSet, ContactList as SesContactList,
     DedicatedIpPool as SesDedicatedIpPool, EmailIdentity as SesEmailIdentity,
@@ -899,6 +901,8 @@ pub struct ResourceProvisioner {
     pub athena_state: SharedAthenaState,
     pub firehose_state: fakecloud_firehose::SharedFirehoseState,
     pub glue_state: fakecloud_glue::SharedGlueState,
+    pub eks_state: SharedEksState,
+    pub servicediscovery_state: SharedServiceDiscoveryState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1052,6 +1056,7 @@ mod dynamodb;
 mod ec2;
 mod ecr;
 mod ecs;
+mod eks;
 mod eventbridge;
 mod firehose;
 mod glue;
@@ -1065,6 +1070,7 @@ mod rds;
 mod route;
 mod s3;
 mod secrets;
+mod servicediscovery;
 mod ses;
 mod sns;
 mod sqs;
@@ -1300,6 +1306,26 @@ impl ResourceProvisioner {
                 self.create_firehose_delivery_stream(resource)
             }
             "AWS::Glue::Database" => self.create_glue_database(resource),
+            "AWS::EKS::Cluster" => self.create_eks_cluster(resource),
+            "AWS::EKS::Nodegroup" => self.create_eks_nodegroup(resource),
+            "AWS::EKS::FargateProfile" => self.create_eks_fargate_profile(resource),
+            "AWS::EKS::Addon" => self.create_eks_addon(resource),
+            "AWS::EKS::AccessEntry" => self.create_eks_access_entry(resource),
+            "AWS::EKS::IdentityProviderConfig" => {
+                self.create_eks_identity_provider_config(resource)
+            }
+            "AWS::EKS::PodIdentityAssociation" => {
+                self.create_eks_pod_identity_association(resource)
+            }
+            "AWS::ServiceDiscovery::HttpNamespace" => self.create_sd_http_namespace(resource),
+            "AWS::ServiceDiscovery::PublicDnsNamespace" => {
+                self.create_sd_public_dns_namespace(resource)
+            }
+            "AWS::ServiceDiscovery::PrivateDnsNamespace" => {
+                self.create_sd_private_dns_namespace(resource)
+            }
+            "AWS::ServiceDiscovery::Service" => self.create_sd_service(resource),
+            "AWS::ServiceDiscovery::Instance" => self.create_sd_instance(resource),
             "AWS::CloudFormation::Stack" => self.create_cloudformation_stack(resource),
             "AWS::Glue::Table" => self.create_glue_table(resource),
             "AWS::Glue::Partition" => self.create_glue_partition(resource),
@@ -1604,6 +1630,29 @@ impl ResourceProvisioner {
                 self.get_att_cloudformation_stack(&resource.physical_id, attribute)
             }
             "AWS::Pipes::Pipe" => self.get_att_pipes_pipe(&resource.physical_id, attribute),
+            "AWS::EKS::Cluster" => self.get_att_eks_cluster(&resource.physical_id, attribute),
+            "AWS::EKS::Nodegroup" => self.get_att_eks_nodegroup(&resource.physical_id, attribute),
+            "AWS::EKS::FargateProfile" => {
+                self.get_att_eks_fargate_profile(&resource.physical_id, attribute)
+            }
+            "AWS::EKS::Addon" => self.get_att_eks_addon(&resource.physical_id, attribute),
+            "AWS::EKS::AccessEntry" => {
+                self.get_att_eks_access_entry(&resource.physical_id, attribute)
+            }
+            "AWS::EKS::IdentityProviderConfig" => {
+                self.get_att_eks_identity_provider_config(&resource.physical_id, attribute)
+            }
+            "AWS::EKS::PodIdentityAssociation" => {
+                self.get_att_eks_pod_identity_association(&resource.physical_id, attribute)
+            }
+            "AWS::ServiceDiscovery::HttpNamespace"
+            | "AWS::ServiceDiscovery::PublicDnsNamespace"
+            | "AWS::ServiceDiscovery::PrivateDnsNamespace" => {
+                self.get_att_sd_namespace(&resource.physical_id, attribute)
+            }
+            "AWS::ServiceDiscovery::Service" => {
+                self.get_att_sd_service(&resource.physical_id, attribute)
+            }
             _ => None,
         }
     }
@@ -1979,6 +2028,26 @@ impl ResourceProvisioner {
             "AWS::Glue::Table" => self.delete_glue_table(&resource.physical_id),
             "AWS::Glue::Partition" => {
                 self.delete_glue_partition(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::EKS::Cluster" => self.delete_eks_cluster(&resource.physical_id),
+            "AWS::EKS::Nodegroup" => self.delete_eks_nodegroup(&resource.physical_id),
+            "AWS::EKS::FargateProfile" => self.delete_eks_fargate_profile(&resource.physical_id),
+            "AWS::EKS::Addon" => self.delete_eks_addon(&resource.physical_id),
+            "AWS::EKS::AccessEntry" => self.delete_eks_access_entry(&resource.physical_id),
+            "AWS::EKS::IdentityProviderConfig" => {
+                self.delete_eks_identity_provider_config(&resource.physical_id)
+            }
+            "AWS::EKS::PodIdentityAssociation" => {
+                self.delete_eks_pod_identity_association(&resource.physical_id)
+            }
+            "AWS::ServiceDiscovery::HttpNamespace"
+            | "AWS::ServiceDiscovery::PublicDnsNamespace"
+            | "AWS::ServiceDiscovery::PrivateDnsNamespace" => {
+                self.delete_sd_namespace(&resource.physical_id)
+            }
+            "AWS::ServiceDiscovery::Service" => self.delete_sd_service(&resource.physical_id),
+            "AWS::ServiceDiscovery::Instance" => {
+                self.delete_sd_instance(&resource.physical_id, &resource.attributes)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -6335,6 +6404,12 @@ mod tests {
             )),
             glue_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_glue::GlueAccounts::new(),
+            )),
+            eks_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            servicediscovery_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
