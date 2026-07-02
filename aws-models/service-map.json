@@ -186,5 +186,9 @@
   "tagging": {
     "repo_dir": "resource-groups-tagging-api",
     "service_name": "tagging"
+  },
+  "memorydb": {
+    "repo_dir": "memorydb",
+    "service_name": "memorydb"
   }
 }

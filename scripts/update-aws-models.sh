@@ -40,6 +40,7 @@ SERVICES=(
     "rds-data:rds-data"
     "dsql:dsql"
     "elasticache:elasticache"
+    "memorydb:memorydb"
     "sfn:sfn"
     "bedrock:bedrock"
     "bedrock-runtime:bedrock-runtime"

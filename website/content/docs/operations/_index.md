@@ -1703,6 +1703,54 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `TestFailover`
 - `TestMigration`
 
+## [MemoryDB](@/docs/services/memorydb.md)
+
+- `BatchUpdateCluster`
+- `CopySnapshot`
+- `CreateACL`
+- `CreateCluster`
+- `CreateMultiRegionCluster`
+- `CreateParameterGroup`
+- `CreateSnapshot`
+- `CreateSubnetGroup`
+- `CreateUser`
+- `DeleteACL`
+- `DeleteCluster`
+- `DeleteMultiRegionCluster`
+- `DeleteParameterGroup`
+- `DeleteSnapshot`
+- `DeleteSubnetGroup`
+- `DeleteUser`
+- `DescribeACLs`
+- `DescribeClusters`
+- `DescribeEngineVersions`
+- `DescribeEvents`
+- `DescribeMultiRegionClusters`
+- `DescribeMultiRegionParameterGroups`
+- `DescribeMultiRegionParameters`
+- `DescribeParameterGroups`
+- `DescribeParameters`
+- `DescribeReservedNodes`
+- `DescribeReservedNodesOfferings`
+- `DescribeServiceUpdates`
+- `DescribeSnapshots`
+- `DescribeSubnetGroups`
+- `DescribeUsers`
+- `FailoverShard`
+- `ListAllowedMultiRegionClusterUpdates`
+- `ListAllowedNodeTypeUpdates`
+- `ListTags`
+- `PurchaseReservedNodesOffering`
+- `ResetParameterGroup`
+- `TagResource`
+- `UntagResource`
+- `UpdateACL`
+- `UpdateCluster`
+- `UpdateMultiRegionCluster`
+- `UpdateParameterGroup`
+- `UpdateSubnetGroup`
+- `UpdateUser`
+
 ## [Step Functions](@/docs/services/stepfunctions.md)
 
 - `CreateActivity`
