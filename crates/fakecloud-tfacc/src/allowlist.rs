@@ -594,6 +594,19 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "servicediscovery",
+        // AWS Cloud Map is a full control plane (no real Route 53 zone / DNS
+        // data plane is stood up). The Terraform provider's namespace resources
+        // (HTTP, public DNS, private DNS) plus their data sources are
+        // exercisable, along with the synchronous Service resource + data source
+        // and asynchronous instance registration. Create/update/delete calls
+        // mint an Operation that settles to SUCCESS on the provider's first
+        // GetOperation poll, so the create/delete waiters complete. Private DNS
+        // namespaces are VPC-scoped and use the real EC2 VPC the test creates.
+        run_regex: "^TestAccServiceDiscovery",
+        deny: &[],
+    },
+    Service {
         name: "eks",
         // EKS is a full control plane (no real Kubernetes API server is spawned),
         // so the Terraform provider's control-plane cluster resources and data
@@ -1180,6 +1193,12 @@ pub const SHARDS: &[Shard] = &[
             "ACL|User|ParameterGroup|Snapshot|Cluster",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "servicediscovery",
+        service: "servicediscovery",
+        run_regex: "^TestAccServiceDiscovery",
         extra_deny: &[],
     },
     Shard {

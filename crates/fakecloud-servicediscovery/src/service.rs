@@ -704,11 +704,41 @@ impl ServiceDiscoveryService {
         if let Some(d) = b.get("Description").and_then(Value::as_str) {
             check_max_len(d, 1024, "Description")?;
         }
+        // CreatorRequestId and Vpc are both `ResourceId` (max length 64) — AWS
+        // rejects an over-long value with InvalidInput before doing any work.
+        if let Some(crid) = b.get("CreatorRequestId").and_then(Value::as_str) {
+            check_max_len(crid, 64, "CreatorRequestId")?;
+        }
+        if let Some(v) = &vpc {
+            check_max_len(v, 64, "Vpc")?;
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        // A private DNS namespace maps to a Route 53 private hosted zone
+        // associated with the VPC. Creating a second one with the same name in
+        // the same VPC conflicts: AWS still returns an OperationId, then the
+        // operation settles to FAIL carrying Route 53's `ConflictingDomainExists`
+        // (surfaced under the `CANNOT_CREATE_HOSTED_ZONE` operation error code).
+        if type_ == "DNS_PRIVATE" {
+            if let Some(v) = &vpc {
+                let conflict = st.namespaces.values().any(|n| {
+                    n.type_ == "DNS_PRIVATE"
+                        && n.name == name
+                        && n.vpc.as_deref() == Some(v.as_str())
+                });
+                if conflict {
+                    let op_id = self.mint_conflicting_domain_operation(st, v, &name, &req.region);
+                    return ok(json!({ "OperationId": op_id }));
+                }
+            }
+        }
         // Namespace names are unique per account+type. AWS returns
-        // NamespaceAlreadyExists for a duplicate name.
-        if st.namespaces.values().any(|n| n.name == name) {
+        // NamespaceAlreadyExists synchronously for a duplicate HTTP/public-DNS
+        // name. Private DNS namespaces are keyed by (name, VPC) and their
+        // conflict surfaces asynchronously (a failed operation carrying the
+        // Route 53 `ConflictingDomainExists`), so it's handled by the caller
+        // before we get here.
+        if type_ != "DNS_PRIVATE" && st.namespaces.values().any(|n| n.name == name) {
             return Err(fault(
                 "NamespaceAlreadyExists",
                 &format!("A namespace named {name} already exists."),
@@ -761,6 +791,42 @@ impl ServiceDiscoveryService {
                 create_date: now,
                 update_date: now,
                 targets,
+            },
+        );
+        op_id
+    }
+
+    /// Mint a `CREATE_NAMESPACE` operation pre-settled to `FAIL` for a private
+    /// DNS namespace whose (name, VPC) collides with an existing one. The failure
+    /// mirrors Route 53's `ConflictingDomainExists`, surfaced under Cloud Map's
+    /// `CANNOT_CREATE_HOSTED_ZONE` operation error code — the shape the Terraform
+    /// provider parses out of a failed operation.
+    fn mint_conflicting_domain_operation(
+        &self,
+        st: &mut crate::state::ServiceDiscoveryState,
+        vpc: &str,
+        name: &str,
+        region: &str,
+    ) -> String {
+        let op_id = new_operation_id();
+        let now = Utc::now();
+        st.operations.insert(
+            op_id.clone(),
+            Operation {
+                id: op_id.clone(),
+                type_: "CREATE_NAMESPACE".to_string(),
+                status: "FAIL".to_string(),
+                error_code: Some("CANNOT_CREATE_HOSTED_ZONE".to_string()),
+                error_message: Some(format!(
+                    "The VPC that you chose, {vpc} in region {region}, is already \
+                     associated with another private hosted zone that has an \
+                     overlapping name space, {name}.. (Service: AmazonRoute53; \
+                     Status Code: 400; Error Code: ConflictingDomainExists; \
+                     Request ID: {op_id})"
+                )),
+                create_date: now,
+                update_date: now,
+                targets: BTreeMap::new(),
             },
         );
         op_id
@@ -981,8 +1047,19 @@ impl ServiceDiscoveryService {
         check_max_len(&name, 127, "Name")?;
         // NamespaceId is semantically required (a service must live in a
         // namespace) even though the Smithy model leaves it optional. It may be
-        // supplied as a bare id or a namespace ARN.
-        let namespace_id = resource_id_from(req_str(&b, "NamespaceId")?).to_string();
+        // supplied as a bare id or a namespace ARN. DNS services carry it inside
+        // `DnsConfig.NamespaceId` (the Terraform provider only sets the top-level
+        // `NamespaceId` for HTTP services), so fall back to that block.
+        let namespace_id = b
+            .get("NamespaceId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                b.get("DnsConfig")
+                    .and_then(|d| d.get("NamespaceId"))
+                    .and_then(Value::as_str)
+            })
+            .map(|s| resource_id_from(s).to_string())
+            .ok_or_else(|| fault("InvalidInput", "NamespaceId is required."))?;
         if let Some(d) = b.get("Description").and_then(Value::as_str) {
             check_max_len(d, 1024, "Description")?;
         }
@@ -1335,16 +1412,17 @@ impl ServiceDiscoveryService {
         let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
         let instance_id = req_str(&b, "InstanceId")?.to_string();
         let accounts = self.state.read();
-        let Some(svc) = accounts
+        // An instance that lives in a service which no longer exists is itself
+        // gone, so GetInstance reports `InstanceNotFound` (not `ServiceNotFound`)
+        // when the parent service is absent. This matches how Cloud Map resolves
+        // a deleted service on the instance read path and is what the Terraform
+        // provider relies on to converge a destroy (it treats only
+        // `InstanceNotFound` as "removed from state").
+        let Some(inst) = accounts
             .get(&req.account_id)
             .and_then(|s| s.services.get(&service_id))
+            .and_then(|svc| svc.instances.get(&instance_id))
         else {
-            return Err(fault(
-                "ServiceNotFound",
-                &format!("Service {service_id} not found."),
-            ));
-        };
-        let Some(inst) = svc.instances.get(&instance_id) else {
             return Err(fault(
                 "InstanceNotFound",
                 &format!("Instance {instance_id} not found."),
@@ -1913,6 +1991,95 @@ mod tests {
             json!({ "Name": "dup.example.com" }),
         )));
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A private DNS namespace with the same name in the *same* VPC conflicts:
+    /// the create still returns an OperationId, but the operation settles to FAIL
+    /// carrying Route 53's `ConflictingDomainExists` (under `CANNOT_CREATE_HOSTED_ZONE`).
+    #[test]
+    fn private_dns_conflicting_domain_fails_operation() {
+        let s = svc();
+        let first = s
+            .create_private_dns_namespace(&req(
+                "CreatePrivateDnsNamespace",
+                json!({ "Name": "priv.internal", "Vpc": "vpc-abc" }),
+            ))
+            .unwrap();
+        // Settle the first create (SUCCESS).
+        let op1 = body_of(&first)["OperationId"].as_str().unwrap().to_string();
+        s.get_operation(&req("GetOperation", json!({ "OperationId": op1 })))
+            .unwrap();
+
+        // Same name + same VPC -> conflict op.
+        let resp = s
+            .create_private_dns_namespace(&req(
+                "CreatePrivateDnsNamespace",
+                json!({ "Name": "priv.internal", "Vpc": "vpc-abc" }),
+            ))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let op = body_of(
+            &s.get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+                .unwrap(),
+        );
+        let op = &op["Operation"];
+        assert_eq!(op["Status"], "FAIL");
+        assert_eq!(op["ErrorCode"], "CANNOT_CREATE_HOSTED_ZONE");
+        assert!(op["ErrorMessage"]
+            .as_str()
+            .unwrap()
+            .contains("ConflictingDomainExists"));
+
+        // Same name in a *different* VPC is allowed (own hosted zone).
+        s.create_private_dns_namespace(&req(
+            "CreatePrivateDnsNamespace",
+            json!({ "Name": "priv.internal", "Vpc": "vpc-xyz" }),
+        ))
+        .unwrap();
+    }
+
+    /// An over-long CreatorRequestId / Vpc (both `ResourceId`, max 64) is rejected
+    /// with InvalidInput before any hosted-zone work.
+    #[test]
+    fn private_dns_rejects_overlong_resource_ids() {
+        let s = svc();
+        let long = "x".repeat(65);
+        let err = expect_err(s.create_private_dns_namespace(&req(
+            "CreatePrivateDnsNamespace",
+            json!({ "Name": "priv.internal", "Vpc": long }),
+        )));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        let long = "x".repeat(65);
+        let err = expect_err(s.create_http_namespace(&req(
+            "CreateHttpNamespace",
+            json!({ "Name": "n", "CreatorRequestId": long }),
+        )));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The Terraform provider puts the namespace id inside `DnsConfig.NamespaceId`
+    /// for DNS services (not the top-level `NamespaceId`); CreateService must
+    /// accept it there and echo it back both top-level and in DnsConfig.
+    #[test]
+    fn create_service_namespace_id_from_dns_config() {
+        let s = svc();
+        let ns_id = make_namespace(&s, "svc.ns");
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({
+                    "Name": "web",
+                    "DnsConfig": {
+                        "NamespaceId": ns_id,
+                        "RoutingPolicy": "MULTIVALUE",
+                        "DnsRecords": [ { "Type": "A", "TTL": 60 } ],
+                    },
+                }),
+            ))
+            .unwrap();
+        let svc_json = &body_of(&resp)["Service"];
+        assert_eq!(svc_json["NamespaceId"], ns_id);
+        assert_eq!(svc_json["DnsConfig"]["NamespaceId"], ns_id);
     }
 
     #[test]
