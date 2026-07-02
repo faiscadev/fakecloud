@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/faiscadev/fakecloud"
 homepage = "https://fakecloud.dev"
 rust-version = "1.94"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies]
 serde_json = "1"
@@ -114,211 +114,211 @@ features = [ "json",]
 
 [workspace.dependencies.fakecloud-core]
 path = "crates/fakecloud-core"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-aws]
 path = "crates/fakecloud-aws"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-sqs]
 path = "crates/fakecloud-sqs"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-sns]
 path = "crates/fakecloud-sns"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-eventbridge]
 path = "crates/fakecloud-eventbridge"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-ec2]
 path = "crates/fakecloud-ec2"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-iam]
 path = "crates/fakecloud-iam"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-organizations]
 path = "crates/fakecloud-organizations"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-ssm]
 path = "crates/fakecloud-ssm"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-s3]
 path = "crates/fakecloud-s3"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-dynamodb]
 path = "crates/fakecloud-dynamodb"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-lambda]
 path = "crates/fakecloud-lambda"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-k8s]
 path = "crates/fakecloud-k8s"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-secretsmanager]
 path = "crates/fakecloud-secretsmanager"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-logs]
 path = "crates/fakecloud-logs"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-kms]
 path = "crates/fakecloud-kms"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-cloudformation]
 path = "crates/fakecloud-cloudformation"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-cloudcontrol]
 path = "crates/fakecloud-cloudcontrol"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-ses]
 path = "crates/fakecloud-ses"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-cognito]
 path = "crates/fakecloud-cognito"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-kinesis]
 path = "crates/fakecloud-kinesis"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-rds]
 path = "crates/fakecloud-rds"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-rds-data]
 path = "crates/fakecloud-rds-data"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-dsql]
 path = "crates/fakecloud-dsql"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-resource-groups]
 path = "crates/fakecloud-resource-groups"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-resource-groups-tagging]
 path = "crates/fakecloud-resource-groups-tagging"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-elasticache]
 path = "crates/fakecloud-elasticache"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-memorydb]
 path = "crates/fakecloud-memorydb"
-version = "0.30.0"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-ecr]
 path = "crates/fakecloud-ecr"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-ecs]
 path = "crates/fakecloud-ecs"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-elbv2]
 path = "crates/fakecloud-elbv2"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-cloudfront]
 path = "crates/fakecloud-cloudfront"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-route53]
 path = "crates/fakecloud-route53"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-acm]
 path = "crates/fakecloud-acm"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-firehose]
 path = "crates/fakecloud-firehose"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-glue]
 path = "crates/fakecloud-glue"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-cloudwatch]
 path = "crates/fakecloud-cloudwatch"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-application-autoscaling]
 path = "crates/fakecloud-application-autoscaling"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-autoscaling]
 path = "crates/fakecloud-autoscaling"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-batch]
 path = "crates/fakecloud-batch"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-pipes]
 path = "crates/fakecloud-pipes"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-wafv2]
 path = "crates/fakecloud-wafv2"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-athena]
 path = "crates/fakecloud-athena"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-stepfunctions]
 path = "crates/fakecloud-stepfunctions"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-scheduler]
 path = "crates/fakecloud-scheduler"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-apigateway]
 path = "crates/fakecloud-apigateway"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-apigatewayv2]
 path = "crates/fakecloud-apigatewayv2"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-bedrock]
 path = "crates/fakecloud-bedrock"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-bedrock-agent]
 path = "crates/fakecloud-bedrock-agent"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-bedrock-agent-runtime]
 path = "crates/fakecloud-bedrock-agent-runtime"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-sdk]
 path = "crates/fakecloud-sdk"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.fakecloud-persistence]
 path = "crates/fakecloud-persistence"
-version = "0.30.1"
+version = "0.30.2"
 
 [workspace.dependencies.kube]
 version = "0.95"
