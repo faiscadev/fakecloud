@@ -5,8 +5,9 @@
 //! objects produced by `UpdateClusterConfig` / `UpdateClusterVersion` and read
 //! back through `DescribeUpdate` / `ListUpdates`; managed node groups and
 //! Fargate profiles (both cluster sub-resources, each with their own status
-//! lifecycle, and node groups with their own update history). Addons, access
-//! entries, and identity-provider configs arrive in later batches.
+//! lifecycle, and node groups with their own update history), add-ons, access
+//! entries, OIDC identity-provider configs, and Pod Identity associations (all
+//! cluster sub-resources).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -129,6 +130,48 @@ pub struct AccessEntry {
     pub associated_policies: Vec<AssociatedPolicy>,
 }
 
+/// An OIDC identity-provider config associated to a cluster via
+/// `AssociateIdentityProviderConfig`, keyed by `identityProviderConfigName`.
+/// Optional OIDC members are stored as `Option`s so describe only echoes the
+/// ones the caller supplied, and `required_claims` keeps the caller's map
+/// verbatim for a faithful round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityProviderConfig {
+    pub name: String,
+    pub arn: String,
+    pub cluster_name: String,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub username_claim: Option<String>,
+    pub username_prefix: Option<String>,
+    pub groups_claim: Option<String>,
+    pub groups_prefix: Option<String>,
+    pub required_claims: serde_json::Value,
+    pub status: String,
+    pub tags: TagMap,
+}
+
+/// An EKS Pod Identity association, a sub-resource of a cluster keyed by its
+/// generated `associationId`. Binds a Kubernetes service account (in a
+/// namespace) to an IAM role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodIdentityAssociation {
+    pub cluster_name: String,
+    pub namespace: String,
+    pub service_account: String,
+    pub role_arn: String,
+    pub association_arn: String,
+    pub association_id: String,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    pub disable_session_tags: bool,
+    /// Present only when the caller supplied `targetRoleArn` (cross-account).
+    pub target_role_arn: Option<String>,
+    /// Generated for the target role's trust policy when `targetRoleArn` is set.
+    pub external_id: Option<String>,
+    pub tags: TagMap,
+}
+
 /// A Fargate profile, a sub-resource of a cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FargateProfile {
@@ -186,6 +229,12 @@ pub struct EksState {
     /// Access entries nested as cluster name -> principal ARN -> access entry.
     #[serde(default)]
     pub access_entries: BTreeMap<String, BTreeMap<String, AccessEntry>>,
+    /// Identity-provider configs nested as cluster name -> config name -> config.
+    #[serde(default)]
+    pub identity_provider_configs: BTreeMap<String, BTreeMap<String, IdentityProviderConfig>>,
+    /// Pod identity associations nested as cluster name -> associationId -> assoc.
+    #[serde(default)]
+    pub pod_identity_associations: BTreeMap<String, BTreeMap<String, PodIdentityAssociation>>,
 }
 
 impl AccountState for EksState {
@@ -244,6 +293,18 @@ pub fn access_entry_arn(
     format!(
         "arn:aws:eks:{region}:{account_id}:access-entry/{cluster}/{principal_type}/{account_id}/{principal_name}/{id}"
     )
+}
+
+/// Build the ARN for an OIDC identity-provider config. AWS embeds the config
+/// type (`oidc`), the config name, and a random UUID.
+pub fn identity_provider_config_arn(
+    region: &str,
+    account_id: &str,
+    cluster: &str,
+    name: &str,
+    id: &str,
+) -> String {
+    format!("arn:aws:eks:{region}:{account_id}:identityproviderconfig/{cluster}/oidc/{name}/{id}")
 }
 
 /// Build the ARN for a pod identity association attached to an add-on.

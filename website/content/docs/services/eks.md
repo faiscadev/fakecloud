@@ -5,12 +5,13 @@ weight = 46
 +++
 
 fakecloud implements **Amazon EKS** (`eks`), the managed Kubernetes service, as a
-restJson1 control plane. **37 of the full 65-operation surface** ship now — the
-**cluster**, **managed node group**, **Fargate profile**, **add-on**, and
-**access-entry** control planes — backed by account-partitioned state that
-persists across restarts in persistent mode.
+restJson1 control plane. **46 of the full 65-operation surface** ship now — the
+**cluster**, **managed node group**, **Fargate profile**, **add-on**,
+**access-entry**, **OIDC identity-provider-config**, and
+**pod-identity-association** control planes — backed by account-partitioned state
+that persists across restarts in persistent mode.
 
-## Supported now (37 operations)
+## Supported now (46 operations)
 
 - **Cluster lifecycle** — `CreateCluster`, `DescribeCluster`, `ListClusters`,
   `DeleteCluster`. Clusters are created with the requested `roleArn`,
@@ -36,17 +37,25 @@ persists across restarts in persistent mode.
   `ListAssociatedAccessPolicies` (cluster/namespace `accessScope`), and the
   read-only `ListAccessPolicies` catalogue of the `AmazonEKS*` cluster-access
   policies.
+- **OIDC identity-provider configs** — `AssociateIdentityProviderConfig` and
+  `DisassociateIdentityProviderConfig` (each minting a tracked cluster `Update`),
+  `DescribeIdentityProviderConfig`, `ListIdentityProviderConfigs`.
+- **Pod-identity associations** — `CreatePodIdentityAssociation`,
+  `DescribePodIdentityAssociation`, `ListPodIdentityAssociations`,
+  `UpdatePodIdentityAssociation`, `DeletePodIdentityAssociation` (map a
+  `namespace`/`serviceAccount` to a `roleArn`, `a-`-prefixed `associationId`).
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (EKS uses
   a `map<String,String>` tag shape, keyed by resource ARN).
 
-100% conformance across every shipped operation: all 1,106 generated Smithy probe
-variants for these 37 operations pass.
+100% conformance across every shipped operation: all 1,347 generated Smithy probe
+variants for these 46 operations pass.
 
 ## In progress (roadmap)
 
-The remaining EKS surface is being added in subsequent batches: **identity
-provider configs**, **pod identity associations**, **insights**, and **EKS
-Anywhere / subscription** operations. There is no real Kubernetes API-server
+The remaining EKS surface is being added in subsequent batches: **insights**,
+**capabilities**, cluster **registration** (`RegisterCluster`/`DeregisterCluster`),
+`AssociateEncryptionConfig`, `CancelUpdate`, `DescribeClusterVersions`, and the
+**EKS Anywhere subscription** operations. There is no real Kubernetes API-server
 endpoint; the control plane models the AWS management API, not `kubectl` traffic.
 
 ## Example

@@ -4,9 +4,10 @@
 //! UpdateClusterConfig, UpdateClusterVersion, Describe/ListUpdates,
 //! Tag/Untag/ListTagsForResource) plus managed node groups
 //! (Create/Describe/List/DeleteNodegroup, UpdateNodegroupConfig/Version) and
-//! Fargate profiles (Create/Describe/List/DeleteFargateProfile), both modeled
-//! as cluster sub-resources. Addons, access entries, and identity-provider
-//! configs land in later batches.
+//! Fargate profiles (Create/Describe/List/DeleteFargateProfile), add-ons,
+//! access entries and their access-policy associations, OIDC identity-provider
+//! configs, and Pod Identity associations, all modeled as cluster
+//! sub-resources.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,10 +21,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    access_entry_arn, addon_arn, cluster_arn, fargate_profile_arn, nodegroup_arn,
-    pod_identity_association_arn, AccessEntry, Addon, AssociatedPolicy, Cluster, EksSnapshot,
-    FargateProfile, Nodegroup, SharedEksState, Update, DEFAULT_K8S_VERSION,
-    EKS_SNAPSHOT_SCHEMA_VERSION,
+    access_entry_arn, addon_arn, cluster_arn, fargate_profile_arn, identity_provider_config_arn,
+    nodegroup_arn, pod_identity_association_arn, AccessEntry, Addon, AssociatedPolicy, Cluster,
+    EksSnapshot, FargateProfile, IdentityProviderConfig, Nodegroup, PodIdentityAssociation,
+    SharedEksState, Update, DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// The set of control-plane log types EKS reports on every cluster.
@@ -73,6 +74,15 @@ pub const EKS_ACTIONS: &[&str] = &[
     "DisassociateAccessPolicy",
     "ListAssociatedAccessPolicies",
     "ListAccessPolicies",
+    "AssociateIdentityProviderConfig",
+    "DisassociateIdentityProviderConfig",
+    "DescribeIdentityProviderConfig",
+    "ListIdentityProviderConfigs",
+    "CreatePodIdentityAssociation",
+    "DeletePodIdentityAssociation",
+    "DescribePodIdentityAssociation",
+    "ListPodIdentityAssociations",
+    "UpdatePodIdentityAssociation",
 ];
 
 pub struct EksService {
@@ -331,6 +341,54 @@ impl EksService {
             }
             // Access-policy catalogue (not scoped to a cluster).
             (&Method::GET, ["access-policies"]) => Some(("ListAccessPolicies", PathArgs::None)),
+            // Identity-provider configs (sub-resources of a cluster). The
+            // associate/disassociate/describe forms are POSTs to fixed action
+            // sub-paths, carrying the config identity in the body.
+            (&Method::POST, ["clusters", c, "identity-provider-configs", "associate"]) => Some((
+                "AssociateIdentityProviderConfig",
+                PathArgs::Cluster(decode(c)),
+            )),
+            (&Method::POST, ["clusters", c, "identity-provider-configs", "disassociate"]) => {
+                Some((
+                    "DisassociateIdentityProviderConfig",
+                    PathArgs::Cluster(decode(c)),
+                ))
+            }
+            (&Method::POST, ["clusters", c, "identity-provider-configs", "describe"]) => Some((
+                "DescribeIdentityProviderConfig",
+                PathArgs::Cluster(decode(c)),
+            )),
+            (&Method::GET, ["clusters", c, "identity-provider-configs"]) => {
+                Some(("ListIdentityProviderConfigs", PathArgs::Cluster(decode(c))))
+            }
+            // Pod identity associations (sub-resources of a cluster, keyed by id).
+            (&Method::POST, ["clusters", c, "pod-identity-associations"]) => {
+                Some(("CreatePodIdentityAssociation", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "pod-identity-associations"]) => {
+                Some(("ListPodIdentityAssociations", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "pod-identity-associations", id]) => Some((
+                "DescribePodIdentityAssociation",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "pod-identity-associations", id]) => Some((
+                "DeletePodIdentityAssociation",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "pod-identity-associations", id]) => Some((
+                "UpdatePodIdentityAssociation",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
             (&Method::POST, ["tags", arn]) => Some(("TagResource", PathArgs::Arn(decode(arn)))),
             (&Method::DELETE, ["tags", arn]) => Some(("UntagResource", PathArgs::Arn(decode(arn)))),
             (&Method::GET, ["tags", arn]) => {
@@ -1749,6 +1807,420 @@ impl EksService {
         }
         Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
     }
+
+    // -----------------------------------------------------------------------
+    // Identity-provider configs
+    // -----------------------------------------------------------------------
+
+    fn associate_identity_provider_config(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let oidc = body
+            .get("oidc")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| invalid_parameter("oidc is required"))?;
+        let name = oidc
+            .get("identityProviderConfigName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("oidc.identityProviderConfigName is required"))?
+            .to_string();
+        let issuer_url = oidc
+            .get("issuerUrl")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("oidc.issuerUrl is required"))?
+            .to_string();
+        let client_id = oidc
+            .get("clientId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("oidc.clientId is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // The parent cluster must exist; AWS returns ResourceNotFoundException.
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        if state
+            .identity_provider_configs
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "Identity provider config already exists with name {name} and cluster name {cluster_name}"
+                ),
+            ));
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = identity_provider_config_arn(&region, &account_id, cluster_name, &name, &id);
+        let config = IdentityProviderConfig {
+            name: name.clone(),
+            arn,
+            cluster_name: cluster_name.to_string(),
+            issuer_url,
+            client_id,
+            username_claim: str_field(oidc, "usernameClaim"),
+            username_prefix: str_field(oidc, "usernamePrefix"),
+            groups_claim: str_field(oidc, "groupsClaim"),
+            groups_prefix: str_field(oidc, "groupsPrefix"),
+            required_claims: oidc
+                .get("requiredClaims")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            status: "CREATING".to_string(),
+            tags: parse_tag_map(body.get("tags")),
+        };
+        state
+            .identity_provider_configs
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(name, config.clone());
+
+        // Associating an IdP config mints a tracked cluster-scoped Update, read
+        // back through DescribeUpdate/ListUpdates like other config changes.
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        let update = new_update(
+            "AssociateIdentityProviderConfig",
+            vec![("IdentityProviderConfig".to_string(), oidc.to_string())],
+        );
+        let update_out = update_json(&update);
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_out, "tags": config.tags }).to_string(),
+        ))
+    }
+
+    fn disassociate_identity_provider_config(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("identityProviderConfig")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("identityProviderConfig.name is required"))?
+            .to_string();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        state
+            .identity_provider_configs
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(&name))
+            .ok_or_else(not_found_identity_provider_config(&name))?;
+
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        let update = new_update(
+            "DisassociateIdentityProviderConfig",
+            vec![("IdentityProviderConfig".to_string(), name)],
+        );
+        let update_out = update_json(&update);
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_out }).to_string(),
+        ))
+    }
+
+    fn describe_identity_provider_config(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("identityProviderConfig")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("identityProviderConfig.name is required"))?
+            .to_string();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let config = state
+            .identity_provider_configs
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(&name))
+            .ok_or_else(not_found_identity_provider_config(&name))?;
+        // Settle CREATING -> ACTIVE on first describe.
+        if config.status == "CREATING" {
+            config.status = "ACTIVE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "identityProviderConfig": identity_provider_config_json(config) }).to_string(),
+        ))
+    }
+
+    fn list_identity_provider_configs(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let configs: Vec<Value> = state
+            .identity_provider_configs
+            .get(cluster_name)
+            .map(|m| {
+                m.keys()
+                    .map(|n| json!({ "type": "oidc", "name": n }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&configs, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "identityProviderConfigs": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Pod identity associations
+    // -----------------------------------------------------------------------
+
+    fn create_pod_identity_association(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let namespace = body
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("namespace is required"))?
+            .to_string();
+        let service_account = body
+            .get("serviceAccount")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("serviceAccount is required"))?
+            .to_string();
+        let role_arn = body
+            .get("roleArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("roleArn is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // The parent cluster must exist; AWS returns ResourceNotFoundException.
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        // A given (namespace, serviceAccount) can only be associated once per
+        // cluster; AWS returns ResourceInUseException for a duplicate.
+        if state
+            .pod_identity_associations
+            .get(cluster_name)
+            .is_some_and(|m| {
+                m.values()
+                    .any(|a| a.namespace == namespace && a.service_account == service_account)
+            })
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "Association already exists for namespace {namespace} and service account {service_account}"
+                ),
+            ));
+        }
+
+        let suffix = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let suffix = &suffix[..17.min(suffix.len())];
+        let association_id = format!("a-{suffix}");
+        let association_arn =
+            pod_identity_association_arn(&region, &account_id, cluster_name, suffix);
+        let target_role_arn = str_field(&body, "targetRoleArn");
+        // AWS returns an externalId (for the target role's trust policy) only
+        // when a cross-account targetRoleArn is supplied.
+        let external_id = target_role_arn
+            .as_ref()
+            .map(|_| uuid::Uuid::new_v4().to_string().replace('-', ""));
+        let now = Utc::now();
+        let assoc = PodIdentityAssociation {
+            cluster_name: cluster_name.to_string(),
+            namespace,
+            service_account,
+            role_arn,
+            association_arn,
+            association_id: association_id.clone(),
+            created_at: now,
+            modified_at: now,
+            disable_session_tags: body
+                .get("disableSessionTags")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            target_role_arn,
+            external_id,
+            tags: parse_tag_map(body.get("tags")),
+        };
+        let out = pod_identity_association_json(&assoc);
+        state
+            .pod_identity_associations
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(association_id, assoc);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "association": out }).to_string(),
+        ))
+    }
+
+    fn describe_pod_identity_association(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        association_id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let assoc = state
+            .pod_identity_associations
+            .get(cluster_name)
+            .and_then(|m| m.get(association_id))
+            .ok_or_else(not_found_pod_identity_association(association_id))?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "association": pod_identity_association_json(assoc) }).to_string(),
+        ))
+    }
+
+    fn list_pod_identity_associations(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let namespace = req.query_params.get("namespace").cloned();
+        let service_account = req.query_params.get("serviceAccount").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let summaries: Vec<Value> = state
+            .pod_identity_associations
+            .get(cluster_name)
+            .map(|m| {
+                m.values()
+                    .filter(|a| namespace.as_deref().is_none_or(|n| a.namespace == n))
+                    .filter(|a| {
+                        service_account
+                            .as_deref()
+                            .is_none_or(|s| a.service_account == s)
+                    })
+                    .map(pod_identity_association_summary_json)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "associations": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_pod_identity_association(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        association_id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let assoc = state
+            .pod_identity_associations
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(association_id))
+            .ok_or_else(not_found_pod_identity_association(association_id))?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "association": pod_identity_association_json(&assoc) }).to_string(),
+        ))
+    }
+
+    fn update_pod_identity_association(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        association_id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let assoc = state
+            .pod_identity_associations
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(association_id))
+            .ok_or_else(not_found_pod_identity_association(association_id))?;
+
+        if let Some(role) = body.get("roleArn").and_then(|v| v.as_str()) {
+            assoc.role_arn = role.to_string();
+        }
+        if let Some(target) = body.get("targetRoleArn").and_then(|v| v.as_str()) {
+            assoc.target_role_arn = Some(target.to_string());
+            // Mint an externalId for the target trust policy if we don't have one.
+            if assoc.external_id.is_none() {
+                assoc.external_id = Some(uuid::Uuid::new_v4().to_string().replace('-', ""));
+            }
+        }
+        if let Some(disable) = body.get("disableSessionTags").and_then(|v| v.as_bool()) {
+            assoc.disable_session_tags = disable;
+        }
+        assoc.modified_at = Utc::now();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "association": pod_identity_association_json(assoc) }).to_string(),
+        ))
+    }
 }
 
 /// Persist the current EKS state as a snapshot. Shared by
@@ -1823,6 +2295,13 @@ impl AwsService for EksService {
                 | "UpdateAccessEntry"
                 | "AssociateAccessPolicy"
                 | "DisassociateAccessPolicy"
+                | "AssociateIdentityProviderConfig"
+                | "DisassociateIdentityProviderConfig"
+                // Describe settles the config's CREATING -> ACTIVE transition.
+                | "DescribeIdentityProviderConfig"
+                | "CreatePodIdentityAssociation"
+                | "DeletePodIdentityAssociation"
+                | "UpdatePodIdentityAssociation"
         );
 
         let result = match (action, &args) {
@@ -1900,6 +2379,33 @@ impl AwsService for EksService {
                 },
             ) => self.disassociate_access_policy(&req, cluster, principal, policy_arn),
             ("ListAccessPolicies", _) => self.list_access_policies(&req),
+            ("AssociateIdentityProviderConfig", PathArgs::Cluster(c)) => {
+                self.associate_identity_provider_config(&req, c)
+            }
+            ("DisassociateIdentityProviderConfig", PathArgs::Cluster(c)) => {
+                self.disassociate_identity_provider_config(&req, c)
+            }
+            ("DescribeIdentityProviderConfig", PathArgs::Cluster(c)) => {
+                self.describe_identity_provider_config(&req, c)
+            }
+            ("ListIdentityProviderConfigs", PathArgs::Cluster(c)) => {
+                self.list_identity_provider_configs(&req, c)
+            }
+            ("CreatePodIdentityAssociation", PathArgs::Cluster(c)) => {
+                self.create_pod_identity_association(&req, c)
+            }
+            ("ListPodIdentityAssociations", PathArgs::Cluster(c)) => {
+                self.list_pod_identity_associations(&req, c)
+            }
+            ("DescribePodIdentityAssociation", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_pod_identity_association(&req, cluster, name)
+            }
+            ("DeletePodIdentityAssociation", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_pod_identity_association(&req, cluster, name)
+            }
+            ("UpdatePodIdentityAssociation", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_pod_identity_association(&req, cluster, name)
+            }
             _ => Err(AwsServiceError::action_not_implemented("eks", action)),
         };
 
@@ -2033,6 +2539,28 @@ fn not_found_access_entry(principal_arn: &str) -> impl Fn() -> AwsServiceError +
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
             format!("No access entry found for principal ARN: {principal_arn}."),
+        )
+    }
+}
+
+fn not_found_identity_provider_config(name: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let name = name.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No identity provider config found for name: {name}."),
+        )
+    }
+}
+
+fn not_found_pod_identity_association(id: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let id = id.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No pod identity association found for id: {id}."),
         )
     }
 }
@@ -2529,6 +3057,69 @@ fn associated_policy_json(ap: &AssociatedPolicy) -> Value {
         "accessScope": ap.access_scope,
         "associatedAt": timestamp_to_number(ap.associated_at),
         "modifiedAt": timestamp_to_number(ap.modified_at),
+    })
+}
+
+/// Read an optional string member from a JSON object.
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+fn identity_provider_config_json(c: &IdentityProviderConfig) -> Value {
+    let mut oidc = json!({
+        "identityProviderConfigName": c.name,
+        "identityProviderConfigArn": c.arn,
+        "clusterName": c.cluster_name,
+        "issuerUrl": c.issuer_url,
+        "clientId": c.client_id,
+        "requiredClaims": c.required_claims,
+        "status": c.status,
+        "tags": c.tags,
+    });
+    if let Some(v) = &c.username_claim {
+        oidc["usernameClaim"] = Value::String(v.clone());
+    }
+    if let Some(v) = &c.username_prefix {
+        oidc["usernamePrefix"] = Value::String(v.clone());
+    }
+    if let Some(v) = &c.groups_claim {
+        oidc["groupsClaim"] = Value::String(v.clone());
+    }
+    if let Some(v) = &c.groups_prefix {
+        oidc["groupsPrefix"] = Value::String(v.clone());
+    }
+    json!({ "oidc": oidc })
+}
+
+fn pod_identity_association_json(a: &PodIdentityAssociation) -> Value {
+    let mut out = json!({
+        "clusterName": a.cluster_name,
+        "namespace": a.namespace,
+        "serviceAccount": a.service_account,
+        "roleArn": a.role_arn,
+        "associationArn": a.association_arn,
+        "associationId": a.association_id,
+        "createdAt": timestamp_to_number(a.created_at),
+        "modifiedAt": timestamp_to_number(a.modified_at),
+        "disableSessionTags": a.disable_session_tags,
+        "tags": a.tags,
+    });
+    if let Some(v) = &a.target_role_arn {
+        out["targetRoleArn"] = Value::String(v.clone());
+    }
+    if let Some(v) = &a.external_id {
+        out["externalId"] = Value::String(v.clone());
+    }
+    out
+}
+
+fn pod_identity_association_summary_json(a: &PodIdentityAssociation) -> Value {
+    json!({
+        "clusterName": a.cluster_name,
+        "namespace": a.namespace,
+        "serviceAccount": a.service_account,
+        "associationArn": a.association_arn,
+        "associationId": a.association_id,
     })
 }
 
@@ -3175,17 +3766,13 @@ mod tests {
 
     #[tokio::test]
     async fn unimplemented_subresource_falls_through() {
-        // Identity-provider-config routes are not implemented; the router must
-        // not accidentally match them via the node-group/fargate-profile/addon/
-        // access-entry arms.
+        // An unknown sub-resource collection must not accidentally match via
+        // the node-group/fargate-profile/addon/access-entry/idp/pod-identity
+        // arms; the router falls through to UnknownOperationException.
         let svc = EksService::new(make_state());
         create_cluster(&svc, "c1").await;
         let err = svc
-            .handle(make_request(
-                Method::GET,
-                "/clusters/c1/identity-provider-configs",
-                "",
-            ))
+            .handle(make_request(Method::GET, "/clusters/c1/insights", ""))
             .await
             .err()
             .unwrap();
@@ -3678,5 +4265,344 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("arn:aws:eks::aws:cluster-access-policy/"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity-provider configs
+    // -----------------------------------------------------------------------
+
+    fn idp_body(name: &str) -> String {
+        json!({
+            "oidc": {
+                "identityProviderConfigName": name,
+                "issuerUrl": "https://example.com",
+                "clientId": "kubernetes",
+                "usernameClaim": "email",
+                "groupsClaim": "groups"
+            },
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn idp_associate_describe_list_disassociate() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        // Associate mints a tracked cluster-scoped Update and echoes tags.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/identity-provider-configs/associate",
+                &idp_body("oidc1"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "AssociateIdentityProviderConfig");
+        assert_eq!(v["update"]["status"], "InProgress");
+        assert_eq!(v["tags"]["team"], "core");
+        let update_id = v["update"]["id"].as_str().unwrap().to_string();
+
+        // The Update is cluster-scoped and settles on DescribeUpdate.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/updates/{update_id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["status"], "Successful");
+
+        // Describe returns the OIDC config and settles CREATING -> ACTIVE.
+        let describe =
+            json!({ "identityProviderConfig": { "type": "oidc", "name": "oidc1" } }).to_string();
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/identity-provider-configs/describe",
+                &describe,
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let oidc = &v["identityProviderConfig"]["oidc"];
+        assert_eq!(oidc["identityProviderConfigName"], "oidc1");
+        assert_eq!(oidc["issuerUrl"], "https://example.com");
+        assert_eq!(oidc["clientId"], "kubernetes");
+        assert_eq!(oidc["usernameClaim"], "email");
+        assert_eq!(oidc["status"], "ACTIVE");
+        assert!(oidc["identityProviderConfigArn"]
+            .as_str()
+            .unwrap()
+            .starts_with(
+                "arn:aws:eks:us-east-1:111122223333:identityproviderconfig/c1/oidc/oidc1/"
+            ));
+
+        // List returns the {type, name} summary.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/identity-provider-configs",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            v["identityProviderConfigs"],
+            json!([{ "type": "oidc", "name": "oidc1" }])
+        );
+
+        // Disassociate mints another tracked Update and removes the config.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/identity-provider-configs/disassociate",
+                &describe,
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "DisassociateIdentityProviderConfig");
+
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/identity-provider-configs",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["identityProviderConfigs"], json!([]));
+
+        // Describe of the removed config is not found.
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/identity-provider-configs/describe",
+                &describe,
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn idp_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/identity-provider-configs/associate",
+                &idp_body("oidc1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn idp_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/identity-provider-configs/associate",
+            &idp_body("oidc1"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/identity-provider-configs/associate",
+                &idp_body("oidc1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pod identity associations
+    // -----------------------------------------------------------------------
+
+    fn pod_identity_body(namespace: &str, sa: &str) -> String {
+        json!({
+            "namespace": namespace,
+            "serviceAccount": sa,
+            "roleArn": "arn:aws:iam::111122223333:role/pod-role",
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn pod_identity_create_describe_list_update_delete() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/pod-identity-associations",
+                &pod_identity_body("default", "app"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let assoc = &v["association"];
+        assert_eq!(assoc["clusterName"], "c1");
+        assert_eq!(assoc["namespace"], "default");
+        assert_eq!(assoc["serviceAccount"], "app");
+        assert_eq!(assoc["roleArn"], "arn:aws:iam::111122223333:role/pod-role");
+        assert_eq!(assoc["disableSessionTags"], false);
+        assert_eq!(assoc["tags"]["team"], "core");
+        // No targetRoleArn was supplied, so no externalId is returned.
+        assert!(assoc.get("externalId").is_none());
+        let association_id = assoc["associationId"].as_str().unwrap().to_string();
+        assert!(association_id.starts_with("a-"));
+        assert!(assoc["associationArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:podidentityassociation/c1/a-"));
+
+        // Describe round-trips.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/pod-identity-associations/{association_id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["association"]["serviceAccount"], "app");
+
+        // List returns a summary, filterable by namespace.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/pod-identity-associations?namespace=default",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["associations"].as_array().unwrap().len(), 1);
+        assert_eq!(v["associations"][0]["associationId"], association_id);
+
+        // A non-matching namespace filter returns nothing.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/pod-identity-associations?namespace=other",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["associations"], json!([]));
+
+        // Update upserts the role and cross-account target (minting externalId).
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                &format!("/clusters/c1/pod-identity-associations/{association_id}"),
+                &json!({
+                    "roleArn": "arn:aws:iam::111122223333:role/new-role",
+                    "targetRoleArn": "arn:aws:iam::444455556666:role/target",
+                    "disableSessionTags": true
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            v["association"]["roleArn"],
+            "arn:aws:iam::111122223333:role/new-role"
+        );
+        assert_eq!(
+            v["association"]["targetRoleArn"],
+            "arn:aws:iam::444455556666:role/target"
+        );
+        assert_eq!(v["association"]["disableSessionTags"], true);
+        assert!(v["association"]["externalId"].is_string());
+
+        // Delete returns the association and then it's gone.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                &format!("/clusters/c1/pod-identity-associations/{association_id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["association"]["associationId"], association_id);
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/pod-identity-associations/{association_id}"),
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn pod_identity_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/pod-identity-associations",
+                &pod_identity_body("default", "app"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn pod_identity_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/pod-identity-associations",
+            &pod_identity_body("default", "app"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/pod-identity-associations",
+                &pod_identity_body("default", "app"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
     }
 }
