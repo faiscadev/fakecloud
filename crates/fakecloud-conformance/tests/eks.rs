@@ -24,6 +24,13 @@ use helpers::TestServer;
 #[test_action("eks", "DescribeFargateProfile", checksum = "0a697095")]
 #[test_action("eks", "ListFargateProfiles", checksum = "3416e569")]
 #[test_action("eks", "DeleteFargateProfile", checksum = "2163f559")]
+#[test_action("eks", "CreateAddon", checksum = "304277ce")]
+#[test_action("eks", "DescribeAddon", checksum = "6d44165d")]
+#[test_action("eks", "ListAddons", checksum = "9d82853d")]
+#[test_action("eks", "DeleteAddon", checksum = "f5e41a86")]
+#[test_action("eks", "UpdateAddon", checksum = "eee6e57e")]
+#[test_action("eks", "DescribeAddonVersions", checksum = "bc128dba")]
+#[test_action("eks", "DescribeAddonConfiguration", checksum = "29c08d92")]
 #[tokio::test]
 async fn eks_probe() {
     let _server = TestServer::start().await;
