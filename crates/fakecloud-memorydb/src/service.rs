@@ -212,7 +212,17 @@ fn parse(req: &AwsRequest) -> Result<Value, AwsServiceError> {
 }
 
 fn fault(code: &str, msg: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, code, msg)
+    // The MemoryDB model declares `httpError: 404` for the entire
+    // `*NotFoundFault` family (ClusterNotFoundFault, ACLNotFoundFault, ...),
+    // with the single exception of ServiceLinkedRoleNotFoundFault (400).
+    // Everything else (InvalidParameterValueException, *AlreadyExistsFault,
+    // etc.) is a 400.
+    let status = if code.ends_with("NotFoundFault") && code != "ServiceLinkedRoleNotFoundFault" {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    AwsServiceError::aws_error(status, code, msg)
 }
 
 fn req_str<'a>(b: &'a Value, f: &str) -> Result<&'a str, AwsServiceError> {
@@ -583,6 +593,13 @@ impl MemoryDbService {
         if !tags.is_empty() {
             st.tags.insert(cluster_arn, tags);
         }
+        // Maintain the ACL -> clusters back-reference so DescribeACLs lists the
+        // clusters using each ACL (AWS keeps this bidirectional).
+        if let Some(acl) = st.acls.get_mut(&cluster.acl_name) {
+            if !acl.clusters.contains(&name) {
+                acl.clusters.push(name.clone());
+            }
+        }
         st.clusters.insert(name, cluster.clone());
         ok(json!({ "Cluster": cluster_json(&cluster) }))
     }
@@ -643,9 +660,13 @@ impl MemoryDbService {
         if let Some(v) = opt_str(&b, "ParameterGroupName") {
             c.parameter_group_name = v;
         }
-        if let Some(v) = opt_str(&b, "ACLName") {
-            c.acl_name = v;
-        }
+        // Track an ACL reassignment so the ACL -> clusters back-references can be
+        // moved after the cluster borrow is released.
+        let acl_change = opt_str(&b, "ACLName").map(|new_acl| {
+            let old_acl = c.acl_name.clone();
+            c.acl_name = new_acl.clone();
+            (old_acl, new_acl)
+        });
         if let Some(v) = opt_str(&b, "MaintenanceWindow") {
             c.maintenance_window = v;
         }
@@ -662,6 +683,19 @@ impl MemoryDbService {
                 .collect();
         }
         let out = cluster_json(c);
+        // Apply any ACL reassignment to the ACL -> clusters back-references.
+        if let Some((old_acl, new_acl)) = acl_change {
+            if old_acl != new_acl {
+                if let Some(a) = st.acls.get_mut(&old_acl) {
+                    a.clusters.retain(|cn| cn != &name);
+                }
+                if let Some(a) = st.acls.get_mut(&new_acl) {
+                    if !a.clusters.contains(&name) {
+                        a.clusters.push(name.clone());
+                    }
+                }
+            }
+        }
         ok(json!({ "Cluster": out }))
     }
 
@@ -678,6 +712,10 @@ impl MemoryDbService {
         };
         c.status = "deleting".to_string();
         st.tags.remove(&c.arn);
+        // Drop the ACL -> clusters back-reference.
+        if let Some(a) = st.acls.get_mut(&c.acl_name) {
+            a.clusters.retain(|cn| cn != &name);
+        }
         ok(json!({ "Cluster": cluster_json(&c) }))
     }
 
@@ -733,7 +771,15 @@ impl MemoryDbService {
         if !tags.is_empty() {
             st.tags.insert(acl_arn, tags);
         }
-        st.acls.insert(name, acl.clone());
+        st.acls.insert(name.clone(), acl.clone());
+        // Maintain the User -> ACLNames back-reference (AWS keeps it bidirectional).
+        for u in &acl.user_names {
+            if let Some(user) = st.users.get_mut(u) {
+                if !user.acl_names.contains(&name) {
+                    user.acl_names.push(name.clone());
+                }
+            }
+        }
         ok(json!({ "ACL": acl_json(&acl) }))
     }
 
@@ -763,14 +809,35 @@ impl MemoryDbService {
         let Some(a) = st.acls.get_mut(&name) else {
             return Err(fault("ACLNotFoundFault", &format!("ACL {name} not found.")));
         };
+        let mut added = Vec::new();
         for u in str_list(&b, "UserNamesToAdd") {
             if !a.user_names.contains(&u) {
-                a.user_names.push(u);
+                a.user_names.push(u.clone());
+                added.push(u);
             }
         }
         let remove = str_list(&b, "UserNamesToRemove");
+        let removed: Vec<String> = a
+            .user_names
+            .iter()
+            .filter(|u| remove.contains(u))
+            .cloned()
+            .collect();
         a.user_names.retain(|u| !remove.contains(u));
         let out = acl_json(a);
+        // Sync the User -> ACLNames back-reference for the affected users.
+        for u in &added {
+            if let Some(user) = st.users.get_mut(u) {
+                if !user.acl_names.contains(&name) {
+                    user.acl_names.push(name.clone());
+                }
+            }
+        }
+        for u in &removed {
+            if let Some(user) = st.users.get_mut(u) {
+                user.acl_names.retain(|an| an != &name);
+            }
+        }
         ok(json!({ "ACL": out }))
     }
 
@@ -784,6 +851,12 @@ impl MemoryDbService {
         };
         a.status = "deleting".to_string();
         st.tags.remove(&a.arn);
+        // Drop the ACL from each member user's ACLNames back-reference.
+        for u in &a.user_names {
+            if let Some(user) = st.users.get_mut(u) {
+                user.acl_names.retain(|an| an != &name);
+            }
+        }
         ok(json!({ "ACL": acl_json(&a) }))
     }
 
@@ -1595,6 +1668,11 @@ fn validate_user_name(name: &str) -> Result<(), AwsServiceError> {
 
 /// Whether a given ARN refers to any resource in this account's state.
 fn arn_exists(st: &MemoryDbState, resource_arn: &str) -> bool {
+    // An empty ARN never refers to a resource (guards against matching a
+    // resource that happens to carry an empty ARN string).
+    if resource_arn.is_empty() {
+        return false;
+    }
     st.clusters.values().any(|c| c.arn == resource_arn)
         || st.acls.values().any(|a| a.arn == resource_arn)
         || st.users.values().any(|u| u.arn == resource_arn)
@@ -1727,5 +1805,105 @@ mod tests {
             .unwrap()
             .iter()
             .any(|u| u["Name"] == "default"));
+    }
+
+    #[test]
+    fn seeded_default_acl_and_user_have_populated_arns() {
+        let s = service();
+        let acls = call(&s, "DescribeACLs", json!({"ACLName": "open-access"})).unwrap();
+        assert_eq!(
+            acls["ACLs"][0]["ARN"],
+            "arn:aws:memorydb:us-east-1:123456789012:acl/open-access"
+        );
+        let users = call(&s, "DescribeUsers", json!({"UserName": "default"})).unwrap();
+        assert_eq!(
+            users["Users"][0]["ARN"],
+            "arn:aws:memorydb:us-east-1:123456789012:user/default"
+        );
+    }
+
+    #[test]
+    fn not_found_faults_return_http_404() {
+        let s = service();
+        let err = call(&s, "DescribeClusters", json!({"ClusterName": "nope"})).unwrap_err();
+        assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
+        // A validation error stays a 400.
+        let bad = call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "c", "NodeType": "db.r6g.large", "ACLName": "open-access", "NumShards": 9999}),
+        )
+        .unwrap_err();
+        assert_eq!(bad.status(), http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn create_cluster_populates_acl_clusters_backref() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "c1", "NodeType": "db.r6g.large", "ACLName": "open-access"}),
+        )
+        .unwrap();
+        let acls = call(&s, "DescribeACLs", json!({"ACLName": "open-access"})).unwrap();
+        let clusters = acls["ACLs"][0]["Clusters"].as_array().unwrap();
+        assert!(clusters.iter().any(|c| c == "c1"), "got: {clusters:?}");
+
+        // Deleting the cluster removes the back-reference.
+        call(&s, "DeleteCluster", json!({"ClusterName": "c1"})).unwrap();
+        let acls = call(&s, "DescribeACLs", json!({"ACLName": "open-access"})).unwrap();
+        assert!(acls["ACLs"][0]["Clusters"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn acl_membership_syncs_user_acl_names_backref() {
+        let s = service();
+        call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "bob", "AccessString": "on ~* &* +@all", "AuthenticationMode": {"Type": "iam"}}),
+        )
+        .unwrap();
+        call(
+            &s,
+            "CreateACL",
+            json!({"ACLName": "team", "UserNames": ["bob"]}),
+        )
+        .unwrap();
+        let users = call(&s, "DescribeUsers", json!({"UserName": "bob"})).unwrap();
+        let acl_names = users["Users"][0]["ACLNames"].as_array().unwrap();
+        assert!(acl_names.iter().any(|a| a == "team"), "got: {acl_names:?}");
+
+        // Removing the user from the ACL drops the back-reference.
+        call(
+            &s,
+            "UpdateACL",
+            json!({"ACLName": "team", "UserNamesToRemove": ["bob"]}),
+        )
+        .unwrap();
+        let users = call(&s, "DescribeUsers", json!({"UserName": "bob"})).unwrap();
+        assert!(users["Users"][0]["ACLNames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a != "team"));
+    }
+
+    #[test]
+    fn tag_resource_rejects_empty_arn() {
+        let s = service();
+        let err = call(
+            &s,
+            "TagResource",
+            json!({"ResourceArn": "", "Tags": [{"Key": "k", "Value": "v"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("known resource") || err.message().contains("ARN"),
+            "got: {}",
+            err.message()
+        );
     }
 }
