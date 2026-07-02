@@ -127,6 +127,9 @@ impl AwsService for MemoryDbService {
 }
 
 fn is_mutating(action: &str) -> bool {
+    // Note: FailoverShard and BatchUpdateCluster do not persist any state (they
+    // validate + echo), so they are intentionally NOT flagged mutating — no
+    // redundant snapshot write on those calls.
     action.starts_with("Create")
         || action.starts_with("Delete")
         || action.starts_with("Update")
@@ -134,8 +137,6 @@ fn is_mutating(action: &str) -> bool {
         || action.starts_with("Untag")
         || action.starts_with("Copy")
         || action.starts_with("Reset")
-        || action.starts_with("Batch")
-        || action.starts_with("Failover")
         || action.starts_with("Purchase")
 }
 
@@ -251,6 +252,26 @@ fn str_list(b: &Value, f: &str) -> Vec<String> {
 
 fn arn(kind: &str, region: &str, account: &str, name: &str) -> String {
     format!("arn:aws:memorydb:{region}:{account}:{kind}/{name}")
+}
+
+/// Read an optional integer request field, defaulting when absent and
+/// range-validating before the `as i32` cast so an out-of-range value is a
+/// clean 400 rather than a silent truncation/wrap.
+fn int_field(
+    b: &Value,
+    field: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> Result<i32, AwsServiceError> {
+    let v = b.get(field).and_then(Value::as_i64).unwrap_or(default);
+    if !(min..=max).contains(&v) {
+        return Err(fault(
+            "InvalidParameterValueException",
+            &format!("{field} must be between {min} and {max}."),
+        ));
+    }
+    Ok(v as i32)
 }
 
 fn parse_tags(b: &Value) -> BTreeMap<String, String> {
@@ -495,6 +516,8 @@ impl MemoryDbService {
             ));
         }
         let replicas = replicas as i32;
+        // SnapshotRetentionLimit: AWS accepts 0-35 days.
+        let snapshot_retention_limit = int_field(&b, "SnapshotRetentionLimit", 0, 0, 35)?;
         let port = b.get("Port").and_then(Value::as_i64).unwrap_or(6379) as i32;
         let engine = opt_str(&b, "Engine").unwrap_or_else(|| DEFAULT_ENGINE.to_string());
         let engine_version =
@@ -555,10 +578,7 @@ impl MemoryDbService {
             kms_key_id: opt_str(&b, "KmsKeyId"),
             arn: cluster_arn.clone(),
             sns_topic_arn: opt_str(&b, "SnsTopicArn"),
-            snapshot_retention_limit: b
-                .get("SnapshotRetentionLimit")
-                .and_then(Value::as_i64)
-                .unwrap_or(0) as i32,
+            snapshot_retention_limit,
             maintenance_window: opt_str(&b, "MaintenanceWindow")
                 .unwrap_or_else(|| "wed:08:00-wed:09:00".to_string()),
             snapshot_window: opt_str(&b, "SnapshotWindow")
@@ -673,8 +693,8 @@ impl MemoryDbService {
         if let Some(v) = opt_str(&b, "SnapshotWindow") {
             c.snapshot_window = v;
         }
-        if let Some(v) = b.get("SnapshotRetentionLimit").and_then(Value::as_i64) {
-            c.snapshot_retention_limit = v as i32;
+        if b.get("SnapshotRetentionLimit").is_some() {
+            c.snapshot_retention_limit = int_field(&b, "SnapshotRetentionLimit", 0, 0, 35)?;
         }
         if let Some(sg) = b.get("SecurityGroupIds").and_then(Value::as_array) {
             c.security_group_ids = sg
@@ -722,20 +742,30 @@ impl MemoryDbService {
     fn batch_update_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let names = str_list(&b, "ClusterNames");
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(&req.account_id);
+        let accounts = self.state.read();
+        let st = accounts.get(&req.account_id);
         let mut processed = Vec::new();
+        let mut unprocessed = Vec::new();
         for n in &names {
-            if let Some(c) = st.clusters.get(n) {
-                processed.push(cluster_json(c));
+            match st.and_then(|s| s.clusters.get(n)) {
+                Some(c) => processed.push(cluster_json(c)),
+                // A name that doesn't resolve to a cluster comes back in
+                // UnprocessedClusters, not silently dropped.
+                None => unprocessed.push(json!({
+                    "ClusterName": n,
+                    "ErrorType": "ClusterNotFoundFault",
+                    "ErrorMessage": format!("Cluster {n} not found."),
+                })),
             }
         }
-        ok(json!({ "ProcessedClusters": processed, "UnprocessedClusters": [] }))
+        ok(json!({ "ProcessedClusters": processed, "UnprocessedClusters": unprocessed }))
     }
 
     fn failover_shard(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let name = req_str(&b, "ClusterName")?.to_string();
+        // ShardName is required by the model and must name an existing shard.
+        let shard_name = req_str(&b, "ShardName")?.to_string();
         let accounts = self.state.read();
         let st = accounts.get(&req.account_id);
         let Some(c) = st.and_then(|s| s.clusters.get(&name)) else {
@@ -744,6 +774,12 @@ impl MemoryDbService {
                 &format!("Cluster {name} not found."),
             ));
         };
+        if !c.shards.iter().any(|s| s.name == shard_name) {
+            return Err(fault(
+                "ShardNotFoundFault",
+                &format!("Shard {shard_name} not found in cluster {name}."),
+            ));
+        }
         ok(json!({ "Cluster": cluster_json(c) }))
     }
 
@@ -865,17 +901,44 @@ impl MemoryDbService {
         let name = req_str(&b, "UserName")?.to_string();
         validate_user_name(&name)?;
         let access_string = req_str(&b, "AccessString")?.to_string();
-        let auth = b.get("AuthenticationMode").cloned().unwrap_or(json!({}));
+        // AuthenticationMode is required by the model; its Type must be one of the
+        // InputAuthenticationType enum values (`password` | `iam`), and a
+        // `password`-type user must ship at least one password.
+        let auth = b.get("AuthenticationMode").ok_or_else(|| {
+            fault(
+                "InvalidParameterValueException",
+                "AuthenticationMode is required.",
+            )
+        })?;
         let auth_type = auth
             .get("Type")
             .and_then(Value::as_str)
-            .unwrap_or("password")
+            .ok_or_else(|| {
+                fault(
+                    "InvalidParameterValueException",
+                    "AuthenticationMode.Type is required.",
+                )
+            })?
             .to_string();
+        if !matches!(auth_type.as_str(), "password" | "iam") {
+            return Err(fault(
+                "InvalidParameterValueException",
+                &format!(
+                    "Invalid AuthenticationMode.Type: {auth_type}. Valid values: password, iam."
+                ),
+            ));
+        }
         let pw_count = auth
             .get("Passwords")
             .and_then(Value::as_array)
             .map(|a| a.len() as i32)
             .unwrap_or(0);
+        if auth_type == "password" && pw_count == 0 {
+            return Err(fault(
+                "InvalidParameterValueException",
+                "A password-authenticated user requires at least one password.",
+            ));
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         if st.users.contains_key(&name) {
@@ -1354,7 +1417,7 @@ impl MemoryDbService {
             engine: opt_str(&b, "Engine").unwrap_or_else(|| DEFAULT_ENGINE.to_string()),
             engine_version: opt_str(&b, "EngineVersion")
                 .unwrap_or_else(|| DEFAULT_ENGINE_VERSION.to_string()),
-            number_of_shards: b.get("NumShards").and_then(Value::as_i64).unwrap_or(1) as i32,
+            number_of_shards: int_field(&b, "NumShards", 1, 1, 500)?,
             multi_region_parameter_group_name: opt_str(&b, "MultiRegionParameterGroupName"),
             tls_enabled: b.get("TLSEnabled").and_then(Value::as_bool).unwrap_or(true),
             arn: mrc_arn.clone(),
@@ -1601,7 +1664,7 @@ impl MemoryDbService {
         let offering_id = req_str(&b, "ReservedNodesOfferingId")?.to_string();
         let reservation_id = opt_str(&b, "ReservationId")
             .unwrap_or_else(|| format!("ri-{}", uuid::Uuid::new_v4().simple()));
-        let count = b.get("NodeCount").and_then(Value::as_i64).unwrap_or(1) as i32;
+        let count = int_field(&b, "NodeCount", 1, 1, i32::MAX as i64)?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let node_arn = arn(
@@ -1902,6 +1965,114 @@ mod tests {
         assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
         assert!(
             err.message().contains("known resource") || err.message().contains("ARN"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn create_user_requires_valid_authentication_mode() {
+        let s = service();
+        // Missing AuthenticationMode -> rejected.
+        let e1 = call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "u1", "AccessString": "on ~* &* +@all"}),
+        )
+        .unwrap_err();
+        assert!(
+            e1.message().contains("AuthenticationMode"),
+            "got: {}",
+            e1.message()
+        );
+        // password type with zero passwords -> rejected.
+        let e2 = call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "u2", "AccessString": "on ~* &* +@all", "AuthenticationMode": {"Type": "password"}}),
+        )
+        .unwrap_err();
+        assert!(e2.message().contains("password"), "got: {}", e2.message());
+        // invalid Type -> rejected.
+        let e3 = call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "u3", "AccessString": "on ~* &* +@all", "AuthenticationMode": {"Type": "kerberos"}}),
+        )
+        .unwrap_err();
+        assert!(
+            e3.message().contains("kerberos") || e3.message().contains("Type"),
+            "got: {}",
+            e3.message()
+        );
+        // iam type -> accepted.
+        call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "u4", "AccessString": "on ~* &* +@all", "AuthenticationMode": {"Type": "iam"}}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn failover_shard_validates_shard_name() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "fc", "NodeType": "db.r6g.large", "ACLName": "open-access", "NumShards": 1}),
+        )
+        .unwrap();
+        // Unknown shard -> ShardNotFoundFault (404).
+        let err = call(
+            &s,
+            "FailoverShard",
+            json!({"ClusterName": "fc", "ShardName": "9999"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), http::StatusCode::NOT_FOUND);
+        // Real shard "0001" -> ok.
+        call(
+            &s,
+            "FailoverShard",
+            json!({"ClusterName": "fc", "ShardName": "0001"}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn batch_update_reports_unknown_clusters_as_unprocessed() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "known", "NodeType": "db.r6g.large", "ACLName": "open-access"}),
+        )
+        .unwrap();
+        let out = call(
+            &s,
+            "BatchUpdateCluster",
+            json!({"ClusterNames": ["known", "ghost"]}),
+        )
+        .unwrap();
+        assert_eq!(out["ProcessedClusters"].as_array().unwrap().len(), 1);
+        let un = out["UnprocessedClusters"].as_array().unwrap();
+        assert_eq!(un.len(), 1);
+        assert_eq!(un[0]["ClusterName"], "ghost");
+    }
+
+    #[test]
+    fn snapshot_retention_limit_out_of_range_rejected() {
+        let s = service();
+        let err = call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "srl", "NodeType": "db.r6g.large", "ACLName": "open-access", "SnapshotRetentionLimit": 4294967297i64}),
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("SnapshotRetentionLimit"),
             "got: {}",
             err.message()
         );
