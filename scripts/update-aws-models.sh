@@ -42,6 +42,7 @@ SERVICES=(
     "elasticache:elasticache"
     "memorydb:memorydb"
     "eks:eks"
+    "servicediscovery:servicediscovery"
     "sfn:sfn"
     "bedrock:bedrock"
     "bedrock-runtime:bedrock-runtime"

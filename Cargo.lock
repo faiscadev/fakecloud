@@ -3294,6 +3294,7 @@ dependencies = [
  "fakecloud-scheduler",
  "fakecloud-sdk",
  "fakecloud-secretsmanager",
+ "fakecloud-servicediscovery",
  "fakecloud-ses",
  "fakecloud-sns",
  "fakecloud-sqs",
@@ -4597,6 +4598,26 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-iam",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-servicediscovery"
+version = "0.30.2"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",

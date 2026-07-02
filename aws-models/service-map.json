@@ -191,6 +191,10 @@
     "repo_dir": "memorydb",
     "service_name": "memorydb"
   },
+  "servicediscovery": {
+    "repo_dir": "servicediscovery",
+    "service_name": "servicediscovery"
+  },
   "eks": {
     "repo_dir": "eks",
     "service_name": "eks"

@@ -1819,6 +1819,39 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateNodegroupVersion`
 - `UpdatePodIdentityAssociation`
 
+## [Cloud Map](@/docs/services/servicediscovery.md)
+
+- `CreateHttpNamespace`
+- `CreatePrivateDnsNamespace`
+- `CreatePublicDnsNamespace`
+- `CreateService`
+- `DeleteNamespace`
+- `DeleteService`
+- `DeleteServiceAttributes`
+- `DeregisterInstance`
+- `DiscoverInstances`
+- `DiscoverInstancesRevision`
+- `GetInstance`
+- `GetInstancesHealthStatus`
+- `GetNamespace`
+- `GetOperation`
+- `GetService`
+- `GetServiceAttributes`
+- `ListInstances`
+- `ListNamespaces`
+- `ListOperations`
+- `ListServices`
+- `ListTagsForResource`
+- `RegisterInstance`
+- `TagResource`
+- `UntagResource`
+- `UpdateHttpNamespace`
+- `UpdateInstanceCustomHealthStatus`
+- `UpdatePrivateDnsNamespace`
+- `UpdatePublicDnsNamespace`
+- `UpdateService`
+- `UpdateServiceAttributes`
+
 ## [Step Functions](@/docs/services/stepfunctions.md)
 
 - `CreateActivity`
