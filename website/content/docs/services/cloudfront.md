@@ -98,11 +98,11 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 fakecloud runs a single-node, in-process HTTP data plane for CloudFront (modeled on the ELBv2 ALB data plane). For each **enabled** distribution, a supervisor binds a `TcpListener` on `127.0.0.1:0` and records the port as `boundPort` (discover it via `GET /_fakecloud/cloudfront/distributions`); the listener is torn down when the distribution is disabled or deleted, and enabled distributions re-bind on startup in persistent mode. Viewer requests are served by:
 
 - **Path-pattern routing** — the request path is matched against the ordered `CacheBehaviors` (`*` / `?` globs, e.g. `/api/*`), falling back to the `DefaultCacheBehavior`, to pick the target origin.
-- **Origin fetch** — the origin is reverse-proxied over HTTP. An S3-website origin (`*.s3-website-<region>.amazonaws.com`) is reached on fakecloud's own port with the website `Host` preserved (as real CloudFront treats an S3-website endpoint as a custom origin); other origins are forwarded verbatim.
+- **Origin fetch** — the origin is reverse-proxied. An S3-website origin (`*.s3-website-<region>.amazonaws.com`) is reached on fakecloud's own port with the website `Host` preserved (as real CloudFront treats an S3-website endpoint as a custom origin). A custom origin honors its `CustomOriginConfig`: an `https-only` protocol policy is fetched over HTTPS (otherwise HTTP), and the configured `HTTPPort` / `HTTPSPort` is used unless the origin `DomainName` already carries an explicit `host:port`.
 - **CustomErrorResponses** — an origin status matching a configured rule with a response page path is served from the default origin with the rule's `ResponseCode` (e.g. `404 -> /index.html` returned as `200`, the SPA deep-link fallback).
 
 Disable the data plane with `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE=1` to run control-plane only.
 
 ## Caveats
 
-The data plane is a single local node, not the global CDN: there is no geo/edge distribution or per-PoP behavior. In-path CloudFront Functions / Lambda@Edge, real TTL caching / invalidation, and OAC/SigV4 to private-S3 origins are not implemented — the MVP forwards uncached and serves public S3-website origins. CloudFront Functions can still be exercised via `TestFunction`.
+The data plane is a single local node, not the global CDN: there is no geo/edge distribution or per-PoP behavior. In-path CloudFront Functions / Lambda@Edge, real TTL caching / invalidation, and OAC/SigV4 to private-S3 origins are not implemented — the MVP forwards uncached and serves public S3-website origins. CloudFront Functions can still be exercised out-of-band via `TestFunction` (this does not apply to Lambda@Edge).

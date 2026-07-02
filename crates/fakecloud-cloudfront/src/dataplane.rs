@@ -236,17 +236,24 @@ async fn handle_request(
         let resolved = accs
             .all_distributions()
             .find(|(_, d)| d.id == dist_id)
-            .and_then(|(_, d)| resolve_route(&d.config, &path));
+            .and_then(|(_, d)| resolve_route(&d.config, &path, &dp.s3_endpoint));
         resolved
     };
     let Some(route) = route else {
         return canned(502, "distribution or matching origin not found");
     };
 
-    let (authority, host_header) = resolve_upstream(&route.origin_domain, &dp.s3_endpoint);
-    let url = format!("http://{authority}{path_and_query}");
-    trace!(dist = %dist_id, %path, origin = %route.origin_domain, "CloudFront data plane: proxying");
-    let resp = fetch_origin(dp, &method, &url, &host_header, &req_headers, &body_bytes).await;
+    let url = format!("{}{path_and_query}", route.upstream.url_base);
+    trace!(dist = %dist_id, %path, origin = %route.upstream.host_header, "CloudFront data plane: proxying");
+    let resp = fetch_origin(
+        dp,
+        &method,
+        &url,
+        &route.upstream.host_header,
+        &req_headers,
+        &body_bytes,
+    )
+    .await;
 
     // CustomErrorResponses: if the origin status matches a configured rule with
     // a response page path, serve that page from the DEFAULT origin and return
@@ -254,38 +261,56 @@ async fn handle_request(
     // 404 -> /index.html returned as 200).
     if let Some(rule) = match_error_rule(&route.error_rules, resp.status().as_u16()) {
         let origin_status = resp.status();
-        let (auth, host) = resolve_upstream(&route.default_origin_domain, &dp.s3_endpoint);
-        let url = format!("http://{auth}{}", rule.page_path);
-        let mut err_resp = fetch_origin(
+        let url = format!("{}{}", route.default_upstream.url_base, rule.page_path);
+        let err_resp = fetch_origin(
             dp,
             &Method::GET,
             &url,
-            &host,
+            &route.default_upstream.host_header,
             &HeaderMap::new(),
             &Bytes::new(),
         )
         .await;
-        // Status = the rule's ResponseCode if set, else the ORIGINAL origin
-        // error status (AWS: an omitted ResponseCode keeps the origin's code).
-        let final_status = rule
-            .response_code
-            .and_then(|c| http::StatusCode::from_u16(c).ok())
-            .unwrap_or(origin_status);
-        *err_resp.status_mut() = final_status;
-        return err_resp;
+        // Only interpose the custom error page when the fallback fetch itself
+        // succeeded. If fetching the page failed (e.g. the default origin is
+        // down, or the page path 404s), returning it under the rule's success
+        // ResponseCode would mask an error body with a 200; keep the ORIGINAL
+        // origin response instead.
+        if err_resp.status().is_success() {
+            let mut err_resp = err_resp;
+            // Status = the rule's ResponseCode if set, else the ORIGINAL origin
+            // error status (AWS: an omitted ResponseCode keeps the origin's code).
+            let final_status = rule
+                .response_code
+                .and_then(|c| http::StatusCode::from_u16(c).ok())
+                .unwrap_or(origin_status);
+            *err_resp.status_mut() = final_status;
+            return err_resp;
+        }
+        return resp;
     }
     resp
 }
 
 /// Owned per-request routing snapshot (taken under the state read lock).
 struct RouteResolution {
-    /// Origin domain for the matched cache behavior.
-    origin_domain: String,
-    /// Origin domain of the default cache behavior (where CustomErrorResponse
-    /// pages are fetched from).
-    default_origin_domain: String,
+    /// Resolved upstream for the matched cache behavior.
+    upstream: UpstreamTarget,
+    /// Resolved upstream for the default cache behavior (where
+    /// CustomErrorResponse pages are fetched from).
+    default_upstream: UpstreamTarget,
     /// CustomErrorResponses that have a response page path.
     error_rules: Vec<ErrorRule>,
+}
+
+/// A resolved origin address: the scheme+authority to connect to and the `Host`
+/// header to send.
+#[derive(Clone)]
+struct UpstreamTarget {
+    /// `scheme://authority` (no trailing slash); the request path is appended.
+    url_base: String,
+    /// `Host` header sent upstream (the origin domain name).
+    host_header: String,
 }
 
 #[derive(Clone)]
@@ -297,21 +322,25 @@ struct ErrorRule {
 
 /// Resolve the matched origin, the default origin, and the custom-error rules
 /// for a request path.
-fn resolve_route(cfg: &DistributionConfig, path: &str) -> Option<RouteResolution> {
+fn resolve_route(
+    cfg: &DistributionConfig,
+    path: &str,
+    s3_endpoint: &str,
+) -> Option<RouteResolution> {
     let items = cfg.origins.items.as_ref()?;
     let target = select_target_origin(cfg, path);
-    let origin_domain = items
+    let upstream = items
         .origin
         .iter()
         .find(|o| o.id == target)
-        .map(|o| o.domain_name.clone())?;
+        .map(|o| upstream_for(o, s3_endpoint))?;
     let default_target = cfg.default_cache_behavior.target_origin_id.as_str();
-    let default_origin_domain = items
+    let default_upstream = items
         .origin
         .iter()
         .find(|o| o.id == default_target)
-        .map(|o| o.domain_name.clone())
-        .unwrap_or_else(|| origin_domain.clone());
+        .map(|o| upstream_for(o, s3_endpoint))
+        .unwrap_or_else(|| upstream.clone());
     let error_rules = cfg
         .custom_error_responses
         .as_ref()
@@ -330,8 +359,8 @@ fn resolve_route(cfg: &DistributionConfig, path: &str) -> Option<RouteResolution
         })
         .unwrap_or_default();
     Some(RouteResolution {
-        origin_domain,
-        default_origin_domain,
+        upstream,
+        default_upstream,
         error_rules,
     })
 }
@@ -354,15 +383,60 @@ fn select_target_origin<'a>(cfg: &'a DistributionConfig, path: &str) -> &'a str 
     &cfg.default_cache_behavior.target_origin_id
 }
 
-/// Resolve an origin `domain_name` to the `(authority, host_header)` to use.
-/// S3-website origins are served by this same fakecloud process, so connect to
-/// its own port while preserving the website domain in `Host`; other (custom)
-/// origins are reached at their domain verbatim.
-fn resolve_upstream(origin_domain: &str, s3_endpoint: &str) -> (String, String) {
-    if origin_domain.contains(".s3-website") {
-        (s3_endpoint.to_string(), origin_domain.to_string())
-    } else {
-        (origin_domain.to_string(), origin_domain.to_string())
+/// An S3 static-website endpoint (`bucket.s3-website-<region>.amazonaws.com` or
+/// `bucket.s3-website.<region>.amazonaws.com`). Matched precisely (`.s3-website`
+/// label plus the `.amazonaws.com` suffix) so a custom origin that merely
+/// contains the substring — e.g. `my.s3-website.example.com` — is NOT rerouted
+/// to the local fakecloud port.
+fn is_s3_website(domain: &str) -> bool {
+    domain.contains(".s3-website") && domain.ends_with(".amazonaws.com")
+}
+
+/// Resolve an [`crate::model::Origin`] to the upstream to connect to.
+///
+/// - S3-website origins are served by this same fakecloud process, so connect to
+///   its own port while preserving the website domain in `Host`.
+/// - Custom origins honor `CustomOriginConfig`: an `https-only` protocol policy
+///   is fetched over HTTPS (else HTTP), and the configured `HTTPPort`/`HTTPSPort`
+///   is appended UNLESS the `domain_name` already carries an explicit `:port`
+///   (as local test origins do) or the port is the scheme default.
+/// - Bare origins (no config) are reached over HTTP at their domain verbatim.
+fn upstream_for(origin: &crate::model::Origin, s3_endpoint: &str) -> UpstreamTarget {
+    let domain = &origin.domain_name;
+    if is_s3_website(domain) {
+        return UpstreamTarget {
+            url_base: format!("http://{s3_endpoint}"),
+            host_header: domain.clone(),
+        };
+    }
+    if let Some(cfg) = &origin.custom_origin_config {
+        let https = cfg
+            .origin_protocol_policy
+            .eq_ignore_ascii_case("https-only");
+        let (scheme, port) = if https {
+            ("https", cfg.https_port)
+        } else {
+            ("http", cfg.http_port)
+        };
+        // A domain that already encodes a port (host:port, as local origins do)
+        // wins over the config port; otherwise append a non-default port.
+        let has_explicit_port = domain.rsplit(':').next().is_some_and(|s| {
+            !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && domain.contains(':')
+        });
+        let default_port = (scheme == "http" && port == 80) || (scheme == "https" && port == 443);
+        let authority = if has_explicit_port || port <= 0 || default_port {
+            domain.clone()
+        } else {
+            format!("{domain}:{port}")
+        };
+        return UpstreamTarget {
+            url_base: format!("{scheme}://{authority}"),
+            host_header: domain.clone(),
+        };
+    }
+    UpstreamTarget {
+        url_base: format!("http://{domain}"),
+        host_header: domain.clone(),
     }
 }
 
@@ -465,4 +539,83 @@ const HOP_BY_HOP: &[&str] = &[
 
 fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|&h| h.eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{CustomOriginConfig, Origin};
+
+    fn origin(domain: &str, custom: Option<CustomOriginConfig>) -> Origin {
+        Origin {
+            id: "o".into(),
+            domain_name: domain.into(),
+            custom_origin_config: custom,
+            ..Default::default()
+        }
+    }
+
+    fn custom(policy: &str, http_port: i32, https_port: i32) -> CustomOriginConfig {
+        CustomOriginConfig {
+            http_port,
+            https_port,
+            origin_protocol_policy: policy.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn s3_website_detection_is_precise() {
+        assert!(is_s3_website("b.s3-website-us-east-1.amazonaws.com"));
+        assert!(is_s3_website("b.s3-website.us-east-1.amazonaws.com"));
+        // A custom origin that merely contains the substring must NOT match.
+        assert!(!is_s3_website("my.s3-website.example.com"));
+        assert!(!is_s3_website("api.example.com"));
+        assert!(!is_s3_website("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn s3_website_origin_routes_to_local_port() {
+        let up = upstream_for(
+            &origin("b.s3-website-us-east-1.amazonaws.com", None),
+            "127.0.0.1:4566",
+        );
+        assert_eq!(up.url_base, "http://127.0.0.1:4566");
+        assert_eq!(up.host_header, "b.s3-website-us-east-1.amazonaws.com");
+    }
+
+    #[test]
+    fn https_only_custom_origin_uses_https_and_port() {
+        let up = upstream_for(
+            &origin("api.example.com", Some(custom("https-only", 80, 8443))),
+            "127.0.0.1:4566",
+        );
+        assert_eq!(up.url_base, "https://api.example.com:8443");
+    }
+
+    #[test]
+    fn http_custom_origin_default_port_omits_port() {
+        let up = upstream_for(
+            &origin("api.example.com", Some(custom("http-only", 80, 443))),
+            "127.0.0.1:4566",
+        );
+        assert_eq!(up.url_base, "http://api.example.com");
+    }
+
+    #[test]
+    fn explicit_port_in_domain_wins_over_config_port() {
+        // Local origins encode the port in the domain; the config port (80) must
+        // not be appended on top of it.
+        let up = upstream_for(
+            &origin("127.0.0.1:52111", Some(custom("http-only", 80, 443))),
+            "127.0.0.1:4566",
+        );
+        assert_eq!(up.url_base, "http://127.0.0.1:52111");
+    }
+
+    #[test]
+    fn bare_origin_defaults_to_http() {
+        let up = upstream_for(&origin("origin.internal", None), "127.0.0.1:4566");
+        assert_eq!(up.url_base, "http://origin.internal");
+    }
 }
