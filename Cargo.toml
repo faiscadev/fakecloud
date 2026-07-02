@@ -206,6 +206,7 @@ version = "0.30.0"
 
 [workspace.dependencies.fakecloud-dsql]
 path = "crates/fakecloud-dsql"
+version = "0.30.0"
 
 [workspace.dependencies.fakecloud-resource-groups]
 path = "crates/fakecloud-resource-groups"
