@@ -27,7 +27,11 @@ use helpers::TestServer;
 #[test_action("servicediscovery", "GetInstance", checksum = "ea10be2d")]
 #[test_action("servicediscovery", "ListInstances", checksum = "00a8e1d4")]
 #[test_action("servicediscovery", "GetInstancesHealthStatus", checksum = "d0c211a5")]
-#[test_action("servicediscovery", "UpdateInstanceCustomHealthStatus", checksum = "c1e0b340")]
+#[test_action(
+    "servicediscovery",
+    "UpdateInstanceCustomHealthStatus",
+    checksum = "c1e0b340"
+)]
 #[test_action("servicediscovery", "DiscoverInstances", checksum = "f0769d88")]
 #[test_action("servicediscovery", "DiscoverInstancesRevision", checksum = "8968362e")]
 #[test_action("servicediscovery", "TagResource", checksum = "6bf142a6")]
