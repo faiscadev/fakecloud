@@ -428,10 +428,9 @@ pub async fn save_dynamodb_snapshot(
             err.kind(),
             format!("failed to write dynamodb snapshot: {err}"),
         )),
-        Err(err) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("dynamodb snapshot task panicked: {err}"),
-        )),
+        Err(err) => Err(io::Error::other(format!(
+            "dynamodb snapshot task panicked: {err}"
+        ))),
     }
 }
 
