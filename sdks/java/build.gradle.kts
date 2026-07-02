@@ -4,7 +4,7 @@ import com.vanniktech.maven.publish.SonatypeHost
 
 plugins {
     `java-library`
-    id("com.vanniktech.maven.publish") version "0.30.1"
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "dev.fakecloud"
