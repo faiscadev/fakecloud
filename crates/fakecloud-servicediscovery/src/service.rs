@@ -30,8 +30,8 @@ use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
 use crate::state::{
-    DnsConfig, DnsProps, DnsRecord, HealthCheckConfig, HealthCheckCustomConfig, Namespace,
-    Operation, Service, SharedServiceDiscoveryState,
+    DnsConfig, DnsProps, DnsRecord, HealthCheckConfig, HealthCheckCustomConfig, Instance,
+    Namespace, Operation, Service, SharedServiceDiscoveryState,
 };
 
 /// Every operation name in the Cloud Map Smithy model (all 30). Ops not yet
@@ -137,6 +137,10 @@ fn is_mutating(action: &str) -> bool {
     action.starts_with("Create")
         || action.starts_with("Delete")
         || action.starts_with("Update")
+        || action.starts_with("Register")
+        || action.starts_with("Deregister")
+        || action.starts_with("Tag")
+        || action.starts_with("Untag")
         || action == "GetOperation"
 }
 
@@ -161,6 +165,17 @@ fn dispatch(s: &ServiceDiscoveryService, req: &AwsRequest) -> Result<AwsResponse
         "GetServiceAttributes" => s.get_service_attributes(req),
         "UpdateServiceAttributes" => s.update_service_attributes(req),
         "DeleteServiceAttributes" => s.delete_service_attributes(req),
+        "RegisterInstance" => s.register_instance(req),
+        "DeregisterInstance" => s.deregister_instance(req),
+        "GetInstance" => s.get_instance(req),
+        "ListInstances" => s.list_instances(req),
+        "GetInstancesHealthStatus" => s.get_instances_health_status(req),
+        "UpdateInstanceCustomHealthStatus" => s.update_instance_custom_health_status(req),
+        "DiscoverInstances" => s.discover_instances(req),
+        "DiscoverInstancesRevision" => s.discover_instances_revision(req),
+        "TagResource" => s.tag_resource(req),
+        "UntagResource" => s.untag_resource(req),
+        "ListTagsForResource" => s.list_tags_for_resource(req),
         _ => Err(AwsServiceError::action_not_implemented(
             s.service_name(),
             &req.action,
@@ -188,9 +203,12 @@ fn parse(req: &AwsRequest) -> Result<Value, AwsServiceError> {
 /// `NamespaceAlreadyExists`, `ResourceLimitExceeded`) is 400.
 fn fault(code: &str, msg: &str) -> AwsServiceError {
     let status = match code {
-        "NamespaceNotFound" | "OperationNotFound" | "ServiceNotFound" | "InstanceNotFound" => {
-            StatusCode::NOT_FOUND
-        }
+        "NamespaceNotFound"
+        | "OperationNotFound"
+        | "ServiceNotFound"
+        | "InstanceNotFound"
+        | "CustomHealthNotFound"
+        | "ResourceNotFoundException" => StatusCode::NOT_FOUND,
         "DuplicateRequest" | "ResourceInUse" => StatusCode::CONFLICT,
         _ => StatusCode::BAD_REQUEST,
     };
@@ -528,6 +546,143 @@ fn service_attributes_json(svc: &Service, account: &str) -> Value {
     })
 }
 
+// ===== instance parsing + JSON builders =====
+
+/// Parse the required `Attributes` map from a request into an ordered map.
+/// Every value must be a string per the `Attributes` map shape.
+fn parse_attributes(v: &Value) -> Result<BTreeMap<String, String>, AwsServiceError> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| fault("InvalidInput", "Attributes must be a map."))?;
+    let mut out = BTreeMap::new();
+    for (k, val) in obj {
+        let s = val
+            .as_str()
+            .ok_or_else(|| fault("InvalidInput", "Attribute values must be strings."))?;
+        out.insert(k.clone(), s.to_string());
+    }
+    Ok(out)
+}
+
+/// Validate a registering instance's attributes against the service's routing
+/// config: a DNS service materializes a record per `DnsRecord` type, and each
+/// record type requires the matching well-known attribute (AWS raises
+/// `InvalidInput` otherwise). HTTP-only services impose no attribute rule.
+fn validate_instance_attributes(
+    svc: &Service,
+    attrs: &BTreeMap<String, String>,
+) -> Result<(), AwsServiceError> {
+    let Some(dns) = &svc.dns_config else {
+        return Ok(());
+    };
+    for rec in &dns.dns_records {
+        let (required, why) = match rec.type_.as_str() {
+            "A" => ("AWS_INSTANCE_IPV4", "an A record"),
+            "AAAA" => ("AWS_INSTANCE_IPV6", "an AAAA record"),
+            "SRV" => ("AWS_INSTANCE_PORT", "an SRV record"),
+            "CNAME" => ("AWS_INSTANCE_CNAME", "a CNAME record"),
+            _ => continue,
+        };
+        // An AWS_ALIAS_DNS_NAME registration targets an ELB alias and is exempt
+        // from the per-record-type attribute requirement.
+        if attrs.contains_key("AWS_ALIAS_DNS_NAME") {
+            continue;
+        }
+        if !attrs.contains_key(required) {
+            return Err(fault(
+                "InvalidInput",
+                &format!("The service specifies {why}, so {required} is required."),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn instance_json(inst: &Instance, account: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("Id".into(), json!(inst.id));
+    obj.insert("CreatorRequestId".into(), json!(inst.creator_request_id));
+    obj.insert("Attributes".into(), json!(inst.attributes));
+    obj.insert("CreatedByAccount".into(), json!(account));
+    Value::Object(obj)
+}
+
+fn instance_summary_json(inst: &Instance, account: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("Id".into(), json!(inst.id));
+    obj.insert("Attributes".into(), json!(inst.attributes));
+    obj.insert("CreatedByAccount".into(), json!(account));
+    Value::Object(obj)
+}
+
+fn http_instance_summary_json(inst: &Instance, namespace_name: &str, service_name: &str) -> Value {
+    json!({
+        "InstanceId": inst.id,
+        "NamespaceName": namespace_name,
+        "ServiceName": service_name,
+        "HealthStatus": inst.health,
+        "Attributes": inst.attributes,
+    })
+}
+
+// ===== tag parsing + storage =====
+
+/// Parse a `TagList` (`[{Key,Value}]`) into a key -> value map.
+fn parse_tag_list(v: &Value) -> Result<BTreeMap<String, String>, AwsServiceError> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| fault("InvalidInput", "Tags must be a list."))?;
+    let mut out = BTreeMap::new();
+    for t in arr {
+        let key = req_str(t, "Key")?.to_string();
+        let value = t.get("Value").and_then(Value::as_str).unwrap_or("");
+        out.insert(key, value.to_string());
+    }
+    Ok(out)
+}
+
+/// Persist create-time `Tags` (present on Create*Namespace / CreateService)
+/// under the resource ARN so `ListTagsForResource` reflects them.
+fn store_create_tags(st: &mut crate::state::ServiceDiscoveryState, arn: &str, b: &Value) {
+    let Some(tags) = b.get("Tags") else {
+        return;
+    };
+    if let Ok(parsed) = parse_tag_list(tags) {
+        if !parsed.is_empty() {
+            st.tags.entry(arn.to_string()).or_default().extend(parsed);
+        }
+    }
+}
+
+/// Serialize a resource's stored tags as a `TagList` (`[{Key,Value}]`).
+fn tag_list_json(tags: &crate::state::TagMap) -> Value {
+    let list: Vec<Value> = tags
+        .iter()
+        .map(|(k, v)| json!({ "Key": k, "Value": v }))
+        .collect();
+    Value::Array(list)
+}
+
+/// Resolve a resource ARN (or bare id) to the canonical ARN of an existing
+/// namespace or service, raising `ResourceNotFoundException` when unknown. Tags
+/// are keyed by the canonical ARN so every taggable resource type is uniform.
+fn resolve_taggable_arn(
+    st: &crate::state::ServiceDiscoveryState,
+    resource_arn: &str,
+) -> Result<String, AwsServiceError> {
+    let id = resource_id_from(resource_arn);
+    if let Some(ns) = st.namespaces.get(id) {
+        return Ok(ns.arn.clone());
+    }
+    if let Some(svc) = st.services.get(id) {
+        return Ok(svc.arn.clone());
+    }
+    Err(fault(
+        "ResourceNotFoundException",
+        &format!("Resource {resource_arn} not found."),
+    ))
+}
+
 // ===== namespace create (shared) =====
 
 impl ServiceDiscoveryService {
@@ -564,7 +719,7 @@ impl ServiceDiscoveryService {
         let now = Utc::now();
         let ns = Namespace {
             id: id.clone(),
-            arn,
+            arn: arn.clone(),
             name: name.clone(),
             type_: type_.to_string(),
             description: opt_str(&b, "Description"),
@@ -576,6 +731,7 @@ impl ServiceDiscoveryService {
             create_date: now,
         };
         st.namespaces.insert(id.clone(), ns);
+        store_create_tags(st, &arn, &b);
         let op_id = self.mint_operation(st, "CREATE_NAMESPACE", "NAMESPACE", &id);
         ok(json!({ "OperationId": op_id }))
     }
@@ -890,12 +1046,16 @@ impl ServiceDiscoveryService {
             attributes: BTreeMap::new(),
             creator_request_id: creator_request_id(&b),
             create_date: Utc::now(),
+            instances: BTreeMap::new(),
+            instances_revision: 0,
         };
+        let arn = svc.arn.clone();
         st.services.insert(id.clone(), svc.clone());
         // Bump the parent namespace's ServiceCount.
         if let Some(ns) = st.namespaces.get_mut(&namespace_id) {
             ns.service_count += 1;
         }
+        store_create_tags(st, &arn, &b);
         ok(json!({ "Service": service_json(&svc, &req.account_id) }))
     }
 
@@ -1065,6 +1225,441 @@ impl ServiceDiscoveryService {
             svc.attributes.remove(&k);
         }
         ok(json!({}))
+    }
+}
+
+// ===== instance handlers =====
+
+impl ServiceDiscoveryService {
+    /// RegisterInstance is *asynchronous*: it stores the instance eagerly (so
+    /// GetInstance sees it immediately) and returns a `REGISTER_INSTANCE`
+    /// `OperationId` for the caller to poll.
+    fn register_instance(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let instance_id = req_str(&b, "InstanceId")?.to_string();
+        check_max_len(&instance_id, 64, "InstanceId")?;
+        let attrs = parse_attributes(
+            b.get("Attributes")
+                .ok_or_else(|| fault("InvalidInput", "Attributes is required."))?,
+        )?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&service_id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        validate_instance_attributes(svc, &attrs)?;
+        // Registering an id that already exists updates it in place (AWS treats a
+        // re-register as an upsert); InstanceCount only grows for a new id.
+        let is_new = !svc.instances.contains_key(&instance_id);
+        svc.instances.insert(
+            instance_id.clone(),
+            Instance {
+                id: instance_id.clone(),
+                creator_request_id: creator_request_id(&b),
+                attributes: attrs,
+                health: "HEALTHY".to_string(),
+            },
+        );
+        if is_new {
+            svc.instance_count += 1;
+        }
+        svc.instances_revision += 1;
+        let op_id =
+            self.mint_instance_operation(st, "REGISTER_INSTANCE", &service_id, &instance_id);
+        ok(json!({ "OperationId": op_id }))
+    }
+
+    /// DeregisterInstance is *asynchronous*: it removes the instance eagerly and
+    /// returns a `DEREGISTER_INSTANCE` `OperationId`.
+    fn deregister_instance(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let instance_id = req_str(&b, "InstanceId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&service_id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        if svc.instances.remove(&instance_id).is_none() {
+            return Err(fault(
+                "InstanceNotFound",
+                &format!("Instance {instance_id} not found."),
+            ));
+        }
+        svc.instance_count = (svc.instance_count - 1).max(0);
+        svc.instances_revision += 1;
+        let op_id =
+            self.mint_instance_operation(st, "DEREGISTER_INSTANCE", &service_id, &instance_id);
+        ok(json!({ "OperationId": op_id }))
+    }
+
+    /// Mint an instance-scoped operation whose `Targets` carry both the
+    /// `INSTANCE` and owning `SERVICE` ids, matching the real API.
+    fn mint_instance_operation(
+        &self,
+        st: &mut crate::state::ServiceDiscoveryState,
+        type_: &str,
+        service_id: &str,
+        instance_id: &str,
+    ) -> String {
+        let op_id = new_operation_id();
+        let now = Utc::now();
+        let mut targets = BTreeMap::new();
+        targets.insert("INSTANCE".to_string(), instance_id.to_string());
+        targets.insert("SERVICE".to_string(), service_id.to_string());
+        st.operations.insert(
+            op_id.clone(),
+            Operation {
+                id: op_id.clone(),
+                type_: type_.to_string(),
+                status: "SUBMITTED".to_string(),
+                error_message: None,
+                error_code: None,
+                create_date: now,
+                update_date: now,
+                targets,
+            },
+        );
+        op_id
+    }
+
+    fn get_instance(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let instance_id = req_str(&b, "InstanceId")?.to_string();
+        let accounts = self.state.read();
+        let Some(svc) = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.services.get(&service_id))
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        let Some(inst) = svc.instances.get(&instance_id) else {
+            return Err(fault(
+                "InstanceNotFound",
+                &format!("Instance {instance_id} not found."),
+            ));
+        };
+        ok(json!({
+            "Instance": instance_json(inst, &req.account_id),
+            "ResourceOwner": req.account_id,
+        }))
+    }
+
+    fn list_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        validate_pagination(&b)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let accounts = self.state.read();
+        let Some(svc) = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.services.get(&service_id))
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        let items: Vec<Value> = svc
+            .instances
+            .values()
+            .map(|inst| instance_summary_json(inst, &req.account_id))
+            .collect();
+        let (page, next) = paginate(items, &b, 100);
+        ok(json!({
+            "Instances": page,
+            "NextToken": next,
+            "ResourceOwner": req.account_id,
+        }))
+    }
+
+    fn get_instances_health_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        validate_pagination(&b)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        // An optional `Instances` list narrows the query to specific ids.
+        let requested: Option<Vec<String>> =
+            b.get("Instances").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            });
+        let accounts = self.state.read();
+        let Some(svc) = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.services.get(&service_id))
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        // When specific ids are named, every one must exist.
+        if let Some(ids) = &requested {
+            for id in ids {
+                if !svc.instances.contains_key(id) {
+                    return Err(fault(
+                        "InstanceNotFound",
+                        &format!("Instance {id} not found."),
+                    ));
+                }
+            }
+        }
+        let mut items: Vec<Value> = svc
+            .instances
+            .values()
+            .filter(|inst| {
+                requested
+                    .as_ref()
+                    .is_none_or(|ids| ids.iter().any(|id| id == &inst.id))
+            })
+            .map(|inst| json!({ "Id": inst.id, "Status": inst.health }))
+            .collect();
+        // Paginate a flat list, then fold the page back into the status map.
+        let (page, next) = paginate(std::mem::take(&mut items), &b, 100);
+        let mut status = serde_json::Map::new();
+        for entry in page {
+            if let (Some(id), Some(st)) = (
+                entry.get("Id").and_then(Value::as_str),
+                entry.get("Status").and_then(Value::as_str),
+            ) {
+                status.insert(id.to_string(), json!(st));
+            }
+        }
+        ok(json!({ "Status": Value::Object(status), "NextToken": next }))
+    }
+
+    fn update_instance_custom_health_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let service_id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let instance_id = req_str(&b, "InstanceId")?.to_string();
+        let status = req_str(&b, "Status")?.to_string();
+        if status != "HEALTHY" && status != "UNHEALTHY" {
+            return Err(fault(
+                "InvalidInput",
+                "Status must be HEALTHY or UNHEALTHY.",
+            ));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&service_id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_id} not found."),
+            ));
+        };
+        // Custom health status only applies to a service configured with a
+        // HealthCheckCustomConfig.
+        if svc.health_check_custom_config.is_none() {
+            return Err(fault(
+                "CustomHealthNotFound",
+                &format!("Service {service_id} has no custom health check configuration."),
+            ));
+        }
+        let Some(inst) = svc.instances.get_mut(&instance_id) else {
+            return Err(fault(
+                "InstanceNotFound",
+                &format!("Instance {instance_id} not found."),
+            ));
+        };
+        inst.health = status;
+        ok(json!({}))
+    }
+
+    /// DiscoverInstances is Cloud Map's *data-plane* lookup: resolve a namespace
+    /// and service by name, then return the registered instances (filtered by
+    /// `QueryParameters` attribute equality and the `HealthStatus` filter) as
+    /// `HttpInstanceSummary` records, along with the service's revision counter.
+    fn discover_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let namespace_name = req_str(&b, "NamespaceName")?.to_string();
+        let service_name = req_str(&b, "ServiceName")?.to_string();
+        let query: BTreeMap<String, String> = match b.get("QueryParameters") {
+            Some(v) => parse_attributes(v)?,
+            None => BTreeMap::new(),
+        };
+        let health_filter =
+            opt_str(&b, "HealthStatus").unwrap_or_else(|| "HEALTHY_OR_ELSE_ALL".to_string());
+        let max = b
+            .get("MaxResults")
+            .and_then(Value::as_i64)
+            .map(|n| n.clamp(1, 1000) as usize)
+            .unwrap_or(100);
+        let accounts = self.state.read();
+        let Some(st) = accounts.get(&req.account_id) else {
+            return Err(fault(
+                "NamespaceNotFound",
+                &format!("Namespace {namespace_name} not found."),
+            ));
+        };
+        let Some(ns) = st.namespaces.values().find(|n| n.name == namespace_name) else {
+            return Err(fault(
+                "NamespaceNotFound",
+                &format!("Namespace {namespace_name} not found."),
+            ));
+        };
+        let Some(svc) = st
+            .services
+            .values()
+            .find(|s| s.namespace_id == ns.id && s.name == service_name)
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_name} not found."),
+            ));
+        };
+        // Attribute-equality filter: an instance matches only if it carries every
+        // requested key with the requested value.
+        let matching: Vec<&Instance> = svc
+            .instances
+            .values()
+            .filter(|inst| {
+                query
+                    .iter()
+                    .all(|(k, v)| inst.attributes.get(k).map(|a| a == v).unwrap_or(false))
+            })
+            .collect();
+        // HealthStatus filter. HEALTHY_OR_ELSE_ALL returns healthy instances, or
+        // all of them when none are healthy (AWS fail-open semantics).
+        let selected: Vec<&Instance> = match health_filter.as_str() {
+            "HEALTHY" => matching
+                .iter()
+                .copied()
+                .filter(|i| i.health == "HEALTHY")
+                .collect(),
+            "UNHEALTHY" => matching
+                .iter()
+                .copied()
+                .filter(|i| i.health == "UNHEALTHY")
+                .collect(),
+            "HEALTHY_OR_ELSE_ALL" => {
+                let healthy: Vec<&Instance> = matching
+                    .iter()
+                    .copied()
+                    .filter(|i| i.health == "HEALTHY")
+                    .collect();
+                if healthy.is_empty() {
+                    matching.clone()
+                } else {
+                    healthy
+                }
+            }
+            // "ALL" (and any unrecognized value) returns every matching instance.
+            _ => matching.clone(),
+        };
+        let instances: Vec<Value> = selected
+            .into_iter()
+            .take(max)
+            .map(|inst| http_instance_summary_json(inst, &ns.name, &svc.name))
+            .collect();
+        ok(json!({
+            "Instances": instances,
+            "InstancesRevision": svc.instances_revision,
+        }))
+    }
+
+    fn discover_instances_revision(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let namespace_name = req_str(&b, "NamespaceName")?.to_string();
+        let service_name = req_str(&b, "ServiceName")?.to_string();
+        let accounts = self.state.read();
+        let Some(st) = accounts.get(&req.account_id) else {
+            return Err(fault(
+                "NamespaceNotFound",
+                &format!("Namespace {namespace_name} not found."),
+            ));
+        };
+        let Some(ns) = st.namespaces.values().find(|n| n.name == namespace_name) else {
+            return Err(fault(
+                "NamespaceNotFound",
+                &format!("Namespace {namespace_name} not found."),
+            ));
+        };
+        let Some(svc) = st
+            .services
+            .values()
+            .find(|s| s.namespace_id == ns.id && s.name == service_name)
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {service_name} not found."),
+            ));
+        };
+        ok(json!({ "InstancesRevision": svc.instances_revision }))
+    }
+}
+
+// ===== tag handlers =====
+
+impl ServiceDiscoveryService {
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let resource_arn = req_str(&b, "ResourceARN")?.to_string();
+        let tags = parse_tag_list(
+            b.get("Tags")
+                .ok_or_else(|| fault("InvalidInput", "Tags is required."))?,
+        )?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let arn = resolve_taggable_arn(st, &resource_arn)?;
+        st.tags.entry(arn).or_default().extend(tags);
+        ok(json!({}))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let resource_arn = req_str(&b, "ResourceARN")?.to_string();
+        let keys: Vec<String> = b
+            .get("TagKeys")
+            .and_then(Value::as_array)
+            .ok_or_else(|| fault("InvalidInput", "TagKeys is required."))?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let arn = resolve_taggable_arn(st, &resource_arn)?;
+        if let Some(map) = st.tags.get_mut(&arn) {
+            for k in &keys {
+                map.remove(k);
+            }
+        }
+        ok(json!({}))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let resource_arn = req_str(&b, "ResourceARN")?.to_string();
+        let accounts = self.state.read();
+        let Some(st) = accounts.get(&req.account_id) else {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Resource {resource_arn} not found."),
+            ));
+        };
+        let arn = resolve_taggable_arn(st, &resource_arn)?;
+        let empty = crate::state::TagMap::new();
+        let tags = st.tags.get(&arn).unwrap_or(&empty);
+        ok(json!({ "Tags": tag_list_json(tags) }))
     }
 }
 
@@ -1555,6 +2150,367 @@ mod tests {
             s.delete_service_attributes(&req(
                 "DeleteServiceAttributes",
                 json!({ "ServiceId": "srv-missing", "Attributes": ["a"] }),
+            )),
+        ] {
+            assert_eq!(expect_err(r).status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    /// Create a DNS namespace + a DNS_HTTP service (A record) and return
+    /// `(namespace_name, namespace_id, service_id)`.
+    fn make_dns_service(
+        s: &ServiceDiscoveryService,
+        ns_name: &str,
+        svc_name: &str,
+    ) -> (String, String) {
+        let ns_id = make_dns_namespace(s, ns_name);
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({
+                    "Name": svc_name,
+                    "NamespaceId": ns_id,
+                    "DnsConfig": {
+                        "RoutingPolicy": "MULTIVALUE",
+                        "DnsRecords": [{ "Type": "A", "TTL": 60 }],
+                    },
+                }),
+            ))
+            .unwrap();
+        let srv_id = body_of(&resp)["Service"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (ns_id, srv_id)
+    }
+
+    /// RegisterInstance -> settle op -> GetInstance visible, InstanceCount++.
+    fn register(s: &ServiceDiscoveryService, srv_id: &str, inst_id: &str, attrs: Value) -> String {
+        let resp = s
+            .register_instance(&req(
+                "RegisterInstance",
+                json!({ "ServiceId": srv_id, "InstanceId": inst_id, "Attributes": attrs }),
+            ))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let resp = s
+            .get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+            .unwrap();
+        let op = &body_of(&resp)["Operation"];
+        assert_eq!(op["Status"], "SUCCESS");
+        assert_eq!(op["Type"], "REGISTER_INSTANCE");
+        assert_eq!(op["Targets"]["INSTANCE"], inst_id);
+        assert_eq!(op["Targets"]["SERVICE"], srv_id);
+        op_id
+    }
+
+    fn svc_instance_count(s: &ServiceDiscoveryService, srv_id: &str) -> i64 {
+        let resp = s
+            .get_service(&req("GetService", json!({ "Id": srv_id })))
+            .unwrap();
+        body_of(&resp)["Service"]["InstanceCount"].as_i64().unwrap()
+    }
+
+    #[test]
+    fn instance_full_lifecycle() {
+        let s = svc();
+        let (_ns_id, srv_id) = make_dns_service(&s, "inst.example.com", "web");
+
+        // Register -> InstanceCount goes to 1, GetInstance sees it.
+        register(
+            &s,
+            &srv_id,
+            "i-1",
+            json!({ "AWS_INSTANCE_IPV4": "10.0.0.1" }),
+        );
+        assert_eq!(svc_instance_count(&s, &srv_id), 1);
+        let resp = s
+            .get_instance(&req(
+                "GetInstance",
+                json!({ "ServiceId": srv_id, "InstanceId": "i-1" }),
+            ))
+            .unwrap();
+        let inst = &body_of(&resp)["Instance"];
+        assert_eq!(inst["Id"], "i-1");
+        assert_eq!(inst["Attributes"]["AWS_INSTANCE_IPV4"], "10.0.0.1");
+
+        // A second instance -> ListInstances returns both.
+        register(
+            &s,
+            &srv_id,
+            "i-2",
+            json!({ "AWS_INSTANCE_IPV4": "10.0.0.2" }),
+        );
+        assert_eq!(svc_instance_count(&s, &srv_id), 2);
+        let resp = s
+            .list_instances(&req("ListInstances", json!({ "ServiceId": srv_id })))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Instances"].as_array().unwrap().len(), 2);
+
+        // Health status defaults to HEALTHY.
+        let resp = s
+            .get_instances_health_status(&req(
+                "GetInstancesHealthStatus",
+                json!({ "ServiceId": srv_id }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Status"]["i-1"], "HEALTHY");
+        assert_eq!(body_of(&resp)["Status"]["i-2"], "HEALTHY");
+
+        // Deregister i-2 -> InstanceCount back to 1.
+        let resp = s
+            .deregister_instance(&req(
+                "DeregisterInstance",
+                json!({ "ServiceId": srv_id, "InstanceId": "i-2" }),
+            ))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let resp = s
+            .get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Operation"]["Type"], "DEREGISTER_INSTANCE");
+        assert_eq!(svc_instance_count(&s, &srv_id), 1);
+        let err = expect_err(s.get_instance(&req(
+            "GetInstance",
+            json!({ "ServiceId": srv_id, "InstanceId": "i-2" }),
+        )));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn register_instance_requires_record_attribute() {
+        let s = svc();
+        let (_ns_id, srv_id) = make_dns_service(&s, "req.example.com", "api");
+        // Missing AWS_INSTANCE_IPV4 for the A record -> InvalidInput.
+        let err = expect_err(s.register_instance(&req(
+            "RegisterInstance",
+            json!({ "ServiceId": srv_id, "InstanceId": "bad", "Attributes": { "custom": "x" } }),
+        )));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn register_instance_missing_service_404() {
+        let s = svc();
+        let err = expect_err(s.register_instance(&req(
+            "RegisterInstance",
+            json!({ "ServiceId": "srv-missing", "InstanceId": "i", "Attributes": { "AWS_INSTANCE_IPV4": "1.2.3.4" } }),
+        )));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn custom_health_status_lifecycle() {
+        let s = svc();
+        let ns_id = make_namespace(&s, "customhealth");
+        // HTTP service with a custom health check config.
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({
+                    "Name": "chk",
+                    "NamespaceId": ns_id,
+                    "HealthCheckCustomConfig": { "FailureThreshold": 1 },
+                }),
+            ))
+            .unwrap();
+        let srv_id = body_of(&resp)["Service"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        register(
+            &s,
+            &srv_id,
+            "ci-1",
+            json!({ "AWS_INSTANCE_IPV4": "10.1.1.1" }),
+        );
+
+        // Update custom health to UNHEALTHY -> reflected in GetInstancesHealthStatus.
+        s.update_instance_custom_health_status(&req(
+            "UpdateInstanceCustomHealthStatus",
+            json!({ "ServiceId": srv_id, "InstanceId": "ci-1", "Status": "UNHEALTHY" }),
+        ))
+        .unwrap();
+        let resp = s
+            .get_instances_health_status(&req(
+                "GetInstancesHealthStatus",
+                json!({ "ServiceId": srv_id, "Instances": ["ci-1"] }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Status"]["ci-1"], "UNHEALTHY");
+    }
+
+    #[test]
+    fn custom_health_on_non_custom_service_404() {
+        let s = svc();
+        let (_ns_id, srv_id) = make_dns_service(&s, "nch.example.com", "svc");
+        register(
+            &s,
+            &srv_id,
+            "i-1",
+            json!({ "AWS_INSTANCE_IPV4": "10.0.0.1" }),
+        );
+        let err = expect_err(s.update_instance_custom_health_status(&req(
+            "UpdateInstanceCustomHealthStatus",
+            json!({ "ServiceId": srv_id, "InstanceId": "i-1", "Status": "HEALTHY" }),
+        )));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn discover_instances_by_name_filter_and_revision() {
+        let s = svc();
+        let (_ns_id, srv_id) = make_dns_service(&s, "disc.example.com", "web");
+        register(
+            &s,
+            &srv_id,
+            "i-1",
+            json!({ "AWS_INSTANCE_IPV4": "10.0.0.1", "stage": "prod" }),
+        );
+        register(
+            &s,
+            &srv_id,
+            "i-2",
+            json!({ "AWS_INSTANCE_IPV4": "10.0.0.2", "stage": "dev" }),
+        );
+
+        // Discover all -> both, revision == 2 (two registers).
+        let resp = s
+            .discover_instances(&req(
+                "DiscoverInstances",
+                json!({ "NamespaceName": "disc.example.com", "ServiceName": "web" }),
+            ))
+            .unwrap();
+        let out = body_of(&resp);
+        assert_eq!(out["Instances"].as_array().unwrap().len(), 2);
+        assert_eq!(out["InstancesRevision"], 2);
+        let first = &out["Instances"][0];
+        assert_eq!(first["NamespaceName"], "disc.example.com");
+        assert_eq!(first["ServiceName"], "web");
+        assert_eq!(first["HealthStatus"], "HEALTHY");
+
+        // QueryParameters attribute-equality filter narrows to i-2.
+        let resp = s
+            .discover_instances(&req(
+                "DiscoverInstances",
+                json!({
+                    "NamespaceName": "disc.example.com",
+                    "ServiceName": "web",
+                    "QueryParameters": { "stage": "dev" },
+                }),
+            ))
+            .unwrap();
+        let out = body_of(&resp);
+        assert_eq!(out["Instances"].as_array().unwrap().len(), 1);
+        assert_eq!(out["Instances"][0]["InstanceId"], "i-2");
+
+        // DiscoverInstancesRevision returns the same counter.
+        let resp = s
+            .discover_instances_revision(&req(
+                "DiscoverInstancesRevision",
+                json!({ "NamespaceName": "disc.example.com", "ServiceName": "web" }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["InstancesRevision"], 2);
+
+        // Deregister bumps the revision.
+        s.deregister_instance(&req(
+            "DeregisterInstance",
+            json!({ "ServiceId": srv_id, "InstanceId": "i-1" }),
+        ))
+        .unwrap();
+        let resp = s
+            .discover_instances_revision(&req(
+                "DiscoverInstancesRevision",
+                json!({ "NamespaceName": "disc.example.com", "ServiceName": "web" }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["InstancesRevision"], 3);
+    }
+
+    #[test]
+    fn discover_instances_missing_namespace_404() {
+        let s = svc();
+        let err = expect_err(s.discover_instances(&req(
+            "DiscoverInstances",
+            json!({ "NamespaceName": "nope", "ServiceName": "web" }),
+        )));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn tag_round_trip_on_namespace_and_service() {
+        let s = svc();
+        let ns_id = make_namespace(&s, "tagns");
+        let ns_arn = format!("arn:aws:servicediscovery:us-east-1:000000000000:namespace/{ns_id}");
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({ "Name": "tagsvc", "NamespaceId": ns_id, "Tags": [{ "Key": "team", "Value": "core" }] }),
+            ))
+            .unwrap();
+        let svc_arn = body_of(&resp)["Service"]["Arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create-time service tag is reflected in ListTagsForResource.
+        let resp = s
+            .list_tags_for_resource(&req(
+                "ListTagsForResource",
+                json!({ "ResourceARN": svc_arn }),
+            ))
+            .unwrap();
+        let tags = body_of(&resp)["Tags"].as_array().unwrap().clone();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["Key"], "team");
+
+        // TagResource on the namespace ARN.
+        s.tag_resource(&req(
+            "TagResource",
+            json!({ "ResourceARN": ns_arn, "Tags": [{ "Key": "env", "Value": "prod" }, { "Key": "owner", "Value": "a" }] }),
+        ))
+        .unwrap();
+        let resp = s
+            .list_tags_for_resource(&req(
+                "ListTagsForResource",
+                json!({ "ResourceARN": ns_arn }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Tags"].as_array().unwrap().len(), 2);
+
+        // UntagResource removes one key.
+        s.untag_resource(&req(
+            "UntagResource",
+            json!({ "ResourceARN": ns_arn, "TagKeys": ["owner"] }),
+        ))
+        .unwrap();
+        let resp = s
+            .list_tags_for_resource(&req(
+                "ListTagsForResource",
+                json!({ "ResourceARN": ns_arn }),
+            ))
+            .unwrap();
+        let tags = body_of(&resp)["Tags"].as_array().unwrap().clone();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["Key"], "env");
+    }
+
+    #[test]
+    fn tag_unknown_resource_404() {
+        let s = svc();
+        for r in [
+            s.tag_resource(&req(
+                "TagResource",
+                json!({ "ResourceARN": "arn:aws:servicediscovery:us-east-1:000000000000:namespace/ns-missing", "Tags": [{ "Key": "a", "Value": "b" }] }),
+            )),
+            s.untag_resource(&req(
+                "UntagResource",
+                json!({ "ResourceARN": "srv-missing", "TagKeys": ["a"] }),
+            )),
+            s.list_tags_for_resource(&req(
+                "ListTagsForResource",
+                json!({ "ResourceARN": "ns-missing" }),
             )),
         ] {
             assert_eq!(expect_err(r).status(), StatusCode::NOT_FOUND);

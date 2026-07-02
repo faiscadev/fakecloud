@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 50 AWS services with 3,921 total operations. 130,537/130,537 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 50 AWS services with 3,932 total operations. 130,944/130,944 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -37,7 +37,7 @@ fakecloud implements 50 AWS services with 3,921 total operations. 130,537/130,53
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | MemoryDB               |  45 | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted. Redis/Valkey data-plane container backing is a follow-up |
 | EKS                    |  65 | Complete control plane: clusters (incl. connected register/deregister), node groups, Fargate profiles, add-ons, access entries + policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, EKS Anywhere subscriptions (create/describe/list/delete, config + version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging); persisted, `CREATING` -> `ACTIVE` on describe. No real Kubernetes control-plane endpoint (all 65 ops) |
-| Cloud Map              |  19 | AWS Cloud Map (`servicediscovery`) namespace + service control plane: namespaces and services (DnsConfig/HealthCheck + attributes) via the async operation model — mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`; persisted. Instances, `DiscoverInstances` in progress (19 of 30 ops) |
+| Cloud Map              |  30 | Complete AWS Cloud Map (`servicediscovery`) control plane + discovery: namespaces, services, instances (register/deregister/health), `DiscoverInstances`/`DiscoverInstancesRevision`, tagging; async operation model — mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`; persisted (all 30 ops) |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |

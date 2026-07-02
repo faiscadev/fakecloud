@@ -22,6 +22,21 @@ use helpers::TestServer;
 #[test_action("servicediscovery", "GetServiceAttributes", checksum = "49cfab99")]
 #[test_action("servicediscovery", "UpdateServiceAttributes", checksum = "f9ec4ca8")]
 #[test_action("servicediscovery", "DeleteServiceAttributes", checksum = "f64d14f7")]
+#[test_action("servicediscovery", "RegisterInstance", checksum = "32c1a456")]
+#[test_action("servicediscovery", "DeregisterInstance", checksum = "6847c4d6")]
+#[test_action("servicediscovery", "GetInstance", checksum = "ea10be2d")]
+#[test_action("servicediscovery", "ListInstances", checksum = "00a8e1d4")]
+#[test_action("servicediscovery", "GetInstancesHealthStatus", checksum = "d0c211a5")]
+#[test_action(
+    "servicediscovery",
+    "UpdateInstanceCustomHealthStatus",
+    checksum = "c1e0b340"
+)]
+#[test_action("servicediscovery", "DiscoverInstances", checksum = "f0769d88")]
+#[test_action("servicediscovery", "DiscoverInstancesRevision", checksum = "8968362e")]
+#[test_action("servicediscovery", "TagResource", checksum = "6bf142a6")]
+#[test_action("servicediscovery", "UntagResource", checksum = "d28c61d9")]
+#[test_action("servicediscovery", "ListTagsForResource", checksum = "190fcb99")]
 #[tokio::test]
 async fn servicediscovery_probe() {
     let _server = TestServer::start().await;
