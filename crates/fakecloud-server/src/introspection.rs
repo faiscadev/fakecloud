@@ -358,6 +358,17 @@ pub(crate) fn athena_named_query_response(
     }
 }
 
+pub(crate) fn cloudfront_distribution_response(
+    dist: &fakecloud_cloudfront::StoredDistribution,
+) -> types::CloudFrontDistribution {
+    types::CloudFrontDistribution {
+        id: dist.id.clone(),
+        domain_name: dist.domain_name.clone(),
+        enabled: dist.config.enabled,
+        bound_port: dist.bound_port,
+    }
+}
+
 pub(crate) fn elbv2_load_balancer_response(
     lb: &fakecloud_elbv2::LoadBalancer,
 ) -> types::Elbv2LoadBalancer {

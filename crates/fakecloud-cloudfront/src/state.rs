@@ -59,6 +59,15 @@ impl CloudFrontAccounts {
     pub fn get(&self, account_id: &str) -> Option<&AccountState> {
         self.accounts.get(account_id)
     }
+
+    /// Iterate every stored distribution across all accounts, paired with the
+    /// owning account id. Used by the `/_fakecloud/cloudfront/distributions`
+    /// introspection route (and, later, the data-plane supervisor).
+    pub fn all_distributions(&self) -> impl Iterator<Item = (&String, &StoredDistribution)> {
+        self.accounts.iter().flat_map(|(account_id, state)| {
+            state.distributions.values().map(move |d| (account_id, d))
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -118,6 +127,13 @@ pub struct StoredDistribution {
     pub in_progress_invalidation_batches: u32,
     pub etag: String,
     pub config: DistributionConfig,
+    /// Data-plane listener port (fakecloud extension; None until the
+    /// supervisor binds a listener for an enabled distribution). Not part
+    /// of the AWS API surface — surfaced only via /_fakecloud/cloudfront/*.
+    /// Runtime-only: never persisted (restarts get a fresh port on the first
+    /// reconcile tick), mirroring the ELBv2 data plane's `bound_port`.
+    #[serde(skip)]
+    pub bound_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

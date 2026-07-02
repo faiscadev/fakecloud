@@ -1555,6 +1555,26 @@ pub struct EcsTaskMetadataResponse {
 
 // ── ELBv2 ───────────────────────────────────────────────────────────
 
+// ── CloudFront ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudFrontDistribution {
+    pub id: String,
+    pub domain_name: String,
+    pub enabled: bool,
+    /// In-process data-plane listener port. `None` until the supervisor binds
+    /// a listener for an enabled distribution (data-plane extension, not part
+    /// of the AWS API surface).
+    pub bound_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudFrontDistributionsResponse {
+    pub distributions: Vec<CloudFrontDistribution>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Elbv2LoadBalancer {

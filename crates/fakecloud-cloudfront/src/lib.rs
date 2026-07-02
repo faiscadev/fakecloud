@@ -7,6 +7,7 @@
 
 pub mod cfunctions;
 pub mod cfunctions_service;
+pub mod dataplane;
 pub mod extras;
 pub mod extras2;
 pub mod extras2_service;
