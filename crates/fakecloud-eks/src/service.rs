@@ -569,6 +569,8 @@ impl EksService {
             updates: Default::default(),
             connector_config: None,
             encryption_config: None,
+            access_config: build_access_config(body.get("accessConfig")),
+            upgrade_policy: build_upgrade_policy(body.get("upgradePolicy")),
         };
 
         let out = cluster_json(&cluster, &id);
@@ -2610,6 +2612,8 @@ impl EksService {
             updates: Default::default(),
             connector_config: Some(connector_config),
             encryption_config: None,
+            access_config: build_access_config(None),
+            upgrade_policy: build_upgrade_policy(None),
         };
         let out = connected_cluster_json(&cluster, &id);
         state.clusters.insert(name, cluster);
@@ -2681,7 +2685,7 @@ impl EksService {
             .cloned()
             .unwrap_or_else(|| "eks".to_string());
 
-        let catalog: Vec<Value> = cluster_version_catalog(&cluster_type)
+        let mut catalog: Vec<Value> = cluster_version_catalog(&cluster_type)
             .into_iter()
             .filter(|v| {
                 version_filter.is_empty()
@@ -2691,6 +2695,9 @@ impl EksService {
             })
             .filter(|v| !default_only || v["defaultVersion"] == true)
             .collect();
+        // AWS reports the default version first; a stable sort keying non-default
+        // rows after default ones preserves the ascending version order otherwise.
+        catalog.sort_by_key(|v| v["defaultVersion"] != true);
 
         let (page, token) = paginate_checked(&catalog, next_token.as_deref(), max_results)
             .map_err(|_| invalid_parameter("Invalid nextToken"))?;
@@ -3591,12 +3598,43 @@ fn build_k8s_network_config(req: Option<&Value>) -> Value {
     let service_cidr = req
         .and_then(|v| v.get("serviceIpv4Cidr"))
         .and_then(|v| v.as_str())
-        .unwrap_or("10.100.0.0/16")
+        .unwrap_or("172.20.0.0/16")
         .to_string();
+    // `elasticLoadBalancing` is always present in the response; `enabled`
+    // defaults to false unless the caller opts in (auto mode / EKS Auto).
+    let elb_enabled = req
+        .and_then(|v| v.get("elasticLoadBalancing"))
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     json!({
         "serviceIpv4Cidr": service_cidr,
         "ipFamily": ip_family,
+        "elasticLoadBalancing": { "enabled": elb_enabled },
     })
+}
+
+/// Build an `AccessConfigResponse` object. The API only reports
+/// `authenticationMode` (bootstrap-creator permission is a create-only input),
+/// defaulting to `CONFIG_MAP` when the caller omits `accessConfig`.
+fn build_access_config(req: Option<&Value>) -> Value {
+    let mode = req
+        .and_then(|v| v.get("authenticationMode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("CONFIG_MAP")
+        .to_string();
+    json!({ "authenticationMode": mode })
+}
+
+/// Build an `UpgradePolicyResponse` object, defaulting `supportType` to
+/// `EXTENDED` (extended support enabled) when the caller omits `upgradePolicy`.
+fn build_upgrade_policy(req: Option<&Value>) -> Value {
+    let support = req
+        .and_then(|v| v.get("supportType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("EXTENDED")
+        .to_string();
+    json!({ "supportType": support })
 }
 
 fn build_logging(req: Option<&Value>) -> Value {
@@ -3637,6 +3675,8 @@ fn cluster_json(c: &Cluster, id: &str) -> Value {
         "platformVersion": c.platform_version,
         "tags": c.tags,
         "health": { "issues": [] },
+        "accessConfig": c.access_config,
+        "upgradePolicy": c.upgrade_policy,
     });
     if let Some(cc) = &c.connector_config {
         out["connectorConfig"] = cc.clone();
@@ -4513,6 +4553,64 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cluster_reports_access_config_upgrade_policy_and_elb_defaults() {
+        let svc = EksService::new(make_state());
+        // Create with no accessConfig/upgradePolicy/kubernetesNetworkConfig: the
+        // response defaults them the way the real control plane does.
+        let resp = svc
+            .handle(make_request(Method::POST, "/clusters", &create_body("c1")))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let c = &v["cluster"];
+        assert_eq!(c["accessConfig"]["authenticationMode"], "CONFIG_MAP");
+        assert_eq!(c["upgradePolicy"]["supportType"], "EXTENDED");
+        assert_eq!(
+            c["kubernetesNetworkConfig"]["elasticLoadBalancing"]["enabled"],
+            false
+        );
+        assert_eq!(
+            c["kubernetesNetworkConfig"]["serviceIpv4Cidr"],
+            "172.20.0.0/16"
+        );
+        assert_eq!(c["kubernetesNetworkConfig"]["ipFamily"], "ipv4");
+
+        // Describe echoes the same shape (drift-free round-trip).
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            v["cluster"]["accessConfig"]["authenticationMode"],
+            "CONFIG_MAP"
+        );
+        assert_eq!(v["cluster"]["upgradePolicy"]["supportType"], "EXTENDED");
+        assert_eq!(
+            v["cluster"]["kubernetesNetworkConfig"]["elasticLoadBalancing"]["enabled"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_echoes_supplied_access_config() {
+        let svc = EksService::new(make_state());
+        let body = json!({
+            "name": "c1",
+            "roleArn": "arn:aws:iam::111122223333:role/eks-cluster",
+            "resourcesVpcConfig": { "subnetIds": ["subnet-1", "subnet-2"] },
+            "accessConfig": { "authenticationMode": "API" },
+        })
+        .to_string();
+        let resp = svc
+            .handle(make_request(Method::POST, "/clusters", &body))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["cluster"]["accessConfig"]["authenticationMode"], "API");
     }
 
     #[tokio::test]
@@ -6039,6 +6137,8 @@ mod tests {
                 .count(),
             1
         );
+        // AWS reports the default version first (index 0).
+        assert_eq!(versions[0]["defaultVersion"], true);
 
         // defaultOnly filter narrows to the single default.
         let resp = svc

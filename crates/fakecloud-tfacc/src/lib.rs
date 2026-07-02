@@ -367,6 +367,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_RDS", "rds"),
     ("AWS_ENDPOINT_URL_ELASTICACHE", "elasticache"),
     ("AWS_ENDPOINT_URL_MEMORYDB", "memorydb"),
+    ("AWS_ENDPOINT_URL_EKS", "eks"),
     ("AWS_ENDPOINT_URL_CLOUDFORMATION", "cloudformation"),
     ("AWS_ENDPOINT_URL_SESV2", "sesv2"),
     ("AWS_ENDPOINT_URL_SES", "ses"),

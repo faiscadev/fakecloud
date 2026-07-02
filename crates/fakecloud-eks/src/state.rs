@@ -214,6 +214,28 @@ pub struct Cluster {
     /// echoed back on describe.
     #[serde(default)]
     pub encryption_config: Option<serde_json::Value>,
+    /// The `AccessConfigResponse`-shaped object (`{authenticationMode}`) echoed
+    /// back on every describe. Defaults to `CONFIG_MAP` when the caller omits
+    /// `accessConfig` at create time, mirroring the real API default.
+    #[serde(default = "default_access_config")]
+    pub access_config: serde_json::Value,
+    /// The `UpgradePolicyResponse`-shaped object (`{supportType}`) echoed back
+    /// on every describe. Defaults to `EXTENDED` (extended support enabled) when
+    /// the caller omits `upgradePolicy` at create time.
+    #[serde(default = "default_upgrade_policy")]
+    pub upgrade_policy: serde_json::Value,
+}
+
+/// The `accessConfig` a cluster reports when none was supplied at create time:
+/// `CONFIG_MAP` authentication (the backward-compatible default).
+pub fn default_access_config() -> serde_json::Value {
+    serde_json::json!({ "authenticationMode": "CONFIG_MAP" })
+}
+
+/// The `upgradePolicy` a cluster reports when none was supplied at create time:
+/// `EXTENDED` support (extended support enabled by default).
+pub fn default_upgrade_policy() -> serde_json::Value {
+    serde_json::json!({ "supportType": "EXTENDED" })
 }
 
 /// An upgrade-readiness/misconfiguration Insight that EKS auto-generates for a

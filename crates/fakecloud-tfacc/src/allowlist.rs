@@ -594,6 +594,25 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "eks",
+        // EKS is a full control plane (no real Kubernetes API server is spawned),
+        // so the Terraform provider's control-plane cluster resources and data
+        // sources are exercisable: clusters (which transition CREATING -> ACTIVE
+        // on describe so the create waiter completes), access entries and their
+        // access-policy associations, OIDC identity-provider configs, and Pod
+        // Identity associations. Managed node groups, Fargate profiles, and
+        // add-ons are deferred: they model real compute/networking a control
+        // plane alone can't stand up faithfully.
+        run_regex: concat!(
+            "^TestAccEKS(",
+            "Cluster|ClusterDataSource|ClustersDataSource|ClusterVersionsDataSource",
+            "|AccessEntry|AccessEntryDataSource|AccessPolicyAssociation",
+            "|IdentityProviderConfig|PodIdentityAssociation",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
         name: "cloudfront",
         // Cache/origin-request/realtime-log/log-delivery data sources. The
         // CloudFront resources (distribution, function, OAC, ...) are deferred.
@@ -1159,6 +1178,18 @@ pub const SHARDS: &[Shard] = &[
         run_regex: concat!(
             "^TestAccMemoryDB(",
             "ACL|User|ParameterGroup|Snapshot|Cluster",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "eks",
+        service: "eks",
+        run_regex: concat!(
+            "^TestAccEKS(",
+            "Cluster|ClusterDataSource|ClustersDataSource|ClusterVersionsDataSource",
+            "|AccessEntry|AccessEntryDataSource|AccessPolicyAssociation",
+            "|IdentityProviderConfig|PodIdentityAssociation",
             ")_basic$",
         ),
         extra_deny: &[],
