@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 49 AWS services with 3,883 total operations. 129,364/129,364 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 49 AWS services with 3,902 total operations. 129,882/129,882 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -36,7 +36,7 @@ fakecloud implements 49 AWS services with 3,883 total operations. 129,364/129,36
 | Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | MemoryDB               |  45 | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted. Redis/Valkey data-plane container backing is a follow-up |
-| EKS                    |  46 | Control plane: clusters, node groups, Fargate profiles, add-ons, access entries, OIDC identity-provider configs, pod-identity associations (create/describe/list/delete, config + version updates with tracking, add-on + access-policy catalogues, access-policy association, tagging); persisted, `CREATING` -> `ACTIVE` on describe. Insights, capabilities, EKS Anywhere in progress (46 of 65 ops) |
+| EKS                    |  65 | Complete control plane: clusters (incl. connected register/deregister), node groups, Fargate profiles, add-ons, access entries + policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, EKS Anywhere subscriptions (create/describe/list/delete, config + version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging); persisted, `CREATING` -> `ACTIVE` on describe. No real Kubernetes control-plane endpoint (all 65 ops) |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |
