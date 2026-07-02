@@ -40,6 +40,15 @@ use helpers::TestServer;
 #[test_action("eks", "DisassociateAccessPolicy", checksum = "aed9926c")]
 #[test_action("eks", "ListAssociatedAccessPolicies", checksum = "a6a37560")]
 #[test_action("eks", "ListAccessPolicies", checksum = "fd7435db")]
+#[test_action("eks", "AssociateIdentityProviderConfig", checksum = "28337c96")]
+#[test_action("eks", "DisassociateIdentityProviderConfig", checksum = "8038f710")]
+#[test_action("eks", "DescribeIdentityProviderConfig", checksum = "b03d8b74")]
+#[test_action("eks", "ListIdentityProviderConfigs", checksum = "f69f1b4a")]
+#[test_action("eks", "CreatePodIdentityAssociation", checksum = "a6248f17")]
+#[test_action("eks", "DeletePodIdentityAssociation", checksum = "17321542")]
+#[test_action("eks", "DescribePodIdentityAssociation", checksum = "fd7fe00b")]
+#[test_action("eks", "ListPodIdentityAssociations", checksum = "6c32e5fa")]
+#[test_action("eks", "UpdatePodIdentityAssociation", checksum = "7376e4fa")]
 #[tokio::test]
 async fn eks_probe() {
     let _server = TestServer::start().await;
