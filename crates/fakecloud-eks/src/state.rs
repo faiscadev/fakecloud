@@ -100,6 +100,35 @@ pub struct Addon {
     pub updates: BTreeMap<String, Update>,
 }
 
+/// An access policy associated to an access entry via `AssociateAccessPolicy`.
+/// `access_scope` is stored as the `{type, namespaces}` JSON object echoed back
+/// on describe/list so the round-trip is faithful.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssociatedPolicy {
+    pub policy_arn: String,
+    pub access_scope: serde_json::Value,
+    pub associated_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+}
+
+/// An EKS access entry, a sub-resource of a cluster keyed by principal ARN.
+/// The access policies associated to the entry are a nested list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessEntry {
+    pub principal_arn: String,
+    pub cluster_name: String,
+    pub arn: String,
+    pub kubernetes_groups: Vec<String>,
+    pub username: String,
+    pub type_: String,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    pub tags: TagMap,
+    /// Access policies associated to this entry, keyed by policy ARN order.
+    #[serde(default)]
+    pub associated_policies: Vec<AssociatedPolicy>,
+}
+
 /// A Fargate profile, a sub-resource of a cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FargateProfile {
@@ -154,6 +183,9 @@ pub struct EksState {
     /// Add-ons nested as cluster name -> addon name -> addon.
     #[serde(default)]
     pub addons: BTreeMap<String, BTreeMap<String, Addon>>,
+    /// Access entries nested as cluster name -> principal ARN -> access entry.
+    #[serde(default)]
+    pub access_entries: BTreeMap<String, BTreeMap<String, AccessEntry>>,
 }
 
 impl AccountState for EksState {
@@ -195,6 +227,23 @@ pub fn fargate_profile_arn(
 /// `addon/{cluster}/{name}` so each add-on's ARN is unique across recreate.
 pub fn addon_arn(region: &str, account_id: &str, cluster: &str, name: &str, id: &str) -> String {
     format!("arn:aws:eks:{region}:{account_id}:addon/{cluster}/{name}/{id}")
+}
+
+/// Build the ARN for an access entry. AWS's access-entry ARN embeds the
+/// principal type (`role`/`user`), the account, the principal's resource name,
+/// and a random UUID:
+/// `arn:aws:eks:{region}:{account}:access-entry/{cluster}/{type}/{account}/{name}/{uuid}`.
+pub fn access_entry_arn(
+    region: &str,
+    account_id: &str,
+    cluster: &str,
+    principal_type: &str,
+    principal_name: &str,
+    id: &str,
+) -> String {
+    format!(
+        "arn:aws:eks:{region}:{account_id}:access-entry/{cluster}/{principal_type}/{account_id}/{principal_name}/{id}"
+    )
 }
 
 /// Build the ARN for a pod identity association attached to an add-on.

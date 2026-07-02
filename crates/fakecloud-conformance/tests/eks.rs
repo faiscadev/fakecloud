@@ -31,6 +31,15 @@ use helpers::TestServer;
 #[test_action("eks", "UpdateAddon", checksum = "eee6e57e")]
 #[test_action("eks", "DescribeAddonVersions", checksum = "bc128dba")]
 #[test_action("eks", "DescribeAddonConfiguration", checksum = "29c08d92")]
+#[test_action("eks", "CreateAccessEntry", checksum = "780d0f0b")]
+#[test_action("eks", "DescribeAccessEntry", checksum = "b2efed3f")]
+#[test_action("eks", "ListAccessEntries", checksum = "9fe261b6")]
+#[test_action("eks", "DeleteAccessEntry", checksum = "ee16b5a4")]
+#[test_action("eks", "UpdateAccessEntry", checksum = "007ebd20")]
+#[test_action("eks", "AssociateAccessPolicy", checksum = "ad63ee66")]
+#[test_action("eks", "DisassociateAccessPolicy", checksum = "aed9926c")]
+#[test_action("eks", "ListAssociatedAccessPolicies", checksum = "a6a37560")]
+#[test_action("eks", "ListAccessPolicies", checksum = "fd7435db")]
 #[tokio::test]
 async fn eks_probe() {
     let _server = TestServer::start().await;

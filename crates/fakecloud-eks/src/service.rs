@@ -20,9 +20,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    addon_arn, cluster_arn, fargate_profile_arn, nodegroup_arn, pod_identity_association_arn,
-    Addon, Cluster, EksSnapshot, FargateProfile, Nodegroup, SharedEksState, Update,
-    DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
+    access_entry_arn, addon_arn, cluster_arn, fargate_profile_arn, nodegroup_arn,
+    pod_identity_association_arn, AccessEntry, Addon, AssociatedPolicy, Cluster, EksSnapshot,
+    FargateProfile, Nodegroup, SharedEksState, Update, DEFAULT_K8S_VERSION,
+    EKS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// The set of control-plane log types EKS reports on every cluster.
@@ -63,6 +64,15 @@ pub const EKS_ACTIONS: &[&str] = &[
     "UpdateAddon",
     "DescribeAddonVersions",
     "DescribeAddonConfiguration",
+    "CreateAccessEntry",
+    "DescribeAccessEntry",
+    "ListAccessEntries",
+    "DeleteAccessEntry",
+    "UpdateAccessEntry",
+    "AssociateAccessPolicy",
+    "DisassociateAccessPolicy",
+    "ListAssociatedAccessPolicies",
+    "ListAccessPolicies",
 ];
 
 pub struct EksService {
@@ -85,6 +95,13 @@ enum PathArgs {
     ClusterChild {
         cluster: String,
         name: String,
+    },
+    /// A named access policy association on an access entry
+    /// (`DisassociateAccessPolicy`).
+    AccessPolicyChild {
+        cluster: String,
+        principal: String,
+        policy_arn: String,
     },
 }
 
@@ -259,6 +276,61 @@ impl EksService {
             (&Method::GET, ["addons", "configuration-schemas"]) => {
                 Some(("DescribeAddonConfiguration", PathArgs::None))
             }
+            // Access entries (sub-resources of a cluster, keyed by principalArn).
+            (&Method::POST, ["clusters", c, "access-entries"]) => {
+                Some(("CreateAccessEntry", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "access-entries"]) => {
+                Some(("ListAccessEntries", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "access-entries", p]) => Some((
+                "DescribeAccessEntry",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(p),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "access-entries", p]) => Some((
+                "DeleteAccessEntry",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(p),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "access-entries", p]) => Some((
+                "UpdateAccessEntry",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(p),
+                },
+            )),
+            // Access-policy associations on an access entry.
+            (&Method::POST, ["clusters", c, "access-entries", p, "access-policies"]) => Some((
+                "AssociateAccessPolicy",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(p),
+                },
+            )),
+            (&Method::GET, ["clusters", c, "access-entries", p, "access-policies"]) => Some((
+                "ListAssociatedAccessPolicies",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(p),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "access-entries", p, "access-policies", policy]) => {
+                Some((
+                    "DisassociateAccessPolicy",
+                    PathArgs::AccessPolicyChild {
+                        cluster: decode(c),
+                        principal: decode(p),
+                        policy_arn: decode(policy),
+                    },
+                ))
+            }
+            // Access-policy catalogue (not scoped to a cluster).
+            (&Method::GET, ["access-policies"]) => Some(("ListAccessPolicies", PathArgs::None)),
             (&Method::POST, ["tags", arn]) => Some(("TagResource", PathArgs::Arn(decode(arn)))),
             (&Method::DELETE, ["tags", arn]) => Some(("UntagResource", PathArgs::Arn(decode(arn)))),
             (&Method::GET, ["tags", arn]) => {
@@ -1340,6 +1412,343 @@ impl EksService {
             .to_string(),
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Access entries / access policies
+    // -----------------------------------------------------------------------
+
+    fn create_access_entry(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let principal_arn = body
+            .get("principalArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("principalArn is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // The parent cluster must exist; AWS returns ResourceNotFoundException.
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        if state
+            .access_entries
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&principal_arn))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "The specified access entry resource is already in use on this cluster: {principal_arn}"
+                ),
+            ));
+        }
+
+        let (principal_type, principal_name) = principal_parts(&principal_arn);
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = access_entry_arn(
+            &region,
+            &account_id,
+            cluster_name,
+            &principal_type,
+            &principal_name,
+            &id,
+        );
+        let now = Utc::now();
+        let username = body
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_username(&principal_arn));
+        let entry_type = body
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("STANDARD")
+            .to_string();
+        let kubernetes_groups = string_list(body.get("kubernetesGroups"));
+
+        let entry = AccessEntry {
+            principal_arn: principal_arn.clone(),
+            cluster_name: cluster_name.to_string(),
+            arn,
+            kubernetes_groups,
+            username,
+            type_: entry_type,
+            created_at: now,
+            modified_at: now,
+            tags: parse_tag_map(body.get("tags")),
+            associated_policies: Vec::new(),
+        };
+
+        let out = access_entry_json(&entry);
+        state
+            .access_entries
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(principal_arn, entry);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "accessEntry": out }).to_string(),
+        ))
+    }
+
+    fn describe_access_entry(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let entry = state
+            .access_entries
+            .get(cluster_name)
+            .and_then(|m| m.get(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "accessEntry": access_entry_json(entry) }).to_string(),
+        ))
+    }
+
+    fn list_access_entries(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let associated_policy = req.query_params.get("associatedPolicyArn").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        // Optional `associatedPolicyArn` filter narrows the result to entries
+        // that have that policy associated, mirroring the real API.
+        let names: Vec<String> = state
+            .access_entries
+            .get(cluster_name)
+            .map(|m| {
+                m.values()
+                    .filter(|e| {
+                        associated_policy.as_deref().is_none_or(|p| {
+                            e.associated_policies.iter().any(|ap| ap.policy_arn == p)
+                        })
+                    })
+                    .map(|e| e.principal_arn.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&names, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "accessEntries": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_access_entry(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        state
+            .access_entries
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn update_access_entry(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let entry = state
+            .access_entries
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+
+        if let Some(groups) = body.get("kubernetesGroups") {
+            entry.kubernetes_groups = string_list(Some(groups));
+        }
+        if let Some(username) = body.get("username").and_then(|v| v.as_str()) {
+            entry.username = username.to_string();
+        }
+        entry.modified_at = Utc::now();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "accessEntry": access_entry_json(entry) }).to_string(),
+        ))
+    }
+
+    fn associate_access_policy(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let policy_arn = body
+            .get("policyArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("policyArn is required"))?
+            .to_string();
+        let access_scope = build_access_scope(body.get("accessScope"));
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let entry = state
+            .access_entries
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+
+        let now = Utc::now();
+        // Re-associating the same policy updates its scope in place, matching
+        // the real API's idempotent upsert semantics.
+        let associated = if let Some(existing) = entry
+            .associated_policies
+            .iter_mut()
+            .find(|ap| ap.policy_arn == policy_arn)
+        {
+            existing.access_scope = access_scope;
+            existing.modified_at = now;
+            existing.clone()
+        } else {
+            let ap = AssociatedPolicy {
+                policy_arn: policy_arn.clone(),
+                access_scope,
+                associated_at: now,
+                modified_at: now,
+            };
+            entry.associated_policies.push(ap.clone());
+            ap
+        };
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({
+                "clusterName": cluster_name,
+                "principalArn": entry.principal_arn,
+                "associatedAccessPolicy": associated_policy_json(&associated),
+            })
+            .to_string(),
+        ))
+    }
+
+    fn disassociate_access_policy(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+        policy_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let entry = state
+            .access_entries
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+        entry
+            .associated_policies
+            .retain(|ap| ap.policy_arn != policy_arn);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    fn list_associated_access_policies(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        principal_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let entry = state
+            .access_entries
+            .get(cluster_name)
+            .and_then(|m| m.get(principal_arn))
+            .ok_or_else(not_found_access_entry(principal_arn))?;
+        let policies: Vec<Value> = entry
+            .associated_policies
+            .iter()
+            .map(associated_policy_json)
+            .collect();
+        let (page, token) = paginate_checked(&policies, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({
+            "clusterName": cluster_name,
+            "principalArn": entry.principal_arn,
+            "associatedAccessPolicies": page,
+        });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn list_access_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // ListAccessPolicies is a read-only catalogue. Its `maxResults` carries
+        // an `@range` (1-100) constraint the probe exercises, so an out-of-range
+        // value is rejected. The nextToken, however, is tolerated (an
+        // unparseable one restarts from the beginning) since the op's Smithy
+        // contract declares no client error for it.
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let catalog = access_policy_catalog();
+        let (page, token) = paginate_checked(&catalog, next_token.as_deref(), max_results)
+            .unwrap_or_else(|_| (catalog.clone(), None));
+        let mut out = json!({ "accessPolicies": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
 }
 
 /// Persist the current EKS state as a snapshot. Shared by
@@ -1409,6 +1818,11 @@ impl AwsService for EksService {
                 | "DeleteAddon"
                 | "UpdateAddon"
                 | "DescribeAddon"
+                | "CreateAccessEntry"
+                | "DeleteAccessEntry"
+                | "UpdateAccessEntry"
+                | "AssociateAccessPolicy"
+                | "DisassociateAccessPolicy"
         );
 
         let result = match (action, &args) {
@@ -1460,6 +1874,32 @@ impl AwsService for EksService {
             }
             ("DescribeAddonVersions", _) => self.describe_addon_versions(&req),
             ("DescribeAddonConfiguration", _) => self.describe_addon_configuration(&req),
+            ("CreateAccessEntry", PathArgs::Cluster(c)) => self.create_access_entry(&req, c),
+            ("ListAccessEntries", PathArgs::Cluster(c)) => self.list_access_entries(&req, c),
+            ("DescribeAccessEntry", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_access_entry(&req, cluster, name)
+            }
+            ("DeleteAccessEntry", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_access_entry(&req, cluster, name)
+            }
+            ("UpdateAccessEntry", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_access_entry(&req, cluster, name)
+            }
+            ("AssociateAccessPolicy", PathArgs::ClusterChild { cluster, name }) => {
+                self.associate_access_policy(&req, cluster, name)
+            }
+            ("ListAssociatedAccessPolicies", PathArgs::ClusterChild { cluster, name }) => {
+                self.list_associated_access_policies(&req, cluster, name)
+            }
+            (
+                "DisassociateAccessPolicy",
+                PathArgs::AccessPolicyChild {
+                    cluster,
+                    principal,
+                    policy_arn,
+                },
+            ) => self.disassociate_access_policy(&req, cluster, principal, policy_arn),
+            ("ListAccessPolicies", _) => self.list_access_policies(&req),
             _ => Err(AwsServiceError::action_not_implemented("eks", action)),
         };
 
@@ -1582,6 +2022,17 @@ fn not_found_addon(name: &str) -> impl Fn() -> AwsServiceError + 'static {
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
             format!("No addon found for name: {name}."),
+        )
+    }
+}
+
+fn not_found_access_entry(principal_arn: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let principal_arn = principal_arn.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No access entry found for principal ARN: {principal_arn}."),
         )
     }
 }
@@ -2001,6 +2452,111 @@ fn pod_identity_configuration(addon_name: &str) -> Value {
         }]),
         _ => json!([]),
     }
+}
+
+/// Split a principal ARN into its access-entry `(type, name)` ARN segments.
+/// `arn:aws:iam::123:role/Foo` -> `("role", "Foo")`; users map to `user`;
+/// anything else (root, assumed-role, unrecognised) falls back to `standard`.
+fn principal_parts(principal_arn: &str) -> (String, String) {
+    let resource = principal_arn
+        .split(':')
+        .next_back()
+        .unwrap_or(principal_arn);
+    let (kind, name) = resource.split_once('/').unwrap_or(("", resource));
+    let name = name.rsplit('/').next().unwrap_or(name);
+    let type_seg = match kind {
+        "role" | "assumed-role" => "role",
+        "user" => "user",
+        _ => "standard",
+    };
+    (type_seg.to_string(), name.to_string())
+}
+
+/// The default `username` EKS derives for an access entry when the caller omits
+/// one: `arn:aws:iam::123:role/Foo` -> a role SessionName template that mirrors
+/// what AWS records for a role principal.
+fn default_username(principal_arn: &str) -> String {
+    let (type_seg, name) = principal_parts(principal_arn);
+    match type_seg.as_str() {
+        "role" => format!("arn:aws:sts::{{{{AccountID}}}}:assumed-role/{name}/{{{{SessionName}}}}"),
+        _ => principal_arn.to_string(),
+    }
+}
+
+/// Parse a `StringList` request member into a `Vec<String>`.
+fn string_list(v: Option<&Value>) -> Vec<String> {
+    v.and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build an `AccessScope` response object, defaulting `type` to `cluster` (the
+/// AWS default) and echoing any supplied namespaces.
+fn build_access_scope(req: Option<&Value>) -> Value {
+    let scope_type = req
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("cluster")
+        .to_string();
+    let namespaces = req
+        .and_then(|v| v.get("namespaces"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    json!({ "type": scope_type, "namespaces": namespaces })
+}
+
+fn access_entry_json(e: &AccessEntry) -> Value {
+    json!({
+        "clusterName": e.cluster_name,
+        "principalArn": e.principal_arn,
+        "kubernetesGroups": e.kubernetes_groups,
+        "accessEntryArn": e.arn,
+        "createdAt": timestamp_to_number(e.created_at),
+        "modifiedAt": timestamp_to_number(e.modified_at),
+        "tags": e.tags,
+        "username": e.username,
+        "type": e.type_,
+    })
+}
+
+fn associated_policy_json(ap: &AssociatedPolicy) -> Value {
+    json!({
+        "policyArn": ap.policy_arn,
+        "accessScope": ap.access_scope,
+        "associatedAt": timestamp_to_number(ap.associated_at),
+        "modifiedAt": timestamp_to_number(ap.modified_at),
+    })
+}
+
+/// The real AWS EKS cluster access-policy catalogue returned by
+/// `ListAccessPolicies`. Every entry is an `arn:aws:eks::aws:cluster-access-policy/*`
+/// managed policy.
+fn access_policy_catalog() -> Vec<Value> {
+    const POLICIES: &[&str] = &[
+        "AmazonEKSClusterAdminPolicy",
+        "AmazonEKSAdminPolicy",
+        "AmazonEKSEditPolicy",
+        "AmazonEKSViewPolicy",
+        "AmazonEKSAdminViewPolicy",
+        "AmazonEKSAutoNodePolicy",
+        "AmazonEKSBlockStoragePolicy",
+        "AmazonEKSLoadBalancingPolicy",
+        "AmazonEKSNetworkingPolicy",
+        "AmazonEKSComputePolicy",
+    ];
+    POLICIES
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "arn": format!("arn:aws:eks::aws:cluster-access-policy/{name}"),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2619,12 +3175,17 @@ mod tests {
 
     #[tokio::test]
     async fn unimplemented_subresource_falls_through() {
-        // Access-entries routes are not implemented; the router must not
-        // accidentally match them via the node-group/fargate-profile/addon arms.
+        // Identity-provider-config routes are not implemented; the router must
+        // not accidentally match them via the node-group/fargate-profile/addon/
+        // access-entry arms.
         let svc = EksService::new(make_state());
         create_cluster(&svc, "c1").await;
         let err = svc
-            .handle(make_request(Method::GET, "/clusters/c1/access-entries", ""))
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/identity-provider-configs",
+                "",
+            ))
             .await
             .err()
             .unwrap();
@@ -2847,5 +3408,275 @@ mod tests {
             v["podIdentityConfiguration"][0]["serviceAccount"],
             "aws-node"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Access entries / access policies
+    // -----------------------------------------------------------------------
+
+    const PRINCIPAL: &str = "arn:aws:iam::111122223333:role/dev";
+
+    fn access_entry_body() -> String {
+        json!({
+            "principalArn": PRINCIPAL,
+            "kubernetesGroups": ["viewers"],
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    fn url_encode(s: &str) -> String {
+        s.replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('/', "%2F")
+    }
+
+    fn encoded_principal() -> String {
+        url_encode(PRINCIPAL)
+    }
+
+    #[tokio::test]
+    async fn access_entry_full_lifecycle() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        // Create.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/access-entries",
+                &access_entry_body(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["accessEntry"]["principalArn"], PRINCIPAL);
+        assert_eq!(v["accessEntry"]["clusterName"], "c1");
+        assert_eq!(v["accessEntry"]["type"], "STANDARD");
+        assert_eq!(v["accessEntry"]["kubernetesGroups"], json!(["viewers"]));
+        assert_eq!(v["accessEntry"]["tags"]["team"], "core");
+        assert!(v["accessEntry"]["accessEntryArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:access-entry/c1/role/"));
+        assert!(v["accessEntry"]["username"]
+            .as_str()
+            .unwrap()
+            .contains("dev"));
+
+        let enc = encoded_principal();
+
+        // Describe.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries/{enc}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["accessEntry"]["principalArn"], PRINCIPAL);
+
+        // List.
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/access-entries", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["accessEntries"], json!([PRINCIPAL]));
+
+        // Update.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                &format!("/clusters/c1/access-entries/{enc}"),
+                &json!({ "kubernetesGroups": ["admins"], "username": "custom" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["accessEntry"]["kubernetesGroups"], json!(["admins"]));
+        assert_eq!(v["accessEntry"]["username"], "custom");
+
+        // Associate an access policy.
+        let policy = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy";
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                &format!("/clusters/c1/access-entries/{enc}/access-policies"),
+                &json!({
+                    "policyArn": policy,
+                    "accessScope": { "type": "namespace", "namespaces": ["default"] }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["clusterName"], "c1");
+        assert_eq!(v["principalArn"], PRINCIPAL);
+        assert_eq!(v["associatedAccessPolicy"]["policyArn"], policy);
+        assert_eq!(
+            v["associatedAccessPolicy"]["accessScope"]["type"],
+            "namespace"
+        );
+
+        // List associated policies.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries/{enc}/access-policies"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["clusterName"], "c1");
+        assert_eq!(v["associatedAccessPolicies"].as_array().unwrap().len(), 1);
+        assert_eq!(v["associatedAccessPolicies"][0]["policyArn"], policy);
+
+        // ListAccessEntries with associatedPolicyArn filter finds the entry.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries?associatedPolicyArn={policy}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["accessEntries"], json!([PRINCIPAL]));
+
+        // Disassociate.
+        let enc_policy = encoded_principal_of(policy);
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                &format!("/clusters/c1/access-entries/{enc}/access-policies/{enc_policy}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v, json!({}));
+
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries/{enc}/access-policies"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["associatedAccessPolicies"].as_array().unwrap().len(), 0);
+
+        // Delete the entry.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                &format!("/clusters/c1/access-entries/{enc}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v, json!({}));
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries/{enc}"),
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    fn encoded_principal_of(s: &str) -> String {
+        url_encode(s)
+    }
+
+    #[tokio::test]
+    async fn access_entry_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/access-entries",
+                &access_entry_body(),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn access_entry_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/access-entries",
+            &access_entry_body(),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/access-entries",
+                &access_entry_body(),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    #[tokio::test]
+    async fn describe_access_entry_missing_is_not_found() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/access-entries/{}", encoded_principal()),
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn list_access_policies_catalog_is_non_empty() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(Method::GET, "/access-policies", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let policies = v["accessPolicies"].as_array().unwrap();
+        assert!(policies.len() >= 10);
+        let names: Vec<&str> = policies
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"AmazonEKSClusterAdminPolicy"));
+        assert!(names.contains(&"AmazonEKSViewPolicy"));
+        assert!(policies[0]["arn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks::aws:cluster-access-policy/"));
     }
 }
