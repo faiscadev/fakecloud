@@ -459,6 +459,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let account_state: fakecloud_account::SharedAccountState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let memorydb_state: fakecloud_memorydb::SharedMemoryDbState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3888,6 +3895,35 @@ async fn main() {
         resource_groups_service = resource_groups_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(resource_groups_service));
+
+    // Account Management control plane.
+    let account_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("account").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_account::persistence::load_into(&store, &account_state) {
+                Ok(fakecloud_account::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded account persistence snapshot");
+                }
+                Ok(fakecloud_account::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no account persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut account_service = fakecloud_account::AccountService::new(account_state.clone());
+    if let Some(store) = account_snapshot_store {
+        account_service = account_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(account_service));
 
     // MemoryDB control plane.
     let memorydb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

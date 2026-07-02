@@ -37,6 +37,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "dsql",
     "resource-groups",
     "eks",
+    "account",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

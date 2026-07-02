@@ -607,6 +607,16 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "account",
+        // AWS Account Management is a full control plane. The Terraform provider's
+        // account resources operate on the caller's own account: alternate
+        // contacts (get/put/delete), the primary contact information, and Region
+        // opt-in status (aws_account_region). Each maps directly to the restJson1
+        // control plane and its data sources round-trip.
+        run_regex: "^TestAccAccount_serial$",
+        deny: &[],
+    },
+    Service {
         name: "eks",
         // EKS is a full control plane (no real Kubernetes API server is spawned),
         // so the Terraform provider's control-plane cluster resources and data
@@ -1199,6 +1209,12 @@ pub const SHARDS: &[Shard] = &[
         name: "servicediscovery",
         service: "servicediscovery",
         run_regex: "^TestAccServiceDiscovery",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "account",
+        service: "account",
+        run_regex: "^TestAccAccount_serial$",
         extra_deny: &[],
     },
     Shard {
