@@ -1515,6 +1515,16 @@ class TtlTickResponse:
         return cls(**d)
 
 
+@dataclass
+class DynamoDbSnapshotSaveResponse:
+    saved: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DynamoDbSnapshotSaveResponse:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
 # ── SecretsManager ──────────────────────────────────────────────────
 
 

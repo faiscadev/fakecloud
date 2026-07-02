@@ -135,9 +135,10 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 ### `fc.dynamodb`
 
-| Method      | Description            |
-| ----------- | ---------------------- |
-| `tickTtl()` | Tick the TTL processor |
+| Method                    | Description                                                            |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `tickTtl()`               | Tick the TTL processor                                                 |
+| `saveSnapshot(dataPath?)` | Save a DynamoDB snapshot on demand (omit dataPath -> configured store) |
 
 ### `fc.ec2`
 

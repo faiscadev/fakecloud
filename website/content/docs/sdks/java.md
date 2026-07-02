@@ -166,6 +166,7 @@ FakeCloud fc2 = new FakeCloud("http://localhost:5000"); // explicit base URL
 | Method       | Description            |
 | ------------ | ---------------------- |
 | `tickTtl()`  | Tick the TTL processor |
+| `saveSnapshot(dataPath)` | Save a DynamoDB snapshot on demand (`null` -> configured store) |
 
 ## `fc.secretsmanager()`
 

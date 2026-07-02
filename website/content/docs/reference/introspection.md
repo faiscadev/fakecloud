@@ -176,6 +176,7 @@ curl http://localhost:4566/_fakecloud/health
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/_fakecloud/dynamodb/ttl-processor/tick` | POST | Expire TTL items that are due. |
+| `/_fakecloud/dynamodb/snapshot/save` | POST | Write the current DynamoDB state as a canonical snapshot on demand. Optional JSON body `{"dataPath": "<dir>"}` saves to `<dir>/dynamodb/snapshot.json`; with no body it saves to the configured persistent store. Returns `{"saved": true}`, `400` if neither a store nor `dataPath` is available, `500` on write failure. |
 
 ## EC2
 

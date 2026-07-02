@@ -34,6 +34,7 @@ from fakecloud.types import (
     ConfirmUserRequest,
     ConfirmUserResponse,
     CreateAdminResponse,
+    DynamoDbSnapshotSaveResponse,
     Ec2InstanceNetworksResponse,
     Ec2InstancesResponse,
     EcrImagesResponse,
@@ -1440,6 +1441,23 @@ class DynamoDbClient:
         _check(resp)
         return TtlTickResponse.from_dict(resp.json())
 
+    async def save_snapshot(
+        self, data_path: Optional[str] = None
+    ) -> DynamoDbSnapshotSaveResponse:
+        """Write the current DynamoDB state as a canonical snapshot on demand.
+
+        With ``data_path`` set, the snapshot is written to
+        ``<data_path>/dynamodb/snapshot.json``; with ``None`` it is written to
+        the server's configured persistent store (an error if none is
+        configured).
+        """
+        body = {"dataPath": data_path} if data_path is not None else None
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/dynamodb/snapshot/save", json=body
+        )
+        _check(resp)
+        return DynamoDbSnapshotSaveResponse.from_dict(resp.json())
+
 
 class SecretsManagerClient:
     """Async SecretsManager introspection client."""
@@ -2197,6 +2215,23 @@ class _SyncDynamoDbClient:
         resp = self._client.post(f"{self._base}/_fakecloud/dynamodb/ttl-processor/tick")
         _check(resp)
         return TtlTickResponse.from_dict(resp.json())
+
+    def save_snapshot(
+        self, data_path: Optional[str] = None
+    ) -> DynamoDbSnapshotSaveResponse:
+        """Write the current DynamoDB state as a canonical snapshot on demand.
+
+        With ``data_path`` set, the snapshot is written to
+        ``<data_path>/dynamodb/snapshot.json``; with ``None`` it is written to
+        the server's configured persistent store (an error if none is
+        configured).
+        """
+        body = {"dataPath": data_path} if data_path is not None else None
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/dynamodb/snapshot/save", json=body
+        )
+        _check(resp)
+        return DynamoDbSnapshotSaveResponse.from_dict(resp.json())
 
 
 class _SyncSecretsManagerClient:

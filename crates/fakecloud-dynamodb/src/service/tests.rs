@@ -1,5 +1,332 @@
 use super::*;
+use fakecloud_persistence::SnapshotStore;
 use serde_json::json;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Default)]
+struct RecordingSnapshotStore {
+    bytes: parking_lot::Mutex<Option<Vec<u8>>>,
+}
+
+impl SnapshotStore for RecordingSnapshotStore {
+    fn load(&self) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.bytes.lock().clone())
+    }
+
+    fn save(&self, bytes: &[u8]) -> io::Result<()> {
+        *self.bytes.lock() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+struct TempSnapshotDir {
+    path: PathBuf,
+}
+
+impl TempSnapshotDir {
+    fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("fakecloud-dynamodb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempSnapshotDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn call_dynamodb(service: &DynamoDbService, action: &str, body: Value) -> Value {
+    let resp = service.handle(make_request(action, body)).await.unwrap();
+    let status = resp.status;
+    let body = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(status, StatusCode::OK, "{action} failed: {body}");
+    body
+}
+
+fn load_recorded_snapshot(store: &RecordingSnapshotStore) -> Vec<u8> {
+    SnapshotStore::load(store).unwrap().unwrap()
+}
+
+fn service_from_snapshot_bytes(bytes: &[u8]) -> DynamoDbService {
+    let snapshot: DynamoDbSnapshot = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(snapshot.schema_version, DYNAMODB_SNAPSHOT_SCHEMA_VERSION);
+
+    let state: SharedDynamoDbState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    if let Some(accounts) = snapshot.accounts {
+        *state.write() = accounts;
+    } else if let Some(single_state) = snapshot.state {
+        let account_id = single_state.account_id.clone();
+        *state.write().get_or_create(&account_id) = single_state;
+    } else {
+        panic!("snapshot must contain either multi-account or legacy state");
+    }
+
+    DynamoDbService::new(state)
+}
+
+async fn populate_snapshot_round_trip_fixture(service: &DynamoDbService) {
+    call_dynamodb(
+        service,
+        "CreateTable",
+        json!({
+            "TableName": "orders",
+            "KeySchema": [
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"}
+            ],
+            "AttributeDefinitions": [
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "gsi_pk", "AttributeType": "S"},
+                {"AttributeName": "gsi_sk", "AttributeType": "N"},
+                {"AttributeName": "lsi_sk", "AttributeType": "S"}
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+            "GlobalSecondaryIndexes": [{
+                "IndexName": "by-status",
+                "KeySchema": [
+                    {"AttributeName": "gsi_pk", "KeyType": "HASH"},
+                    {"AttributeName": "gsi_sk", "KeyType": "RANGE"}
+                ],
+                "Projection": {"ProjectionType": "ALL"}
+            }],
+            "LocalSecondaryIndexes": [{
+                "IndexName": "by-due",
+                "KeySchema": [
+                    {"AttributeName": "pk", "KeyType": "HASH"},
+                    {"AttributeName": "lsi_sk", "KeyType": "RANGE"}
+                ],
+                "Projection": {"ProjectionType": "ALL"}
+            }]
+        }),
+    )
+    .await;
+
+    call_dynamodb(
+        service,
+        "CreateTable",
+        json!({
+            "TableName": "typed",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+            "BillingMode": "PAY_PER_REQUEST"
+        }),
+    )
+    .await;
+
+    call_dynamodb(
+        service,
+        "PutItem",
+        json!({
+            "TableName": "orders",
+            "Item": {
+                "pk": {"S": "acct#1"},
+                "sk": {"S": "order#1"},
+                "gsi_pk": {"S": "open"},
+                "gsi_sk": {"N": "10"},
+                "lsi_sk": {"S": "due#2026-07-01"},
+                "payload": {"S": "first order"}
+            }
+        }),
+    )
+    .await;
+    call_dynamodb(
+        service,
+        "PutItem",
+        json!({
+            "TableName": "orders",
+            "Item": {
+                "pk": {"S": "acct#1"},
+                "sk": {"S": "order#2"},
+                "gsi_pk": {"S": "open"},
+                "gsi_sk": {"N": "20"},
+                "lsi_sk": {"S": "due#2026-07-02"},
+                "payload": {"S": "second order"}
+            }
+        }),
+    )
+    .await;
+    call_dynamodb(
+        service,
+        "PutItem",
+        json!({
+            "TableName": "typed",
+            "Item": {
+                "pk": {"S": "types#1"},
+                "s": {"S": "hello"},
+                "n": {"N": "42.5"},
+                "flag": {"BOOL": true},
+                "none": {"NULL": true},
+                "ss": {"SS": ["red", "blue"]},
+                "ns": {"NS": ["1", "2"]},
+                "b": {"B": "aGVsbG8="},
+                "bs": {"BS": ["YQ==", "Yg=="]},
+                "list": {"L": [{"S": "nested"}, {"N": "7"}, {"BOOL": false}]},
+                "map": {"M": {"inner": {"S": "value"}, "count": {"N": "3"}}}
+            }
+        }),
+    )
+    .await;
+}
+
+async fn assert_snapshot_round_trip_fixture(service: &DynamoDbService) {
+    let tables = call_dynamodb(service, "ListTables", json!({})).await;
+    let table_names = tables["TableNames"].as_array().unwrap();
+    assert!(table_names.iter().any(|name| name == "orders"));
+    assert!(table_names.iter().any(|name| name == "typed"));
+
+    let orders = call_dynamodb(service, "DescribeTable", json!({"TableName": "orders"})).await;
+    let order_table = &orders["Table"];
+    assert_eq!(
+        order_table["GlobalSecondaryIndexes"][0]["IndexName"],
+        "by-status"
+    );
+    assert_eq!(
+        order_table["LocalSecondaryIndexes"][0]["IndexName"],
+        "by-due"
+    );
+
+    let item = call_dynamodb(
+        service,
+        "GetItem",
+        json!({
+            "TableName": "orders",
+            "Key": {"pk": {"S": "acct#1"}, "sk": {"S": "order#1"}}
+        }),
+    )
+    .await;
+    assert_eq!(item["Item"]["payload"], json!({"S": "first order"}));
+
+    let gsi = call_dynamodb(
+        service,
+        "Query",
+        json!({
+            "TableName": "orders",
+            "IndexName": "by-status",
+            "KeyConditionExpression": "gsi_pk = :status",
+            "ExpressionAttributeValues": {":status": {"S": "open"}}
+        }),
+    )
+    .await;
+    assert_eq!(gsi["Count"], 2);
+
+    let lsi = call_dynamodb(
+        service,
+        "Query",
+        json!({
+            "TableName": "orders",
+            "IndexName": "by-due",
+            "KeyConditionExpression": "pk = :pk AND begins_with(lsi_sk, :prefix)",
+            "ExpressionAttributeValues": {
+                ":pk": {"S": "acct#1"},
+                ":prefix": {"S": "due#"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(lsi["Count"], 2);
+
+    let typed = call_dynamodb(
+        service,
+        "GetItem",
+        json!({
+            "TableName": "typed",
+            "Key": {"pk": {"S": "types#1"}}
+        }),
+    )
+    .await;
+    let item = &typed["Item"];
+    assert_eq!(item["s"], json!({"S": "hello"}));
+    assert_eq!(item["n"], json!({"N": "42.5"}));
+    assert_eq!(item["flag"], json!({"BOOL": true}));
+    assert_eq!(item["none"], json!({"NULL": true}));
+    assert_eq!(item["b"], json!({"B": "aGVsbG8="}));
+    // Lists and maps are ordered/deterministic, so assert full equality: a
+    // regression that drops later list elements or extra map fields fails here.
+    assert_eq!(
+        item["list"],
+        json!({"L": [{"S": "nested"}, {"N": "7"}, {"BOOL": false}]})
+    );
+    assert_eq!(
+        item["map"],
+        json!({"M": {"inner": {"S": "value"}, "count": {"N": "3"}}})
+    );
+    // Sets are unordered: check the exact length plus every expected member so
+    // a dropped or duplicated element is caught regardless of ordering.
+    let ss = item["ss"]["SS"].as_array().unwrap();
+    assert_eq!(ss.len(), 2);
+    assert!(ss.contains(&json!("red")));
+    assert!(ss.contains(&json!("blue")));
+    let ns = item["ns"]["NS"].as_array().unwrap();
+    assert_eq!(ns.len(), 2);
+    assert!(ns.contains(&json!("1")));
+    assert!(ns.contains(&json!("2")));
+    let bs = item["bs"]["BS"].as_array().unwrap();
+    assert_eq!(bs.len(), 2);
+    assert!(bs.contains(&json!("YQ==")));
+    assert!(bs.contains(&json!("Yg==")));
+}
+
+#[tokio::test]
+async fn save_snapshot_round_trips_empty_state() {
+    let store = Arc::new(RecordingSnapshotStore::default());
+    let service = make_service().with_snapshot_store(store.clone());
+
+    assert!(service.save_snapshot().await.unwrap());
+
+    let bytes = load_recorded_snapshot(store.as_ref());
+    let restored = service_from_snapshot_bytes(&bytes);
+    let tables = call_dynamodb(&restored, "ListTables", json!({})).await;
+    assert_eq!(tables["TableNames"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn save_snapshot_round_trips_tables_items_and_indexes() {
+    let store = Arc::new(RecordingSnapshotStore::default());
+    let service = make_service().with_snapshot_store(store.clone());
+    populate_snapshot_round_trip_fixture(&service).await;
+
+    assert!(service.save_snapshot().await.unwrap());
+
+    let bytes = load_recorded_snapshot(store.as_ref());
+    let restored = service_from_snapshot_bytes(&bytes);
+    assert_snapshot_round_trip_fixture(&restored).await;
+}
+
+#[tokio::test]
+async fn save_snapshot_to_store_round_trips_tables_items_and_indexes() {
+    let tmp = TempSnapshotDir::new();
+    let snapshot_path = tmp.path().join("dynamodb").join("snapshot.json");
+    let store = Arc::new(fakecloud_persistence::DiskSnapshotStore::new(
+        snapshot_path.clone(),
+    ));
+    let service = make_service();
+    populate_snapshot_round_trip_fixture(&service).await;
+
+    service.save_snapshot_to_store(store).await.unwrap();
+
+    let bytes = std::fs::read(snapshot_path).unwrap();
+    let restored = service_from_snapshot_bytes(&bytes);
+    assert_snapshot_round_trip_fixture(&restored).await;
+}
+
+#[tokio::test]
+async fn save_snapshot_reports_missing_store() {
+    let service = make_service();
+
+    assert!(!service.save_snapshot().await.unwrap());
+}
 
 #[test]
 fn test_parse_update_clauses_set() {
@@ -241,7 +568,6 @@ fn test_project_item_alias_with_dot_is_top_level_attr() {
 
 use crate::state::SharedDynamoDbState;
 use parking_lot::RwLock;
-use std::sync::Arc;
 
 fn make_service() -> DynamoDbService {
     let state: SharedDynamoDbState = Arc::new(RwLock::new(

@@ -2004,7 +2004,8 @@ async fn main() {
     if let Some(h) = dynamodb_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("dynamodb", h);
     }
-    registry.register(Arc::new(dynamodb_service));
+    let dynamodb_service = Arc::new(dynamodb_service);
+    registry.register(dynamodb_service.clone());
     // Companion data plane: DynamoDB Streams (`streams.dynamodb.<region>.amazonaws.com`)
     // shares the same per-table state populated by mutations on the main
     // service. Lambda event source mappings against
@@ -5970,11 +5971,64 @@ async fn main() {
                     // handler, so without this the expired items reappear on the
                     // next restart (the normal mutating API path saves here).
                     if count > 0 {
-                        fakecloud_dynamodb::save_dynamodb_snapshot(&ds, store.clone(), &lock).await;
+                        if let Err(err) =
+                            fakecloud_dynamodb::save_dynamodb_snapshot(&ds, store.clone(), &lock)
+                                .await
+                        {
+                            tracing::error!(%err, "dynamodb snapshot save failed");
+                        }
                     }
                     axum::Json(types::TtlTickResponse {
                         expired_items: count as u64,
                     })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/dynamodb/snapshot/save",
+            axum::routing::post({
+                let service = dynamodb_service.clone();
+                move |body: Option<axum::Json<types::DynamoDbSnapshotSaveRequest>>| {
+                    let service = service.clone();
+                    async move {
+                        let result = if let Some(data_path) =
+                            body.and_then(|axum::Json(body)| body.data_path)
+                        {
+                            let data_path = std::path::PathBuf::from(data_path);
+                            let store = fakecloud_persistence::DiskSnapshotStore::new(
+                                data_path.join("dynamodb").join("snapshot.json"),
+                            );
+                            service
+                                .save_snapshot_to_store(Arc::new(store))
+                                .await
+                                .map(|_| true)
+                        } else {
+                            service.save_snapshot().await
+                        };
+
+                        match result {
+                            Ok(true) => {
+                                axum::Json(serde_json::json!({ "saved": true })).into_response()
+                            }
+                            Ok(false) => (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::Json(serde_json::json!({
+                                    "error": "dynamodb snapshot store is not configured and request body did not include dataPath"
+                                })),
+                            )
+                                .into_response(),
+                            Err(err) => {
+                                tracing::error!(%err, "manual dynamodb snapshot save failed");
+                                (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    axum::Json(serde_json::json!({
+                                        "error": "failed to save dynamodb snapshot"
+                                    })),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    }
                 }
             }),
         )

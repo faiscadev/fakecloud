@@ -100,6 +100,8 @@ import dev.fakecloud.Types.StepFunctionsSyncExecutionsResponse;
 import dev.fakecloud.Types.StepFunctionsExecutionTreeResponse;
 import dev.fakecloud.Types.TokensResponse;
 import dev.fakecloud.Types.TtlTickResponse;
+import dev.fakecloud.Types.DynamoDbSnapshotSaveRequest;
+import dev.fakecloud.Types.DynamoDbSnapshotSaveResponse;
 import dev.fakecloud.Types.UserConfirmationCodes;
 import dev.fakecloud.Types.WarmContainersResponse;
 
@@ -716,6 +718,21 @@ public final class FakeCloud {
 
         public TtlTickResponse tickTtl() {
             return http.postEmpty("/_fakecloud/dynamodb/ttl-processor/tick", TtlTickResponse.class);
+        }
+
+        /**
+         * Write the current DynamoDB state as a canonical snapshot on demand.
+         *
+         * <p>When {@code dataPath} is non-null the snapshot is written to
+         * {@code <dataPath>/dynamodb/snapshot.json}; when null it is written to
+         * the server's configured persistent store (an error if none is
+         * configured).
+         */
+        public DynamoDbSnapshotSaveResponse saveSnapshot(String dataPath) {
+            return http.postJson(
+                    "/_fakecloud/dynamodb/snapshot/save",
+                    new DynamoDbSnapshotSaveRequest(dataPath),
+                    DynamoDbSnapshotSaveResponse.class);
         }
     }
 

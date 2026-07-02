@@ -149,6 +149,7 @@ Sub-clients are accessed via methods: `fc.SES()`, `fc.SNS()`, `fc.Lambda()`, etc
 | Method | Description |
 |--------|-------------|
 | `TickTTL(ctx)` | Tick the TTL processor |
+| `SaveSnapshot(ctx, dataPath)` | Save a DynamoDB snapshot on demand (empty -> configured store) |
 
 ## `fc.SecretsManager()`
 

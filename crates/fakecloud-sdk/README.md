@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Method             | Description                     |
 | ------------------ | ------------------------------- |
 | `tick_ttl().await` | Tick the DynamoDB TTL processor |
+| `save_snapshot(data_path).await` | Save a DynamoDB snapshot on demand (`None` -> configured store) |
 
 ### `fc.ecr()`
 

@@ -514,6 +514,14 @@ export interface TtlTickResponse {
   expiredItems: number;
 }
 
+export interface DynamoDbSnapshotSaveRequest {
+  dataPath?: string;
+}
+
+export interface DynamoDbSnapshotSaveResponse {
+  saved: boolean;
+}
+
 // ── SecretsManager ─────────────────────────────────────────────────
 
 export interface RotationTickResponse {

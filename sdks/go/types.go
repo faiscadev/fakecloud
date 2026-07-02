@@ -602,6 +602,17 @@ type TTLTickResponse struct {
 	ExpiredItems uint64 `json:"expiredItems"`
 }
 
+// DynamoDBSnapshotSaveRequest is the optional body for SaveSnapshot. An empty
+// DataPath saves to the server's configured persistent store.
+type DynamoDBSnapshotSaveRequest struct {
+	DataPath string `json:"dataPath,omitempty"`
+}
+
+// DynamoDBSnapshotSaveResponse is returned after saving a DynamoDB snapshot.
+type DynamoDBSnapshotSaveResponse struct {
+	Saved bool `json:"saved"`
+}
+
 // ── SecretsManager ─────────────────────────────────────────────────
 
 // RotationTickResponse is returned after ticking the rotation scheduler.
