@@ -87,6 +87,7 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // awsJson1.1).
         "monitoring" => Protocol::Query,
         "s3" => Protocol::Rest,
+        "eks" => Protocol::Rest,
         "lambda" => Protocol::Rest,
         // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate
         // Smithy models with distinct `service_name` entries in

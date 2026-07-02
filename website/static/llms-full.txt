@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 48 services (3,837 operations) are shipped today, all at true 100% conformance — 128,017/128,017 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 49 services (3,848 operations) are shipped today, all at true 100% conformance — 128,333/128,333 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 128,017/128,017 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 128,333/128,333 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 23 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -87,10 +87,10 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 48 services persist their durable state: S3, SQS, SNS, EventBridge,
+All 49 services persist their durable state: S3, SQS, SNS, EventBridge,
 EventBridge Pipes, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager,
 CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, Cloud Control API, SES,
-Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, Resource Groups Tagging API, ElastiCache, MemoryDB,
+Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, Resource Groups Tagging API, ElastiCache, MemoryDB, EKS,
 Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Agent,
 Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2,
 CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue,
@@ -370,6 +370,14 @@ BatchUpdateCluster, CopySnapshot, CreateACL, CreateCluster, CreateMultiRegionClu
 Features: full Redis/Valkey control plane — clusters with shard/replica topology (`NumShards` 1-500, `NumReplicasPerShard` 0-5), ACLs and users (a default `open-access` ACL and `default` user seeded per account), parameter and subnet groups, snapshots capturing cluster configuration, multi-region clusters, and reserved nodes. Account-partitioned and persisted; clusters transition `creating` -> `available` on describe. Redis/Valkey data-plane container backing is a follow-up.
 
 Protocol: JSON 1.1 (awsJson1.1, `X-Amz-Target: AmazonMemoryDB.<Action>`)
+
+### EKS (11 actions, batch 1 of 65)
+
+CreateCluster, DescribeCluster, ListClusters, DeleteCluster, UpdateClusterConfig, UpdateClusterVersion, DescribeUpdate, ListUpdates, TagResource, UntagResource, ListTagsForResource
+
+Features: Elastic Kubernetes Service cluster control plane. Cluster lifecycle with `roleArn`/`resourcesVpcConfig`/`version` (default 1.31) and a `map<String,String>` tag shape; clusters transition `CREATING` -> `ACTIVE` on describe. Config and version updates mint tracked `Update` records (`InProgress` -> `Successful` on describe) surfaced via DescribeUpdate/ListUpdates. Account-partitioned and persisted. Node groups, Fargate profiles, add-ons, access entries, and identity-provider configs are in progress; no real Kubernetes API-server endpoint.
+
+Protocol: REST (restJson1, path-based routing, JSON responses)
 
 ### Resource Groups (23 actions)
 

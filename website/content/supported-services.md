@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,837 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,848 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,837 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,848 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 47
-- **Total Operations**: 3,837
-- **Conformance Engine**: 128,017 Smithy-based test variants
+- **Total Operations**: 3,848
+- **Conformance Engine**: 128,333 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -28,6 +28,7 @@ fakecloud provides 100% API conformance across 3,837 operations. Unlike mocks, f
 - **Aurora DSQL**: 16 operations. Serverless distributed PostgreSQL control plane. Cluster lifecycle (`CreateCluster`/`GetCluster`/`UpdateCluster`/`DeleteCluster`/`ListClusters`) with async `CREATING`->`ACTIVE` transitions, cluster resource policies, change streams to Kinesis (`CreateStream`/`GetStream`/`DeleteStream`/`ListStreams`), `GetVpcEndpointServiceName`, and tagging. Data plane (reachable container + IAM-token auth) is a follow-up.
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.
+- **EKS**: 11 operations (batch 1 of 65). Elastic Kubernetes Service cluster control plane: create/describe/list/delete, config + version updates with update tracking, and tagging, with persistence. Clusters transition `CREATING` -> `ACTIVE` on describe. Node groups, Fargate profiles, and add-ons are in progress.
 
 ### AI & Machine Learning
 - **Bedrock**: 214 operations across 4 APIs (Bedrock 101, Bedrock Runtime 10, Bedrock Agent 72, Bedrock Agent Runtime 31). Guardrails, Model Customization, Provisioned Throughput, Agents, Knowledge Bases.

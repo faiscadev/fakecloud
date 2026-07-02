@@ -190,5 +190,9 @@
   "memorydb": {
     "repo_dir": "memorydb",
     "service_name": "memorydb"
+  },
+  "eks": {
+    "repo_dir": "eks",
+    "service_name": "eks"
   }
 }

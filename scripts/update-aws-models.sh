@@ -41,6 +41,7 @@ SERVICES=(
     "dsql:dsql"
     "elasticache:elasticache"
     "memorydb:memorydb"
+    "eks:eks"
     "sfn:sfn"
     "bedrock:bedrock"
     "bedrock-runtime:bedrock-runtime"
