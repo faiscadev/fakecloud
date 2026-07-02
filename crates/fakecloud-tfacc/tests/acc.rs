@@ -103,6 +103,11 @@ async fn elasticache_acceptance() {
 }
 
 #[tokio::test]
+async fn memorydb_acceptance() {
+    run_shard("memorydb").await;
+}
+
+#[tokio::test]
 async fn rds_acceptance() {
     run_shard("rds").await;
 }

@@ -574,6 +574,26 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "memorydb",
+        // MemoryDB is a full control plane (no Redis/Valkey data-plane container),
+        // so the Terraform provider's control-plane resources are exercisable:
+        // ACLs, users, parameter groups (a default group per family is seeded so
+        // the provider's default-group read succeeds), snapshots, and clusters
+        // (which transition creating -> available on describe, so the create
+        // waiter completes; shard slots are partitioned to match).
+        //
+        // SubnetGroup_basic is excluded: its check asserts `vpc_id` equals the
+        // real EC2 VPC the test created, which needs cross-service subnet ->
+        // VPC resolution the memorydb crate does not have (the sibling
+        // ElastiCache subnet group has the same limitation). Tracked follow-up.
+        run_regex: concat!(
+            "^TestAccMemoryDB(",
+            "ACL|User|ParameterGroup|Snapshot|Cluster",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
         name: "cloudfront",
         // Cache/origin-request/realtime-log/log-delivery data sources. The
         // CloudFront resources (distribution, function, OAC, ...) are deferred.
@@ -1129,6 +1149,16 @@ pub const SHARDS: &[Shard] = &[
             "User|UserDataSource",
             "|UserGroup|UserGroupAssociation",
             "|SubnetGroup|SubnetGroupDataSource",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "memorydb",
+        service: "memorydb",
+        run_regex: concat!(
+            "^TestAccMemoryDB(",
+            "ACL|User|ParameterGroup|Snapshot|Cluster",
             ")_basic$",
         ),
         extra_deny: &[],

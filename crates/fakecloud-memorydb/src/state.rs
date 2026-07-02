@@ -215,6 +215,25 @@ impl AccountState for MemoryDbState {
                 arn: format!("arn:aws:memorydb:{region}:{account_id}:acl/open-access"),
             },
         );
+        // AWS provides a default parameter group per supported engine family.
+        // The Terraform provider reads e.g. `default.memorydb-redis7` when
+        // managing a parameter group, so these must exist out of the box.
+        for (pg_name, family) in [
+            ("default.memorydb-redis7", "memorydb_redis7"),
+            ("default.memorydb-redis6", "memorydb_redis6"),
+            ("default.memorydb-valkey7", "memorydb_valkey7"),
+        ] {
+            s.parameter_groups.insert(
+                pg_name.to_string(),
+                ParameterGroup {
+                    name: pg_name.to_string(),
+                    family: family.to_string(),
+                    description: format!("Default parameter group for {family}"),
+                    arn: format!("arn:aws:memorydb:{region}:{account_id}:parametergroup/{pg_name}"),
+                    parameters: BTreeMap::new(),
+                },
+            );
+        }
         s
     }
 }
