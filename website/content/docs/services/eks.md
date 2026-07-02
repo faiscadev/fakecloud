@@ -1,17 +1,18 @@
 +++
 title = "EKS"
-description = "Amazon EKS (eks) on fakecloud: Elastic Kubernetes Service control plane — cluster lifecycle, config/version updates with update tracking, and tagging. restJson1."
+description = "Amazon EKS (eks) on fakecloud: complete 65-op Elastic Kubernetes Service control plane — clusters, node groups, Fargate profiles, add-ons, access entries, identity-provider configs, pod identity, insights, capabilities, and EKS Anywhere. restJson1."
 weight = 46
 +++
 
 fakecloud implements **Amazon EKS** (`eks`), the managed Kubernetes service, as a
-restJson1 control plane. **46 of the full 65-operation surface** ship now — the
-**cluster**, **managed node group**, **Fargate profile**, **add-on**,
-**access-entry**, **OIDC identity-provider-config**, and
-**pod-identity-association** control planes — backed by account-partitioned state
-that persists across restarts in persistent mode.
+restJson1 control plane. **The complete 65-operation surface** ships — clusters,
+managed node groups, Fargate profiles, add-ons, access entries, OIDC
+identity-provider configs, pod-identity associations, upgrade insights,
+capabilities, connected-cluster registration, encryption config, and EKS Anywhere
+subscriptions — backed by account-partitioned state that persists across restarts
+in persistent mode.
 
-## Supported now (46 operations)
+## Supported now (all 65 operations)
 
 - **Cluster lifecycle** — `CreateCluster`, `DescribeCluster`, `ListClusters`,
   `DeleteCluster`. Clusters are created with the requested `roleArn`,
@@ -44,18 +45,26 @@ that persists across restarts in persistent mode.
   `DescribePodIdentityAssociation`, `ListPodIdentityAssociations`,
   `UpdatePodIdentityAssociation`, `DeletePodIdentityAssociation` (map a
   `namespace`/`serviceAccount` to a `roleArn`, `a-`-prefixed `associationId`).
+- **Upgrade insights** — `ListInsights`, `DescribeInsight` (seeded `PASSING`
+  UPGRADE_READINESS findings per cluster), `StartInsightsRefresh`,
+  `DescribeInsightsRefresh`.
+- **Capabilities** — `CreateCapability`, `DescribeCapability`, `ListCapabilities`,
+  `UpdateCapability` (tracked `Update`), `DeleteCapability`.
+- **Connected clusters** — `RegisterCluster` (creates a `PENDING` cluster with a
+  `connectorConfig`) and `DeregisterCluster`.
+- **Cluster maintenance** — `AssociateEncryptionConfig` and `CancelUpdate` (both
+  operate on tracked `Update` records), plus the read-only `DescribeClusterVersions`
+  catalogue (Kubernetes 1.28-1.32 with platform versions and standard/extended
+  support windows).
+- **EKS Anywhere subscriptions** — `CreateEksAnywhereSubscription`,
+  `DescribeEksAnywhereSubscription`, `ListEksAnywhereSubscriptions`,
+  `UpdateEksAnywhereSubscription`, `DeleteEksAnywhereSubscription`
+  (account-scoped, `term`/`licenseQuantity`/`autoRenew`).
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (EKS uses
   a `map<String,String>` tag shape, keyed by resource ARN).
 
-100% conformance across every shipped operation: all 1,347 generated Smithy probe
-variants for these 46 operations pass.
-
-## In progress (roadmap)
-
-The remaining EKS surface is being added in subsequent batches: **insights**,
-**capabilities**, cluster **registration** (`RegisterCluster`/`DeregisterCluster`),
-`AssociateEncryptionConfig`, `CancelUpdate`, `DescribeClusterVersions`, and the
-**EKS Anywhere subscription** operations. There is no real Kubernetes API-server
+100% conformance across the full surface: all 1,865 generated Smithy probe
+variants for the 65 operations pass. There is no real Kubernetes API-server
 endpoint; the control plane models the AWS management API, not `kubectl` traffic.
 
 ## Example

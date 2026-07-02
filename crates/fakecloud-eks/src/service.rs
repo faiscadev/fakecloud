@@ -21,10 +21,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    access_entry_arn, addon_arn, cluster_arn, fargate_profile_arn, identity_provider_config_arn,
-    nodegroup_arn, pod_identity_association_arn, AccessEntry, Addon, AssociatedPolicy, Cluster,
-    EksSnapshot, FargateProfile, IdentityProviderConfig, Nodegroup, PodIdentityAssociation,
-    SharedEksState, Update, DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
+    access_entry_arn, addon_arn, capability_arn, cluster_arn, eks_anywhere_subscription_arn,
+    fargate_profile_arn, identity_provider_config_arn, nodegroup_arn, pod_identity_association_arn,
+    AccessEntry, Addon, AssociatedPolicy, Capability, Cluster, EksAnywhereSubscription,
+    EksSnapshot, FargateProfile, IdentityProviderConfig, Insight, InsightsRefresh, Nodegroup,
+    PodIdentityAssociation, SharedEksState, Update, DEFAULT_K8S_VERSION,
+    EKS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// The set of control-plane log types EKS reports on every cluster.
@@ -83,6 +85,25 @@ pub const EKS_ACTIONS: &[&str] = &[
     "DescribePodIdentityAssociation",
     "ListPodIdentityAssociations",
     "UpdatePodIdentityAssociation",
+    "DescribeInsight",
+    "ListInsights",
+    "DescribeInsightsRefresh",
+    "StartInsightsRefresh",
+    "AssociateEncryptionConfig",
+    "CancelUpdate",
+    "DeregisterCluster",
+    "RegisterCluster",
+    "DescribeClusterVersions",
+    "CreateCapability",
+    "DeleteCapability",
+    "DescribeCapability",
+    "ListCapabilities",
+    "UpdateCapability",
+    "CreateEksAnywhereSubscription",
+    "DeleteEksAnywhereSubscription",
+    "DescribeEksAnywhereSubscription",
+    "ListEksAnywhereSubscriptions",
+    "UpdateEksAnywhereSubscription",
 ];
 
 pub struct EksService {
@@ -389,6 +410,90 @@ impl EksService {
                     name: decode(id),
                 },
             )),
+            // Insights (sub-resources of a cluster). List is a POST (it carries
+            // a filter body); Describe is a GET keyed by insight id.
+            (&Method::POST, ["clusters", c, "insights"]) => {
+                Some(("ListInsights", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "insights", id]) => Some((
+                "DescribeInsight",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
+            (&Method::GET, ["clusters", c, "insights-refresh"]) => {
+                Some(("DescribeInsightsRefresh", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::POST, ["clusters", c, "insights-refresh"]) => {
+                Some(("StartInsightsRefresh", PathArgs::Cluster(decode(c))))
+            }
+            // Encryption config association (mints a tracked cluster Update).
+            (&Method::POST, ["clusters", c, "encryption-config", "associate"]) => {
+                Some(("AssociateEncryptionConfig", PathArgs::Cluster(decode(c))))
+            }
+            // Cancel an in-progress update.
+            (&Method::POST, ["clusters", name, "updates", update_id, "cancel-update"]) => Some((
+                "CancelUpdate",
+                PathArgs::Update {
+                    name: decode(name),
+                    update_id: decode(update_id),
+                },
+            )),
+            // Connected (registered) clusters.
+            (&Method::POST, ["cluster-registrations"]) => Some(("RegisterCluster", PathArgs::None)),
+            (&Method::DELETE, ["cluster-registrations", name]) => {
+                Some(("DeregisterCluster", PathArgs::Name(decode(name))))
+            }
+            // Kubernetes version catalogue (account/region-scoped).
+            (&Method::GET, ["cluster-versions"]) => {
+                Some(("DescribeClusterVersions", PathArgs::None))
+            }
+            // Capabilities (sub-resources of a cluster).
+            (&Method::POST, ["clusters", c, "capabilities"]) => {
+                Some(("CreateCapability", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "capabilities"]) => {
+                Some(("ListCapabilities", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "capabilities", n]) => Some((
+                "DescribeCapability",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "capabilities", n]) => Some((
+                "DeleteCapability",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "capabilities", n]) => Some((
+                "UpdateCapability",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            // EKS Anywhere subscriptions (account-scoped).
+            (&Method::POST, ["eks-anywhere-subscriptions"]) => {
+                Some(("CreateEksAnywhereSubscription", PathArgs::None))
+            }
+            (&Method::GET, ["eks-anywhere-subscriptions"]) => {
+                Some(("ListEksAnywhereSubscriptions", PathArgs::None))
+            }
+            (&Method::GET, ["eks-anywhere-subscriptions", id]) => Some((
+                "DescribeEksAnywhereSubscription",
+                PathArgs::Name(decode(id)),
+            )),
+            (&Method::DELETE, ["eks-anywhere-subscriptions", id]) => {
+                Some(("DeleteEksAnywhereSubscription", PathArgs::Name(decode(id))))
+            }
+            (&Method::POST, ["eks-anywhere-subscriptions", id]) => {
+                Some(("UpdateEksAnywhereSubscription", PathArgs::Name(decode(id))))
+            }
             (&Method::POST, ["tags", arn]) => Some(("TagResource", PathArgs::Arn(decode(arn)))),
             (&Method::DELETE, ["tags", arn]) => Some(("UntagResource", PathArgs::Arn(decode(arn)))),
             (&Method::GET, ["tags", arn]) => {
@@ -462,6 +567,8 @@ impl EksService {
             logging: build_logging(body.get("logging")),
             tags,
             updates: Default::default(),
+            connector_config: None,
+            encryption_config: None,
         };
 
         let out = cluster_json(&cluster, &id);
@@ -2221,6 +2328,748 @@ impl EksService {
             json!({ "association": pod_identity_association_json(assoc) }).to_string(),
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Insights
+    // -----------------------------------------------------------------------
+
+    fn list_insights(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // ListInsights is a POST carrying the filter/pagination in its body.
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let max_results = body
+            .get("maxResults")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).max(1))
+            .unwrap_or(100);
+        let next_token = body
+            .get("nextToken")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // Optional category / status filters.
+        let categories = string_list(body.get("filter").and_then(|f| f.get("categories")));
+        let statuses = string_list(body.get("filter").and_then(|f| f.get("statuses")));
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let version = state
+            .clusters
+            .get(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?
+            .version
+            .clone();
+        let insights = state
+            .insights
+            .entry(cluster_name.to_string())
+            .or_insert_with(|| {
+                default_insights(&version)
+                    .into_iter()
+                    .map(|i| (i.id.clone(), i))
+                    .collect()
+            });
+        let summaries: Vec<Value> = insights
+            .values()
+            .filter(|i| categories.is_empty() || categories.iter().any(|c| c == &i.category))
+            .filter(|i| statuses.is_empty() || statuses.iter().any(|s| s == &i.status))
+            .map(insight_summary_json)
+            .collect();
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "insights": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn describe_insight(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let version = state
+            .clusters
+            .get(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?
+            .version
+            .clone();
+        let insights = state
+            .insights
+            .entry(cluster_name.to_string())
+            .or_insert_with(|| {
+                default_insights(&version)
+                    .into_iter()
+                    .map(|i| (i.id.clone(), i))
+                    .collect()
+            });
+        let insight = insights.get(id).ok_or_else(not_found_insight(id))?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "insight": insight_json(insight) }).to_string(),
+        ))
+    }
+
+    fn describe_insights_refresh(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let refresh = state
+            .insights_refresh
+            .entry(cluster_name.to_string())
+            .or_insert_with(|| InsightsRefresh {
+                status: "COMPLETED".to_string(),
+                started_at: Utc::now(),
+                ended_at: Some(Utc::now()),
+            });
+        // An in-progress refresh settles to COMPLETED on first describe.
+        if refresh.status == "IN_PROGRESS" {
+            refresh.status = "COMPLETED".to_string();
+            refresh.ended_at = Some(Utc::now());
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            insights_refresh_json(refresh).to_string(),
+        ))
+    }
+
+    fn start_insights_refresh(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let version = state
+            .clusters
+            .get(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?
+            .version
+            .clone();
+        // A refresh regenerates the cluster's insights.
+        state.insights.insert(
+            cluster_name.to_string(),
+            default_insights(&version)
+                .into_iter()
+                .map(|i| (i.id.clone(), i))
+                .collect(),
+        );
+        let refresh = InsightsRefresh {
+            status: "IN_PROGRESS".to_string(),
+            started_at: Utc::now(),
+            ended_at: None,
+        };
+        // StartInsightsRefresh's response carries only `message` + `status`;
+        // the timestamps are read back through DescribeInsightsRefresh.
+        let out = json!({
+            "message": "Insights refresh started for the cluster.",
+            "status": refresh.status,
+        });
+        state
+            .insights_refresh
+            .insert(cluster_name.to_string(), refresh);
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cluster misc (encryption config, cancel update, register/deregister,
+    // cluster versions)
+    // -----------------------------------------------------------------------
+
+    fn associate_encryption_config(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let encryption_config = body
+            .get("encryptionConfig")
+            .filter(|v| v.is_array())
+            .cloned()
+            .ok_or_else(|| invalid_parameter("encryptionConfig is required"))?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let cluster = state
+            .clusters
+            .get_mut(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        cluster.encryption_config = Some(encryption_config.clone());
+
+        let update = new_update(
+            "AssociateEncryptionConfig",
+            vec![(
+                "EncryptionConfig".to_string(),
+                encryption_config.to_string(),
+            )],
+        );
+        let out = update_json(&update);
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": out }).to_string(),
+        ))
+    }
+
+    fn cancel_update(
+        &self,
+        req: &AwsRequest,
+        name: &str,
+        update_id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let cluster = state
+            .clusters
+            .get_mut(name)
+            .ok_or_else(not_found_cluster(name))?;
+        let update = cluster
+            .updates
+            .get_mut(update_id)
+            .ok_or_else(not_found_update(update_id))?;
+        update.status = "Cancelled".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_json(update) }).to_string(),
+        ))
+    }
+
+    fn register_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("name is required"))?
+            .to_string();
+        validate_cluster_name(&name)?;
+        let connector = body
+            .get("connectorConfig")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| invalid_parameter("connectorConfig is required"))?;
+        let role_arn = connector
+            .get("roleArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("connectorConfig.roleArn is required"))?
+            .to_string();
+        let provider = connector
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("connectorConfig.provider is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if state.clusters.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!("Cluster already exists with name: {name}"),
+            ));
+        }
+
+        let arn = cluster_arn(&region, &account_id, &name);
+        let id = uuid::Uuid::new_v4().to_string();
+        let activation_id = uuid::Uuid::new_v4().to_string();
+        let activation_code = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let connector_config = json!({
+            "activationId": activation_id,
+            "activationCode": activation_code,
+            "activationExpiry": timestamp_to_number(Utc::now() + chrono::Duration::hours(72)),
+            "provider": provider,
+            "roleArn": role_arn,
+        });
+
+        let cluster = Cluster {
+            name: name.clone(),
+            arn,
+            version: String::new(),
+            role_arn: String::new(),
+            status: "PENDING".to_string(),
+            created_at: Utc::now(),
+            endpoint: String::new(),
+            platform_version: "eks.1".to_string(),
+            certificate_authority_data: String::new(),
+            resources_vpc_config: json!({}),
+            kubernetes_network_config: json!({}),
+            logging: build_logging(None),
+            tags: parse_tag_map(body.get("tags")),
+            updates: Default::default(),
+            connector_config: Some(connector_config),
+            encryption_config: None,
+        };
+        let out = connected_cluster_json(&cluster, &id);
+        state.clusters.insert(name, cluster);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "cluster": out }).to_string(),
+        ))
+    }
+
+    fn deregister_cluster(
+        &self,
+        req: &AwsRequest,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // Deregister only applies to connected (registered) clusters.
+        let is_connected = state
+            .clusters
+            .get(name)
+            .map(|c| c.connector_config.is_some())
+            .unwrap_or(false);
+        if !is_connected {
+            return Err(not_found_cluster(name)());
+        }
+        let mut cluster = state.clusters.remove(name).unwrap();
+        cluster.status = "DELETING".to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "cluster": connected_cluster_json(&cluster, &id) }).to_string(),
+        ))
+    }
+
+    fn describe_cluster_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let next_token = req.query_params.get("nextToken").cloned();
+        let max_results = match req.query_params.get("maxResults") {
+            Some(raw) => {
+                let n: i64 = raw
+                    .parse()
+                    .map_err(|_| invalid_parameter("maxResults must be an integer"))?;
+                if !(1..=100).contains(&n) {
+                    return Err(invalid_parameter("maxResults must be between 1 and 100"));
+                }
+                n as usize
+            }
+            None => 100,
+        };
+        // Enum query params reject values outside the model's declared members.
+        if let Some(status) = req.query_params.get("status") {
+            if !["unsupported", "standard_support", "extended_support"].contains(&status.as_str()) {
+                return Err(invalid_parameter(format!("Invalid status: {status}")));
+            }
+        }
+        if let Some(vs) = req.query_params.get("versionStatus") {
+            if !["UNSUPPORTED", "STANDARD_SUPPORT", "EXTENDED_SUPPORT"].contains(&vs.as_str()) {
+                return Err(invalid_parameter(format!("Invalid versionStatus: {vs}")));
+            }
+        }
+        let default_only = req
+            .query_params
+            .get("defaultOnly")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let version_filter = parse_multi_query(&req.raw_query, "clusterVersions");
+        let cluster_type = req
+            .query_params
+            .get("clusterType")
+            .cloned()
+            .unwrap_or_else(|| "eks".to_string());
+
+        let catalog: Vec<Value> = cluster_version_catalog(&cluster_type)
+            .into_iter()
+            .filter(|v| {
+                version_filter.is_empty()
+                    || version_filter
+                        .iter()
+                        .any(|f| v["clusterVersion"] == f.as_str())
+            })
+            .filter(|v| !default_only || v["defaultVersion"] == true)
+            .collect();
+
+        let (page, token) = paginate_checked(&catalog, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "clusterVersions": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Capabilities
+    // -----------------------------------------------------------------------
+
+    fn create_capability(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("capabilityName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("capabilityName is required"))?
+            .to_string();
+        let type_ = body
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("type is required"))?
+            .to_string();
+        let role_arn = body
+            .get("roleArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("roleArn is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        if state
+            .capabilities
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "Capability already exists with name {name} and cluster name {cluster_name}"
+                ),
+            ));
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = capability_arn(&region, &account_id, cluster_name, &name, &id);
+        let now = Utc::now();
+        let capability = Capability {
+            name: name.clone(),
+            arn,
+            cluster_name: cluster_name.to_string(),
+            type_,
+            role_arn,
+            status: "CREATING".to_string(),
+            version: "v1".to_string(),
+            configuration: normalize_capability_configuration(body.get("configuration")),
+            tags: parse_tag_map(body.get("tags")),
+            created_at: now,
+            modified_at: now,
+            delete_propagation_policy: str_field(&body, "deletePropagationPolicy"),
+        };
+        let out = capability_json(&capability);
+        state
+            .capabilities
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(name, capability);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "capability": out }).to_string(),
+        ))
+    }
+
+    fn describe_capability(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let capability = state
+            .capabilities
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_capability(name))?;
+        if capability.status == "CREATING" {
+            capability.status = "ACTIVE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "capability": capability_json(capability) }).to_string(),
+        ))
+    }
+
+    fn list_capabilities(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let summaries: Vec<Value> = state
+            .capabilities
+            .get(cluster_name)
+            .map(|m| m.values().map(capability_summary_json).collect())
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "capabilities": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_capability(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let mut capability = state
+            .capabilities
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(name))
+            .ok_or_else(not_found_capability(name))?;
+        capability.status = "DELETING".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "capability": capability_json(&capability) }).to_string(),
+        ))
+    }
+
+    fn update_capability(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let capability = state
+            .capabilities
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_capability(name))?;
+
+        let mut params = Vec::new();
+        if let Some(role) = body.get("roleArn").and_then(|v| v.as_str()) {
+            capability.role_arn = role.to_string();
+            params.push(("RoleArn".to_string(), role.to_string()));
+        }
+        if let Some(cfg) = normalize_capability_configuration(body.get("configuration")) {
+            params.push(("Configuration".to_string(), cfg.to_string()));
+            capability.configuration = Some(cfg);
+        }
+        capability.modified_at = Utc::now();
+
+        // UpdateCapability returns a tracked cluster-scoped Update.
+        let update = new_update("CapabilityUpdate", params);
+        let out = update_json(&update);
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": out }).to_string(),
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // EKS Anywhere subscriptions
+    // -----------------------------------------------------------------------
+
+    fn create_eks_anywhere_subscription(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("name is required"))?
+            .to_string();
+        // EksAnywhereSubscriptionName: length 1-100, ^[0-9A-Za-z][A-Za-z0-9\-_]*$.
+        if name.is_empty() || name.len() > 100 {
+            return Err(invalid_parameter("name must be 1-100 characters"));
+        }
+        if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err(invalid_parameter(
+                "name must match ^[0-9A-Za-z][A-Za-z0-9\\-_]*$",
+            ));
+        }
+        if let Some(lt) = body.get("licenseType").and_then(|v| v.as_str()) {
+            if lt != "Cluster" {
+                return Err(invalid_parameter(format!("Invalid licenseType: {lt}")));
+            }
+        }
+        let term = body
+            .get("term")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| invalid_parameter("term is required"))?;
+        let term_duration = term.get("duration").and_then(|v| v.as_i64()).unwrap_or(12);
+        let term_unit = term
+            .get("unit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("MONTHS")
+            .to_string();
+        let license_quantity = body
+            .get("licenseQuantity")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let license_type = body
+            .get("licenseType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Cluster")
+            .to_string();
+        let auto_renew = body
+            .get("autoRenew")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+
+        let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let id = raw[..17.min(raw.len())].to_string();
+        let arn = eks_anywhere_subscription_arn(&region, &account_id, &id);
+        let now = Utc::now();
+        let expiration = now + chrono::Duration::days(term_duration * 30);
+        let subscription = EksAnywhereSubscription {
+            id: id.clone(),
+            arn,
+            name,
+            created_at: now,
+            effective_date: now,
+            expiration_date: expiration,
+            license_quantity,
+            license_type,
+            term_duration,
+            term_unit,
+            status: "ACTIVE".to_string(),
+            auto_renew,
+            tags: parse_tag_map(body.get("tags")),
+        };
+        let out = subscription_json(&subscription);
+        state.eks_anywhere_subscriptions.insert(id, subscription);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "subscription": out }).to_string(),
+        ))
+    }
+
+    fn list_eks_anywhere_subscriptions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let Some(state) = accounts.get(&req.account_id) else {
+            return Ok(AwsResponse::json(
+                StatusCode::OK,
+                json!({ "subscriptions": [] }).to_string(),
+            ));
+        };
+        let subs: Vec<Value> = state
+            .eks_anywhere_subscriptions
+            .values()
+            .map(subscription_json)
+            .collect();
+        let (page, token) = paginate_checked(&subs, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "subscriptions": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn describe_eks_anywhere_subscription(
+        &self,
+        req: &AwsRequest,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_subscription(id))?;
+        let subscription = state
+            .eks_anywhere_subscriptions
+            .get(id)
+            .ok_or_else(not_found_subscription(id))?;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "subscription": subscription_json(subscription) }).to_string(),
+        ))
+    }
+
+    fn delete_eks_anywhere_subscription(
+        &self,
+        req: &AwsRequest,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let mut subscription = state
+            .eks_anywhere_subscriptions
+            .remove(id)
+            .ok_or_else(not_found_subscription(id))?;
+        subscription.status = "DELETING".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "subscription": subscription_json(&subscription) }).to_string(),
+        ))
+    }
+
+    fn update_eks_anywhere_subscription(
+        &self,
+        req: &AwsRequest,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let auto_renew = body
+            .get("autoRenew")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| invalid_parameter("autoRenew is required"))?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let subscription = state
+            .eks_anywhere_subscriptions
+            .get_mut(id)
+            .ok_or_else(not_found_subscription(id))?;
+        subscription.auto_renew = auto_renew;
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "subscription": subscription_json(subscription) }).to_string(),
+        ))
+    }
 }
 
 /// Persist the current EKS state as a snapshot. Shared by
@@ -2302,6 +3151,23 @@ impl AwsService for EksService {
                 | "CreatePodIdentityAssociation"
                 | "DeletePodIdentityAssociation"
                 | "UpdatePodIdentityAssociation"
+                // Insights are seeded/settled on read; refresh settles on describe.
+                | "ListInsights"
+                | "DescribeInsight"
+                | "DescribeInsightsRefresh"
+                | "StartInsightsRefresh"
+                | "AssociateEncryptionConfig"
+                | "CancelUpdate"
+                | "RegisterCluster"
+                | "DeregisterCluster"
+                | "CreateCapability"
+                | "DeleteCapability"
+                | "UpdateCapability"
+                | "DescribeCapability"
+                | "CreateEksAnywhereSubscription"
+                | "DeleteEksAnywhereSubscription"
+                | "UpdateEksAnywhereSubscription"
+                | "DescribeEksAnywhereSubscription"
         );
 
         let result = match (action, &args) {
@@ -2405,6 +3271,45 @@ impl AwsService for EksService {
             }
             ("UpdatePodIdentityAssociation", PathArgs::ClusterChild { cluster, name }) => {
                 self.update_pod_identity_association(&req, cluster, name)
+            }
+            ("ListInsights", PathArgs::Cluster(c)) => self.list_insights(&req, c),
+            ("DescribeInsight", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_insight(&req, cluster, name)
+            }
+            ("DescribeInsightsRefresh", PathArgs::Cluster(c)) => {
+                self.describe_insights_refresh(&req, c)
+            }
+            ("StartInsightsRefresh", PathArgs::Cluster(c)) => self.start_insights_refresh(&req, c),
+            ("AssociateEncryptionConfig", PathArgs::Cluster(c)) => {
+                self.associate_encryption_config(&req, c)
+            }
+            ("CancelUpdate", PathArgs::Update { name, update_id }) => {
+                self.cancel_update(&req, name, update_id)
+            }
+            ("RegisterCluster", _) => self.register_cluster(&req),
+            ("DeregisterCluster", PathArgs::Name(n)) => self.deregister_cluster(&req, n),
+            ("DescribeClusterVersions", _) => self.describe_cluster_versions(&req),
+            ("CreateCapability", PathArgs::Cluster(c)) => self.create_capability(&req, c),
+            ("ListCapabilities", PathArgs::Cluster(c)) => self.list_capabilities(&req, c),
+            ("DescribeCapability", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_capability(&req, cluster, name)
+            }
+            ("DeleteCapability", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_capability(&req, cluster, name)
+            }
+            ("UpdateCapability", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_capability(&req, cluster, name)
+            }
+            ("CreateEksAnywhereSubscription", _) => self.create_eks_anywhere_subscription(&req),
+            ("ListEksAnywhereSubscriptions", _) => self.list_eks_anywhere_subscriptions(&req),
+            ("DescribeEksAnywhereSubscription", PathArgs::Name(id)) => {
+                self.describe_eks_anywhere_subscription(&req, id)
+            }
+            ("DeleteEksAnywhereSubscription", PathArgs::Name(id)) => {
+                self.delete_eks_anywhere_subscription(&req, id)
+            }
+            ("UpdateEksAnywhereSubscription", PathArgs::Name(id)) => {
+                self.update_eks_anywhere_subscription(&req, id)
             }
             _ => Err(AwsServiceError::action_not_implemented("eks", action)),
         };
@@ -2712,7 +3617,7 @@ fn build_logging(req: Option<&Value>) -> Value {
 }
 
 fn cluster_json(c: &Cluster, id: &str) -> Value {
-    json!({
+    let mut out = json!({
         "name": c.name,
         "arn": c.arn,
         "createdAt": timestamp_to_number(c.created_at),
@@ -2732,7 +3637,14 @@ fn cluster_json(c: &Cluster, id: &str) -> Value {
         "platformVersion": c.platform_version,
         "tags": c.tags,
         "health": { "issues": [] },
-    })
+    });
+    if let Some(cc) = &c.connector_config {
+        out["connectorConfig"] = cc.clone();
+    }
+    if let Some(ec) = &c.encryption_config {
+        out["encryptionConfig"] = ec.clone();
+    }
+    out
 }
 
 fn update_json(u: &Update) -> Value {
@@ -3148,6 +4060,293 @@ fn access_policy_catalog() -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn not_found_insight(id: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let id = id.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No insight found for id: {id}."),
+        )
+    }
+}
+
+fn not_found_capability(name: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let name = name.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No capability found for name: {name}."),
+        )
+    }
+}
+
+fn not_found_subscription(id: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let id = id.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No EKS Anywhere subscription found for id: {id}."),
+        )
+    }
+}
+
+/// Render a connected (registered) cluster. Same shape as `cluster_json` but
+/// tolerant of the empty fields a not-yet-activated connected cluster carries.
+fn connected_cluster_json(c: &Cluster, id: &str) -> Value {
+    cluster_json(c, id)
+}
+
+/// A set of plausible upgrade-readiness Insights EKS auto-generates for a
+/// cluster. All seed as `PASSING` (a healthy cluster) so List/Describe return
+/// real, non-empty content. Ids are generated per seed so Describe round-trips.
+fn default_insights(cluster_version: &str) -> Vec<Insight> {
+    let now = Utc::now();
+    let mk = |name: &str, category: &str, description: &str, recommendation: &str| Insight {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        category: category.to_string(),
+        kubernetes_version: cluster_version.to_string(),
+        description: description.to_string(),
+        recommendation: recommendation.to_string(),
+        status: "PASSING".to_string(),
+        reason: "No deprecated API usage detected.".to_string(),
+        last_refresh_time: now,
+        last_transition_time: now,
+    };
+    vec![
+        mk(
+            "Deprecated APIs removed in Kubernetes",
+            "UPGRADE_READINESS",
+            "Checks for usage of Kubernetes APIs that are removed in the next version.",
+            "Migrate any deprecated API usage to the supported apiVersion before upgrading.",
+        ),
+        mk(
+            "Kubelet version skew",
+            "UPGRADE_READINESS",
+            "Checks that node kubelet versions are within the supported skew of the control plane.",
+            "Upgrade node groups so kubelet stays within two minor versions of the control plane.",
+        ),
+        mk(
+            "EKS add-on version compatibility",
+            "UPGRADE_READINESS",
+            "Checks that installed EKS add-on versions are compatible with the target cluster version.",
+            "Update add-ons to a version compatible with the target Kubernetes version.",
+        ),
+    ]
+}
+
+fn insight_status_json(i: &Insight) -> Value {
+    json!({ "status": i.status, "reason": i.reason })
+}
+
+fn insight_json(i: &Insight) -> Value {
+    json!({
+        "id": i.id,
+        "name": i.name,
+        "category": i.category,
+        "kubernetesVersion": i.kubernetes_version,
+        "lastRefreshTime": timestamp_to_number(i.last_refresh_time),
+        "lastTransitionTime": timestamp_to_number(i.last_transition_time),
+        "description": i.description,
+        "insightStatus": insight_status_json(i),
+        "recommendation": i.recommendation,
+        "additionalInfo": {},
+        "resources": [],
+    })
+}
+
+fn insight_summary_json(i: &Insight) -> Value {
+    json!({
+        "id": i.id,
+        "name": i.name,
+        "category": i.category,
+        "kubernetesVersion": i.kubernetes_version,
+        "lastRefreshTime": timestamp_to_number(i.last_refresh_time),
+        "lastTransitionTime": timestamp_to_number(i.last_transition_time),
+        "description": i.description,
+        "insightStatus": insight_status_json(i),
+    })
+}
+
+fn insights_refresh_json(r: &InsightsRefresh) -> Value {
+    let mut out = json!({
+        "message": "Insights refresh for the cluster.",
+        "status": r.status,
+        "startedAt": timestamp_to_number(r.started_at),
+    });
+    if let Some(ended) = r.ended_at {
+        out["endedAt"] = timestamp_to_number(ended);
+    }
+    out
+}
+
+/// A real catalogue of recent Kubernetes minor versions with plausible
+/// platform versions, release dates, and support windows, returned by
+/// `DescribeClusterVersions`. 1.31 is the default.
+fn cluster_version_catalog(cluster_type: &str) -> Vec<Value> {
+    // (version, patch, platformVersion, releaseYmd, eoStandardYmd, eoExtendedYmd,
+    //  status, default)
+    type VersionRow = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        bool,
+    );
+    const ROWS: &[VersionRow] = &[
+        (
+            "1.28",
+            "1.28.15",
+            "eks.30",
+            "2023-09-26",
+            "2024-11-26",
+            "2025-11-26",
+            "extended_support",
+            false,
+        ),
+        (
+            "1.29",
+            "1.29.10",
+            "eks.24",
+            "2024-01-23",
+            "2025-03-23",
+            "2026-03-23",
+            "extended_support",
+            false,
+        ),
+        (
+            "1.30",
+            "1.30.6",
+            "eks.20",
+            "2024-05-23",
+            "2025-07-23",
+            "2026-07-23",
+            "standard_support",
+            false,
+        ),
+        (
+            "1.31",
+            "1.31.2",
+            "eks.9",
+            "2024-09-26",
+            "2025-11-26",
+            "2026-11-26",
+            "standard_support",
+            true,
+        ),
+        (
+            "1.32",
+            "1.32.0",
+            "eks.2",
+            "2025-01-23",
+            "2026-03-23",
+            "2027-03-23",
+            "standard_support",
+            false,
+        ),
+    ];
+    ROWS.iter()
+        .map(
+            |(ver, patch, plat, release, eos, eoe, status, is_default)| {
+                let version_status = match *status {
+                    "standard_support" => "STANDARD_SUPPORT",
+                    "extended_support" => "EXTENDED_SUPPORT",
+                    _ => "UNSUPPORTED",
+                };
+                json!({
+                    "clusterVersion": ver,
+                    "clusterType": cluster_type,
+                    "defaultPlatformVersion": plat,
+                    "defaultVersion": is_default,
+                    "releaseDate": date_to_number(release),
+                    "endOfStandardSupportDate": date_to_number(eos),
+                    "endOfExtendedSupportDate": date_to_number(eoe),
+                    "status": status,
+                    "versionStatus": version_status,
+                    "kubernetesPatchVersion": patch,
+                })
+            },
+        )
+        .collect()
+}
+
+/// Parse a `YYYY-MM-DD` date into an epoch-seconds JSON number (midnight UTC).
+fn date_to_number(ymd: &str) -> Value {
+    let ts = chrono::NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc())
+        .unwrap_or_else(Utc::now);
+    timestamp_to_number(ts)
+}
+
+/// Keep only the `argoCd` member of a capability configuration (the sole
+/// member of `CapabilityConfigurationResponse`), so the echoed config stays
+/// shape-faithful. Returns `None` when nothing recognisable is present.
+fn normalize_capability_configuration(req: Option<&Value>) -> Option<Value> {
+    let argo = req.and_then(|v| v.get("argoCd"))?;
+    Some(json!({ "argoCd": argo }))
+}
+
+fn capability_json(c: &Capability) -> Value {
+    let mut out = json!({
+        "capabilityName": c.name,
+        "arn": c.arn,
+        "clusterName": c.cluster_name,
+        "type": c.type_,
+        "roleArn": c.role_arn,
+        "status": c.status,
+        "version": c.version,
+        "tags": c.tags,
+        "health": { "issues": [] },
+        "createdAt": timestamp_to_number(c.created_at),
+        "modifiedAt": timestamp_to_number(c.modified_at),
+    });
+    if let Some(cfg) = &c.configuration {
+        out["configuration"] = cfg.clone();
+    }
+    if let Some(p) = &c.delete_propagation_policy {
+        out["deletePropagationPolicy"] = Value::String(p.clone());
+    }
+    out
+}
+
+fn capability_summary_json(c: &Capability) -> Value {
+    json!({
+        "capabilityName": c.name,
+        "arn": c.arn,
+        "type": c.type_,
+        "status": c.status,
+        "version": c.version,
+        "createdAt": timestamp_to_number(c.created_at),
+        "modifiedAt": timestamp_to_number(c.modified_at),
+    })
+}
+
+fn subscription_json(s: &EksAnywhereSubscription) -> Value {
+    json!({
+        "id": s.id,
+        "arn": s.arn,
+        "createdAt": timestamp_to_number(s.created_at),
+        "effectiveDate": timestamp_to_number(s.effective_date),
+        "expirationDate": timestamp_to_number(s.expiration_date),
+        "licenseQuantity": s.license_quantity,
+        "licenseType": s.license_type,
+        "term": { "duration": s.term_duration, "unit": s.term_unit },
+        "status": s.status,
+        "autoRenew": s.auto_renew,
+        "licenseArns": [],
+        "licenses": [],
+        "tags": s.tags,
+    })
 }
 
 #[cfg(test)]
@@ -4604,5 +5803,530 @@ mod tests {
             .unwrap();
         assert_eq!(err.status(), StatusCode::CONFLICT);
         assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    // -----------------------------------------------------------------------
+    // Insights
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn insights_list_describe_and_refresh() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        // ListInsights seeds and returns a non-empty, real catalogue.
+        let resp = svc
+            .handle(make_request(Method::POST, "/clusters/c1/insights", "{}"))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let insights = v["insights"].as_array().unwrap();
+        assert!(!insights.is_empty());
+        assert_eq!(insights[0]["insightStatus"]["status"], "PASSING");
+        let id = insights[0]["id"].as_str().unwrap().to_string();
+
+        // DescribeInsight round-trips by id.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/insights/{id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["insight"]["id"], id);
+        assert_eq!(v["insight"]["category"], "UPGRADE_READINESS");
+
+        // StartInsightsRefresh returns only message + status.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/insights-refresh",
+                "{}",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["status"], "IN_PROGRESS");
+        assert!(v.get("startedAt").is_none());
+
+        // DescribeInsightsRefresh settles IN_PROGRESS -> COMPLETED.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/insights-refresh",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["status"], "COMPLETED");
+        assert!(v.get("endedAt").is_some());
+    }
+
+    #[tokio::test]
+    async fn insights_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(Method::POST, "/clusters/ghost/insights", "{}"))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn describe_insight_missing_is_not_found() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        let err = svc
+            .handle(make_request(Method::GET, "/clusters/c1/insights/ghost", ""))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    // -----------------------------------------------------------------------
+    // Encryption config / cancel update / register / cluster versions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn associate_encryption_config_mints_update() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        let body = json!({
+            "encryptionConfig": [{
+                "resources": ["secrets"],
+                "provider": { "keyArn": "arn:aws:kms:us-east-1:111122223333:key/abc" }
+            }]
+        })
+        .to_string();
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/encryption-config/associate",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "AssociateEncryptionConfig");
+        assert_eq!(v["update"]["status"], "InProgress");
+        let update_id = v["update"]["id"].as_str().unwrap().to_string();
+
+        // The update is a cluster update discoverable via DescribeUpdate, and
+        // CancelUpdate marks it Cancelled.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                &format!("/clusters/c1/updates/{update_id}/cancel-update"),
+                "{}",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["status"], "Cancelled");
+    }
+
+    #[tokio::test]
+    async fn encryption_config_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/encryption-config/associate",
+                &json!({ "encryptionConfig": [] }).to_string(),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn register_and_deregister_cluster() {
+        let svc = EksService::new(make_state());
+        let body = json!({
+            "name": "connected1",
+            "connectorConfig": {
+                "roleArn": "arn:aws:iam::111122223333:role/eks-connector",
+                "provider": "EKS_ANYWHERE"
+            }
+        })
+        .to_string();
+        let resp = svc
+            .handle(make_request(Method::POST, "/cluster-registrations", &body))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["cluster"]["name"], "connected1");
+        assert_eq!(v["cluster"]["status"], "PENDING");
+        assert_eq!(v["cluster"]["connectorConfig"]["provider"], "EKS_ANYWHERE");
+        assert!(v["cluster"]["connectorConfig"]["activationId"].is_string());
+
+        // Duplicate registration conflicts.
+        let err = svc
+            .handle(make_request(Method::POST, "/cluster-registrations", &body))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceInUseException");
+
+        // Deregister removes the connected cluster.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/cluster-registrations/connected1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["cluster"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/cluster-registrations/connected1",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn deregister_non_connected_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "regular").await;
+        // A regular (non-registered) cluster can't be deregistered.
+        let err = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/cluster-registrations/regular",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_versions_catalog_is_non_empty() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(Method::GET, "/cluster-versions", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let versions = v["clusterVersions"].as_array().unwrap();
+        assert!(versions.len() >= 5);
+        let names: Vec<&str> = versions
+            .iter()
+            .map(|x| x["clusterVersion"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"1.31"));
+        // Exactly one default version.
+        assert_eq!(
+            versions
+                .iter()
+                .filter(|x| x["defaultVersion"] == true)
+                .count(),
+            1
+        );
+
+        // defaultOnly filter narrows to the single default.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/cluster-versions?defaultOnly=true",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["clusterVersions"].as_array().unwrap().len(), 1);
+        assert_eq!(v["clusterVersions"][0]["clusterVersion"], "1.31");
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_versions_rejects_bad_maxresults() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/cluster-versions?maxResults=0",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    // -----------------------------------------------------------------------
+    // Capabilities
+    // -----------------------------------------------------------------------
+
+    fn capability_body(name: &str) -> String {
+        json!({
+            "capabilityName": name,
+            "type": "ACK",
+            "roleArn": "arn:aws:iam::111122223333:role/eks-capability",
+            "deletePropagationPolicy": "RETAIN",
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn capability_create_describe_list_update_delete() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/capabilities",
+                &capability_body("ack"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["capability"]["capabilityName"], "ack");
+        assert_eq!(v["capability"]["status"], "CREATING");
+        assert_eq!(v["capability"]["type"], "ACK");
+        assert!(v["capability"]["arn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:capability/c1/ack/"));
+
+        // Describe settles CREATING -> ACTIVE.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/capabilities/ack",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["capability"]["status"], "ACTIVE");
+        assert_eq!(v["capability"]["tags"]["team"], "core");
+
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/capabilities", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["capabilities"].as_array().unwrap().len(), 1);
+        assert_eq!(v["capabilities"][0]["capabilityName"], "ack");
+
+        // UpdateCapability mints a tracked cluster Update.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/capabilities/ack",
+                &json!({ "roleArn": "arn:aws:iam::111122223333:role/new" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "CapabilityUpdate");
+
+        // Delete.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/clusters/c1/capabilities/ack",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["capability"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/capabilities/ack",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn capability_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/capabilities",
+                &capability_body("ack"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn capability_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/capabilities",
+            &capability_body("ack"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/capabilities",
+                &capability_body("ack"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    // -----------------------------------------------------------------------
+    // EKS Anywhere subscriptions
+    // -----------------------------------------------------------------------
+
+    fn subscription_body(name: &str) -> String {
+        json!({
+            "name": name,
+            "term": { "duration": 12, "unit": "MONTHS" },
+            "licenseQuantity": 5,
+            "licenseType": "Cluster",
+            "autoRenew": false,
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn subscription_create_describe_list_update_delete() {
+        let svc = EksService::new(make_state());
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/eks-anywhere-subscriptions",
+                &subscription_body("sub1"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let sub = &v["subscription"];
+        assert_eq!(sub["status"], "ACTIVE");
+        assert_eq!(sub["licenseQuantity"], 5);
+        assert_eq!(sub["term"]["duration"], 12);
+        assert_eq!(sub["autoRenew"], false);
+        let id = sub["id"].as_str().unwrap().to_string();
+        assert!(sub["arn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:eks-anywhere-subscription/"));
+
+        // Describe round-trips.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/eks-anywhere-subscriptions/{id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["subscription"]["id"], id);
+
+        // List returns the subscription.
+        let resp = svc
+            .handle(make_request(Method::GET, "/eks-anywhere-subscriptions", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["subscriptions"].as_array().unwrap().len(), 1);
+
+        // Update toggles autoRenew.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                &format!("/eks-anywhere-subscriptions/{id}"),
+                &json!({ "autoRenew": true }).to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["subscription"]["autoRenew"], true);
+
+        // Delete.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                &format!("/eks-anywhere-subscriptions/{id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["subscription"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/eks-anywhere-subscriptions/{id}"),
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn subscription_describe_missing_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/eks-anywhere-subscriptions/ghost",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn subscription_rejects_bad_name() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/eks-anywhere-subscriptions",
+                &json!({ "name": "-bad", "term": { "duration": 1, "unit": "MONTHS" } }).to_string(),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "InvalidParameterException");
     }
 }

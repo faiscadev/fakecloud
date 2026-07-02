@@ -206,6 +206,83 @@ pub struct Cluster {
     pub tags: TagMap,
     /// Per-cluster updates keyed by update id.
     pub updates: BTreeMap<String, Update>,
+    /// The `ConnectorConfigResponse`-shaped object present only on clusters
+    /// created via `RegisterCluster` (i.e. connected/external clusters).
+    #[serde(default)]
+    pub connector_config: Option<serde_json::Value>,
+    /// The `EncryptionConfigList` applied via `AssociateEncryptionConfig`,
+    /// echoed back on describe.
+    #[serde(default)]
+    pub encryption_config: Option<serde_json::Value>,
+}
+
+/// An upgrade-readiness/misconfiguration Insight that EKS auto-generates for a
+/// cluster, a cluster sub-resource keyed by its generated id. Read back through
+/// `ListInsights` / `DescribeInsight`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Insight {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub kubernetes_version: String,
+    pub description: String,
+    pub recommendation: String,
+    /// The `InsightStatusValue` (PASSING / WARNING / ERROR / UNKNOWN).
+    pub status: String,
+    pub reason: String,
+    pub last_refresh_time: DateTime<Utc>,
+    pub last_transition_time: DateTime<Utc>,
+}
+
+/// The state of the most recent `StartInsightsRefresh` for a cluster, read back
+/// through `DescribeInsightsRefresh`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsightsRefresh {
+    /// The `InsightsRefreshStatus` (IN_PROGRESS / FAILED / COMPLETED).
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// An EKS cluster capability (e.g. an ACK / KRO / ArgoCD controller), a
+/// sub-resource of a cluster keyed by `capabilityName`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capability {
+    pub name: String,
+    pub arn: String,
+    pub cluster_name: String,
+    /// The `CapabilityType` (ACK / KRO / ARGOCD).
+    pub type_: String,
+    pub role_arn: String,
+    pub status: String,
+    pub version: String,
+    /// The `CapabilityConfigurationResponse`-shaped object, when supplied.
+    pub configuration: Option<serde_json::Value>,
+    pub tags: TagMap,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    pub delete_propagation_policy: Option<String>,
+}
+
+/// An EKS Anywhere subscription, an account-scoped (not cluster-scoped)
+/// resource keyed by its generated id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EksAnywhereSubscription {
+    pub id: String,
+    pub arn: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub effective_date: DateTime<Utc>,
+    pub expiration_date: DateTime<Utc>,
+    pub license_quantity: i64,
+    /// The `EksAnywhereSubscriptionLicenseType` (only `Cluster` today).
+    pub license_type: String,
+    pub term_duration: i64,
+    /// The `EksAnywhereSubscriptionTermUnit` (only `MONTHS` today).
+    pub term_unit: String,
+    pub status: String,
+    pub auto_renew: bool,
+    pub tags: TagMap,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -235,6 +312,18 @@ pub struct EksState {
     /// Pod identity associations nested as cluster name -> associationId -> assoc.
     #[serde(default)]
     pub pod_identity_associations: BTreeMap<String, BTreeMap<String, PodIdentityAssociation>>,
+    /// Auto-generated Insights nested as cluster name -> insight id -> insight.
+    #[serde(default)]
+    pub insights: BTreeMap<String, BTreeMap<String, Insight>>,
+    /// The most recent insights-refresh state, keyed by cluster name.
+    #[serde(default)]
+    pub insights_refresh: BTreeMap<String, InsightsRefresh>,
+    /// Capabilities nested as cluster name -> capability name -> capability.
+    #[serde(default)]
+    pub capabilities: BTreeMap<String, BTreeMap<String, Capability>>,
+    /// EKS Anywhere subscriptions (account-scoped) keyed by subscription id.
+    #[serde(default)]
+    pub eks_anywhere_subscriptions: BTreeMap<String, EksAnywhereSubscription>,
 }
 
 impl AccountState for EksState {
@@ -315,6 +404,23 @@ pub fn pod_identity_association_arn(
     id: &str,
 ) -> String {
     format!("arn:aws:eks:{region}:{account_id}:podidentityassociation/{cluster}/a-{id}")
+}
+
+/// Build the ARN for a cluster capability. AWS appends a random UUID segment
+/// after `capability/{cluster}/{name}` so each capability's ARN is unique.
+pub fn capability_arn(
+    region: &str,
+    account_id: &str,
+    cluster: &str,
+    name: &str,
+    id: &str,
+) -> String {
+    format!("arn:aws:eks:{region}:{account_id}:capability/{cluster}/{name}/{id}")
+}
+
+/// Build the ARN for an EKS Anywhere subscription.
+pub fn eks_anywhere_subscription_arn(region: &str, account_id: &str, id: &str) -> String {
+    format!("arn:aws:eks:{region}:{account_id}:eks-anywhere-subscription/{id}")
 }
 
 pub type SharedEksState = Arc<RwLock<MultiAccountState<EksState>>>;
