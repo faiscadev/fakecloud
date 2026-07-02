@@ -6,7 +6,7 @@ template = "page.html"
 
 AWS SAM Local is AWS's official tool for running Lambda functions locally. It invokes Lambda inside a Docker container with the real AWS runtime image, and provides a limited HTTP / API Gateway surface in front.
 
-fakecloud runs Lambda the same way — real runtime containers, 23 runtimes supported — and also runs 46 other AWS services end-to-end at true 100% Smithy conformance (128,882/128,882 variants pass).
+fakecloud runs Lambda the same way — real runtime containers, 23 runtimes supported — and also runs 46 other AWS services end-to-end at true 100% Smithy conformance (129,123/129,123 variants pass).
 
 ## Scope difference
 
