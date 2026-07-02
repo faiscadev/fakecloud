@@ -186,7 +186,7 @@ pub struct MemoryDbState {
 }
 
 impl AccountState for MemoryDbState {
-    fn new_for_account(_account_id: &str, _region: &str, _endpoint: &str) -> Self {
+    fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         // AWS seeds every account with a default ACL and default user.
         let mut s = Self::default();
         s.users.insert(
@@ -201,7 +201,7 @@ impl AccountState for MemoryDbState {
                     type_: "no-password".to_string(),
                     password_count: 0,
                 },
-                arn: String::new(),
+                arn: format!("arn:aws:memorydb:{region}:{account_id}:user/default"),
             },
         );
         s.acls.insert(
@@ -212,7 +212,7 @@ impl AccountState for MemoryDbState {
                 user_names: vec!["default".to_string()],
                 minimum_engine_version: "6.2".to_string(),
                 clusters: vec![],
-                arn: String::new(),
+                arn: format!("arn:aws:memorydb:{region}:{account_id}:acl/open-access"),
             },
         );
         s
