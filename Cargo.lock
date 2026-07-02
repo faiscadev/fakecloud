@@ -1262,6 +1262,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-resourcegroupstagging"
+version = "1.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e97f24dd8bc7d6bb053b2078e42be5f511fc69a15b1132706faad76b26fe923"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-route53"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3214,6 +3238,7 @@ dependencies = [
  "fakecloud-rds",
  "fakecloud-rds-data",
  "fakecloud-resource-groups",
+ "fakecloud-resource-groups-tagging",
  "fakecloud-route53",
  "fakecloud-s3",
  "fakecloud-scheduler",
@@ -3682,6 +3707,7 @@ dependencies = [
  "aws-sdk-pipes",
  "aws-sdk-rds",
  "aws-sdk-resourcegroups",
+ "aws-sdk-resourcegroupstagging",
  "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
@@ -4355,6 +4381,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-resource-groups-tagging"
+version = "0.29.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fakecloud-route53"
 version = "0.30.0"
 dependencies = [
@@ -4636,6 +4680,7 @@ dependencies = [
  "aws-sdk-pipes",
  "aws-sdk-rds",
  "aws-sdk-resourcegroups",
+ "aws-sdk-resourcegroupstagging",
  "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",

@@ -1,186 +1,190 @@
 {
-    "sqs": {
-        "repo_dir": "sqs",
-        "service_name": "sqs"
-    },
-    "sns": {
-        "repo_dir": "sns",
-        "service_name": "sns"
-    },
-    "eventbridge": {
-        "repo_dir": "eventbridge",
-        "service_name": "events"
-    },
-    "pipes": {
-        "repo_dir": "pipes",
-        "service_name": "pipes"
-    },
-    "iam": {
-        "repo_dir": "iam",
-        "service_name": "iam"
-    },
-    "sts": {
-        "repo_dir": "sts",
-        "service_name": "sts"
-    },
-    "ssm": {
-        "repo_dir": "ssm",
-        "service_name": "ssm"
-    },
-    "s3": {
-        "repo_dir": "s3",
-        "service_name": "s3"
-    },
-    "dynamodb": {
-        "repo_dir": "dynamodb",
-        "service_name": "dynamodb"
-    },
-    "lambda": {
-        "repo_dir": "lambda",
-        "service_name": "lambda"
-    },
-    "secretsmanager": {
-        "repo_dir": "secrets-manager",
-        "service_name": "secretsmanager"
-    },
-    "cloudwatch-logs": {
-        "repo_dir": "cloudwatch-logs",
-        "service_name": "logs"
-    },
-    "kms": {
-        "repo_dir": "kms",
-        "service_name": "kms"
-    },
-    "kinesis": {
-        "repo_dir": "kinesis",
-        "service_name": "kinesis"
-    },
-    "cloudformation": {
-        "repo_dir": "cloudformation",
-        "service_name": "cloudformation"
-    },
-    "sesv2": {
-        "repo_dir": "sesv2",
-        "service_name": "ses"
-    },
-    "cognito-identity-provider": {
-        "repo_dir": "cognito-identity-provider",
-        "service_name": "cognito-idp"
-    },
-    "rds": {
-        "repo_dir": "rds",
-        "service_name": "rds"
-    },
-    "rds-data": {
-        "repo_dir": "rds-data",
-        "service_name": "rds-data"
-    },
-    "dsql": {
-        "repo_dir": "dsql",
-        "service_name": "dsql"
-    },
-    "cloudcontrolapi": {
-        "repo_dir": "cloudcontrol",
-        "service_name": "cloudcontrolapi"
-    },
-    "resource-groups": {
-        "repo_dir": "resource-groups",
-        "service_name": "resource-groups"
-    },
-    "elasticache": {
-        "repo_dir": "elasticache",
-        "service_name": "elasticache"
-    },
-    "sfn": {
-        "repo_dir": "sfn",
-        "service_name": "states"
-    },
-    "bedrock": {
-        "repo_dir": "bedrock",
-        "service_name": "bedrock"
-    },
-    "bedrock-agent": {
-        "repo_dir": "bedrock-agent",
-        "service_name": "bedrock-agent"
-    },
-    "bedrock-runtime": {
-        "repo_dir": "bedrock-runtime",
-        "service_name": "bedrock-runtime"
-    },
-    "bedrock-agent-runtime": {
-        "repo_dir": "bedrock-agent-runtime",
-        "service_name": "bedrock-agent-runtime"
-    },
-    "scheduler": {
-        "repo_dir": "scheduler",
-        "service_name": "scheduler"
-    },
-    "apigateway": {
-        "repo_dir": "api-gateway",
-        "service_name": "apigatewayv1"
-    },
-    "apigatewayv2": {
-        "repo_dir": "apigatewayv2",
-        "service_name": "apigatewayv2"
-    },
-    "ecr": {
-        "repo_dir": "ecr",
-        "service_name": "ecr"
-    },
-    "ecs": {
-        "repo_dir": "ecs",
-        "service_name": "ecs"
-    },
-    "elasticloadbalancingv2": {
-        "repo_dir": "elastic-load-balancing-v2",
-        "service_name": "elasticloadbalancing"
-    },
-    "cloudfront": {
-        "repo_dir": "cloudfront",
-        "service_name": "cloudfront"
-    },
-    "route53": {
-        "repo_dir": "route-53",
-        "service_name": "route53"
-    },
-    "acm": {
-        "repo_dir": "acm",
-        "service_name": "acm"
-    },
-    "application-autoscaling": {
-        "repo_dir": "application-auto-scaling",
-        "service_name": "application-autoscaling"
-    },
-    "wafv2": {
-        "repo_dir": "wafv2",
-        "service_name": "wafv2"
-    },
-    "athena": {
-        "repo_dir": "athena",
-        "service_name": "athena"
-    },
-    "cognito-identity": {
-        "repo_dir": "cognito-identity",
-        "service_name": "cognito-identity"
-    },
-    "cloudwatch": {
-        "repo_dir": "cloudwatch",
-        "service_name": "monitoring"
-    },
-    "firehose": {
-        "repo_dir": "firehose",
-        "service_name": "firehose"
-    },
-    "glue": {
-        "repo_dir": "glue",
-        "service_name": "glue"
-    },
-    "organizations": {
-        "repo_dir": "organizations",
-        "service_name": "organizations"
-    },
-    "ec2": {
-        "repo_dir": "ec2",
-        "service_name": "ec2"
-    }
+  "sqs": {
+    "repo_dir": "sqs",
+    "service_name": "sqs"
+  },
+  "sns": {
+    "repo_dir": "sns",
+    "service_name": "sns"
+  },
+  "eventbridge": {
+    "repo_dir": "eventbridge",
+    "service_name": "events"
+  },
+  "pipes": {
+    "repo_dir": "pipes",
+    "service_name": "pipes"
+  },
+  "iam": {
+    "repo_dir": "iam",
+    "service_name": "iam"
+  },
+  "sts": {
+    "repo_dir": "sts",
+    "service_name": "sts"
+  },
+  "ssm": {
+    "repo_dir": "ssm",
+    "service_name": "ssm"
+  },
+  "s3": {
+    "repo_dir": "s3",
+    "service_name": "s3"
+  },
+  "dynamodb": {
+    "repo_dir": "dynamodb",
+    "service_name": "dynamodb"
+  },
+  "lambda": {
+    "repo_dir": "lambda",
+    "service_name": "lambda"
+  },
+  "secretsmanager": {
+    "repo_dir": "secrets-manager",
+    "service_name": "secretsmanager"
+  },
+  "cloudwatch-logs": {
+    "repo_dir": "cloudwatch-logs",
+    "service_name": "logs"
+  },
+  "kms": {
+    "repo_dir": "kms",
+    "service_name": "kms"
+  },
+  "kinesis": {
+    "repo_dir": "kinesis",
+    "service_name": "kinesis"
+  },
+  "cloudformation": {
+    "repo_dir": "cloudformation",
+    "service_name": "cloudformation"
+  },
+  "sesv2": {
+    "repo_dir": "sesv2",
+    "service_name": "ses"
+  },
+  "cognito-identity-provider": {
+    "repo_dir": "cognito-identity-provider",
+    "service_name": "cognito-idp"
+  },
+  "rds": {
+    "repo_dir": "rds",
+    "service_name": "rds"
+  },
+  "rds-data": {
+    "repo_dir": "rds-data",
+    "service_name": "rds-data"
+  },
+  "dsql": {
+    "repo_dir": "dsql",
+    "service_name": "dsql"
+  },
+  "cloudcontrolapi": {
+    "repo_dir": "cloudcontrol",
+    "service_name": "cloudcontrolapi"
+  },
+  "resource-groups": {
+    "repo_dir": "resource-groups",
+    "service_name": "resource-groups"
+  },
+  "elasticache": {
+    "repo_dir": "elasticache",
+    "service_name": "elasticache"
+  },
+  "sfn": {
+    "repo_dir": "sfn",
+    "service_name": "states"
+  },
+  "bedrock": {
+    "repo_dir": "bedrock",
+    "service_name": "bedrock"
+  },
+  "bedrock-agent": {
+    "repo_dir": "bedrock-agent",
+    "service_name": "bedrock-agent"
+  },
+  "bedrock-runtime": {
+    "repo_dir": "bedrock-runtime",
+    "service_name": "bedrock-runtime"
+  },
+  "bedrock-agent-runtime": {
+    "repo_dir": "bedrock-agent-runtime",
+    "service_name": "bedrock-agent-runtime"
+  },
+  "scheduler": {
+    "repo_dir": "scheduler",
+    "service_name": "scheduler"
+  },
+  "apigateway": {
+    "repo_dir": "api-gateway",
+    "service_name": "apigatewayv1"
+  },
+  "apigatewayv2": {
+    "repo_dir": "apigatewayv2",
+    "service_name": "apigatewayv2"
+  },
+  "ecr": {
+    "repo_dir": "ecr",
+    "service_name": "ecr"
+  },
+  "ecs": {
+    "repo_dir": "ecs",
+    "service_name": "ecs"
+  },
+  "elasticloadbalancingv2": {
+    "repo_dir": "elastic-load-balancing-v2",
+    "service_name": "elasticloadbalancing"
+  },
+  "cloudfront": {
+    "repo_dir": "cloudfront",
+    "service_name": "cloudfront"
+  },
+  "route53": {
+    "repo_dir": "route-53",
+    "service_name": "route53"
+  },
+  "acm": {
+    "repo_dir": "acm",
+    "service_name": "acm"
+  },
+  "application-autoscaling": {
+    "repo_dir": "application-auto-scaling",
+    "service_name": "application-autoscaling"
+  },
+  "wafv2": {
+    "repo_dir": "wafv2",
+    "service_name": "wafv2"
+  },
+  "athena": {
+    "repo_dir": "athena",
+    "service_name": "athena"
+  },
+  "cognito-identity": {
+    "repo_dir": "cognito-identity",
+    "service_name": "cognito-identity"
+  },
+  "cloudwatch": {
+    "repo_dir": "cloudwatch",
+    "service_name": "monitoring"
+  },
+  "firehose": {
+    "repo_dir": "firehose",
+    "service_name": "firehose"
+  },
+  "glue": {
+    "repo_dir": "glue",
+    "service_name": "glue"
+  },
+  "organizations": {
+    "repo_dir": "organizations",
+    "service_name": "organizations"
+  },
+  "ec2": {
+    "repo_dir": "ec2",
+    "service_name": "ec2"
+  },
+  "tagging": {
+    "repo_dir": "resource-groups-tagging-api",
+    "service_name": "tagging"
+  }
 }

@@ -816,6 +816,10 @@ impl TestServer {
         aws_sdk_resourcegroups::Client::new(&self.aws_config().await)
     }
 
+    pub async fn resourcegroupstaggingapi_client(&self) -> aws_sdk_resourcegroupstagging::Client {
+        aws_sdk_resourcegroupstagging::Client::new(&self.aws_config().await)
+    }
+
     pub async fn ecr_client(&self) -> aws_sdk_ecr::Client {
         aws_sdk_ecr::Client::new(&self.aws_config().await)
     }

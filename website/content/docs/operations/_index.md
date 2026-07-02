@@ -1613,6 +1613,18 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateGroup`
 - `UpdateGroupQuery`
 
+## [Resource Groups Tagging API](@/docs/services/resource-groups-tagging.md)
+
+- `DescribeReportCreation`
+- `GetComplianceSummary`
+- `GetResources`
+- `GetTagKeys`
+- `GetTagValues`
+- `ListRequiredTags`
+- `StartReportCreation`
+- `TagResources`
+- `UntagResources`
+
 ## [ElastiCache](@/docs/services/elasticache.md)
 
 - `AddTagsToResource`

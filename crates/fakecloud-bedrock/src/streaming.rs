@@ -369,12 +369,33 @@ mod tests {
 
     #[test]
     fn get_response_text_returns_default_without_override() {
+        // Serialize with the other echo-env tests and force echo OFF so the
+        // expectation is deterministic under threaded `cargo test`.
+        let _env = crate::prompt::ECHO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
+        let prev_legacy = std::env::var("BEDROCK_ECHO").ok();
+        // SAFETY: env is process-global; restored below, under the lock.
+        unsafe {
+            std::env::remove_var("FAKECLOUD_BEDROCK_ECHO");
+            std::env::remove_var("BEDROCK_ECHO");
+        }
+
         let s = shared();
         let out = get_response_text(&s, &req(), "anthropic.claude", b"{}");
-        if crate::prompt::echo_enabled() {
-            assert_eq!(out, "(empty prompt)");
-        } else {
-            assert_eq!(out, default_stream_text());
+        assert_eq!(out, default_stream_text());
+
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("FAKECLOUD_BEDROCK_ECHO", p),
+                None => std::env::remove_var("FAKECLOUD_BEDROCK_ECHO"),
+            }
+            match prev_legacy {
+                Some(p) => std::env::set_var("BEDROCK_ECHO", p),
+                None => std::env::remove_var("BEDROCK_ECHO"),
+            }
         }
     }
 
@@ -431,6 +452,9 @@ mod tests {
     /// the previous value as a defensive cleanup.
     #[test]
     fn get_response_text_echo_mode_reflects_prompt() {
+        let _env = crate::prompt::ECHO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
         // SAFETY: scoped mutation below restores the previous value.
         unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
