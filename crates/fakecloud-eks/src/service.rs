@@ -1,9 +1,11 @@
-//! AWS EKS REST-JSON service handler (batch 1: cluster control plane).
+//! AWS EKS REST-JSON service handler.
 //!
-//! Implements the eleven batch-1 operations:
-//! Create/Describe/List/DeleteCluster, UpdateClusterConfig,
-//! UpdateClusterVersion, Describe/ListUpdates, Tag/Untag/ListTagsForResource.
-//! Node groups, addons, Fargate profiles, access entries, and identity-provider
+//! Implements the cluster control plane (Create/Describe/List/DeleteCluster,
+//! UpdateClusterConfig, UpdateClusterVersion, Describe/ListUpdates,
+//! Tag/Untag/ListTagsForResource) plus managed node groups
+//! (Create/Describe/List/DeleteNodegroup, UpdateNodegroupConfig/Version) and
+//! Fargate profiles (Create/Describe/List/DeleteFargateProfile), both modeled
+//! as cluster sub-resources. Addons, access entries, and identity-provider
 //! configs land in later batches.
 
 use async_trait::async_trait;
@@ -18,8 +20,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    cluster_arn, Cluster, EksSnapshot, SharedEksState, Update, DEFAULT_K8S_VERSION,
-    EKS_SNAPSHOT_SCHEMA_VERSION,
+    cluster_arn, fargate_profile_arn, nodegroup_arn, Cluster, EksSnapshot, FargateProfile,
+    Nodegroup, SharedEksState, Update, DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// The set of control-plane log types EKS reports on every cluster.
@@ -43,6 +45,16 @@ pub const EKS_ACTIONS: &[&str] = &[
     "TagResource",
     "UntagResource",
     "ListTagsForResource",
+    "CreateNodegroup",
+    "DescribeNodegroup",
+    "ListNodegroups",
+    "DeleteNodegroup",
+    "UpdateNodegroupConfig",
+    "UpdateNodegroupVersion",
+    "CreateFargateProfile",
+    "DescribeFargateProfile",
+    "ListFargateProfiles",
+    "DeleteFargateProfile",
 ];
 
 pub struct EksService {
@@ -54,8 +66,18 @@ pub struct EksService {
 enum PathArgs {
     None,
     Name(String),
-    Update { name: String, update_id: String },
+    Update {
+        name: String,
+        update_id: String,
+    },
     Arn(String),
+    /// A sub-resource collection scoped to a cluster (create/list).
+    Cluster(String),
+    /// A named sub-resource of a cluster (describe/delete/update).
+    ClusterChild {
+        cluster: String,
+        name: String,
+    },
 }
 
 impl EksService {
@@ -136,6 +158,62 @@ impl EksService {
                 PathArgs::Update {
                     name: decode(name),
                     update_id: decode(update_id),
+                },
+            )),
+            // Node groups (sub-resources of a cluster).
+            (&Method::POST, ["clusters", c, "node-groups"]) => {
+                Some(("CreateNodegroup", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "node-groups"]) => {
+                Some(("ListNodegroups", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "node-groups", n]) => Some((
+                "DescribeNodegroup",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "node-groups", n]) => Some((
+                "DeleteNodegroup",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "node-groups", n, "update-config"]) => Some((
+                "UpdateNodegroupConfig",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "node-groups", n, "update-version"]) => Some((
+                "UpdateNodegroupVersion",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            // Fargate profiles (sub-resources of a cluster).
+            (&Method::POST, ["clusters", c, "fargate-profiles"]) => {
+                Some(("CreateFargateProfile", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "fargate-profiles"]) => {
+                Some(("ListFargateProfiles", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "fargate-profiles", n]) => Some((
+                "DescribeFargateProfile",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "fargate-profiles", n]) => Some((
+                "DeleteFargateProfile",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
                 },
             )),
             (&Method::POST, ["tags", arn]) => Some(("TagResource", PathArgs::Arn(decode(arn)))),
@@ -363,16 +441,35 @@ impl EksService {
         name: &str,
         update_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let nodegroup_name = req.query_params.get("nodegroupName").cloned();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let cluster = state
-            .clusters
-            .get_mut(name)
-            .ok_or_else(not_found_cluster(name))?;
-        let update = cluster
-            .updates
-            .get_mut(update_id)
-            .ok_or_else(not_found_update(update_id))?;
+        if !state.clusters.contains_key(name) {
+            return Err(not_found_cluster(name)());
+        }
+        // `DescribeUpdate` disambiguates cluster updates from node-group
+        // updates via the optional `nodegroupName` query param, mirroring the
+        // real API. When present, the update lives on that node group's own
+        // update history.
+        let update = if let Some(ng_name) = nodegroup_name.as_deref() {
+            let ng = state
+                .nodegroups
+                .get_mut(name)
+                .and_then(|m| m.get_mut(ng_name))
+                .ok_or_else(not_found_nodegroup(ng_name))?;
+            ng.updates
+                .get_mut(update_id)
+                .ok_or_else(not_found_update(update_id))?
+        } else {
+            let cluster = state
+                .clusters
+                .get_mut(name)
+                .ok_or_else(not_found_cluster(name))?;
+            cluster
+                .updates
+                .get_mut(update_id)
+                .ok_or_else(not_found_update(update_id))?
+        };
         // Updates settle to Successful on first describe.
         if update.status == "InProgress" {
             update.status = "Successful".to_string();
@@ -387,15 +484,28 @@ impl EksService {
         let max_results = validate_max_results(req)?;
         let next_token = req.query_params.get("nextToken").cloned();
 
+        let nodegroup_name = req.query_params.get("nodegroupName").cloned();
         let accounts = self.state.read();
         let state = accounts
             .get(&req.account_id)
             .ok_or_else(not_found_cluster(name))?;
-        let cluster = state
-            .clusters
-            .get(name)
-            .ok_or_else(not_found_cluster(name))?;
-        let ids: Vec<String> = cluster.updates.keys().cloned().collect();
+        if !state.clusters.contains_key(name) {
+            return Err(not_found_cluster(name)());
+        }
+        let ids: Vec<String> = if let Some(ng_name) = nodegroup_name.as_deref() {
+            let ng = state
+                .nodegroups
+                .get(name)
+                .and_then(|m| m.get(ng_name))
+                .ok_or_else(not_found_nodegroup(ng_name))?;
+            ng.updates.keys().cloned().collect()
+        } else {
+            let cluster = state
+                .clusters
+                .get(name)
+                .ok_or_else(not_found_cluster(name))?;
+            cluster.updates.keys().cloned().collect()
+        };
         let (page, token) = paginate_checked(&ids, next_token.as_deref(), max_results)
             .map_err(|_| invalid_parameter("Invalid nextToken"))?;
         let mut out = json!({ "updateIds": page });
@@ -462,6 +572,434 @@ impl EksService {
             json!({ "tags": tags }).to_string(),
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Node groups
+    // -----------------------------------------------------------------------
+
+    fn create_nodegroup(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("nodegroupName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("nodegroupName is required"))?
+            .to_string();
+        let node_role = body
+            .get("nodeRole")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("nodeRole is required"))?
+            .to_string();
+        let subnets = body
+            .get("subnets")
+            .filter(|v| v.is_array())
+            .cloned()
+            .ok_or_else(|| invalid_parameter("subnets is required"))?;
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // The parent cluster must exist. AWS returns ResourceNotFoundException
+        // here even though the Smithy model omits it from CreateNodegroup's
+        // declared errors.
+        let cluster_version = state
+            .clusters
+            .get(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?
+            .version
+            .clone();
+        if state
+            .nodegroups
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "NodeGroup already exists with name {name} and cluster name {cluster_name}"
+                ),
+            ));
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = nodegroup_arn(&region, &account_id, cluster_name, &name, &id);
+        let now = Utc::now();
+        let version = body
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or(cluster_version);
+        let release_version = body
+            .get("releaseVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{version}-20240000"));
+        let capacity_type = body
+            .get("capacityType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ON_DEMAND")
+            .to_string();
+        let ami_type = body
+            .get("amiType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AL2023_x86_64_STANDARD")
+            .to_string();
+        let disk_size = body.get("diskSize").and_then(|v| v.as_i64()).unwrap_or(20);
+
+        let ng = Nodegroup {
+            name: name.clone(),
+            arn,
+            cluster_name: cluster_name.to_string(),
+            version,
+            release_version,
+            status: "CREATING".to_string(),
+            capacity_type,
+            ami_type,
+            node_role,
+            created_at: now,
+            modified_at: now,
+            disk_size,
+            scaling_config: build_scaling_config(body.get("scalingConfig")),
+            update_config: build_nodegroup_update_config(body.get("updateConfig")),
+            instance_types: body
+                .get("instanceTypes")
+                .cloned()
+                .unwrap_or_else(|| json!(["t3.medium"])),
+            subnets,
+            labels: body.get("labels").cloned().unwrap_or_else(|| json!({})),
+            taints: body.get("taints").cloned().unwrap_or_else(|| json!([])),
+            remote_access: body.get("remoteAccess").cloned(),
+            launch_template: body.get("launchTemplate").cloned(),
+            asg_name: format!("eks-{name}-{}", &id[..8]),
+            tags: parse_tag_map(body.get("tags")),
+            updates: Default::default(),
+        };
+
+        let out = nodegroup_json(&ng);
+        state
+            .nodegroups
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(name, ng);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "nodegroup": out }).to_string(),
+        ))
+    }
+
+    fn describe_nodegroup(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let ng = state
+            .nodegroups
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_nodegroup(name))?;
+        if ng.status == "CREATING" {
+            ng.status = "ACTIVE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "nodegroup": nodegroup_json(ng) }).to_string(),
+        ))
+    }
+
+    fn list_nodegroups(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let names: Vec<String> = state
+            .nodegroups
+            .get(cluster_name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&names, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "nodegroups": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_nodegroup(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let mut ng = state
+            .nodegroups
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(name))
+            .ok_or_else(not_found_nodegroup(name))?;
+        ng.status = "DELETING".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "nodegroup": nodegroup_json(&ng) }).to_string(),
+        ))
+    }
+
+    fn update_nodegroup_config(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let ng = state
+            .nodegroups
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_nodegroup(name))?;
+
+        let mut params = Vec::new();
+        if let Some(scaling) = body.get("scalingConfig") {
+            ng.scaling_config = build_scaling_config(Some(scaling));
+            params.push(("ScalingConfig".to_string(), scaling.to_string()));
+        }
+        if let Some(labels) = body.get("labels") {
+            if let Some(add) = labels.get("addOrUpdateLabels").and_then(|v| v.as_object()) {
+                let map = ng.labels.as_object_mut();
+                if let Some(map) = map {
+                    for (k, v) in add {
+                        map.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            params.push(("LabelsToAdd".to_string(), labels.to_string()));
+        }
+        if let Some(update_config) = body.get("updateConfig") {
+            ng.update_config = build_nodegroup_update_config(Some(update_config));
+            params.push(("MaxUnavailable".to_string(), update_config.to_string()));
+        }
+        ng.modified_at = Utc::now();
+
+        let update = new_update("ConfigUpdate", params);
+        let out = update_json(&update);
+        ng.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": out }).to_string(),
+        ))
+    }
+
+    fn update_nodegroup_version(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let ng = state
+            .nodegroups
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_nodegroup(name))?;
+
+        let mut params = Vec::new();
+        if let Some(version) = body.get("version").and_then(|v| v.as_str()) {
+            ng.version = version.to_string();
+            params.push(("Version".to_string(), version.to_string()));
+        }
+        if let Some(release) = body.get("releaseVersion").and_then(|v| v.as_str()) {
+            ng.release_version = release.to_string();
+            params.push(("ReleaseVersion".to_string(), release.to_string()));
+        }
+        ng.modified_at = Utc::now();
+
+        let update = new_update("VersionUpdate", params);
+        let out = update_json(&update);
+        ng.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": out }).to_string(),
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Fargate profiles
+    // -----------------------------------------------------------------------
+
+    fn create_fargate_profile(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("fargateProfileName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("fargateProfileName is required"))?
+            .to_string();
+        let pod_execution_role_arn = body
+            .get("podExecutionRoleArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("podExecutionRoleArn is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        if state
+            .fargate_profiles
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "FargateProfile already exists with name {name} and cluster name {cluster_name}"
+                ),
+            ));
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = fargate_profile_arn(&region, &account_id, cluster_name, &name, &id);
+        let profile = FargateProfile {
+            name: name.clone(),
+            arn,
+            cluster_name: cluster_name.to_string(),
+            pod_execution_role_arn,
+            status: "CREATING".to_string(),
+            created_at: Utc::now(),
+            subnets: body.get("subnets").cloned().unwrap_or_else(|| json!([])),
+            selectors: body.get("selectors").cloned().unwrap_or_else(|| json!([])),
+            tags: parse_tag_map(body.get("tags")),
+        };
+
+        let out = fargate_profile_json(&profile);
+        state
+            .fargate_profiles
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(name, profile);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "fargateProfile": out }).to_string(),
+        ))
+    }
+
+    fn describe_fargate_profile(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let profile = state
+            .fargate_profiles
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_fargate_profile(name))?;
+        if profile.status == "CREATING" {
+            profile.status = "ACTIVE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "fargateProfile": fargate_profile_json(profile) }).to_string(),
+        ))
+    }
+
+    fn list_fargate_profiles(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let names: Vec<String> = state
+            .fargate_profiles
+            .get(cluster_name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&names, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "fargateProfileNames": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_fargate_profile(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let mut profile = state
+            .fargate_profiles
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(name))
+            .ok_or_else(not_found_fargate_profile(name))?;
+        profile.status = "DELETING".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "fargateProfile": fargate_profile_json(&profile) }).to_string(),
+        ))
+    }
 }
 
 /// Persist the current EKS state as a snapshot. Shared by
@@ -519,6 +1057,14 @@ impl AwsService for EksService {
                 // which mutates persisted state.
                 | "DescribeCluster"
                 | "DescribeUpdate"
+                | "CreateNodegroup"
+                | "DeleteNodegroup"
+                | "UpdateNodegroupConfig"
+                | "UpdateNodegroupVersion"
+                | "DescribeNodegroup"
+                | "CreateFargateProfile"
+                | "DeleteFargateProfile"
+                | "DescribeFargateProfile"
         );
 
         let result = match (action, &args) {
@@ -535,6 +1081,28 @@ impl AwsService for EksService {
             ("TagResource", PathArgs::Arn(a)) => self.tag_resource(&req, a),
             ("UntagResource", PathArgs::Arn(a)) => self.untag_resource(&req, a),
             ("ListTagsForResource", PathArgs::Arn(a)) => self.list_tags_for_resource(&req, a),
+            ("CreateNodegroup", PathArgs::Cluster(c)) => self.create_nodegroup(&req, c),
+            ("ListNodegroups", PathArgs::Cluster(c)) => self.list_nodegroups(&req, c),
+            ("DescribeNodegroup", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_nodegroup(&req, cluster, name)
+            }
+            ("DeleteNodegroup", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_nodegroup(&req, cluster, name)
+            }
+            ("UpdateNodegroupConfig", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_nodegroup_config(&req, cluster, name)
+            }
+            ("UpdateNodegroupVersion", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_nodegroup_version(&req, cluster, name)
+            }
+            ("CreateFargateProfile", PathArgs::Cluster(c)) => self.create_fargate_profile(&req, c),
+            ("ListFargateProfiles", PathArgs::Cluster(c)) => self.list_fargate_profiles(&req, c),
+            ("DescribeFargateProfile", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_fargate_profile(&req, cluster, name)
+            }
+            ("DeleteFargateProfile", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_fargate_profile(&req, cluster, name)
+            }
             _ => Err(AwsServiceError::action_not_implemented("eks", action)),
         };
 
@@ -624,6 +1192,28 @@ fn not_found_update(id: &str) -> impl Fn() -> AwsServiceError + 'static {
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
             format!("No update found for id: {id}."),
+        )
+    }
+}
+
+fn not_found_nodegroup(name: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let name = name.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No node group found for name: {name}."),
+        )
+    }
+}
+
+fn not_found_fargate_profile(name: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let name = name.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No Fargate Profile found with name: {name}."),
         )
     }
 }
@@ -811,6 +1401,89 @@ fn update_json(u: &Update) -> Value {
         "params": params,
         "createdAt": timestamp_to_number(u.created_at),
         "errors": [],
+    })
+}
+
+/// Build a `NodegroupScalingConfig`, defaulting to AWS's create-time defaults
+/// (min 1 / max 2 / desired 2) for any member the caller omits.
+fn build_scaling_config(req: Option<&Value>) -> Value {
+    let min = req
+        .and_then(|v| v.get("minSize"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let max = req
+        .and_then(|v| v.get("maxSize"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(2);
+    let desired = req
+        .and_then(|v| v.get("desiredSize"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(2);
+    json!({ "minSize": min, "maxSize": max, "desiredSize": desired })
+}
+
+/// Build a `NodegroupUpdateConfig`, defaulting `maxUnavailable` to 1.
+fn build_nodegroup_update_config(req: Option<&Value>) -> Value {
+    if let Some(pct) = req
+        .and_then(|v| v.get("maxUnavailablePercentage"))
+        .and_then(|v| v.as_i64())
+    {
+        return json!({ "maxUnavailablePercentage": pct });
+    }
+    let max_unavailable = req
+        .and_then(|v| v.get("maxUnavailable"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    json!({ "maxUnavailable": max_unavailable })
+}
+
+fn nodegroup_json(n: &Nodegroup) -> Value {
+    let mut out = json!({
+        "nodegroupName": n.name,
+        "nodegroupArn": n.arn,
+        "clusterName": n.cluster_name,
+        "version": n.version,
+        "releaseVersion": n.release_version,
+        "createdAt": timestamp_to_number(n.created_at),
+        "modifiedAt": timestamp_to_number(n.modified_at),
+        "status": n.status,
+        "capacityType": n.capacity_type,
+        "scalingConfig": n.scaling_config,
+        "instanceTypes": n.instance_types,
+        "subnets": n.subnets,
+        "amiType": n.ami_type,
+        "nodeRole": n.node_role,
+        "labels": n.labels,
+        "taints": n.taints,
+        "resources": {
+            "autoScalingGroups": [{ "name": n.asg_name }],
+        },
+        "diskSize": n.disk_size,
+        "health": { "issues": [] },
+        "updateConfig": n.update_config,
+        "tags": n.tags,
+    });
+    if let Some(ra) = &n.remote_access {
+        out["remoteAccess"] = ra.clone();
+    }
+    if let Some(lt) = &n.launch_template {
+        out["launchTemplate"] = lt.clone();
+    }
+    out
+}
+
+fn fargate_profile_json(p: &FargateProfile) -> Value {
+    json!({
+        "fargateProfileName": p.name,
+        "fargateProfileArn": p.arn,
+        "clusterName": p.cluster_name,
+        "createdAt": timestamp_to_number(p.created_at),
+        "podExecutionRoleArn": p.pod_execution_role_arn,
+        "subnets": p.subnets,
+        "selectors": p.selectors,
+        "status": p.status,
+        "tags": p.tags,
+        "health": { "issues": [] },
     })
 }
 
@@ -1062,5 +1735,383 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(v["tags"], json!({}));
+    }
+
+    // -----------------------------------------------------------------------
+    // Node groups
+    // -----------------------------------------------------------------------
+
+    fn nodegroup_body(name: &str) -> String {
+        json!({
+            "nodegroupName": name,
+            "nodeRole": "arn:aws:iam::111122223333:role/eks-node",
+            "subnets": ["subnet-1", "subnet-2"],
+            "scalingConfig": { "minSize": 1, "maxSize": 3, "desiredSize": 2 },
+            "instanceTypes": ["t3.large"],
+            "labels": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    async fn create_cluster(svc: &EksService, name: &str) {
+        svc.handle(make_request(Method::POST, "/clusters", &create_body(name)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn nodegroup_create_describe_list_delete() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/node-groups",
+                &nodegroup_body("ng1"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroup"]["nodegroupName"], "ng1");
+        assert_eq!(v["nodegroup"]["status"], "CREATING");
+        assert_eq!(v["nodegroup"]["clusterName"], "c1");
+        assert_eq!(v["nodegroup"]["scalingConfig"]["maxSize"], 3);
+        assert!(v["nodegroup"]["nodegroupArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:nodegroup/c1/ng1/"));
+
+        // Describe settles CREATING -> ACTIVE.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/node-groups/ng1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroup"]["status"], "ACTIVE");
+        assert_eq!(v["nodegroup"]["labels"]["team"], "core");
+
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/node-groups", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroups"], json!(["ng1"]));
+
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/clusters/c1/node-groups/ng1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroup"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/node-groups/ng1",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn nodegroup_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/node-groups",
+                &nodegroup_body("ng1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn nodegroup_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/node-groups",
+            &nodegroup_body("ng1"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/node-groups",
+                &nodegroup_body("ng1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    #[tokio::test]
+    async fn nodegroup_cross_cluster_isolation() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        create_cluster(&svc, "c2").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/node-groups",
+            &nodegroup_body("ng1"),
+        ))
+        .await
+        .unwrap();
+
+        // c2 sees no node groups, and can't describe c1's node group.
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c2/node-groups", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroups"], json!([]));
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c2/node-groups/ng1",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn nodegroup_update_config_and_version_have_own_updates() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/node-groups",
+            &nodegroup_body("ng1"),
+        ))
+        .await
+        .unwrap();
+
+        // UpdateNodegroupVersion returns an Update.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/node-groups/ng1/update-version",
+                &json!({ "version": "1.30" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "VersionUpdate");
+        let update_id = v["update"]["id"].as_str().unwrap().to_string();
+
+        // UpdateNodegroupConfig returns another Update.
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/node-groups/ng1/update-config",
+            &json!({ "scalingConfig": { "minSize": 2, "maxSize": 5, "desiredSize": 3 } })
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        // ListUpdates with nodegroupName returns the node group's updates.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/updates?nodegroupName=ng1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["updateIds"].as_array().unwrap().len(), 2);
+
+        // Cluster-scoped ListUpdates (no nodegroupName) is empty.
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/updates", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["updateIds"].as_array().unwrap().len(), 0);
+
+        // DescribeUpdate with nodegroupName settles the node group update.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/updates/{update_id}?nodegroupName=ng1"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["status"], "Successful");
+
+        // The node group reflects the new version and scaling config.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/node-groups/ng1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroup"]["version"], "1.30");
+        assert_eq!(v["nodegroup"]["scalingConfig"]["maxSize"], 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fargate profiles
+    // -----------------------------------------------------------------------
+
+    fn fargate_body(name: &str) -> String {
+        json!({
+            "fargateProfileName": name,
+            "podExecutionRoleArn": "arn:aws:iam::111122223333:role/eks-fargate",
+            "subnets": ["subnet-1"],
+            "selectors": [{ "namespace": "default", "labels": { "app": "web" } }]
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn fargate_create_describe_list_delete() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/fargate-profiles",
+                &fargate_body("fp1"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["fargateProfile"]["fargateProfileName"], "fp1");
+        assert_eq!(v["fargateProfile"]["status"], "CREATING");
+        assert!(v["fargateProfile"]["fargateProfileArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:fargateprofile/c1/fp1/"));
+
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/fargate-profiles/fp1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["fargateProfile"]["status"], "ACTIVE");
+        assert_eq!(v["fargateProfile"]["selectors"][0]["namespace"], "default");
+
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/fargate-profiles",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["fargateProfileNames"], json!(["fp1"]));
+
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/clusters/c1/fargate-profiles/fp1",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["fargateProfile"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/fargate-profiles/fp1",
+                "",
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn fargate_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/fargate-profiles",
+                &fargate_body("fp1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn fargate_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/fargate-profiles",
+            &fargate_body("fp1"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/fargate-profiles",
+                &fargate_body("fp1"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    #[tokio::test]
+    async fn unimplemented_subresource_falls_through() {
+        // Addons/access-entries routes are not implemented; the router must not
+        // accidentally match them via the node-group/fargate-profile arms.
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        let err = svc
+            .handle(make_request(Method::GET, "/clusters/c1/addons", ""))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "UnknownOperationException");
     }
 }

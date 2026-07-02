@@ -180,6 +180,20 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidAMIID.Malformed",
             "InvalidAMIID.Unavailable",
         ],
+        // EKS under-declares two client errors that the real API returns for
+        // sub-resource operations:
+        //   - ResourceNotFoundException: any op naming a parent cluster that
+        //     doesn't exist. The model declares it on most sub-resource ops but
+        //     omits it from CreateNodegroup / CreateFargateProfile even though
+        //     AWS returns it for a missing cluster.
+        //   - ResourceInUseException: creating a sub-resource whose name is
+        //     already taken. The model declares it on CreateNodegroup but omits
+        //     it from CreateFargateProfile, which returns the same 409 for a
+        //     duplicate profile name.
+        // A handler returning either to the probes' synthetic inputs ran
+        // correctly. Source: EKS API reference (CreateNodegroup /
+        // CreateFargateProfile "Errors").
+        "eks" => &["ResourceNotFoundException", "ResourceInUseException"],
         // STS returns AccessDenied (HTTP 403) whenever a role can't be assumed
         // -- the role doesn't exist, or its trust policy rejects the caller --
         // for AssumeRole / AssumeRoleWithWebIdentity / AssumeRoleWithSAML. AWS
