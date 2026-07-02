@@ -42,6 +42,7 @@ fakecloud-cloudcontrol = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-memorydb = { workspace = true }
+fakecloud-servicediscovery = { workspace = true }
 fakecloud-elbv2 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }
 fakecloud-route53 = { workspace = true }

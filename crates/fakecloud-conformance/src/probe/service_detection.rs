@@ -82,6 +82,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "memorydb" => Protocol::Json {
             target_prefix: "AmazonMemoryDB",
         },
+        // Cloud Map (servicediscovery): awsJson1.1.
+        "servicediscovery" => Protocol::Json {
+            target_prefix: "Route53AutoNaming_v20170314",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).

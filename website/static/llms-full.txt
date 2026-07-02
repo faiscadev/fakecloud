@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 49 services (3,902 operations) are shipped today, all at true 100% conformance — 129,882/129,882 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 50 services (3,913 operations) are shipped today, all at true 100% conformance — 130,279/130,279 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 129,882/129,882 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 130,279/130,279 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 23 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -87,7 +87,7 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 49 services persist their durable state: S3, SQS, SNS, EventBridge,
+All 50 services persist their durable state: S3, SQS, SNS, EventBridge,
 EventBridge Pipes, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager,
 CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, Cloud Control API, SES,
 Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, Resource Groups Tagging API, ElastiCache, MemoryDB, EKS,
@@ -378,6 +378,14 @@ CreateCluster, DescribeCluster, ListClusters, DeleteCluster, UpdateClusterConfig
 Features: Elastic Kubernetes Service control plane. Cluster lifecycle with `roleArn`/`resourcesVpcConfig`/`version` (default 1.31) and a `map<String,String>` tag shape; clusters transition `CREATING` -> `ACTIVE` on describe. Config and version updates mint tracked `Update` records (`InProgress` -> `Successful` on describe) surfaced via DescribeUpdate/ListUpdates. Managed node groups (`nodeRole`/`subnets`/`scalingConfig`, config + version updates) and Fargate profiles (`podExecutionRoleArn`/`selectors`) with their own `CREATING` -> `ACTIVE` transitions and update tracking. Add-ons (`addonName`/`addonVersion`/`serviceAccountRoleArn`/`configurationValues`, tracked version updates, plus a DescribeAddonVersions catalogue for vpc-cni/coredns/kube-proxy/aws-ebs-csi-driver/aws-efs-csi-driver and DescribeAddonConfiguration schemas). Access entries (`principalArn`/`kubernetesGroups`/`type`, access-policy association with cluster/namespace `accessScope`, and a ListAccessPolicies catalogue of the AmazonEKS* cluster-access policies). OIDC identity-provider configs (Associate/Disassociate mint tracked cluster Updates; Describe/List) and pod-identity associations (`namespace`/`serviceAccount`/`roleArn`, `a-`-prefixed associationId, upsert Update). Upgrade insights (seeded PASSING UPGRADE_READINESS findings + refresh), capabilities, connected-cluster register/deregister (`connectorConfig`), AssociateEncryptionConfig + CancelUpdate (tracked Updates), a DescribeClusterVersions catalogue (Kubernetes 1.28-1.32 with support windows), and account-scoped EKS Anywhere subscriptions. Complete 65/65 op surface. Account-partitioned and persisted; no real Kubernetes API-server endpoint.
 
 Protocol: REST (restJson1, path-based routing, JSON responses)
+
+### Cloud Map (11 actions, 11 of 30)
+
+CreateHttpNamespace, CreatePrivateDnsNamespace, CreatePublicDnsNamespace, GetNamespace, ListNamespaces, DeleteNamespace, UpdateHttpNamespace, UpdatePrivateDnsNamespace, UpdatePublicDnsNamespace, GetOperation, ListOperations
+
+Features: AWS Cloud Map (`servicediscovery`) namespace control plane. HTTP, public-DNS, and private-DNS namespaces with `Id` (`ns-...`), ARN, `Properties` (HttpProperties.HttpName; DnsProperties.HostedZoneId + SOA for DNS types), `ServiceCount`, and tags. Follows Cloud Map's asynchronous operation model: create/delete/update return an `OperationId` (not the resource), and `GetOperation` settles the operation `SUBMITTED` -> `SUCCESS` on read (with a `Targets` map to the affected namespace) while the namespace is visible immediately via GetNamespace/ListNamespaces. ListNamespaces/ListOperations paginate with `MaxResults`/`NextToken` and support `Filters`. Account-partitioned and persisted. Services, instances, and `DiscoverInstances` are in progress.
+
+Protocol: awsJson1.1 (X-Amz-Target `Route53AutoNaming_v20170314.<Op>`)
 
 ### Resource Groups (23 actions)
 
