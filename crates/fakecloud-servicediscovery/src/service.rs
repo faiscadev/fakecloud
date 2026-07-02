@@ -295,6 +295,14 @@ fn validate_pagination(b: &Value) -> Result<(), AwsServiceError> {
     }
     if let Some(tok) = b.get("NextToken").and_then(Value::as_str) {
         check_max_len(tok, 4096, "NextToken")?;
+        // Our tokens are numeric offsets; a non-numeric token is malformed and
+        // must be rejected rather than silently yielding an empty page.
+        if !tok.is_empty() && tok.parse::<usize>().is_err() {
+            return Err(fault(
+                "InvalidInput",
+                "The NextToken you provided is invalid.",
+            ));
+        }
     }
     Ok(())
 }
@@ -338,6 +346,18 @@ fn paginate(items: Vec<Value>, b: &Value, default_max: usize) -> (Vec<Value>, Op
     let end = start.saturating_add(max).min(total);
     let next = (end < total).then(|| end.to_string());
     (items[start..end].to_vec(), next)
+}
+
+/// Build a list response object, omitting `NextToken` when there is no next
+/// page. awsJson1.1 does not serialize null for an absent optional, so emitting
+/// `"NextToken": null` on the last page diverges from the real API.
+fn page_response(key: &str, page: Vec<Value>, next: Option<String>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(key.to_string(), Value::Array(page));
+    if let Some(t) = next {
+        m.insert("NextToken".to_string(), Value::String(t));
+    }
+    Value::Object(m)
 }
 
 // ===== JSON builders (member names match the Smithy model) =====
@@ -905,7 +925,7 @@ impl ServiceDiscoveryService {
             .map(|ns| namespace_summary_json(ns, &req.account_id))
             .collect();
         let (page, next) = paginate(items, &b, 100);
-        ok(json!({ "Namespaces": page, "NextToken": next }))
+        ok(page_response("Namespaces", page, next))
     }
 
     fn delete_namespace(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1031,7 +1051,7 @@ impl ServiceDiscoveryService {
             .map(|op| json!({ "Id": op.id, "Status": op.status }))
             .collect();
         let (page, next) = paginate(items, &b, 100);
-        ok(json!({ "Operations": page, "NextToken": next }))
+        ok(page_response("Operations", page, next))
     }
 }
 
@@ -1166,7 +1186,7 @@ impl ServiceDiscoveryService {
             .map(|svc| service_summary_json(svc, &req.account_id))
             .collect();
         let (page, next) = paginate(items, &b, 100);
-        ok(json!({ "Services": page, "NextToken": next }))
+        ok(page_response("Services", page, next))
     }
 
     /// UpdateService is *asynchronous*: it returns an `OperationId` (unlike the
@@ -1454,11 +1474,13 @@ impl ServiceDiscoveryService {
             .map(|inst| instance_summary_json(inst, &req.account_id))
             .collect();
         let (page, next) = paginate(items, &b, 100);
-        ok(json!({
-            "Instances": page,
-            "NextToken": next,
-            "ResourceOwner": req.account_id,
-        }))
+        let mut m = serde_json::Map::new();
+        m.insert("Instances".into(), Value::Array(page));
+        if let Some(t) = next {
+            m.insert("NextToken".into(), Value::String(t));
+        }
+        m.insert("ResourceOwner".into(), json!(req.account_id));
+        ok(Value::Object(m))
     }
 
     fn get_instances_health_status(
@@ -1517,7 +1539,12 @@ impl ServiceDiscoveryService {
                 status.insert(id.to_string(), json!(st));
             }
         }
-        ok(json!({ "Status": Value::Object(status), "NextToken": next }))
+        let mut m = serde_json::Map::new();
+        m.insert("Status".into(), Value::Object(status));
+        if let Some(t) = next {
+            m.insert("NextToken".into(), Value::String(t));
+        }
+        ok(Value::Object(m))
     }
 
     fn update_instance_custom_health_status(
@@ -1613,9 +1640,18 @@ impl ServiceDiscoveryService {
                     .all(|(k, v)| inst.attributes.get(k).map(|a| a == v).unwrap_or(false))
             })
             .collect();
+        // The HealthStatus filter is ignored for services with no health check
+        // configured (all instances are considered healthy and returned).
+        let has_health_check =
+            svc.health_check_config.is_some() || svc.health_check_custom_config.is_some();
+        let effective_filter = if has_health_check {
+            health_filter.as_str()
+        } else {
+            "ALL"
+        };
         // HealthStatus filter. HEALTHY_OR_ELSE_ALL returns healthy instances, or
         // all of them when none are healthy (AWS fail-open semantics).
-        let selected: Vec<&Instance> = match health_filter.as_str() {
+        let selected: Vec<&Instance> = match effective_filter {
             "HEALTHY" => matching
                 .iter()
                 .copied()
@@ -1803,9 +1839,33 @@ fn operation_matches_filters(op: &Operation, b: &Value) -> bool {
             "TYPE" => op.type_.clone(),
             "NAMESPACE_ID" => op.targets.get("NAMESPACE").cloned().unwrap_or_default(),
             "SERVICE_ID" => op.targets.get("SERVICE").cloned().unwrap_or_default(),
-            // UPDATE_DATE is a BETWEEN filter over epoch millis; not exercised
-            // by the namespace batch, so it's accepted without narrowing.
-            "UPDATE_DATE" => continue,
+            // UPDATE_DATE is a BETWEEN filter over epoch-second bounds; narrow to
+            // operations whose UpdateDate falls in the requested window. Bounds
+            // may arrive as JSON numbers or strings.
+            "UPDATE_DATE" => {
+                let bounds: Vec<i64> = f
+                    .get("Values")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| {
+                                x.as_i64()
+                                    .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ts = op.update_date.timestamp();
+                let hit = match bounds.as_slice() {
+                    [start, end] => ts >= *start && ts <= *end,
+                    [start] => ts >= *start,
+                    _ => true,
+                };
+                if !hit {
+                    return false;
+                }
+                continue;
+            }
             _ => continue,
         };
         if !filter_hit(&values, condition, &candidate) {
@@ -2603,6 +2663,81 @@ mod tests {
             json!({ "NamespaceName": "nope", "ServiceName": "web" }),
         )));
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn discover_instances_ignores_health_filter_without_health_check() {
+        let s = svc();
+        let (_ns, srv) = make_dns_service(&s, "nohc.example.com", "web");
+        register(&s, &srv, "i-1", json!({ "AWS_INSTANCE_IPV4": "10.0.0.1" }));
+        // Service has no health check configured, so a HealthStatus=UNHEALTHY
+        // filter is ignored and the (default-healthy) instance is still returned.
+        let resp = s
+            .discover_instances(&req(
+                "DiscoverInstances",
+                json!({
+                    "NamespaceName": "nohc.example.com",
+                    "ServiceName": "web",
+                    "HealthStatus": "UNHEALTHY",
+                }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Instances"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_rejects_malformed_next_token() {
+        let s = svc();
+        let err = expect_err(s.list_namespaces(&req(
+            "ListNamespaces",
+            json!({ "NextToken": "not-a-number" }),
+        )));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "InvalidInput");
+    }
+
+    #[test]
+    fn list_omits_next_token_on_last_page() {
+        let s = svc();
+        make_namespace(&s, "one");
+        let resp = s
+            .list_namespaces(&req("ListNamespaces", json!({})))
+            .unwrap();
+        let out = body_of(&resp);
+        assert_eq!(out["Namespaces"].as_array().unwrap().len(), 1);
+        // No next page -> NextToken must be omitted, not null.
+        assert!(out.get("NextToken").is_none());
+    }
+
+    #[test]
+    fn list_operations_update_date_filter_narrows() {
+        let s = svc();
+        // Creating a namespace mints a CREATE_NAMESPACE operation (UpdateDate now).
+        make_namespace(&s, "opns");
+        // A window covering the epoch through the far future includes it.
+        let resp = s
+            .list_operations(&req(
+                "ListOperations",
+                json!({ "Filters": [{
+                    "Name": "UPDATE_DATE",
+                    "Condition": "BETWEEN",
+                    "Values": [0, 32503680000i64],
+                }] }),
+            ))
+            .unwrap();
+        assert!(!body_of(&resp)["Operations"].as_array().unwrap().is_empty());
+        // A far-future-only window excludes it.
+        let resp = s
+            .list_operations(&req(
+                "ListOperations",
+                json!({ "Filters": [{
+                    "Name": "UPDATE_DATE",
+                    "Condition": "BETWEEN",
+                    "Values": [32503680000i64, 32503690000i64],
+                }] }),
+            ))
+            .unwrap();
+        assert!(body_of(&resp)["Operations"].as_array().unwrap().is_empty());
     }
 
     #[test]
