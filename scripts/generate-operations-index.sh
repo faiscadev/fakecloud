@@ -61,6 +61,7 @@ SERVICES=(
     "tagging|Resource Groups Tagging API|resource-groups-tagging"
     "elasticache|ElastiCache|elasticache"
     "memorydb|MemoryDB|memorydb"
+    "eks|EKS|eks"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"
     "apigatewayv2|API Gateway v2|apigatewayv2"

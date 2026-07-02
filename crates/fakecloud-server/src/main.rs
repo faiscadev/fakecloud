@@ -466,6 +466,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let eks_state: fakecloud_eks::SharedEksState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -3896,6 +3903,35 @@ async fn main() {
         memorydb_service = memorydb_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(memorydb_service));
+
+    // EKS cluster control plane.
+    let eks_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("eks").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_eks::persistence::load_into(&store, &eks_state) {
+                Ok(fakecloud_eks::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded eks persistence snapshot");
+                }
+                Ok(fakecloud_eks::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no eks persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut eks_service = fakecloud_eks::EksService::new(eks_state.clone());
+    if let Some(store) = eks_snapshot_store {
+        eks_service = eks_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(eks_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to

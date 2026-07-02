@@ -200,6 +200,7 @@ jobs:
           publish fakecloud-resource-groups-tagging  # only core/persistence/aws deps
           publish fakecloud-elasticache
           publish fakecloud-memorydb         # only core/persistence/aws deps
+          publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock
