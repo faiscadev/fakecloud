@@ -107,6 +107,8 @@ impl ResourceProvisioner {
             athena_state: self.athena_state.clone(),
             firehose_state: self.firehose_state.clone(),
             glue_state: self.glue_state.clone(),
+            eks_state: self.eks_state.clone(),
+            servicediscovery_state: self.servicediscovery_state.clone(),
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),

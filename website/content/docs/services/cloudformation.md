@@ -76,6 +76,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **EC2** — `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress` / `SecurityGroupEgress` rules), `InternetGateway`, `RouteTable`. VPC `EnableDnsSupport` / `EnableDnsHostnames` and subnet `MapPublicIpOnLaunch` are applied; `Fn::GetAtt` on a subnet resolves `VpcId` / `CidrBlock`
 - **ECR** — `Repository`, `RepositoryPolicy`, `LifecyclePolicy`, `PullThroughCacheRule`, `RegistryPolicy`, `RegistryScanningConfiguration`, `ReplicationConfiguration`
 - **ECS** — `Cluster`, `Service` (launches real running tasks to reach `DesiredCount`), `TaskDefinition`, `CapacityProvider`
+- **EKS** — `Cluster`, `Nodegroup`, `FargateProfile`, `Addon`, `AccessEntry`, `IdentityProviderConfig`, `PodIdentityAssociation`
 - **ElastiCache** — `CacheCluster` and `ReplicationGroup` (backed by a real Redis/Memcached container), `ParameterGroup`, `SubnetGroup`, `SecurityGroup`, `User`, `UserGroup`
 - **ELBv2** — `LoadBalancer`, `Listener`, `ListenerRule`, `ListenerCertificate`, `TargetGroup`, `TrustStore`
 - **EventBridge** — `EventBus`, `Rule`, `Archive`, `Connection`, `ApiDestination`, `Endpoint`, `EventBusPolicy`
@@ -91,6 +92,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **Route 53** — `HostedZone`, `RecordSet`, `HealthCheck`, `DNSSEC`, `KeySigningKey`
 - **S3** — `Bucket`, `BucketPolicy`
 - **Secrets Manager** — `Secret`, `ResourcePolicy`, `RotationSchedule`, `SecretTargetAttachment`
+- **Service Discovery (Cloud Map)** — `HttpNamespace`, `PublicDnsNamespace`, `PrivateDnsNamespace`, `Service`, `Instance`
 - **SES v2** — `EmailIdentity`, `ConfigurationSet`, `ConfigurationSetEventDestination`, `ContactList`, `DedicatedIpPool`, `ReceiptFilter`, `ReceiptRule`, `ReceiptRuleSet`, `Template`, `VdmAttributes`
 - **SNS** — `Topic`, `TopicPolicy`, `Subscription`
 - **SQS** — `Queue`, `QueuePolicy`
@@ -100,7 +102,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 
 ### Fn::GetAtt coverage
 
-The provisioners populate the AWS-documented attribute set for each type, so `Fn::GetAtt` on common shapes works without templates having to fall back to `Ref` plus string surgery. SES email identities expose `DkimDNSTokenName1/2/3` + `DkimDNSTokenValue1/2/3`; WAFv2 web ACLs expose `Arn`, `Id`, `Capacity`, `LabelNamespace`; ELBv2 load balancers expose `DNSName`, `CanonicalHostedZoneID`, `LoadBalancerFullName`, `SecurityGroups`; Lambda functions expose `Arn`, `FunctionArn`, etc.
+The provisioners populate the AWS-documented attribute set for each type, so `Fn::GetAtt` on common shapes works without templates having to fall back to `Ref` plus string surgery. SES email identities expose `DkimDNSTokenName1/2/3` + `DkimDNSTokenValue1/2/3`; WAFv2 web ACLs expose `Arn`, `Id`, `Capacity`, `LabelNamespace`; ELBv2 load balancers expose `DNSName`, `CanonicalHostedZoneID`, `LoadBalancerFullName`, `SecurityGroups`; EKS clusters expose `Arn`, `Endpoint`, `CertificateAuthorityData`, `ClusterSecurityGroupId`, `OpenIdConnectIssuerUrl`; Cloud Map services expose `Arn`, `Id`, `Name`; Lambda functions expose `Arn`, `FunctionArn`, etc.
 
 ## Cross-service delivery
 
