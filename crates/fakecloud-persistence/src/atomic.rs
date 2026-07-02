@@ -149,17 +149,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = Arc::new(dir.path().join("snap.bin"));
         let payloads: Vec<Vec<u8>> = (0..16).map(|i| vec![b'A' + i as u8; 8192]).collect();
-        let handles: Vec<_> = payloads
-            .iter()
-            .cloned()
-            .map(|p| {
-                let path = Arc::clone(&path);
-                std::thread::spawn(move || write_atomic_bytes(&path, &p).unwrap())
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = payloads
+                .iter()
+                .map(|p| {
+                    let path = Arc::clone(&path);
+                    scope.spawn(move || write_atomic_bytes(&path, p).unwrap())
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
         let got = std::fs::read(&*path).unwrap();
         assert!(
             payloads.contains(&got),
