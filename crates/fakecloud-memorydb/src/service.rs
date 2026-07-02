@@ -2190,4 +2190,34 @@ mod tests {
         let sys = call(&s, "DescribeSnapshots", json!({"Source": "system"})).unwrap();
         assert!(sys["Snapshots"].as_array().unwrap().is_empty());
     }
+
+    #[test]
+    fn default_parameter_groups_are_seeded() {
+        let s = service();
+        let groups = call(&s, "DescribeParameterGroups", json!({})).unwrap();
+        let names: Vec<&str> = groups["ParameterGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g["Name"].as_str())
+            .collect();
+        for expected in [
+            "default.memorydb-redis7",
+            "default.memorydb-redis6",
+            "default.memorydb-valkey7",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing {expected}; got {names:?}"
+            );
+        }
+        // The default group is readable by name (the TF provider reads it).
+        let one = call(
+            &s,
+            "DescribeParameterGroups",
+            json!({"ParameterGroupName": "default.memorydb-redis7"}),
+        )
+        .unwrap();
+        assert_eq!(one["ParameterGroups"][0]["Family"], "memorydb_redis7");
+    }
 }
