@@ -352,6 +352,18 @@ fn shard_json(sh: &Shard) -> Value {
     })
 }
 
+/// `cluster_json`, but drops the per-shard `Shards` detail when `show_shards`
+/// is false (DescribeClusters `ShowShardDetails=false`).
+fn cluster_json_shards(c: &Cluster, show_shards: bool) -> Value {
+    let mut v = cluster_json(c);
+    if !show_shards {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("Shards");
+        }
+    }
+    v
+}
+
 fn cluster_json(c: &Cluster) -> Value {
     json!({
         "Name": c.name,
@@ -436,7 +448,13 @@ fn sg_json(g: &SubnetGroup) -> Value {
 }
 
 fn snapshot_json(s: &Snapshot) -> Value {
-    json!({
+    snapshot_json_detail(s, true)
+}
+
+/// `snapshot_json`, dropping the heavy `ClusterConfiguration` when `show_detail`
+/// is false (DescribeSnapshots `ShowDetail=false`).
+fn snapshot_json_detail(s: &Snapshot, show_detail: bool) -> Value {
+    let mut v = json!({
         "Name": s.name,
         "Status": s.status,
         "Source": s.source,
@@ -444,7 +462,13 @@ fn snapshot_json(s: &Snapshot) -> Value {
         "ARN": s.arn,
         "ClusterConfiguration": s.cluster_configuration,
         "DataTiering": s.data_tiering,
-    })
+    });
+    if !show_detail {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("ClusterConfiguration");
+        }
+    }
+    v
 }
 
 fn mrc_json(m: &MultiRegionCluster) -> Value {
@@ -549,10 +573,16 @@ impl MemoryDbService {
                         },
                     })
                     .collect::<Vec<_>>();
+                // Partition the 16384 keyspace slots contiguously across shards,
+                // the way MemoryDB/Redis Cluster does (shard 1 `0-8191`,
+                // shard 2 `8192-16383`, ...), instead of giving every shard the
+                // full range.
+                let start = (i as i64 * 16384 / num_shards as i64) as i32;
+                let end = ((i as i64 + 1) * 16384 / num_shards as i64) as i32 - 1;
                 Shard {
                     name: sname,
                     status: "creating".to_string(),
-                    slots: "0-16383".to_string(),
+                    slots: format!("{start}-{end}"),
                     number_of_nodes: nodes.len() as i32,
                     nodes,
                 }
@@ -626,9 +656,18 @@ impl MemoryDbService {
 
     fn describe_clusters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
+        // ShowShardDetails defaults to true; when explicitly false AWS omits the
+        // per-shard `Shards` detail from each cluster.
+        let show_shards = b
+            .get("ShowShardDetails")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        // Lazy transition creating -> available.
+        // Lazy transition creating -> available. This mutates under a write lock
+        // on a Describe (non-persisted) path, but the transition is idempotent
+        // and self-healing: after a restart the next Describe re-applies it, and
+        // the first mutating op snapshots the settled state. No data is lost.
         for c in st.clusters.values_mut() {
             if c.status == "creating" {
                 c.status = "available".to_string();
@@ -647,9 +686,13 @@ impl MemoryDbService {
                     &format!("Cluster {name} not found."),
                 ));
             };
-            return ok(json!({ "Clusters": [cluster_json(c)] }));
+            return ok(json!({ "Clusters": [cluster_json_shards(c, show_shards)] }));
         }
-        let items: Vec<Value> = st.clusters.values().map(cluster_json).collect();
+        let items: Vec<Value> = st
+            .clusters
+            .values()
+            .map(|c| cluster_json_shards(c, show_shards))
+            .collect();
         let (page, next) = paginate(items, &b, 100);
         ok(json!({ "Clusters": page, "NextToken": next }))
     }
@@ -1179,7 +1222,8 @@ impl MemoryDbService {
                 })
             })
             .collect();
-        ok(json!({ "Parameters": params, "NextToken": Value::Null }))
+        let (page, next) = paginate(params, &b, 100);
+        ok(json!({ "Parameters": page, "NextToken": next }))
     }
 
     fn create_subnet_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1352,6 +1396,8 @@ impl MemoryDbService {
         let Some(st) = st else {
             return ok(json!({ "Snapshots": [] }));
         };
+        // ShowDetail defaults to true; false omits ClusterConfiguration.
+        let show_detail = b.get("ShowDetail").and_then(Value::as_bool).unwrap_or(true);
         if let Some(name) = opt_str(&b, "SnapshotName") {
             let Some(s) = st.snapshots.get(&name) else {
                 return Err(fault(
@@ -1359,9 +1405,11 @@ impl MemoryDbService {
                     &format!("Snapshot {name} not found."),
                 ));
             };
-            return ok(json!({ "Snapshots": [snapshot_json(s)] }));
+            return ok(json!({ "Snapshots": [snapshot_json_detail(s, show_detail)] }));
         }
         let cluster_filter = opt_str(&b, "ClusterName");
+        // Source filters by snapshot origin; "all" (or absent) matches everything.
+        let source_filter = opt_str(&b, "Source").filter(|s| s != "all");
         let items: Vec<Value> = st
             .snapshots
             .values()
@@ -1370,7 +1418,8 @@ impl MemoryDbService {
                     s.cluster_configuration.get("Name").and_then(Value::as_str) == Some(cn)
                 })
             })
-            .map(snapshot_json)
+            .filter(|s| source_filter.as_ref().is_none_or(|src| &s.source == src))
+            .map(|s| snapshot_json_detail(s, show_detail))
             .collect();
         let (page, next) = paginate(items, &b, 50);
         ok(json!({ "Snapshots": page, "NextToken": next }))
@@ -2076,5 +2125,69 @@ mod tests {
             "got: {}",
             err.message()
         );
+    }
+
+    #[test]
+    fn shard_slots_are_partitioned_across_shards() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "sh", "NodeType": "db.r6g.large", "ACLName": "open-access", "NumShards": 2}),
+        )
+        .unwrap();
+        let desc = call(&s, "DescribeClusters", json!({"ClusterName": "sh"})).unwrap();
+        let shards = desc["Clusters"][0]["Shards"].as_array().unwrap();
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0]["Slots"], "0-8191");
+        assert_eq!(shards[1]["Slots"], "8192-16383");
+    }
+
+    #[test]
+    fn describe_clusters_show_shard_details_false_omits_shards() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "hide", "NodeType": "db.r6g.large", "ACLName": "open-access"}),
+        )
+        .unwrap();
+        let with = call(&s, "DescribeClusters", json!({"ClusterName": "hide"})).unwrap();
+        assert!(with["Clusters"][0].get("Shards").is_some());
+        let without = call(
+            &s,
+            "DescribeClusters",
+            json!({"ClusterName": "hide", "ShowShardDetails": false}),
+        )
+        .unwrap();
+        assert!(without["Clusters"][0].get("Shards").is_none());
+    }
+
+    #[test]
+    fn describe_snapshots_honors_show_detail_and_source() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "snapc", "NodeType": "db.r6g.large", "ACLName": "open-access"}),
+        )
+        .unwrap();
+        call(
+            &s,
+            "CreateSnapshot",
+            json!({"ClusterName": "snapc", "SnapshotName": "s1"}),
+        )
+        .unwrap();
+        // ShowDetail=false drops ClusterConfiguration.
+        let brief = call(
+            &s,
+            "DescribeSnapshots",
+            json!({"SnapshotName": "s1", "ShowDetail": false}),
+        )
+        .unwrap();
+        assert!(brief["Snapshots"][0].get("ClusterConfiguration").is_none());
+        // Source=system matches nothing (created snapshots are user-source).
+        let sys = call(&s, "DescribeSnapshots", json!({"Source": "system"})).unwrap();
+        assert!(sys["Snapshots"].as_array().unwrap().is_empty());
     }
 }
