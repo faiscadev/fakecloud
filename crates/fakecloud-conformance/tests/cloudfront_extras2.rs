@@ -189,18 +189,89 @@ async fn cf_list_domain_conflicts() {
 #[test_action("cloudfront", "UpdateDomainAssociation", checksum = "5eac5bbc")]
 #[tokio::test]
 async fn cf_update_domain_association() {
+    use aws_sdk_cloudfront::types::DomainItem;
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
-    cf.update_domain_association()
+
+    // Seed a real SOURCE tenant that currently owns docs.example.com, so the
+    // update exercises the domain-MOVE path (detach from the source + attach to
+    // the target), not an unowned-domain attach.
+    let source = cf
+        .create_distribution_tenant()
+        .distribution_id("E1234")
+        .name("conf6b-domainassoc-src")
+        .domains(
+            DomainItem::builder()
+                .domain("docs.example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let source_id = source
+        .distribution_tenant()
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+
+    // UpdateDomainAssociation validates that the target resource exists (AWS
+    // returns EntityNotFound otherwise), so use a real target distribution.
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("conf6b-domainassoc"))
+        .send()
+        .await
+        .unwrap();
+    let target_id = create.distribution().unwrap().id().to_string();
+
+    // Move docs.example.com from the source tenant to the target distribution.
+    let resp = cf
+        .update_domain_association()
         .domain("docs.example.com")
         .target_resource(
             DistributionResourceId::builder()
-                .distribution_id("E1234")
+                .distribution_id(&target_id)
                 .build(),
         )
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.resource_id(), Some(target_id.as_str()));
+
+    // (a) The target distribution now owns the domain (as a CNAME alias).
+    let target = cf.get_distribution().id(&target_id).send().await.unwrap();
+    let aliases = target
+        .distribution()
+        .unwrap()
+        .distribution_config()
+        .unwrap()
+        .aliases()
+        .expect("target should have aliases after the move");
+    assert!(
+        aliases.items().iter().any(|c| c == "docs.example.com"),
+        "target distribution should own the moved domain, got {:?}",
+        aliases.items()
+    );
+
+    // (b) The source tenant no longer owns the domain (detach happened).
+    let src = cf
+        .get_distribution_tenant()
+        .identifier(&source_id)
+        .send()
+        .await
+        .unwrap();
+    let still_owned = src
+        .distribution_tenant()
+        .unwrap()
+        .domains()
+        .iter()
+        .any(|d| d.domain() == "docs.example.com");
+    assert!(
+        !still_owned,
+        "source tenant should no longer own the moved domain after the move"
+    );
 }
 
 #[test_action("cloudfront", "VerifyDnsConfiguration", checksum = "5ae578cb")]

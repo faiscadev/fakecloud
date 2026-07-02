@@ -137,19 +137,30 @@ async fn update_domain_association_round_trip() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
 
+    // AWS moves the domain onto an existing target distribution, so create one
+    // and target its real id (the resource must exist -> EntityNotFound
+    // otherwise).
+    let dist = cf
+        .create_distribution()
+        .distribution_config(minimal_config("assoc"))
+        .send()
+        .await
+        .expect("create");
+    let dist_id = dist.distribution().unwrap().id().to_string();
+
     let resp = cf
         .update_domain_association()
         .domain("docs.example.com")
         .target_resource(
             DistributionResourceId::builder()
-                .distribution_id("E1234")
+                .distribution_id(&dist_id)
                 .build(),
         )
         .send()
         .await
         .expect("update");
     assert_eq!(resp.domain().unwrap(), "docs.example.com");
-    assert_eq!(resp.resource_id().unwrap(), "E1234");
+    assert_eq!(resp.resource_id().unwrap(), dist_id);
 }
 
 #[tokio::test]

@@ -269,26 +269,82 @@ impl CloudFrontService {
         if parsed.domain.is_empty() {
             return Err(invalid_argument("Domain is required"));
         }
-        let target = parsed
+        let tenant_id = parsed
             .target_resource
             .as_ref()
-            .and_then(|t| {
-                t.distribution_id
-                    .clone()
-                    .or_else(|| t.distribution_tenant_id.clone())
-            })
-            .unwrap_or_default();
-        if target.is_empty() {
-            return Err(invalid_argument(
-                "TargetResource must specify DistributionId or DistributionTenantId",
+            .and_then(|t| t.distribution_tenant_id.clone())
+            .filter(|s| !s.is_empty());
+        let distribution_id = parsed
+            .target_resource
+            .as_ref()
+            .and_then(|t| t.distribution_id.clone())
+            .filter(|s| !s.is_empty());
+        // TargetResource is a mutually-exclusive union: AWS requires exactly
+        // one of DistributionId / DistributionTenantId. Resolve to a single
+        // target and use it for validation, mutation, and the response so the
+        // three can never disagree.
+        let target = match (distribution_id, tenant_id) {
+            (Some(_), Some(_)) => {
+                return Err(invalid_argument(
+                    "TargetResource must specify exactly one of DistributionId or DistributionTenantId, not both",
+                ));
+            }
+            (Some(did), None) => Target::Distribution(did),
+            (None, Some(tid)) => Target::Tenant(tid),
+            (None, None) => {
+                return Err(invalid_argument(
+                    "TargetResource must specify DistributionId or DistributionTenantId",
+                ));
+            }
+        };
+
+        let mut state = self.state.write();
+        let account = state.entry(DEFAULT_ACCOUNT);
+
+        // The target must exist, otherwise AWS returns EntityNotFound.
+        let target_ok = match &target {
+            Target::Tenant(tid) => account.distribution_tenants.contains_key(tid),
+            Target::Distribution(did) => account.distributions.contains_key(did),
+        };
+        if !target_ok {
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "EntityNotFound",
+                format!("The target resource {} was not found", target.id()),
             ));
         }
+
+        // Detach the domain from whichever tenant or distribution currently
+        // owns it, then attach it to the target. Domains are unique across
+        // resources, so a plain move is correct.
+        for t in account.distribution_tenants.values_mut() {
+            t.domains.retain(|d| d != &parsed.domain);
+        }
+        for d in account.distributions.values_mut() {
+            remove_alias(&mut d.config, &parsed.domain);
+        }
+        match &target {
+            Target::Tenant(tid) => {
+                if let Some(t) = account.distribution_tenants.get_mut(tid) {
+                    t.domains.push(parsed.domain.clone());
+                    t.last_modified_time = Utc::now();
+                }
+            }
+            Target::Distribution(did) => {
+                if let Some(d) = account.distributions.get_mut(did) {
+                    add_alias(&mut d.config, &parsed.domain);
+                    d.last_modified_time = Utc::now();
+                }
+            }
+        }
+        drop(state);
+
         let etag = generate_id_with_prefix("E");
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<UpdateDomainAssociationResult xmlns=\"{NS}\">"));
         body.push_str(&format!("<Domain>{}</Domain>", esc(&parsed.domain)));
-        body.push_str(&format!("<ResourceId>{}</ResourceId>", esc(&target)));
+        body.push_str(&format!("<ResourceId>{}</ResourceId>", esc(target.id())));
         body.push_str("</UpdateDomainAssociationResult>");
         Ok(xml_with_etag(StatusCode::OK, body, &etag, None))
     }
@@ -400,6 +456,44 @@ impl CloudFrontService {
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
+/// A single resolved UpdateDomainAssociation target. Resolving to one value
+/// up front guarantees validation, mutation, and the response all reference
+/// the same resource.
+enum Target {
+    Tenant(String),
+    Distribution(String),
+}
+
+impl Target {
+    fn id(&self) -> &str {
+        match self {
+            Target::Tenant(id) | Target::Distribution(id) => id,
+        }
+    }
+}
+
+/// Add `domain` to a distribution's alias (CNAME) set, keeping Quantity in
+/// sync. No-op if the alias is already present.
+fn add_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
+    let aliases = config.aliases.get_or_insert_with(Default::default);
+    let items = aliases.items.get_or_insert_with(Default::default);
+    if !items.cname.iter().any(|c| c == domain) {
+        items.cname.push(domain.to_string());
+    }
+    aliases.quantity = items.cname.len() as i32;
+}
+
+/// Remove `domain` from a distribution's alias (CNAME) set, keeping Quantity
+/// in sync.
+fn remove_alias(config: &mut crate::model::DistributionConfig, domain: &str) {
+    if let Some(aliases) = config.aliases.as_mut() {
+        if let Some(items) = aliases.items.as_mut() {
+            items.cname.retain(|c| c != domain);
+            aliases.quantity = items.cname.len() as i32;
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 struct UpdateDomainAssociationBody {
@@ -457,4 +551,202 @@ fn push_connection_group_inner(out: &mut String, g: &StoredConnectionGroup) {
     out.push_str(&format!("<Status>{}</Status>", esc(&g.status)));
     out.push_str(&format!("<Enabled>{}</Enabled>", g.enabled));
     out.push_str(&format!("<IsDefault>{}</IsDefault>", g.is_default));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::CloudFrontAccounts;
+    use bytes::Bytes;
+    use fakecloud_core::service::{AwsService, ResponseBody};
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn svc() -> CloudFrontService {
+        CloudFrontService::new(Arc::new(RwLock::new(CloudFrontAccounts::new())))
+    }
+
+    fn req(method: http::Method, path: &str, body: &str) -> AwsRequest {
+        AwsRequest {
+            service: "cloudfront".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: DEFAULT_ACCOUNT.into(),
+            request_id: Uuid::new_v4().to_string(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            body: Bytes::from(body.to_string()),
+            path_segments: path
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            raw_path: path.into(),
+            raw_query: String::new(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_str(resp: &AwsResponse) -> String {
+        match &resp.body {
+            ResponseBody::Bytes(b) => String::from_utf8(b.to_vec()).unwrap(),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    async fn create_tenant(svc: &CloudFrontService, name: &str, domain: &str) -> String {
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<CreateDistributionTenantRequest xmlns="{NS}">
+  <DistributionId>E123</DistributionId>
+  <Name>{name}</Name>
+  <Domains><member><Domain>{domain}</Domain></member></Domains>
+</CreateDistributionTenantRequest>"#
+        );
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/distribution-tenant",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let xml = body_str(&resp);
+        xml.split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn get_tenant_xml(svc: &CloudFrontService, id: &str) -> String {
+        let resp = svc
+            .handle(req(
+                http::Method::GET,
+                &format!("/2020-05-31/distribution-tenant/{id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        body_str(&resp)
+    }
+
+    #[tokio::test]
+    async fn update_domain_association_moves_and_persists() {
+        // Finding #2: the domain moves from its current tenant to the target
+        // tenant, and the change is persisted (visible on GetDistributionTenant).
+        let svc = svc();
+        let t1 = create_tenant(&svc, "src-tenant", "moveme.example.com").await;
+        let t2 = create_tenant(&svc, "dst-tenant", "other.example.com").await;
+
+        assert!(get_tenant_xml(&svc, &t1)
+            .await
+            .contains("moveme.example.com"));
+
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>moveme.example.com</Domain>
+  <TargetResource><DistributionTenantId>{t2}</DistributionTenantId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/domain-association",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = body_str(&resp);
+        assert!(
+            xml.contains(&format!("<ResourceId>{t2}</ResourceId>")),
+            "{xml}"
+        );
+
+        // Persisted: source no longer has it, target does.
+        assert!(
+            !get_tenant_xml(&svc, &t1)
+                .await
+                .contains("moveme.example.com"),
+            "domain not detached from source tenant"
+        );
+        assert!(
+            get_tenant_xml(&svc, &t2)
+                .await
+                .contains("moveme.example.com"),
+            "domain not attached to target tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_domain_association_unknown_target_is_not_found() {
+        let svc = svc();
+        create_tenant(&svc, "only-tenant", "x.example.com").await;
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>x.example.com</Domain>
+  <TargetResource><DistributionTenantId>DTNONEXISTENT</DistributionTenantId></TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let err = match svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/domain-association",
+                &body,
+            ))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected EntityNotFound for unknown target"),
+        };
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "EntityNotFound");
+    }
+
+    #[tokio::test]
+    async fn update_domain_association_rejects_both_targets() {
+        // TargetResource is mutually exclusive: supplying both a DistributionId
+        // and a DistributionTenantId is an InvalidArgument (prevents the
+        // response and the mutation from disagreeing on the target).
+        let svc = svc();
+        let tid = create_tenant(&svc, "dual-tenant", "d.example.com").await;
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateDomainAssociationRequest xmlns="{NS}">
+  <Domain>d.example.com</Domain>
+  <TargetResource>
+    <DistributionId>E123</DistributionId>
+    <DistributionTenantId>{tid}</DistributionTenantId>
+  </TargetResource>
+</UpdateDomainAssociationRequest>"#
+        );
+        let err = match svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/domain-association",
+                &body,
+            ))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected InvalidArgument when both targets supplied"),
+        };
+        assert_eq!(err.code(), "InvalidArgument");
+        // The tenant's domain must be untouched (no mutation happened).
+        assert!(
+            get_tenant_xml(&svc, &tid).await.contains("d.example.com"),
+            "domain should be unchanged after a rejected request"
+        );
+    }
 }

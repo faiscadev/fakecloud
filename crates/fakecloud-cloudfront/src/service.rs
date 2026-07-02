@@ -1043,39 +1043,17 @@ impl CloudFrontService {
             .values()
             .flat_map(|a| a.distributions.values().cloned())
             .collect();
-        dists.sort_by_key(|a| a.last_modified_time);
         drop(state);
+        dists.sort_by_key(|a| a.last_modified_time);
 
-        // CloudFront paginates with Marker (the next distribution Id) + MaxItems.
-        let max_items = req
-            .query_params
-            .get("MaxItems")
-            .or_else(|| req.query_params.get("maxitems"))
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(100);
-        let marker = req
-            .query_params
-            .get("Marker")
-            .or_else(|| req.query_params.get("marker"));
-        let start_idx = match marker {
-            Some(m) if !m.is_empty() => {
-                dists.iter().position(|d| &d.id == m).unwrap_or(dists.len())
-            }
-            _ => 0,
-        };
-        let page: Vec<StoredDistribution> = dists
-            .iter()
-            .skip(start_idx)
-            .take(max_items)
-            .cloned()
-            .collect();
-        let next_marker = dists.get(start_idx + page.len()).map(|d| d.id.clone());
+        // CloudFront paginates with an exclusive Marker (start after this id) +
+        // MaxItems; shared with the ListDistributionsBy* handlers.
+        let (marker, max_items, page, next_marker) = paginate_distributions(req, dists);
 
         let body = build_distribution_list_xml(
             &page,
             "DistributionList",
-            marker.map(String::as_str).unwrap_or(""),
+            &marker,
             max_items,
             next_marker.as_deref(),
         );
@@ -1144,9 +1122,10 @@ impl CloudFrontService {
         }
 
         // The "by-X" listings each have a distinct response root element.
-        // We never index distributions by the predicate (that would require
-        // shipping each policy/key-group/etc service first), so each
-        // response is empty until those services land.
+        // For the seven predicate ops whose match field is persisted on the
+        // distribution config we filter the live state; the remaining ops
+        // (owned-resource, connection-mode/function, trust-store,
+        // realtime-log-config) are not yet indexed and stay empty.
         let root = match action {
             "ListDistributionsByCachePolicyId"
             | "ListDistributionsByOriginRequestPolicyId"
@@ -1156,7 +1135,86 @@ impl CloudFrontService {
             "ListDistributionsByOwnedResource" => "DistributionIdOwnerList",
             _ => "DistributionList",
         };
-        let body = build_empty_distribution_id_list(root);
+
+        // Collect all distributions once, sorted for stable ordering.
+        let mut all: Vec<StoredDistribution> = {
+            let state = self.state.read();
+            state
+                .accounts
+                .values()
+                .flat_map(|a| a.distributions.values().cloned())
+                .collect()
+        };
+        all.sort_by_key(|d| d.last_modified_time);
+
+        let path_id = route.id.as_deref().unwrap_or("");
+        let matched: Vec<StoredDistribution> = match action {
+            "ListDistributionsByCachePolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_cache_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByOriginRequestPolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_origin_request_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByResponseHeadersPolicyId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_response_headers_policy(d, path_id))
+                .collect(),
+            "ListDistributionsByKeyGroup" => all
+                .into_iter()
+                .filter(|d| distribution_uses_key_group(d, path_id))
+                .collect(),
+            "ListDistributionsByVpcOriginId" => all
+                .into_iter()
+                .filter(|d| distribution_uses_vpc_origin(d, path_id))
+                .collect(),
+            // CloudFront treats the literal WebACLId "null" as "list the
+            // distributions that aren't associated with any web ACL".
+            "ListDistributionsByWebACLId" if path_id == "null" => all
+                .into_iter()
+                .filter(|d| {
+                    d.config
+                        .web_acl_id
+                        .as_deref()
+                        .map(|w| w.is_empty())
+                        .unwrap_or(true)
+                })
+                .collect(),
+            "ListDistributionsByWebACLId" => all
+                .into_iter()
+                .filter(|d| d.config.web_acl_id.as_deref() == Some(path_id))
+                .collect(),
+            "ListDistributionsByAnycastIpListId" => all
+                .into_iter()
+                .filter(|d| d.config.anycast_ip_list_id.as_deref() == Some(path_id))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        // Mirror the Marker/MaxItems pagination the plain ListDistributions
+        // handler applies so large predicate result sets page correctly.
+        let (marker, max_items, page, next_marker) = paginate_distributions(req, matched);
+
+        let body = if root == "DistributionIdList" {
+            let ids: Vec<&str> = page.iter().map(|d| d.id.as_str()).collect();
+            build_distribution_id_list_xml(&ids, &marker, max_items, next_marker.as_deref())
+        } else if root == "DistributionList"
+            && matches!(
+                action,
+                "ListDistributionsByWebACLId" | "ListDistributionsByAnycastIpListId"
+            )
+        {
+            build_distribution_list_xml(
+                &page,
+                "DistributionList",
+                &marker,
+                max_items,
+                next_marker.as_deref(),
+            )
+        } else {
+            build_empty_distribution_id_list(root)
+        };
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
 
@@ -1757,6 +1815,159 @@ fn build_empty_distribution_id_list(root: &str) -> String {
     out.push_str("<Quantity>0</Quantity>");
     out.push_str(&format!("</{root}>"));
     out
+}
+
+/// Render a `DistributionIdList` response body listing the given ids, echoing
+/// the Marker/MaxItems cursor and NextMarker/IsTruncated pagination metadata.
+fn build_distribution_id_list_xml(
+    ids: &[&str],
+    marker: &str,
+    max_items: usize,
+    next_marker: Option<&str>,
+) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    out.push_str(&format!(
+        "<DistributionIdList xmlns=\"{ns}\">",
+        ns = crate::NAMESPACE
+    ));
+    out.push_str(&format!("<Marker>{}</Marker>", esc(marker)));
+    if let Some(nm) = next_marker {
+        out.push_str(&format!("<NextMarker>{}</NextMarker>", esc(nm)));
+    }
+    out.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+    out.push_str(&format!(
+        "<IsTruncated>{}</IsTruncated>",
+        next_marker.is_some()
+    ));
+    out.push_str(&format!("<Quantity>{}</Quantity>", ids.len()));
+    if !ids.is_empty() {
+        out.push_str("<Items>");
+        for id in ids {
+            out.push_str(&format!("<DistributionId>{}</DistributionId>", esc(id)));
+        }
+        out.push_str("</Items>");
+    }
+    out.push_str("</DistributionIdList>");
+    out
+}
+
+/// Apply the CloudFront Marker/MaxItems pagination scheme (the same one the
+/// plain `ListDistributions` handler uses) to an already-filtered, sorted set
+/// of distributions. Returns the echoed marker, the effective MaxItems, the
+/// page slice, and the NextMarker cursor when the result is truncated.
+fn paginate_distributions(
+    req: &AwsRequest,
+    items: Vec<StoredDistribution>,
+) -> (String, usize, Vec<StoredDistribution>, Option<String>) {
+    let max_items = req
+        .query_params
+        .get("MaxItems")
+        .or_else(|| req.query_params.get("maxitems"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(100);
+    let marker = req
+        .query_params
+        .get("Marker")
+        .or_else(|| req.query_params.get("marker"))
+        .cloned()
+        .unwrap_or_default();
+    // CloudFront markers are EXCLUSIVE: a supplied Marker means "start after
+    // this id". If the marker id isn't found, the page is empty (start past
+    // the end), matching AWS.
+    let start_idx = if marker.is_empty() {
+        0
+    } else {
+        match items.iter().position(|d| d.id == marker) {
+            Some(pos) => pos + 1,
+            None => items.len(),
+        }
+    };
+    let page: Vec<StoredDistribution> = items
+        .iter()
+        .skip(start_idx)
+        .take(max_items)
+        .cloned()
+        .collect();
+    // Truncated when unread items remain after this page. NextMarker is the id
+    // of the LAST item on the current page (where listing left off), so the
+    // caller passes it back as the next Marker to resume strictly after it.
+    let has_more = start_idx + page.len() < items.len();
+    let next_marker = if has_more {
+        page.last().map(|d| d.id.clone())
+    } else {
+        None
+    };
+    (marker, max_items, page, next_marker)
+}
+
+/// Iterate the default cache behavior followed by every additional cache
+/// behavior of a distribution.
+fn distribution_cache_behaviors(
+    d: &StoredDistribution,
+) -> impl Iterator<Item = &crate::model::CacheBehavior> {
+    d.config
+        .cache_behaviors
+        .as_ref()
+        .and_then(|cb| cb.items.as_ref())
+        .into_iter()
+        .flat_map(|items| items.cache_behavior.iter())
+}
+
+fn distribution_uses_cache_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config.default_cache_behavior.cache_policy_id.as_deref() == Some(id)
+        || distribution_cache_behaviors(d).any(|b| b.cache_policy_id.as_deref() == Some(id))
+}
+
+fn distribution_uses_origin_request_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .default_cache_behavior
+        .origin_request_policy_id
+        .as_deref()
+        == Some(id)
+        || distribution_cache_behaviors(d)
+            .any(|b| b.origin_request_policy_id.as_deref() == Some(id))
+}
+
+fn distribution_uses_response_headers_policy(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .default_cache_behavior
+        .response_headers_policy_id
+        .as_deref()
+        == Some(id)
+        || distribution_cache_behaviors(d)
+            .any(|b| b.response_headers_policy_id.as_deref() == Some(id))
+}
+
+fn trusted_key_groups_contains(tkg: Option<&crate::model::TrustedKeyGroups>, id: &str) -> bool {
+    tkg.and_then(|g| g.items.as_ref())
+        .map(|items| items.key_group.iter().any(|k| k == id))
+        .unwrap_or(false)
+}
+
+fn distribution_uses_key_group(d: &StoredDistribution, id: &str) -> bool {
+    trusted_key_groups_contains(
+        d.config.default_cache_behavior.trusted_key_groups.as_ref(),
+        id,
+    ) || distribution_cache_behaviors(d)
+        .any(|b| trusted_key_groups_contains(b.trusted_key_groups.as_ref(), id))
+}
+
+fn distribution_uses_vpc_origin(d: &StoredDistribution, id: &str) -> bool {
+    d.config
+        .origins
+        .items
+        .as_ref()
+        .map(|items| {
+            items.origin.iter().any(|o| {
+                o.vpc_origin_config
+                    .as_ref()
+                    .map(|v| v.vpc_origin_id == id)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn build_invalidation_xml(inv: &StoredInvalidation) -> String {
@@ -2581,5 +2792,266 @@ mod tests {
         // a Comment element on the wire.
         assert!(!xml.contains("<Comment>a&b<c>d"));
         assert!(xml.contains(dist_id));
+    }
+
+    fn predicate_dist_config_xml(caller_ref: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+  <CallerReference>{caller_ref}</CallerReference>
+  <Origins>
+    <Quantity>1</Quantity>
+    <Items>
+      <Origin>
+        <Id>primary</Id>
+        <DomainName>example.com</DomainName>
+        <VpcOriginConfig><VpcOriginId>vo-123</VpcOriginId></VpcOriginConfig>
+      </Origin>
+    </Items>
+  </Origins>
+  <DefaultCacheBehavior>
+    <TargetOriginId>primary</TargetOriginId>
+    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+    <CachePolicyId>cp-123</CachePolicyId>
+    <OriginRequestPolicyId>orp-123</OriginRequestPolicyId>
+    <ResponseHeadersPolicyId>rhp-123</ResponseHeadersPolicyId>
+    <TrustedKeyGroups>
+      <Enabled>true</Enabled>
+      <Quantity>1</Quantity>
+      <Items><KeyGroup>kg-123</KeyGroup></Items>
+    </TrustedKeyGroups>
+  </DefaultCacheBehavior>
+  <Comment></Comment>
+  <WebACLId>waf-abc</WebACLId>
+  <AnycastIpListId>ail-123</AnycastIpListId>
+  <Enabled>true</Enabled>
+</DistributionConfig>"#
+        )
+    }
+
+    async fn list_by(svc: &CloudFrontService, path: &str) -> String {
+        let resp = svc
+            .handle(make_request(http::Method::GET, path, "", ""))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn list_distributions_by_predicate_fields_filters_state() {
+        let svc = CloudFrontService::new(make_state());
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &predicate_dist_config_xml("pred-ref"),
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes()).unwrap();
+        let id = xml
+            .split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string();
+
+        // DistributionIdList-shaped ops: match id must appear, mismatch empty.
+        for (path, root) in [
+            ("/2020-05-31/distributionsByCachePolicyId/cp-123", "cp-123"),
+            (
+                "/2020-05-31/distributionsByOriginRequestPolicyId/orp-123",
+                "orp-123",
+            ),
+            (
+                "/2020-05-31/distributionsByResponseHeadersPolicyId/rhp-123",
+                "rhp-123",
+            ),
+            ("/2020-05-31/distributionsByKeyGroupId/kg-123", "kg-123"),
+            ("/2020-05-31/distributionsByVpcOriginId/vo-123", "vo-123"),
+        ] {
+            let body = list_by(&svc, path).await;
+            assert!(body.contains("<DistributionIdList"), "{root}: {body}");
+            assert!(
+                body.contains(&format!("<DistributionId>{id}</DistributionId>")),
+                "{root} did not list distribution: {body}"
+            );
+            assert!(body.contains("<Quantity>1</Quantity>"), "{root}: {body}");
+        }
+
+        // Mismatched id -> empty.
+        let empty = list_by(&svc, "/2020-05-31/distributionsByCachePolicyId/other").await;
+        assert!(empty.contains("<Quantity>0</Quantity>"), "{empty}");
+        assert!(!empty.contains("<DistributionId>"), "{empty}");
+
+        // DistributionList-shaped ops: WebACLId + AnycastIpListId.
+        let web = list_by(&svc, "/2020-05-31/distributionsByWebACLId/waf-abc").await;
+        assert!(web.contains("<DistributionList"), "{web}");
+        assert!(web.contains(&format!("<Id>{id}</Id>")), "{web}");
+
+        let anycast = list_by(&svc, "/2020-05-31/distributionsByAnycastIpListId/ail-123").await;
+        assert!(anycast.contains("<DistributionList"), "{anycast}");
+        assert!(anycast.contains(&format!("<Id>{id}</Id>")), "{anycast}");
+
+        let anycast_miss = list_by(&svc, "/2020-05-31/distributionsByAnycastIpListId/nope").await;
+        assert!(
+            anycast_miss.contains("<Quantity>0</Quantity>"),
+            "{anycast_miss}"
+        );
+    }
+
+    fn dist_config_with_cache_policy(caller_ref: &str, cache_policy: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+  <CallerReference>{caller_ref}</CallerReference>
+  <Origins>
+    <Quantity>1</Quantity>
+    <Items><Origin><Id>primary</Id><DomainName>example.com</DomainName></Origin></Items>
+  </Origins>
+  <DefaultCacheBehavior>
+    <TargetOriginId>primary</TargetOriginId>
+    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+    <CachePolicyId>{cache_policy}</CachePolicyId>
+  </DefaultCacheBehavior>
+  <Comment></Comment>
+  <Enabled>true</Enabled>
+</DistributionConfig>"#
+        )
+    }
+
+    async fn create_dist_returning_id(svc: &CloudFrontService, config_xml: &str) -> String {
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                config_xml,
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes()).unwrap();
+        xml.split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn make_request_with_params(path: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut r = make_request(http::Method::GET, path, "", "");
+        r.query_params = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        r
+    }
+
+    #[tokio::test]
+    async fn list_distributions_by_web_acl_id_null_lists_unassociated() {
+        // Finding #2: WebACLId "null" lists distributions with no web ACL.
+        let svc = CloudFrontService::new(make_state());
+        let with_acl = create_dist_returning_id(
+            &svc,
+            &predicate_dist_config_xml("null-with-acl"), // has WebACLId waf-abc
+        )
+        .await;
+        let without_acl =
+            create_dist_returning_id(&svc, &dist_config_with_cache_policy("null-no-acl", "cp-x"))
+                .await;
+
+        let body = list_by(&svc, "/2020-05-31/distributionsByWebACLId/null").await;
+        assert!(body.contains("<DistributionList"), "{body}");
+        assert!(
+            body.contains(&format!("<Id>{without_acl}</Id>")),
+            "unassociated distribution missing from null listing: {body}"
+        );
+        assert!(
+            !body.contains(&format!("<Id>{with_acl}</Id>")),
+            "distribution WITH a web ACL leaked into the null listing: {body}"
+        );
+    }
+
+    fn only_distribution_id(xml: &str) -> String {
+        assert_eq!(
+            xml.matches("<DistributionId>").count(),
+            1,
+            "expected exactly one DistributionId: {xml}"
+        );
+        xml.split("<DistributionId>")
+            .nth(1)
+            .unwrap()
+            .split("</DistributionId>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn list_distributions_by_predicate_paginates() {
+        // Finding #3: Marker/MaxItems pagination applies to the filtered set,
+        // with EXCLUSIVE markers (NextMarker = last id on the page; the next
+        // request resumes strictly after it).
+        let svc = CloudFrontService::new(make_state());
+        // Two distributions sharing the same cache policy.
+        let d1 =
+            create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-1", "cp-pg")).await;
+        let d2 =
+            create_dist_returning_id(&svc, &dist_config_with_cache_policy("pg-2", "cp-pg")).await;
+
+        // First page: MaxItems=1 -> one id, truncated, NextMarker == that id.
+        let page1 = svc
+            .handle(make_request_with_params(
+                "/2020-05-31/distributionsByCachePolicyId/cp-pg",
+                &[("MaxItems", "1")],
+            ))
+            .await
+            .unwrap();
+        let xml1 = std::str::from_utf8(page1.body.expect_bytes()).unwrap();
+        assert!(xml1.contains("<MaxItems>1</MaxItems>"), "{xml1}");
+        assert!(xml1.contains("<IsTruncated>true</IsTruncated>"), "{xml1}");
+        let first_id = only_distribution_id(xml1);
+        let next = xml1
+            .split("<NextMarker>")
+            .nth(1)
+            .expect("NextMarker present")
+            .split("</NextMarker>")
+            .next()
+            .unwrap()
+            .to_string();
+        // Exclusive marker: NextMarker is the LAST id on the current page.
+        assert_eq!(next, first_id, "NextMarker must be the last id on the page");
+
+        // Second page via the cursor: resumes AFTER the marker -> the other id,
+        // never the marker item again, and not truncated.
+        let page2 = svc
+            .handle(make_request_with_params(
+                "/2020-05-31/distributionsByCachePolicyId/cp-pg",
+                &[("MaxItems", "1"), ("Marker", &next)],
+            ))
+            .await
+            .unwrap();
+        let xml2 = std::str::from_utf8(page2.body.expect_bytes()).unwrap();
+        assert!(xml2.contains(&format!("<Marker>{next}</Marker>")), "{xml2}");
+        assert!(xml2.contains("<IsTruncated>false</IsTruncated>"), "{xml2}");
+        let second_id = only_distribution_id(xml2);
+        assert_ne!(
+            second_id, first_id,
+            "exclusive marker must not return the marker item again"
+        );
+        // The two pages together cover both distributions exactly once.
+        let mut seen = [first_id, second_id];
+        seen.sort();
+        let mut expected = [d1, d2];
+        expected.sort();
+        assert_eq!(seen, expected, "pages did not cover both distributions");
     }
 }

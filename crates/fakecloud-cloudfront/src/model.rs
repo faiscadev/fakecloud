@@ -41,7 +41,10 @@ pub struct DistributionConfig {
     pub viewer_certificate: Option<ViewerCertificate>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub restrictions: Option<Restrictions>,
-    #[serde(default, skip_serializing_if = "skip_if_none")]
+    // AWS spells this `WebACLId` (upper-case ACL). The default PascalCase
+    // rule would emit `WebAclId`, which drops the field on parse from real
+    // SDK requests and mis-names it on the wire. Pin the exact name.
+    #[serde(default, rename = "WebACLId", skip_serializing_if = "skip_if_none")]
     pub web_acl_id: Option<String>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub http_version: Option<String>,
