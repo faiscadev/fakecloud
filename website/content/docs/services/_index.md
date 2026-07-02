@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 49 AWS services with 3,858 total operations. 128,643/128,643 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 49 AWS services with 3,865 total operations. 128,882/128,882 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -36,7 +36,7 @@ fakecloud implements 49 AWS services with 3,858 total operations. 128,643/128,64
 | Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | MemoryDB               |  45 | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted. Redis/Valkey data-plane container backing is a follow-up |
-| EKS                    |  21 | Control plane: clusters, managed node groups, Fargate profiles (create/describe/list/delete, cluster + node-group config/version updates with tracking, tagging); persisted, `CREATING` -> `ACTIVE` on describe. Add-ons, access entries, pod-identity in progress (21 of 65 ops) |
+| EKS                    |  28 | Control plane: clusters, managed node groups, Fargate profiles, add-ons (create/describe/list/delete, cluster/node-group/add-on config + version updates with tracking, add-on catalogue, tagging); persisted, `CREATING` -> `ACTIVE` on describe. Access entries, pod-identity in progress (28 of 65 ops) |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |

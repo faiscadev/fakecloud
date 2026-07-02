@@ -75,6 +75,31 @@ pub struct Nodegroup {
     pub updates: BTreeMap<String, Update>,
 }
 
+/// An EKS add-on, a sub-resource of a cluster (e.g. `vpc-cni`, `coredns`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Addon {
+    pub name: String,
+    pub arn: String,
+    pub cluster_name: String,
+    pub addon_version: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    /// Present only when the caller supplied `serviceAccountRoleArn`.
+    pub service_account_role_arn: Option<String>,
+    /// Present only when the caller supplied `configurationValues`.
+    pub configuration_values: Option<String>,
+    /// The custom install namespace, if the caller supplied `namespaceConfig`.
+    pub namespace: Option<String>,
+    /// Pod identity association ARNs (one per requested association), echoed
+    /// back as the `podIdentityAssociations` StringList on describe.
+    pub pod_identity_associations: Vec<String>,
+    pub tags: TagMap,
+    /// Per-addon updates keyed by update id, disambiguated from cluster and
+    /// node-group updates by the `addonName` query param on Describe/ListUpdates.
+    pub updates: BTreeMap<String, Update>,
+}
+
 /// A Fargate profile, a sub-resource of a cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FargateProfile {
@@ -126,6 +151,9 @@ pub struct EksState {
     /// Fargate profiles nested as cluster name -> profile name -> profile.
     #[serde(default)]
     pub fargate_profiles: BTreeMap<String, BTreeMap<String, FargateProfile>>,
+    /// Add-ons nested as cluster name -> addon name -> addon.
+    #[serde(default)]
+    pub addons: BTreeMap<String, BTreeMap<String, Addon>>,
 }
 
 impl AccountState for EksState {
@@ -161,6 +189,22 @@ pub fn fargate_profile_arn(
     id: &str,
 ) -> String {
     format!("arn:aws:eks:{region}:{account_id}:fargateprofile/{cluster}/{name}/{id}")
+}
+
+/// Build the ARN for an add-on. AWS appends a random UUID segment after
+/// `addon/{cluster}/{name}` so each add-on's ARN is unique across recreate.
+pub fn addon_arn(region: &str, account_id: &str, cluster: &str, name: &str, id: &str) -> String {
+    format!("arn:aws:eks:{region}:{account_id}:addon/{cluster}/{name}/{id}")
+}
+
+/// Build the ARN for a pod identity association attached to an add-on.
+pub fn pod_identity_association_arn(
+    region: &str,
+    account_id: &str,
+    cluster: &str,
+    id: &str,
+) -> String {
+    format!("arn:aws:eks:{region}:{account_id}:podidentityassociation/{cluster}/a-{id}")
 }
 
 pub type SharedEksState = Arc<RwLock<MultiAccountState<EksState>>>;

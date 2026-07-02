@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,858 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,865 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,858 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,865 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 49
-- **Total Operations**: 3,858
-- **Conformance Engine**: 128,643 Smithy-based test variants
+- **Total Operations**: 3,865
+- **Conformance Engine**: 128,882 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -28,7 +28,7 @@ fakecloud provides 100% API conformance across 3,858 operations. Unlike mocks, f
 - **Aurora DSQL**: 16 operations. Serverless distributed PostgreSQL control plane. Cluster lifecycle (`CreateCluster`/`GetCluster`/`UpdateCluster`/`DeleteCluster`/`ListClusters`) with async `CREATING`->`ACTIVE` transitions, cluster resource policies, change streams to Kinesis (`CreateStream`/`GetStream`/`DeleteStream`/`ListStreams`), `GetVpcEndpointServiceName`, and tagging. Data plane (reachable container + IAM-token auth) is a follow-up.
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.
-- **EKS**: 21 operations (of 65). Elastic Kubernetes Service control plane: clusters, managed node groups, and Fargate profiles (create/describe/list/delete, cluster + node-group config/version updates with tracking, tagging), with persistence. Resources transition `CREATING` -> `ACTIVE` on describe. Add-ons, access entries, identity-provider configs, and pod-identity are in progress.
+- **EKS**: 28 operations (of 65). Elastic Kubernetes Service control plane: clusters, managed node groups, Fargate profiles, and add-ons (create/describe/list/delete, cluster/node-group/add-on config + version updates with tracking, add-on version + configuration catalogue, tagging), with persistence. Resources transition `CREATING` -> `ACTIVE` on describe. Access entries, identity-provider configs, and pod-identity are in progress.
 
 ### AI & Machine Learning
 - **Bedrock**: 214 operations across 4 APIs (Bedrock 101, Bedrock Runtime 10, Bedrock Agent 72, Bedrock Agent Runtime 31). Guardrails, Model Customization, Provisioned Throughput, Agents, Knowledge Bases.

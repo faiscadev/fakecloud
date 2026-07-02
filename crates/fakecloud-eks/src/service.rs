@@ -20,8 +20,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    cluster_arn, fargate_profile_arn, nodegroup_arn, Cluster, EksSnapshot, FargateProfile,
-    Nodegroup, SharedEksState, Update, DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
+    addon_arn, cluster_arn, fargate_profile_arn, nodegroup_arn, pod_identity_association_arn,
+    Addon, Cluster, EksSnapshot, FargateProfile, Nodegroup, SharedEksState, Update,
+    DEFAULT_K8S_VERSION, EKS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// The set of control-plane log types EKS reports on every cluster.
@@ -55,6 +56,13 @@ pub const EKS_ACTIONS: &[&str] = &[
     "DescribeFargateProfile",
     "ListFargateProfiles",
     "DeleteFargateProfile",
+    "CreateAddon",
+    "DescribeAddon",
+    "ListAddons",
+    "DeleteAddon",
+    "UpdateAddon",
+    "DescribeAddonVersions",
+    "DescribeAddonConfiguration",
 ];
 
 pub struct EksService {
@@ -216,6 +224,41 @@ impl EksService {
                     name: decode(n),
                 },
             )),
+            // Add-ons (sub-resources of a cluster).
+            (&Method::POST, ["clusters", c, "addons"]) => {
+                Some(("CreateAddon", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "addons"]) => {
+                Some(("ListAddons", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "addons", n]) => Some((
+                "DescribeAddon",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "addons", n]) => Some((
+                "DeleteAddon",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "addons", n, "update"]) => Some((
+                "UpdateAddon",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(n),
+                },
+            )),
+            // Add-on catalogue ops (not scoped to a cluster).
+            (&Method::GET, ["addons", "supported-versions"]) => {
+                Some(("DescribeAddonVersions", PathArgs::None))
+            }
+            (&Method::GET, ["addons", "configuration-schemas"]) => {
+                Some(("DescribeAddonConfiguration", PathArgs::None))
+            }
             (&Method::POST, ["tags", arn]) => Some(("TagResource", PathArgs::Arn(decode(arn)))),
             (&Method::DELETE, ["tags", arn]) => Some(("UntagResource", PathArgs::Arn(decode(arn)))),
             (&Method::GET, ["tags", arn]) => {
@@ -442,15 +485,16 @@ impl EksService {
         update_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let nodegroup_name = req.query_params.get("nodegroupName").cloned();
+        let addon_name = req.query_params.get("addonName").cloned();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if !state.clusters.contains_key(name) {
             return Err(not_found_cluster(name)());
         }
-        // `DescribeUpdate` disambiguates cluster updates from node-group
-        // updates via the optional `nodegroupName` query param, mirroring the
-        // real API. When present, the update lives on that node group's own
-        // update history.
+        // `DescribeUpdate` disambiguates cluster updates from node-group and
+        // add-on updates via the optional `nodegroupName` / `addonName` query
+        // params, mirroring the real API. When present, the update lives on
+        // that sub-resource's own update history.
         let update = if let Some(ng_name) = nodegroup_name.as_deref() {
             let ng = state
                 .nodegroups
@@ -458,6 +502,16 @@ impl EksService {
                 .and_then(|m| m.get_mut(ng_name))
                 .ok_or_else(not_found_nodegroup(ng_name))?;
             ng.updates
+                .get_mut(update_id)
+                .ok_or_else(not_found_update(update_id))?
+        } else if let Some(a_name) = addon_name.as_deref() {
+            let addon = state
+                .addons
+                .get_mut(name)
+                .and_then(|m| m.get_mut(a_name))
+                .ok_or_else(not_found_addon(a_name))?;
+            addon
+                .updates
                 .get_mut(update_id)
                 .ok_or_else(not_found_update(update_id))?
         } else {
@@ -485,6 +539,7 @@ impl EksService {
         let next_token = req.query_params.get("nextToken").cloned();
 
         let nodegroup_name = req.query_params.get("nodegroupName").cloned();
+        let addon_name = req.query_params.get("addonName").cloned();
         let accounts = self.state.read();
         let state = accounts
             .get(&req.account_id)
@@ -499,6 +554,13 @@ impl EksService {
                 .and_then(|m| m.get(ng_name))
                 .ok_or_else(not_found_nodegroup(ng_name))?;
             ng.updates.keys().cloned().collect()
+        } else if let Some(a_name) = addon_name.as_deref() {
+            let addon = state
+                .addons
+                .get(name)
+                .and_then(|m| m.get(a_name))
+                .ok_or_else(not_found_addon(a_name))?;
+            addon.updates.keys().cloned().collect()
         } else {
             let cluster = state
                 .clusters
@@ -1000,6 +1062,284 @@ impl EksService {
             json!({ "fargateProfile": fargate_profile_json(&profile) }).to_string(),
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Add-ons
+    // -----------------------------------------------------------------------
+
+    fn create_addon(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let name = body
+            .get("addonName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("addonName is required"))?
+            .to_string();
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // The parent cluster must exist; AWS returns ResourceNotFoundException.
+        let cluster_version = state
+            .clusters
+            .get(cluster_name)
+            .ok_or_else(not_found_cluster(cluster_name))?
+            .version
+            .clone();
+        if state
+            .addons
+            .get(cluster_name)
+            .is_some_and(|m| m.contains_key(&name))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!("Addon already exists with name {name} and cluster name {cluster_name}"),
+            ));
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let arn = addon_arn(&region, &account_id, cluster_name, &name, &id);
+        let now = Utc::now();
+        let addon_version = body
+            .get("addonVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default_addon_version(&name, &cluster_version));
+        let namespace = body
+            .get("namespaceConfig")
+            .and_then(|v| v.get("namespace"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let pod_identity_associations = build_pod_identity_association_arns(
+            &region,
+            &account_id,
+            cluster_name,
+            body.get("podIdentityAssociations"),
+        );
+
+        let addon = Addon {
+            name: name.clone(),
+            arn,
+            cluster_name: cluster_name.to_string(),
+            addon_version,
+            status: "CREATING".to_string(),
+            created_at: now,
+            modified_at: now,
+            service_account_role_arn: body
+                .get("serviceAccountRoleArn")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            configuration_values: body
+                .get("configurationValues")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            namespace,
+            pod_identity_associations,
+            tags: parse_tag_map(body.get("tags")),
+            updates: Default::default(),
+        };
+
+        let out = addon_json(&addon);
+        state
+            .addons
+            .entry(cluster_name.to_string())
+            .or_default()
+            .insert(name, addon);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "addon": out }).to_string(),
+        ))
+    }
+
+    fn describe_addon(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let addon = state
+            .addons
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_addon(name))?;
+        // Settle CREATING -> ACTIVE on first describe.
+        if addon.status == "CREATING" {
+            addon.status = "ACTIVE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "addon": addon_json(addon) }).to_string(),
+        ))
+    }
+
+    fn list_addons(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let names: Vec<String> = state
+            .addons
+            .get(cluster_name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&names, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "addons": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_addon(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let mut addon = state
+            .addons
+            .get_mut(cluster_name)
+            .and_then(|m| m.remove(name))
+            .ok_or_else(not_found_addon(name))?;
+        addon.status = "DELETING".to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "addon": addon_json(&addon) }).to_string(),
+        ))
+    }
+
+    fn update_addon(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let addon = state
+            .addons
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(not_found_addon(name))?;
+
+        let mut params = Vec::new();
+        if let Some(version) = body.get("addonVersion").and_then(|v| v.as_str()) {
+            addon.addon_version = version.to_string();
+            params.push(("AddonVersion".to_string(), version.to_string()));
+        }
+        if let Some(role) = body.get("serviceAccountRoleArn").and_then(|v| v.as_str()) {
+            addon.service_account_role_arn = Some(role.to_string());
+            params.push(("ServiceAccountRoleArn".to_string(), role.to_string()));
+        }
+        if let Some(cfg) = body.get("configurationValues").and_then(|v| v.as_str()) {
+            addon.configuration_values = Some(cfg.to_string());
+            params.push(("ConfigurationValues".to_string(), cfg.to_string()));
+        }
+        if let Some(resolve) = body.get("resolveConflicts").and_then(|v| v.as_str()) {
+            params.push(("ResolveConflicts".to_string(), resolve.to_string()));
+        }
+        if let Some(assocs) = body.get("podIdentityAssociations") {
+            addon.pod_identity_associations = build_pod_identity_association_arns(
+                &region,
+                &account_id,
+                cluster_name,
+                Some(assocs),
+            );
+        }
+        addon.modified_at = Utc::now();
+
+        let update = new_update("AddonUpdate", params);
+        let out = update_json(&update);
+        addon.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": out }).to_string(),
+        ))
+    }
+
+    fn describe_addon_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let addon_filter = req.query_params.get("addonName").cloned();
+        let k8s_version = req
+            .query_params
+            .get("kubernetesVersion")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_K8S_VERSION.to_string());
+
+        let catalog = addon_catalog(&k8s_version);
+        let filtered: Vec<Value> = catalog
+            .into_iter()
+            .filter(|a| addon_filter.as_deref().is_none_or(|f| a["addonName"] == f))
+            .collect();
+
+        let (page, token) = paginate_checked(&filtered, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "addons": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn describe_addon_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let addon_name = req
+            .query_params
+            .get("addonName")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("addonName is required"))?;
+        let addon_version = req
+            .query_params
+            .get("addonVersion")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("addonVersion is required"))?;
+
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({
+                "addonName": addon_name,
+                "addonVersion": addon_version,
+                "configurationSchema": addon_configuration_schema(&addon_name),
+                "podIdentityConfiguration": pod_identity_configuration(&addon_name),
+            })
+            .to_string(),
+        ))
+    }
 }
 
 /// Persist the current EKS state as a snapshot. Shared by
@@ -1065,6 +1405,10 @@ impl AwsService for EksService {
                 | "CreateFargateProfile"
                 | "DeleteFargateProfile"
                 | "DescribeFargateProfile"
+                | "CreateAddon"
+                | "DeleteAddon"
+                | "UpdateAddon"
+                | "DescribeAddon"
         );
 
         let result = match (action, &args) {
@@ -1103,6 +1447,19 @@ impl AwsService for EksService {
             ("DeleteFargateProfile", PathArgs::ClusterChild { cluster, name }) => {
                 self.delete_fargate_profile(&req, cluster, name)
             }
+            ("CreateAddon", PathArgs::Cluster(c)) => self.create_addon(&req, c),
+            ("ListAddons", PathArgs::Cluster(c)) => self.list_addons(&req, c),
+            ("DescribeAddon", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_addon(&req, cluster, name)
+            }
+            ("DeleteAddon", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_addon(&req, cluster, name)
+            }
+            ("UpdateAddon", PathArgs::ClusterChild { cluster, name }) => {
+                self.update_addon(&req, cluster, name)
+            }
+            ("DescribeAddonVersions", _) => self.describe_addon_versions(&req),
+            ("DescribeAddonConfiguration", _) => self.describe_addon_configuration(&req),
             _ => Err(AwsServiceError::action_not_implemented("eks", action)),
         };
 
@@ -1214,6 +1571,17 @@ fn not_found_fargate_profile(name: &str) -> impl Fn() -> AwsServiceError + 'stat
             StatusCode::NOT_FOUND,
             "ResourceNotFoundException",
             format!("No Fargate Profile found with name: {name}."),
+        )
+    }
+}
+
+fn not_found_addon(name: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let name = name.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No addon found for name: {name}."),
         )
     }
 }
@@ -1485,6 +1853,154 @@ fn fargate_profile_json(p: &FargateProfile) -> Value {
         "tags": p.tags,
         "health": { "issues": [] },
     })
+}
+
+/// The AWS default add-on version for a well-known add-on at a given cluster
+/// version. Falls back to a generic `v1.0.0-eksbuild.1` for unknown add-ons so
+/// CreateAddon always echoes a plausible version even without an explicit one.
+fn default_addon_version(addon_name: &str, _cluster_version: &str) -> String {
+    match addon_name {
+        "vpc-cni" => "v1.18.3-eksbuild.2".to_string(),
+        "coredns" => "v1.11.1-eksbuild.9".to_string(),
+        "kube-proxy" => "v1.31.0-eksbuild.2".to_string(),
+        "aws-ebs-csi-driver" => "v1.35.0-eksbuild.1".to_string(),
+        "aws-efs-csi-driver" => "v2.1.0-eksbuild.1".to_string(),
+        _ => "v1.0.0-eksbuild.1".to_string(),
+    }
+}
+
+/// Turn the request's `podIdentityAssociations` (structs of
+/// `{serviceAccount, roleArn}`) into the association ARNs echoed back on the
+/// add-on as a StringList.
+fn build_pod_identity_association_arns(
+    region: &str,
+    account_id: &str,
+    cluster: &str,
+    req: Option<&Value>,
+) -> Vec<String> {
+    let Some(list) = req.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|_| {
+            let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            pod_identity_association_arn(region, account_id, cluster, &id[..17.min(id.len())])
+        })
+        .collect()
+}
+
+fn addon_json(a: &Addon) -> Value {
+    let mut out = json!({
+        "addonName": a.name,
+        "clusterName": a.cluster_name,
+        "status": a.status,
+        "addonVersion": a.addon_version,
+        "addonArn": a.arn,
+        "createdAt": timestamp_to_number(a.created_at),
+        "modifiedAt": timestamp_to_number(a.modified_at),
+        "tags": a.tags,
+        "health": { "issues": [] },
+    });
+    if let Some(role) = &a.service_account_role_arn {
+        out["serviceAccountRoleArn"] = Value::String(role.clone());
+    }
+    if let Some(cfg) = &a.configuration_values {
+        out["configurationValues"] = Value::String(cfg.clone());
+    }
+    if let Some(ns) = &a.namespace {
+        out["namespaceConfig"] = json!({ "namespace": ns });
+    }
+    if !a.pod_identity_associations.is_empty() {
+        out["podIdentityAssociations"] = json!(a.pod_identity_associations);
+    }
+    out
+}
+
+/// A single `AddonVersionInfo` catalog entry.
+fn addon_version_info(version: &str, cluster_version: &str, requires_config: bool) -> Value {
+    json!({
+        "addonVersion": version,
+        "architecture": ["amd64", "arm64"],
+        "computeTypes": ["ec2", "fargate"],
+        "compatibilities": [{
+            "clusterVersion": cluster_version,
+            "platformVersions": ["*"],
+            "defaultVersion": true,
+        }],
+        "requiresConfiguration": requires_config,
+        "requiresIamPermissions": false,
+    })
+}
+
+/// A plausible real-AWS add-on version catalog scoped to a cluster version,
+/// returned by `DescribeAddonVersions`. Each entry is an `AddonInfo`.
+fn addon_catalog(cluster_version: &str) -> Vec<Value> {
+    let entry = |name: &str, atype: &str, ns: &str, requires_config: bool| -> Value {
+        let versions = vec![addon_version_info(
+            &default_addon_version(name, cluster_version),
+            cluster_version,
+            requires_config,
+        )];
+        json!({
+            "addonName": name,
+            "type": atype,
+            "addonVersions": versions,
+            "publisher": "eks",
+            "owner": "aws",
+            "defaultNamespace": ns,
+        })
+    };
+    vec![
+        entry("vpc-cni", "networking", "kube-system", false),
+        entry("coredns", "networking", "kube-system", false),
+        entry("kube-proxy", "networking", "kube-system", false),
+        entry("aws-ebs-csi-driver", "storage", "kube-system", false),
+        entry("aws-efs-csi-driver", "storage", "kube-system", false),
+    ]
+}
+
+/// A JSON-schema string describing the configuration accepted by an add-on,
+/// returned by `DescribeAddonConfiguration`.
+fn addon_configuration_schema(addon_name: &str) -> String {
+    json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "title": format!("{addon_name} configuration schema"),
+        "additionalProperties": false,
+        "properties": {
+            "resources": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "limits": { "type": "object" },
+                    "requests": { "type": "object" },
+                },
+            },
+            "tolerations": { "type": "array" },
+            "nodeSelector": { "type": "object" },
+        },
+    })
+    .to_string()
+}
+
+/// The recommended pod-identity configuration for an add-on, returned by
+/// `DescribeAddonConfiguration` as `podIdentityConfiguration`.
+fn pod_identity_configuration(addon_name: &str) -> Value {
+    match addon_name {
+        "vpc-cni" => json!([{
+            "serviceAccount": "aws-node",
+            "recommendedManagedPolicies": ["arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"],
+        }]),
+        "aws-ebs-csi-driver" => json!([{
+            "serviceAccount": "ebs-csi-controller-sa",
+            "recommendedManagedPolicies": ["arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"],
+        }]),
+        "aws-efs-csi-driver" => json!([{
+            "serviceAccount": "efs-csi-controller-sa",
+            "recommendedManagedPolicies": ["arn:aws:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy"],
+        }]),
+        _ => json!([]),
+    }
 }
 
 #[cfg(test)]
@@ -2103,15 +2619,233 @@ mod tests {
 
     #[tokio::test]
     async fn unimplemented_subresource_falls_through() {
-        // Addons/access-entries routes are not implemented; the router must not
-        // accidentally match them via the node-group/fargate-profile arms.
+        // Access-entries routes are not implemented; the router must not
+        // accidentally match them via the node-group/fargate-profile/addon arms.
         let svc = EksService::new(make_state());
         create_cluster(&svc, "c1").await;
         let err = svc
-            .handle(make_request(Method::GET, "/clusters/c1/addons", ""))
+            .handle(make_request(Method::GET, "/clusters/c1/access-entries", ""))
             .await
             .err()
             .unwrap();
         assert_eq!(err.code(), "UnknownOperationException");
+    }
+
+    // -----------------------------------------------------------------------
+    // Add-ons
+    // -----------------------------------------------------------------------
+
+    fn addon_body(name: &str) -> String {
+        json!({
+            "addonName": name,
+            "addonVersion": "v1.18.3-eksbuild.2",
+            "serviceAccountRoleArn": "arn:aws:iam::111122223333:role/eks-addon",
+            "configurationValues": "{\"replicaCount\":2}",
+            "tags": { "team": "core" }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn addon_create_describe_list_update_delete() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/addons",
+                &addon_body("vpc-cni"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addon"]["addonName"], "vpc-cni");
+        assert_eq!(v["addon"]["status"], "CREATING");
+        assert_eq!(v["addon"]["clusterName"], "c1");
+        assert_eq!(v["addon"]["addonVersion"], "v1.18.3-eksbuild.2");
+        assert_eq!(v["addon"]["configurationValues"], "{\"replicaCount\":2}");
+        assert!(v["addon"]["addonArn"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:eks:us-east-1:111122223333:addon/c1/vpc-cni/"));
+
+        // Describe settles CREATING -> ACTIVE.
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/addons/vpc-cni", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addon"]["status"], "ACTIVE");
+        assert_eq!(v["addon"]["tags"]["team"], "core");
+
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/addons", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addons"], json!(["vpc-cni"]));
+
+        // UpdateAddon mints a tracked Update, discoverable via addonName.
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/addons/vpc-cni/update",
+                &json!({ "addonVersion": "v1.18.5-eksbuild.1" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["type"], "AddonUpdate");
+        assert_eq!(v["update"]["status"], "InProgress");
+        let update_id = v["update"]["id"].as_str().unwrap().to_string();
+
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/updates/{update_id}?addonName=vpc-cni"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["status"], "Successful");
+
+        // Addon reflects the new version.
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/c1/addons/vpc-cni", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addon"]["addonVersion"], "v1.18.5-eksbuild.1");
+
+        // ListUpdates with addonName sees the update.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/c1/updates?addonName=vpc-cni",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["updateIds"].as_array().unwrap().len(), 1);
+
+        // Delete.
+        let resp = svc
+            .handle(make_request(
+                Method::DELETE,
+                "/clusters/c1/addons/vpc-cni",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addon"]["status"], "DELETING");
+
+        let err = svc
+            .handle(make_request(Method::GET, "/clusters/c1/addons/vpc-cni", ""))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn addon_on_missing_cluster_is_not_found() {
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/ghost/addons",
+                &addon_body("coredns"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn addon_duplicate_is_in_use() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "c1").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/c1/addons",
+            &addon_body("coredns"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/addons",
+                &addon_body("coredns"),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    #[tokio::test]
+    async fn describe_addon_versions_catalog_is_non_empty() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(Method::GET, "/addons/supported-versions", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let addons = v["addons"].as_array().unwrap();
+        assert!(addons.len() >= 5);
+        let names: Vec<&str> = addons
+            .iter()
+            .map(|a| a["addonName"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"vpc-cni"));
+        assert!(names.contains(&"coredns"));
+        assert!(!addons[0]["addonVersions"].as_array().unwrap().is_empty());
+
+        // Filtered by addonName.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/addons/supported-versions?addonName=coredns",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let addons = v["addons"].as_array().unwrap();
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0]["addonName"], "coredns");
+    }
+
+    #[tokio::test]
+    async fn describe_addon_configuration_returns_schema() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/addons/configuration-schemas?addonName=vpc-cni&addonVersion=v1.18.3-eksbuild.2",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["addonName"], "vpc-cni");
+        assert_eq!(v["addonVersion"], "v1.18.3-eksbuild.2");
+        assert!(v["configurationSchema"]
+            .as_str()
+            .unwrap()
+            .contains("$schema"));
+        assert_eq!(
+            v["podIdentityConfiguration"][0]["serviceAccount"],
+            "aws-node"
+        );
     }
 }
