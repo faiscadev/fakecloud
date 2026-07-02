@@ -6,6 +6,6 @@ pub mod state;
 
 pub use service::{ServiceDiscoveryService, SERVICEDISCOVERY_ACTIONS};
 pub use state::{
-    ServiceDiscoverySnapshot, ServiceDiscoveryState, SharedServiceDiscoveryState,
+    Service, ServiceDiscoverySnapshot, ServiceDiscoveryState, SharedServiceDiscoveryState,
     SERVICEDISCOVERY_SNAPSHOT_SCHEMA_VERSION,
 };

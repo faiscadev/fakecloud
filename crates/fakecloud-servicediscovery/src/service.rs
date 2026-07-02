@@ -29,7 +29,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
-use crate::state::{DnsProps, Namespace, Operation, SharedServiceDiscoveryState};
+use crate::state::{
+    DnsConfig, DnsProps, DnsRecord, HealthCheckConfig, HealthCheckCustomConfig, Namespace,
+    Operation, Service, SharedServiceDiscoveryState,
+};
 
 /// Every operation name in the Cloud Map Smithy model (all 30). Ops not yet
 /// implemented in this batch (services/instances/tags) still advertise here so
@@ -150,6 +153,14 @@ fn dispatch(s: &ServiceDiscoveryService, req: &AwsRequest) -> Result<AwsResponse
         "UpdateHttpNamespace" => s.update_http_namespace(req),
         "UpdatePrivateDnsNamespace" => s.update_private_dns_namespace(req),
         "UpdatePublicDnsNamespace" => s.update_public_dns_namespace(req),
+        "CreateService" => s.create_service(req),
+        "GetService" => s.get_service(req),
+        "ListServices" => s.list_services(req),
+        "UpdateService" => s.update_service(req),
+        "DeleteService" => s.delete_service(req),
+        "GetServiceAttributes" => s.get_service_attributes(req),
+        "UpdateServiceAttributes" => s.update_service_attributes(req),
+        "DeleteServiceAttributes" => s.delete_service_attributes(req),
         _ => Err(AwsServiceError::action_not_implemented(
             s.service_name(),
             &req.action,
@@ -218,6 +229,22 @@ fn new_hosted_zone_id() -> String {
 
 fn namespace_arn(region: &str, account: &str, id: &str) -> String {
     format!("arn:aws:servicediscovery:{region}:{account}:namespace/{id}")
+}
+
+/// `srv-...` service id (AWS uses a lowercase alphanumeric suffix).
+fn new_service_id() -> String {
+    format!("srv-{}", rand_frag(17))
+}
+
+fn service_arn(region: &str, account: &str, id: &str) -> String {
+    format!("arn:aws:servicediscovery:{region}:{account}:service/{id}")
+}
+
+/// Cloud Map accepts either a bare resource id (`ns-...`/`srv-...`) or a full
+/// ARN wherever an id is expected (shared-namespace support). Reduce an ARN to
+/// its trailing resource id so lookups key uniformly on the id.
+fn resource_id_from(value: &str) -> &str {
+    value.rsplit('/').next().unwrap_or(value)
 }
 
 fn creator_request_id(b: &Value) -> String {
@@ -365,6 +392,142 @@ fn operation_json(op: &Operation, account: &str) -> Value {
     Value::Object(obj)
 }
 
+// ===== service parsing =====
+
+/// Parse a `DnsRecord` list from a request `DnsRecords` array. Each record
+/// requires a `Type` and `TTL` per the Smithy model.
+fn parse_dns_records(v: &Value) -> Result<Vec<DnsRecord>, AwsServiceError> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| fault("InvalidInput", "DnsRecords must be a list."))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for r in arr {
+        let type_ = req_str(r, "Type")?.to_string();
+        let ttl = r
+            .get("TTL")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| fault("InvalidInput", "DnsRecord TTL is required."))?;
+        out.push(DnsRecord { type_, ttl });
+    }
+    Ok(out)
+}
+
+/// Parse the `DnsConfig` block from a `CreateService` request.
+fn parse_dns_config(v: &Value) -> Result<DnsConfig, AwsServiceError> {
+    let records = v
+        .get("DnsRecords")
+        .ok_or_else(|| fault("InvalidInput", "DnsConfig.DnsRecords is required."))?;
+    Ok(DnsConfig {
+        namespace_id: opt_str(v, "NamespaceId"),
+        routing_policy: opt_str(v, "RoutingPolicy"),
+        dns_records: parse_dns_records(records)?,
+    })
+}
+
+/// Parse a `HealthCheckConfig` block.
+fn parse_health_check(v: &Value) -> Result<HealthCheckConfig, AwsServiceError> {
+    Ok(HealthCheckConfig {
+        type_: req_str(v, "Type")?.to_string(),
+        resource_path: opt_str(v, "ResourcePath"),
+        failure_threshold: v
+            .get("FailureThreshold")
+            .and_then(Value::as_i64)
+            .map(|n| n as i32),
+    })
+}
+
+/// Parse a `HealthCheckCustomConfig` block.
+fn parse_health_check_custom(v: &Value) -> HealthCheckCustomConfig {
+    HealthCheckCustomConfig {
+        failure_threshold: v
+            .get("FailureThreshold")
+            .and_then(Value::as_i64)
+            .map(|n| n as i32),
+    }
+}
+
+// ===== service JSON builders (member names match the Smithy model) =====
+
+fn dns_config_json(cfg: &DnsConfig) -> Value {
+    let records: Vec<Value> = cfg
+        .dns_records
+        .iter()
+        .map(|r| json!({ "Type": r.type_, "TTL": r.ttl }))
+        .collect();
+    let mut obj = serde_json::Map::new();
+    put_opt(&mut obj, "NamespaceId", cfg.namespace_id.as_ref());
+    put_opt(&mut obj, "RoutingPolicy", cfg.routing_policy.as_ref());
+    obj.insert("DnsRecords".into(), Value::Array(records));
+    Value::Object(obj)
+}
+
+fn health_check_json(hc: &HealthCheckConfig) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("Type".into(), json!(hc.type_));
+    put_opt(&mut obj, "ResourcePath", hc.resource_path.as_ref());
+    if let Some(ft) = hc.failure_threshold {
+        obj.insert("FailureThreshold".into(), json!(ft));
+    }
+    Value::Object(obj)
+}
+
+fn health_check_custom_json(hc: &HealthCheckCustomConfig) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(ft) = hc.failure_threshold {
+        obj.insert("FailureThreshold".into(), json!(ft));
+    }
+    Value::Object(obj)
+}
+
+/// Populate the members shared by the full `Service` shape and `ServiceSummary`.
+fn service_common_members(obj: &mut serde_json::Map<String, Value>, svc: &Service, account: &str) {
+    obj.insert("Id".into(), json!(svc.id));
+    obj.insert("Arn".into(), json!(svc.arn));
+    obj.insert("ResourceOwner".into(), json!(account));
+    obj.insert("Name".into(), json!(svc.name));
+    obj.insert("Type".into(), json!(svc.type_));
+    put_opt(obj, "Description", svc.description.as_ref());
+    obj.insert("InstanceCount".into(), json!(svc.instance_count));
+    if let Some(dns) = &svc.dns_config {
+        obj.insert("DnsConfig".into(), dns_config_json(dns));
+    }
+    if let Some(hc) = &svc.health_check_config {
+        obj.insert("HealthCheckConfig".into(), health_check_json(hc));
+    }
+    if let Some(hc) = &svc.health_check_custom_config {
+        obj.insert(
+            "HealthCheckCustomConfig".into(),
+            health_check_custom_json(hc),
+        );
+    }
+    obj.insert("CreateDate".into(), json!(svc.create_date.timestamp()));
+    obj.insert("CreatedByAccount".into(), json!(account));
+}
+
+/// Full `Service` shape (CreateService/GetService).
+fn service_json(svc: &Service, account: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    service_common_members(&mut obj, svc, account);
+    obj.insert("NamespaceId".into(), json!(svc.namespace_id));
+    obj.insert("CreatorRequestId".into(), json!(svc.creator_request_id));
+    Value::Object(obj)
+}
+
+/// `ServiceSummary` shape (ListServices) — no `NamespaceId`/`CreatorRequestId`.
+fn service_summary_json(svc: &Service, account: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    service_common_members(&mut obj, svc, account);
+    Value::Object(obj)
+}
+
+fn service_attributes_json(svc: &Service, account: &str) -> Value {
+    json!({
+        "ServiceArn": svc.arn,
+        "ResourceOwner": account,
+        "Attributes": svc.attributes,
+    })
+}
+
 // ===== namespace create (shared) =====
 
 impl ServiceDiscoveryService {
@@ -413,22 +576,24 @@ impl ServiceDiscoveryService {
             create_date: now,
         };
         st.namespaces.insert(id.clone(), ns);
-        let op_id = self.mint_operation(st, "CREATE_NAMESPACE", &id);
+        let op_id = self.mint_operation(st, "CREATE_NAMESPACE", "NAMESPACE", &id);
         ok(json!({ "OperationId": op_id }))
     }
 
-    /// Insert a fresh `SUBMITTED` operation targeting `namespace_id` and return
-    /// its id. Settles to `SUCCESS` on the first `GetOperation`.
+    /// Insert a fresh `SUBMITTED` operation targeting `target_id` under the given
+    /// `OperationTargetType` (`NAMESPACE`/`SERVICE`/`INSTANCE`) and return its id.
+    /// Settles to `SUCCESS` on the first `GetOperation`.
     fn mint_operation(
         &self,
         st: &mut crate::state::ServiceDiscoveryState,
         type_: &str,
-        namespace_id: &str,
+        target_type: &str,
+        target_id: &str,
     ) -> String {
         let op_id = new_operation_id();
         let now = Utc::now();
         let mut targets = BTreeMap::new();
-        targets.insert("NAMESPACE".to_string(), namespace_id.to_string());
+        targets.insert(target_type.to_string(), target_id.to_string());
         st.operations.insert(
             op_id.clone(),
             Operation {
@@ -542,7 +707,7 @@ impl ServiceDiscoveryService {
             ));
         }
         st.namespaces.remove(&id);
-        let op_id = self.mint_operation(st, "DELETE_NAMESPACE", &id);
+        let op_id = self.mint_operation(st, "DELETE_NAMESPACE", "NAMESPACE", &id);
         ok(json!({ "OperationId": op_id }))
     }
 
@@ -606,7 +771,7 @@ impl ServiceDiscoveryService {
         if let (Some(ttl), Some(dns)) = (soa_ttl, ns.dns.as_mut()) {
             dns.soa_ttl = ttl;
         }
-        let op_id = self.mint_operation(st, "UPDATE_NAMESPACE", id);
+        let op_id = self.mint_operation(st, "UPDATE_NAMESPACE", "NAMESPACE", id);
         ok(json!({ "OperationId": op_id }))
     }
 
@@ -645,6 +810,261 @@ impl ServiceDiscoveryService {
             .collect();
         let (page, next) = paginate(items, &b, 100);
         ok(json!({ "Operations": page, "NextToken": next }))
+    }
+}
+
+// ===== service handlers =====
+
+impl ServiceDiscoveryService {
+    /// CreateService is *synchronous* in Cloud Map: it returns the full
+    /// `Service` shape immediately (no operation to poll), unlike the namespace
+    /// create/update/delete calls.
+    fn create_service(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let name = req_str(&b, "Name")?.to_string();
+        check_max_len(&name, 127, "Name")?;
+        // NamespaceId is semantically required (a service must live in a
+        // namespace) even though the Smithy model leaves it optional. It may be
+        // supplied as a bare id or a namespace ARN.
+        let namespace_id = resource_id_from(req_str(&b, "NamespaceId")?).to_string();
+        if let Some(d) = b.get("Description").and_then(Value::as_str) {
+            check_max_len(d, 1024, "Description")?;
+        }
+        let dns_config = match b.get("DnsConfig") {
+            Some(v) => Some(parse_dns_config(v)?),
+            None => None,
+        };
+        let health_check_config = match b.get("HealthCheckConfig") {
+            Some(v) => Some(parse_health_check(v)?),
+            None => None,
+        };
+        let health_check_custom_config = b
+            .get("HealthCheckCustomConfig")
+            .map(parse_health_check_custom);
+        // An explicit `Type: HTTP` (ServiceTypeOption) forces an HTTP service.
+        let explicit_http = b.get("Type").and_then(Value::as_str) == Some("HTTP");
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        // The namespace must exist.
+        let Some(ns) = st.namespaces.get(&namespace_id) else {
+            return Err(fault(
+                "NamespaceNotFound",
+                &format!("Namespace {namespace_id} not found."),
+            ));
+        };
+        // Derive the service Type from the namespace kind and the presence of a
+        // DnsConfig: HTTP namespaces (or an explicit HTTP option) yield `HTTP`;
+        // a DNS namespace with DNS records yields `DNS_HTTP`.
+        let type_ = if explicit_http || ns.type_ == "HTTP" {
+            "HTTP".to_string()
+        } else if dns_config.is_some() {
+            "DNS_HTTP".to_string()
+        } else {
+            "HTTP".to_string()
+        };
+        // Service names are unique within a namespace.
+        if st
+            .services
+            .values()
+            .any(|s| s.namespace_id == namespace_id && s.name == name)
+        {
+            return Err(fault(
+                "ServiceAlreadyExists",
+                &format!("A service named {name} already exists."),
+            ));
+        }
+        let id = new_service_id();
+        let arn = service_arn(&req.region, &req.account_id, &id);
+        let svc = Service {
+            id: id.clone(),
+            arn,
+            name,
+            namespace_id: namespace_id.clone(),
+            type_,
+            description: opt_str(&b, "Description"),
+            instance_count: 0,
+            dns_config,
+            health_check_config,
+            health_check_custom_config,
+            attributes: BTreeMap::new(),
+            creator_request_id: creator_request_id(&b),
+            create_date: Utc::now(),
+        };
+        st.services.insert(id.clone(), svc.clone());
+        // Bump the parent namespace's ServiceCount.
+        if let Some(ns) = st.namespaces.get_mut(&namespace_id) {
+            ns.service_count += 1;
+        }
+        ok(json!({ "Service": service_json(&svc, &req.account_id) }))
+    }
+
+    fn get_service(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "Id")?).to_string();
+        let accounts = self.state.read();
+        let Some(svc) = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.services.get(&id))
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        ok(json!({ "Service": service_json(svc, &req.account_id) }))
+    }
+
+    fn list_services(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        validate_pagination(&b)?;
+        let accounts = self.state.read();
+        let Some(st) = accounts.get(&req.account_id) else {
+            return ok(json!({ "Services": [] }));
+        };
+        let items: Vec<Value> = st
+            .services
+            .values()
+            .filter(|svc| service_matches_filters(svc, &b, &req.account_id))
+            .map(|svc| service_summary_json(svc, &req.account_id))
+            .collect();
+        let (page, next) = paginate(items, &b, 100);
+        ok(json!({ "Services": page, "NextToken": next }))
+    }
+
+    /// UpdateService is *asynchronous*: it returns an `OperationId` (unlike the
+    /// synchronous create/delete on the same resource). The mutable fields
+    /// (`Description`, `DnsConfig.DnsRecords`, `HealthCheckConfig`) are applied
+    /// eagerly and an `UPDATE_SERVICE` operation is minted for the caller to poll.
+    fn update_service(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "Id")?).to_string();
+        let change = b
+            .get("Service")
+            .ok_or_else(|| fault("InvalidInput", "Service change block is required."))?;
+        let description = opt_str(change, "Description");
+        let dns_records = match change.get("DnsConfig").and_then(|d| d.get("DnsRecords")) {
+            Some(v) => Some(parse_dns_records(v)?),
+            None => None,
+        };
+        let health_check = match change.get("HealthCheckConfig") {
+            Some(v) => Some(parse_health_check(v)?),
+            None => None,
+        };
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        if let Some(d) = description {
+            svc.description = Some(d);
+        }
+        if let Some(records) = dns_records {
+            if let Some(dns) = svc.dns_config.as_mut() {
+                dns.dns_records = records;
+            }
+        }
+        if let Some(hc) = health_check {
+            svc.health_check_config = Some(hc);
+        }
+        let op_id = self.mint_operation(st, "UPDATE_SERVICE", "SERVICE", &id);
+        ok(json!({ "OperationId": op_id }))
+    }
+
+    /// DeleteService is *synchronous* (returns an empty body). A service that
+    /// still owns registered instances can't be deleted (ResourceInUse); the
+    /// instances batch has yet to land, so `instance_count` is 0 today, but the
+    /// guard keeps the contract correct.
+    fn delete_service(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "Id")?).to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get(&id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        if svc.instance_count > 0 {
+            return Err(fault(
+                "ResourceInUse",
+                &format!("Service {id} still contains registered instances."),
+            ));
+        }
+        let namespace_id = svc.namespace_id.clone();
+        st.services.remove(&id);
+        // Decrement the parent namespace's ServiceCount.
+        if let Some(ns) = st.namespaces.get_mut(&namespace_id) {
+            ns.service_count = (ns.service_count - 1).max(0);
+        }
+        ok(json!({}))
+    }
+
+    fn get_service_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let accounts = self.state.read();
+        let Some(svc) = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.services.get(&id))
+        else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        ok(json!({ "ServiceAttributes": service_attributes_json(svc, &req.account_id) }))
+    }
+
+    fn update_service_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let attrs = b
+            .get("Attributes")
+            .and_then(Value::as_object)
+            .ok_or_else(|| fault("InvalidInput", "Attributes is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        for (k, v) in attrs {
+            if let Some(s) = v.as_str() {
+                svc.attributes.insert(k.clone(), s.to_string());
+            }
+        }
+        ok(json!({}))
+    }
+
+    fn delete_service_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let id = resource_id_from(req_str(&b, "ServiceId")?).to_string();
+        let keys: Vec<String> = b
+            .get("Attributes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| fault("InvalidInput", "Attributes is required."))?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let Some(svc) = st.services.get_mut(&id) else {
+            return Err(fault(
+                "ServiceNotFound",
+                &format!("Service {id} not found."),
+            ));
+        };
+        for k in keys {
+            svc.attributes.remove(&k);
+        }
+        ok(json!({}))
     }
 }
 
@@ -716,6 +1136,29 @@ fn operation_matches_filters(op: &Operation, b: &Value) -> bool {
             _ => continue,
         };
         if !filter_hit(&values, condition, &candidate) {
+            return false;
+        }
+    }
+    true
+}
+
+/// ListServices supports the `NAMESPACE_ID` and `RESOURCE_OWNER` filters.
+fn service_matches_filters(svc: &Service, b: &Value, owner: &str) -> bool {
+    let Some(filters) = b.get("Filters").and_then(Value::as_array) else {
+        return true;
+    };
+    for f in filters {
+        let name = f.get("Name").and_then(Value::as_str).unwrap_or("");
+        let condition = f.get("Condition").and_then(Value::as_str).unwrap_or("EQ");
+        let values = filter_values(f);
+        let candidate = match name {
+            "NAMESPACE_ID" => svc.namespace_id.as_str(),
+            // Every service here is owned by the calling account, so a filter
+            // naming a different account excludes everything.
+            "RESOURCE_OWNER" => owner,
+            _ => continue,
+        };
+        if !filter_hit(&values, condition, candidate) {
             return false;
         }
     }
@@ -886,5 +1329,235 @@ mod tests {
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         let err = expect_err(s.get_namespace(&req("GetNamespace", json!({ "Id": "ns-missing" }))));
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Create an HTTP namespace and return its id (settling the create op).
+    fn make_namespace(s: &ServiceDiscoveryService, name: &str) -> String {
+        let resp = s
+            .create_http_namespace(&req("CreateHttpNamespace", json!({ "Name": name })))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let resp = s
+            .get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+            .unwrap();
+        body_of(&resp)["Operation"]["Targets"]["NAMESPACE"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Create a DNS namespace and return its id.
+    fn make_dns_namespace(s: &ServiceDiscoveryService, name: &str) -> String {
+        let resp = s
+            .create_public_dns_namespace(&req("CreatePublicDnsNamespace", json!({ "Name": name })))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let resp = s
+            .get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+            .unwrap();
+        body_of(&resp)["Operation"]["Targets"]["NAMESPACE"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn ns_service_count(s: &ServiceDiscoveryService, ns_id: &str) -> i64 {
+        let resp = s
+            .get_namespace(&req("GetNamespace", json!({ "Id": ns_id })))
+            .unwrap();
+        body_of(&resp)["Namespace"]["ServiceCount"]
+            .as_i64()
+            .unwrap()
+    }
+
+    #[test]
+    fn service_full_lifecycle() {
+        let s = svc();
+        let ns_id = make_dns_namespace(&s, "svc.example.com");
+
+        // CreateService is synchronous — returns the Service directly.
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({
+                    "Name": "myservice",
+                    "NamespaceId": ns_id,
+                    "Description": "d",
+                    "DnsConfig": {
+                        "RoutingPolicy": "MULTIVALUE",
+                        "DnsRecords": [{ "Type": "A", "TTL": 60 }],
+                    },
+                    "HealthCheckConfig": { "Type": "HTTP", "ResourcePath": "/", "FailureThreshold": 2 },
+                }),
+            ))
+            .unwrap();
+        let created = &body_of(&resp)["Service"];
+        let srv_id = created["Id"].as_str().unwrap().to_string();
+        assert!(srv_id.starts_with("srv-"));
+        assert_eq!(created["Name"], "myservice");
+        assert_eq!(created["NamespaceId"], ns_id);
+        assert_eq!(created["Type"], "DNS_HTTP");
+        assert_eq!(created["InstanceCount"], 0);
+        assert_eq!(created["DnsConfig"]["DnsRecords"][0]["TTL"], 60);
+        assert_eq!(created["HealthCheckConfig"]["FailureThreshold"], 2);
+        assert!(created["Arn"].as_str().unwrap().contains(":service/srv-"));
+
+        // Namespace ServiceCount incremented.
+        assert_eq!(ns_service_count(&s, &ns_id), 1);
+
+        // GetService round-trips.
+        let resp = s
+            .get_service(&req("GetService", json!({ "Id": srv_id })))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Service"]["Name"], "myservice");
+
+        // ListServices with NAMESPACE_ID filter.
+        let resp = s
+            .list_services(&req(
+                "ListServices",
+                json!({ "Filters": [{ "Name": "NAMESPACE_ID", "Condition": "EQ", "Values": [ns_id] }] }),
+            ))
+            .unwrap();
+        let list = body_of(&resp);
+        assert_eq!(list["Services"].as_array().unwrap().len(), 1);
+        assert_eq!(list["Services"][0]["Id"], srv_id);
+        // A different namespace id filters everything out.
+        let resp = s
+            .list_services(&req(
+                "ListServices",
+                json!({ "Filters": [{ "Name": "NAMESPACE_ID", "Values": ["ns-other"] }] }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Services"].as_array().unwrap().len(), 0);
+
+        // UpdateService is asynchronous — returns an OperationId that settles.
+        let resp = s
+            .update_service(&req(
+                "UpdateService",
+                json!({
+                    "Id": srv_id,
+                    "Service": {
+                        "Description": "updated",
+                        "DnsConfig": { "DnsRecords": [{ "Type": "A", "TTL": 120 }] },
+                    },
+                }),
+            ))
+            .unwrap();
+        let op_id = body_of(&resp)["OperationId"].as_str().unwrap().to_string();
+        let resp = s
+            .get_operation(&req("GetOperation", json!({ "OperationId": op_id })))
+            .unwrap();
+        let op = &body_of(&resp)["Operation"];
+        assert_eq!(op["Status"], "SUCCESS");
+        assert_eq!(op["Type"], "UPDATE_SERVICE");
+        assert_eq!(op["Targets"]["SERVICE"], srv_id);
+        let resp = s
+            .get_service(&req("GetService", json!({ "Id": srv_id })))
+            .unwrap();
+        let updated = body_of(&resp);
+        assert_eq!(updated["Service"]["Description"], "updated");
+        assert_eq!(updated["Service"]["DnsConfig"]["DnsRecords"][0]["TTL"], 120);
+
+        // Attributes: set -> get -> delete.
+        s.update_service_attributes(&req(
+            "UpdateServiceAttributes",
+            json!({ "ServiceId": srv_id, "Attributes": { "port": "80", "protocol": "HTTP" } }),
+        ))
+        .unwrap();
+        let resp = s
+            .get_service_attributes(&req("GetServiceAttributes", json!({ "ServiceId": srv_id })))
+            .unwrap();
+        let attrs = body_of(&resp);
+        assert_eq!(attrs["ServiceAttributes"]["ServiceArn"], created["Arn"]);
+        assert_eq!(attrs["ServiceAttributes"]["Attributes"]["port"], "80");
+        s.delete_service_attributes(&req(
+            "DeleteServiceAttributes",
+            json!({ "ServiceId": srv_id, "Attributes": ["port"] }),
+        ))
+        .unwrap();
+        let resp = s
+            .get_service_attributes(&req("GetServiceAttributes", json!({ "ServiceId": srv_id })))
+            .unwrap();
+        let attrs = body_of(&resp);
+        assert!(attrs["ServiceAttributes"]["Attributes"]
+            .get("port")
+            .is_none());
+        assert_eq!(attrs["ServiceAttributes"]["Attributes"]["protocol"], "HTTP");
+
+        // DeleteService is synchronous (empty body) and decrements ServiceCount.
+        s.delete_service(&req("DeleteService", json!({ "Id": srv_id })))
+            .unwrap();
+        assert_eq!(ns_service_count(&s, &ns_id), 0);
+        let err = expect_err(s.get_service(&req("GetService", json!({ "Id": srv_id }))));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn create_service_by_namespace_arn() {
+        let s = svc();
+        let ns_id = make_namespace(&s, "httpns");
+        let ns_arn = format!("arn:aws:servicediscovery:us-east-1:000000000000:namespace/{ns_id}");
+        // HTTP namespace yields an HTTP-typed service.
+        let resp = s
+            .create_service(&req(
+                "CreateService",
+                json!({ "Name": "s1", "NamespaceId": ns_arn }),
+            ))
+            .unwrap();
+        assert_eq!(body_of(&resp)["Service"]["Type"], "HTTP");
+        assert_eq!(body_of(&resp)["Service"]["NamespaceId"], ns_id);
+    }
+
+    #[test]
+    fn create_service_missing_namespace_404() {
+        let s = svc();
+        let err = expect_err(s.create_service(&req(
+            "CreateService",
+            json!({ "Name": "orphan", "NamespaceId": "ns-doesnotexist" }),
+        )));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn duplicate_service_name_rejected() {
+        let s = svc();
+        let ns_id = make_namespace(&s, "dupns");
+        s.create_service(&req(
+            "CreateService",
+            json!({ "Name": "dup", "NamespaceId": ns_id }),
+        ))
+        .unwrap();
+        let err = expect_err(s.create_service(&req(
+            "CreateService",
+            json!({ "Name": "dup", "NamespaceId": ns_id }),
+        )));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn service_ops_404_on_missing() {
+        let s = svc();
+        for r in [
+            s.get_service(&req("GetService", json!({ "Id": "srv-missing" }))),
+            s.update_service(&req(
+                "UpdateService",
+                json!({ "Id": "srv-missing", "Service": { "Description": "x" } }),
+            )),
+            s.delete_service(&req("DeleteService", json!({ "Id": "srv-missing" }))),
+            s.get_service_attributes(&req(
+                "GetServiceAttributes",
+                json!({ "ServiceId": "srv-missing" }),
+            )),
+            s.update_service_attributes(&req(
+                "UpdateServiceAttributes",
+                json!({ "ServiceId": "srv-missing", "Attributes": { "a": "b" } }),
+            )),
+            s.delete_service_attributes(&req(
+                "DeleteServiceAttributes",
+                json!({ "ServiceId": "srv-missing", "Attributes": ["a"] }),
+            )),
+        ] {
+            assert_eq!(expect_err(r).status(), StatusCode::NOT_FOUND);
+        }
     }
 }
