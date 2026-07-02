@@ -5,11 +5,12 @@ weight = 47
 +++
 
 fakecloud implements **AWS Cloud Map** (`servicediscovery`), the service-discovery
-and application resource registry, as an awsJson1.1 control plane. **Batch 1** —
-the **namespace** control plane plus **operation** tracking — ships now, backed by
-account-partitioned state that persists across restarts in persistent mode.
+and application resource registry, as an awsJson1.1 control plane. The
+**namespace** control plane, **operation** tracking, and the **service** control
+plane ship now, backed by account-partitioned state that persists across restarts
+in persistent mode.
 
-## Supported now (11 of 30 operations)
+## Supported now (19 of 30 operations)
 
 - **Namespaces** — `CreateHttpNamespace`, `CreatePrivateDnsNamespace`,
   `CreatePublicDnsNamespace`, `GetNamespace`, `ListNamespaces`,
@@ -25,18 +26,27 @@ account-partitioned state that persists across restarts in persistent mode.
   `SUCCESS` when you call `GetOperation` (deterministic, no background timer), with
   a `Targets` map pointing at the affected namespace. The namespace itself is
   visible immediately via `GetNamespace` / `ListNamespaces`.
+- **Services** — `CreateService`, `GetService`, `ListServices`, `UpdateService`,
+  `DeleteService`, plus `GetServiceAttributes`, `UpdateServiceAttributes`,
+  `DeleteServiceAttributes`. Each service carries an `Id` (`srv-...`), an ARN, its
+  `NamespaceId`, `DnsConfig` (RoutingPolicy + DnsRecords), `HealthCheckConfig` /
+  `HealthCheckCustomConfig`, an `InstanceCount`, and a string-map of service
+  attributes. `CreateService`/`DeleteService` are synchronous (and adjust the
+  parent namespace's `ServiceCount`); `UpdateService` is asynchronous (returns an
+  `OperationId`). `ListServices` filters by `NAMESPACE_ID`.
 
-`ListNamespaces` and `ListOperations` paginate with `MaxResults` / `NextToken`
-and honor `Filters`. 100% conformance across every shipped operation: all 397
-generated Smithy probe variants for these 11 operations pass.
+`ListNamespaces`, `ListServices`, and `ListOperations` paginate with
+`MaxResults` / `NextToken` and honor `Filters`. 100% conformance across every
+shipped operation: all 655 generated Smithy probe variants for these 19
+operations pass.
 
 ## In progress (roadmap)
 
-The remaining Cloud Map surface lands in later batches: **services**
-(`CreateService` / `GetService` / `ListServices` / `UpdateService` /
-`DeleteService` + service attributes), **instances** (`RegisterInstance` /
-`DeregisterInstance` / `GetInstance` / `ListInstances` + health status), and the
-discovery data plane (`DiscoverInstances` / `DiscoverInstancesRevision`).
+The remaining Cloud Map surface lands in later batches: **instances**
+(`RegisterInstance` / `DeregisterInstance` / `GetInstance` / `ListInstances` +
+`GetInstancesHealthStatus` / `UpdateInstanceCustomHealthStatus`), the discovery
+data plane (`DiscoverInstances` / `DiscoverInstancesRevision`), and resource
+**tagging** (`TagResource` / `UntagResource` / `ListTagsForResource`).
 
 ## Example
 

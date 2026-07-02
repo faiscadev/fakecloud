@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 130,279 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 130,537 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-50 services, 3,913 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+50 services, 3,921 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
@@ -78,7 +78,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 | ElastiCache               | 75  | Real Redis, Valkey, Memcached via Docker |
 | MemoryDB                  | 45  | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted |
 | EKS                       | 65  | Complete control plane: clusters (incl. connected register/deregister), node groups, Fargate profiles, add-ons, access entries + policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, EKS Anywhere subscriptions; config/version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging; persisted, `CREATING` -> `ACTIVE` on describe |
-| Cloud Map                 | 11  | AWS Cloud Map (`servicediscovery`) namespace control plane: HTTP/public-DNS/private-DNS namespaces via the async operation model (mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`); persisted. Services, instances, `DiscoverInstances` in progress (11 of 30 ops) |
+| Cloud Map                 | 19  | AWS Cloud Map (`servicediscovery`) namespace + service control plane: namespaces and services (DnsConfig/HealthCheck + attributes) via the async operation model (mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`); persisted. Instances, `DiscoverInstances` in progress (19 of 30 ops) |
 | Step Functions            | 37  | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks |
 | API Gateway v1            | 124 | REST APIs, integrations incl. real Lambda proxy, authorizers (Lambda + Cognito JWT) |
 | API Gateway v2            | 103 | HTTP APIs, routes, developer portals, authorizers (Lambda + Cognito JWT) |

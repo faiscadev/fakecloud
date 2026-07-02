@@ -53,6 +53,66 @@ pub struct Namespace {
     pub create_date: DateTime<Utc>,
 }
 
+/// A single DNS record template in a service's `DnsConfig` — the record type
+/// (`A`/`AAAA`/`SRV`/`CNAME`) and the TTL Cloud Map applies when it materializes
+/// the record for a registered instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsRecord {
+    /// One of the `RecordType` enum values.
+    pub type_: String,
+    pub ttl: i64,
+}
+
+/// The DNS routing configuration of a service (public/private DNS namespaces).
+/// HTTP-only services carry no `DnsConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsConfig {
+    pub namespace_id: Option<String>,
+    /// One of the `RoutingPolicy` enum values (`MULTIVALUE`/`WEIGHTED`).
+    pub routing_policy: Option<String>,
+    pub dns_records: Vec<DnsRecord>,
+}
+
+/// A Route 53 health check attached to a service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    /// One of the `HealthCheckType` enum values (`HTTP`/`HTTPS`/`TCP`).
+    pub type_: String,
+    pub resource_path: Option<String>,
+    pub failure_threshold: Option<i32>,
+}
+
+/// A custom (third-party) health check configuration attached to a service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckCustomConfig {
+    pub failure_threshold: Option<i32>,
+}
+
+/// A Cloud Map service: instances register *into* a service, which lives within
+/// a namespace. Created synchronously (unlike namespaces), so `CreateService`
+/// returns the full `Service` shape rather than an `OperationId`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Service {
+    pub id: String,
+    pub arn: String,
+    pub name: String,
+    /// The `ns-...` id of the parent namespace.
+    pub namespace_id: String,
+    /// One of the `ServiceType` enum values (`HTTP`/`DNS_HTTP`/`DNS`).
+    pub type_: String,
+    pub description: Option<String>,
+    /// Count of instances currently registered against the service (0 until the
+    /// instances batch lands).
+    pub instance_count: i32,
+    pub dns_config: Option<DnsConfig>,
+    pub health_check_config: Option<HealthCheckConfig>,
+    pub health_check_custom_config: Option<HealthCheckCustomConfig>,
+    /// Service-level attributes (`GetServiceAttributes`/`UpdateServiceAttributes`).
+    pub attributes: BTreeMap<String, String>,
+    pub creator_request_id: String,
+    pub create_date: DateTime<Utc>,
+}
+
 /// An asynchronous Cloud Map operation. Create/update/delete calls return an
 /// `OperationId` referencing one of these; the caller polls `GetOperation` to
 /// observe it settle from `SUBMITTED` -> `SUCCESS`.
@@ -77,6 +137,9 @@ pub struct ServiceDiscoveryState {
     pub namespaces: BTreeMap<String, Namespace>,
     /// Operations keyed by their operation id.
     pub operations: BTreeMap<String, Operation>,
+    /// Services keyed by their `srv-...` id.
+    #[serde(default)]
+    pub services: BTreeMap<String, Service>,
     /// Tags keyed by resource ARN (populated by the later tag-ops batch).
     pub tags: BTreeMap<String, TagMap>,
 }

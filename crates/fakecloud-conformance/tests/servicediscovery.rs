@@ -14,6 +14,14 @@ use helpers::TestServer;
 #[test_action("servicediscovery", "UpdateHttpNamespace", checksum = "c261b30d")]
 #[test_action("servicediscovery", "UpdatePrivateDnsNamespace", checksum = "6c03aca7")]
 #[test_action("servicediscovery", "UpdatePublicDnsNamespace", checksum = "ffec59c5")]
+#[test_action("servicediscovery", "CreateService", checksum = "80fb7bbc")]
+#[test_action("servicediscovery", "GetService", checksum = "9d793b84")]
+#[test_action("servicediscovery", "ListServices", checksum = "7a671b03")]
+#[test_action("servicediscovery", "UpdateService", checksum = "4fc955ef")]
+#[test_action("servicediscovery", "DeleteService", checksum = "b49d2bf7")]
+#[test_action("servicediscovery", "GetServiceAttributes", checksum = "49cfab99")]
+#[test_action("servicediscovery", "UpdateServiceAttributes", checksum = "f9ec4ca8")]
+#[test_action("servicediscovery", "DeleteServiceAttributes", checksum = "f64d14f7")]
 #[tokio::test]
 async fn servicediscovery_probe() {
     let _server = TestServer::start().await;

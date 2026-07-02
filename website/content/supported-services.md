@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,913 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,921 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,913 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,921 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 50
-- **Total Operations**: 3,913
-- **Conformance Engine**: 130,279 Smithy-based test variants
+- **Total Operations**: 3,921
+- **Conformance Engine**: 130,537 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -39,7 +39,7 @@ fakecloud provides 100% API conformance across 3,913 operations. Unlike mocks, f
 - **SNS**: 42 operations. Topic management and fan-out to SQS/Lambda.
 - **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) and EventBridge Pipes (10 operations) are separate services.
 - **EventBridge Pipes**: 10 operations. Point-to-point source -> filter -> Lambda enrichment -> target integrations with per-target InputTemplate transforms, driven by a real background runner.
-- **Cloud Map**: 11 operations (of 30). AWS Cloud Map (`servicediscovery`) namespace control plane: HTTP, public-DNS, and private-DNS namespaces (create/get/list/update/delete) driven by the async operation model — mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`; persisted. Services, instances, and `DiscoverInstances` are in progress.
+- **Cloud Map**: 19 operations (of 30). AWS Cloud Map (`servicediscovery`) namespace + service control plane: HTTP/public-DNS/private-DNS namespaces and services (DnsConfig/HealthCheck + service attributes) driven by the async operation model — mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`; persisted. Instances and `DiscoverInstances` are in progress.
 
 ### Security & Management
 - **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.

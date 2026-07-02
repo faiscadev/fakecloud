@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 50 services (3,913 operations) are shipped today, all at true 100% conformance — 130,279/130,279 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 50 services (3,921 operations) are shipped today, all at true 100% conformance — 130,537/130,537 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 130,279/130,279 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 130,537/130,537 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 23 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -379,11 +379,11 @@ Features: Elastic Kubernetes Service control plane. Cluster lifecycle with `role
 
 Protocol: REST (restJson1, path-based routing, JSON responses)
 
-### Cloud Map (11 actions, 11 of 30)
+### Cloud Map (19 actions, 19 of 30)
 
-CreateHttpNamespace, CreatePrivateDnsNamespace, CreatePublicDnsNamespace, GetNamespace, ListNamespaces, DeleteNamespace, UpdateHttpNamespace, UpdatePrivateDnsNamespace, UpdatePublicDnsNamespace, GetOperation, ListOperations
+CreateHttpNamespace, CreatePrivateDnsNamespace, CreatePublicDnsNamespace, GetNamespace, ListNamespaces, DeleteNamespace, UpdateHttpNamespace, UpdatePrivateDnsNamespace, UpdatePublicDnsNamespace, GetOperation, ListOperations, CreateService, GetService, ListServices, UpdateService, DeleteService, GetServiceAttributes, UpdateServiceAttributes, DeleteServiceAttributes
 
-Features: AWS Cloud Map (`servicediscovery`) namespace control plane. HTTP, public-DNS, and private-DNS namespaces with `Id` (`ns-...`), ARN, `Properties` (HttpProperties.HttpName; DnsProperties.HostedZoneId + SOA for DNS types), `ServiceCount`, and tags. Follows Cloud Map's asynchronous operation model: create/delete/update return an `OperationId` (not the resource), and `GetOperation` settles the operation `SUBMITTED` -> `SUCCESS` on read (with a `Targets` map to the affected namespace) while the namespace is visible immediately via GetNamespace/ListNamespaces. ListNamespaces/ListOperations paginate with `MaxResults`/`NextToken` and support `Filters`. Account-partitioned and persisted. Services, instances, and `DiscoverInstances` are in progress.
+Features: AWS Cloud Map (`servicediscovery`) namespace + service control plane. HTTP, public-DNS, and private-DNS namespaces with `Id` (`ns-...`), ARN, `Properties` (HttpProperties.HttpName; DnsProperties.HostedZoneId + SOA for DNS types), `ServiceCount`, and tags. Services (`srv-...`) carry `NamespaceId`, `DnsConfig` (RoutingPolicy + DnsRecords), `HealthCheckConfig`/`HealthCheckCustomConfig`, `InstanceCount`, and string-map service attributes (Get/Update/DeleteServiceAttributes). Follows Cloud Map's asynchronous operation model: namespace create/delete/update and UpdateService return an `OperationId` (not the resource), and `GetOperation` settles the operation `SUBMITTED` -> `SUCCESS` on read (with a `Targets` map to the affected namespace/service); CreateService/DeleteService are synchronous. ListNamespaces/ListServices/ListOperations paginate with `MaxResults`/`NextToken` and support `Filters` (e.g. NAMESPACE_ID). Account-partitioned and persisted. Instances and `DiscoverInstances` are in progress.
 
 Protocol: awsJson1.1 (X-Amz-Target `Route53AutoNaming_v20170314.<Op>`)
 
