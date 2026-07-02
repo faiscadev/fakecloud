@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 47 AWS services with 3,792 total operations. 126,816/126,816 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 48 AWS services with 3,837 total operations. 128,017/128,017 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -35,6 +35,7 @@ fakecloud implements 47 AWS services with 3,792 total operations. 126,816/126,81
 | Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
 | Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
+| MemoryDB               |  45 | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted. Redis/Valkey data-plane container backing is a follow-up |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |

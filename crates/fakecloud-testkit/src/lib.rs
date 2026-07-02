@@ -816,6 +816,10 @@ impl TestServer {
         aws_sdk_resourcegroups::Client::new(&self.aws_config().await)
     }
 
+    pub async fn memorydb_client(&self) -> aws_sdk_memorydb::Client {
+        aws_sdk_memorydb::Client::new(&self.aws_config().await)
+    }
+
     pub async fn resourcegroupstaggingapi_client(&self) -> aws_sdk_resourcegroupstagging::Client {
         aws_sdk_resourcegroupstagging::Client::new(&self.aws_config().await)
     }

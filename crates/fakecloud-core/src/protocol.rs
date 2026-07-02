@@ -443,6 +443,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AWSGlue" => "glue",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
+        "AmazonMemoryDB" => "memorydb",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with

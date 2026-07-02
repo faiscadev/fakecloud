@@ -104,6 +104,7 @@ impl ResourceGroupsTaggingService {
 
     fn get_resources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_token(&body, "PaginationToken")?;
         let per_page = match body.get("ResourcesPerPage").and_then(Value::as_i64) {
             Some(n) if !(1..=MAX_RESOURCES_PER_PAGE).contains(&n) => {
                 return Err(invalid_param(&format!(
@@ -210,6 +211,7 @@ impl ResourceGroupsTaggingService {
 
     fn get_tag_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_token(&body, "PaginationToken")?;
         let mut keys: BTreeSet<String> = BTreeSet::new();
         for r in self.visible_resources(req) {
             keys.extend(r.tags.keys().cloned());
@@ -221,7 +223,11 @@ impl ResourceGroupsTaggingService {
 
     fn get_tag_values(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
+        validate_token(&body, "PaginationToken")?;
         let key = require_str(&body, "Key")?;
+        if key.is_empty() || key.len() > 128 {
+            return Err(invalid_param("Key must be between 1 and 128 characters."));
+        }
         let mut values: BTreeSet<String> = BTreeSet::new();
         for r in self.visible_resources(req) {
             if let Some(v) = r.tags.get(key) {
@@ -308,13 +314,20 @@ impl ResourceGroupsTaggingService {
     /// Compliance is evaluated against Organizations tag policies. With no tag
     /// policy in effect, no resource is non-compliant, so the summary is empty.
     fn get_compliance_summary(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        parse_json(&req.body)?;
+        let body = parse_json(&req.body)?;
+        validate_max_results(&body, 1, 1000)?;
+        validate_token(&body, "PaginationToken")?;
         Ok(json_ok(json!({ "SummaryList": [], "PaginationToken": "" })))
     }
 
     fn start_report_creation(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
         let bucket = require_str(&body, "S3Bucket")?.to_string();
+        if bucket.len() < 3 || bucket.len() > 63 {
+            return Err(invalid_param(
+                "S3Bucket must be between 3 and 63 characters.",
+            ));
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         st.report.status = Some("SUCCEEDED".to_string());
@@ -345,7 +358,9 @@ impl ResourceGroupsTaggingService {
     /// Required tags come from Organizations tag policies. Without one, none
     /// are required.
     fn list_required_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        parse_json(&req.body)?;
+        let body = parse_json(&req.body)?;
+        validate_max_results(&body, 1, 200)?;
+        validate_token(&body, "NextToken")?;
         Ok(json_ok(json!({ "RequiredTags": [] })))
     }
 }
@@ -395,6 +410,31 @@ fn json_ok(v: Value) -> AwsResponse {
 
 fn invalid_param(msg: &str) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", msg)
+}
+
+/// Pagination tokens (`PaginationToken` / `NextToken`) have a max length of
+/// 2048 across every op that accepts one.
+fn validate_token(body: &Value, field: &str) -> Result<(), AwsServiceError> {
+    if let Some(t) = body.get(field).and_then(Value::as_str) {
+        if t.len() > 2048 {
+            return Err(invalid_param(&format!(
+                "{field} must be at most 2048 characters."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `MaxResults` against an inclusive `[min, max]` range.
+fn validate_max_results(body: &Value, min: i64, max: i64) -> Result<(), AwsServiceError> {
+    if let Some(n) = body.get("MaxResults").and_then(Value::as_i64) {
+        if !(min..=max).contains(&n) {
+            return Err(invalid_param(&format!(
+                "MaxResults must be between {min} and {max}."
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parse_json(body: &[u8]) -> Result<Value, AwsServiceError> {

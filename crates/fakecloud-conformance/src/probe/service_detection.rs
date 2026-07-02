@@ -74,6 +74,14 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },
+        // Resource Groups Tagging API: awsJson1.1.
+        "tagging" => Protocol::Json {
+            target_prefix: "ResourceGroupsTaggingAPI_20170126",
+        },
+        // MemoryDB: awsJson1.1 (Redis/Valkey control plane).
+        "memorydb" => Protocol::Json {
+            target_prefix: "AmazonMemoryDB",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).

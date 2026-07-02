@@ -44,6 +44,7 @@ sdk-clients = [
     "dep:aws-sdk-dsql",
     "dep:aws-sdk-cloudcontrol",
     "dep:aws-sdk-resourcegroups",
+    "dep:aws-sdk-memorydb",
     "dep:aws-sdk-resourcegroupstagging",
     "dep:aws-sdk-ecr",
     "dep:aws-sdk-ecs",
@@ -104,6 +105,7 @@ aws-sdk-scheduler = { version = "1", optional = true }
 aws-sdk-dsql = { version = "1", optional = true }
 aws-sdk-cloudcontrol = { version = "1", optional = true }
 aws-sdk-resourcegroups = { version = "1", optional = true }
+aws-sdk-memorydb = { version = "1", optional = true }
 aws-sdk-resourcegroupstagging = { version = "1", optional = true }
 aws-sdk-ecr = { version = "1", optional = true }
 aws-sdk-ecs = { version = "1", optional = true }
