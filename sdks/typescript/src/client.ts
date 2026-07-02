@@ -1,6 +1,8 @@
 import type {
   AthenaNamedQueriesResponse,
   CreateAdminResponse,
+  DynamoDbSnapshotSaveRequest,
+  DynamoDbSnapshotSaveResponse,
   ApiGatewayV2RequestsResponse,
   ApiGatewayV2ConnectionsResponse,
   RdsLambdaInvokeRequest,
@@ -673,6 +675,28 @@ export class DynamoDbClient {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/dynamodb/ttl-processor/tick`,
       { method: "POST" },
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Write the current DynamoDB state as a canonical snapshot on demand.
+   *
+   * With `dataPath` set, the snapshot is written to
+   * `<dataPath>/dynamodb/snapshot.json`; with it omitted, the snapshot is
+   * written to the server's configured persistent store (an error if none is
+   * configured).
+   */
+  async saveSnapshot(dataPath?: string): Promise<DynamoDbSnapshotSaveResponse> {
+    const req: DynamoDbSnapshotSaveRequest =
+      dataPath !== undefined ? { dataPath } : {};
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/dynamodb/snapshot/save`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
     );
     return parse(resp);
   }

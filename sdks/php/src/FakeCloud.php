@@ -721,6 +721,21 @@ final class DynamoDbClient
             $this->http->postEmpty('/_fakecloud/dynamodb/ttl-processor/tick')
         );
     }
+
+    /**
+     * Write the current DynamoDB state as a canonical snapshot on demand.
+     *
+     * When $dataPath is provided the snapshot is written to
+     * "<dataPath>/dynamodb/snapshot.json"; when null it is written to the
+     * server's configured persistent store (an error if none is configured).
+     */
+    public function saveSnapshot(?string $dataPath = null): DynamoDbSnapshotSaveResponse
+    {
+        $body = $dataPath !== null ? ['dataPath' => $dataPath] : [];
+        return DynamoDbSnapshotSaveResponse::fromArray(
+            $this->http->postJson('/_fakecloud/dynamodb/snapshot/save', $body)
+        );
+    }
 }
 
 final class SecretsManagerClient

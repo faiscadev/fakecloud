@@ -576,6 +576,12 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record TtlTickResponse(int expiredItems) {}
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record DynamoDbSnapshotSaveRequest(String dataPath) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record DynamoDbSnapshotSaveResponse(boolean saved) {}
+
     // ── SecretsManager ─────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record RotationTickResponse(List<String> rotatedSecrets) {}

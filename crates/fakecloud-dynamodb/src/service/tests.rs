@@ -252,14 +252,30 @@ async fn assert_snapshot_round_trip_fixture(service: &DynamoDbService) {
     assert_eq!(item["flag"], json!({"BOOL": true}));
     assert_eq!(item["none"], json!({"NULL": true}));
     assert_eq!(item["b"], json!({"B": "aGVsbG8="}));
-    assert_eq!(item["list"]["L"][0], json!({"S": "nested"}));
-    assert_eq!(item["map"]["M"]["inner"], json!({"S": "value"}));
-    assert!(item["ss"]["SS"].as_array().unwrap().contains(&json!("red")));
-    assert!(item["ns"]["NS"].as_array().unwrap().contains(&json!("2")));
-    assert!(item["bs"]["BS"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("Yg==")));
+    // Lists and maps are ordered/deterministic, so assert full equality: a
+    // regression that drops later list elements or extra map fields fails here.
+    assert_eq!(
+        item["list"],
+        json!({"L": [{"S": "nested"}, {"N": "7"}, {"BOOL": false}]})
+    );
+    assert_eq!(
+        item["map"],
+        json!({"M": {"inner": {"S": "value"}, "count": {"N": "3"}}})
+    );
+    // Sets are unordered: check the exact length plus every expected member so
+    // a dropped or duplicated element is caught regardless of ordering.
+    let ss = item["ss"]["SS"].as_array().unwrap();
+    assert_eq!(ss.len(), 2);
+    assert!(ss.contains(&json!("red")));
+    assert!(ss.contains(&json!("blue")));
+    let ns = item["ns"]["NS"].as_array().unwrap();
+    assert_eq!(ns.len(), 2);
+    assert!(ns.contains(&json!("1")));
+    assert!(ns.contains(&json!("2")));
+    let bs = item["bs"]["BS"].as_array().unwrap();
+    assert_eq!(bs.len(), 2);
+    assert!(bs.contains(&json!("YQ==")));
+    assert!(bs.contains(&json!("Yg==")));
 }
 
 #[tokio::test]

@@ -955,6 +955,30 @@ impl DynamoDbClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// Write the current DynamoDB state as a canonical snapshot on demand.
+    ///
+    /// With `data_path` set, the snapshot is written to
+    /// `<data_path>/dynamodb/snapshot.json`; with `None`, it is written to the
+    /// server's configured persistent store (an error if none is configured).
+    pub async fn save_snapshot(
+        &self,
+        data_path: Option<&str>,
+    ) -> Result<DynamoDbSnapshotSaveResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/dynamodb/snapshot/save",
+                self.fc.base_url
+            ))
+            .json(&DynamoDbSnapshotSaveRequest {
+                data_path: data_path.map(str::to_string),
+            })
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── SecretsManager ──────────────────────────────────────────────────

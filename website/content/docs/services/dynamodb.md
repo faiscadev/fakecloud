@@ -30,6 +30,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 ## Introspection
 
 - `POST /_fakecloud/dynamodb/ttl-processor/tick` — expire items whose TTL attribute is in the past
+- `POST /_fakecloud/dynamodb/snapshot/save` — write the current DynamoDB state as a canonical snapshot on demand. An optional JSON body `{"dataPath": "<dir>"}` writes to `<dir>/dynamodb/snapshot.json`; with no body it writes to the configured persistent store. Returns `{"saved": true}`, `400` when neither a store nor `dataPath` is available, and `500` on write failure. Lets import/export tooling populate DynamoDB through the normal API and then have fakecloud emit the canonical snapshot format instead of reproducing snapshot internals out of tree.
 
 ## Cross-service delivery
 

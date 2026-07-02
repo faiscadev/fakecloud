@@ -112,6 +112,7 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 | Method             | Description                                |
 | ------------------ | ------------------------------------------ |
 | `tick_ttl().await` | Tick the DynamoDB TTL processor            |
+| `save_snapshot(data_path).await` | Save a DynamoDB snapshot on demand (`None` -> store) |
 
 ## `fc.ec2()`
 

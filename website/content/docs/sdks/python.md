@@ -267,6 +267,7 @@ Called as a method on the main client: `fc.organizations()`.
 | Method        | Description            |
 | ------------- | ---------------------- |
 | `tick_ttl()`  | Tick the TTL processor |
+| `save_snapshot(data_path=None)` | Save a DynamoDB snapshot on demand (`None` -> configured store) |
 
 ## `fc.secretsmanager`
 

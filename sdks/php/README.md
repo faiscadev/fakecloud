@@ -206,6 +206,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 | Method       | Description            |
 | ------------ | ---------------------- |
 | `tickTtl()`  | Tick the TTL processor |
+| `saveSnapshot(?dataPath)` | Save a DynamoDB snapshot on demand (`null` -> configured store) |
 
 ### `$fc->secretsmanager()`
 

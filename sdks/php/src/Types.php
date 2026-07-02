@@ -1759,6 +1759,18 @@ final class TtlTickResponse
     }
 }
 
+final class DynamoDbSnapshotSaveResponse
+{
+    public function __construct(
+        public readonly bool $saved,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['saved']);
+    }
+}
+
 // ── SecretsManager ─────────────────────────────────────────────
 
 final class RotationTickResponse

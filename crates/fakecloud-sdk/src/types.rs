@@ -792,6 +792,12 @@ pub struct DynamoDbSnapshotSaveRequest {
     pub data_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamoDbSnapshotSaveResponse {
+    pub saved: bool,
+}
+
 // ── SecretsManager ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
