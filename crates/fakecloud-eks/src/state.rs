@@ -224,6 +224,26 @@ pub struct Cluster {
     /// the caller omits `upgradePolicy` at create time.
     #[serde(default = "default_upgrade_policy")]
     pub upgrade_policy: serde_json::Value,
+    /// The `ComputeConfigResponse` (EKS Auto Mode) echoed back when the caller
+    /// supplied `computeConfig` at create or via `UpdateClusterConfig`.
+    #[serde(default)]
+    pub compute_config: Option<serde_json::Value>,
+    /// The `StorageConfigResponse` (EKS Auto Mode block storage) echoed back
+    /// when supplied.
+    #[serde(default)]
+    pub storage_config: Option<serde_json::Value>,
+    /// The `ZonalShiftConfigResponse` echoed back when supplied.
+    #[serde(default)]
+    pub zonal_shift_config: Option<serde_json::Value>,
+    /// The `RemoteNetworkConfigResponse` (hybrid nodes) echoed back when supplied.
+    #[serde(default)]
+    pub remote_network_config: Option<serde_json::Value>,
+    /// The `ControlPlaneScalingConfigResponse` echoed back when supplied.
+    #[serde(default)]
+    pub control_plane_scaling_config: Option<serde_json::Value>,
+    /// Whether deletion protection is enabled, echoed back when set.
+    #[serde(default)]
+    pub deletion_protection: Option<bool>,
 }
 
 /// The `accessConfig` a cluster reports when none was supplied at create time:
