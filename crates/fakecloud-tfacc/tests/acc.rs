@@ -108,6 +108,11 @@ async fn memorydb_acceptance() {
 }
 
 #[tokio::test]
+async fn eks_acceptance() {
+    run_shard("eks").await;
+}
+
+#[tokio::test]
 async fn rds_acceptance() {
     run_shard("rds").await;
 }
