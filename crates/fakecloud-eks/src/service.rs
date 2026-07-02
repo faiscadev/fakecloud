@@ -571,6 +571,12 @@ impl EksService {
             encryption_config: None,
             access_config: build_access_config(body.get("accessConfig")),
             upgrade_policy: build_upgrade_policy(body.get("upgradePolicy")),
+            compute_config: body.get("computeConfig").cloned(),
+            storage_config: body.get("storageConfig").cloned(),
+            zonal_shift_config: body.get("zonalShiftConfig").cloned(),
+            remote_network_config: body.get("remoteNetworkConfig").cloned(),
+            control_plane_scaling_config: body.get("controlPlaneScalingConfig").cloned(),
+            deletion_protection: body.get("deletionProtection").and_then(|v| v.as_bool()),
         };
 
         let out = cluster_json(&cluster, &id);
@@ -628,10 +634,46 @@ impl EksService {
     fn delete_cluster(&self, req: &AwsRequest, name: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(name) {
+            return Err(not_found_cluster(name)());
+        }
+        // Real EKS refuses to delete a cluster that still has managed node
+        // groups or Fargate profiles attached; the caller must delete those
+        // first.
+        let has_nodegroups = state.nodegroups.get(name).is_some_and(|m| !m.is_empty());
+        let has_fargate = state
+            .fargate_profiles
+            .get(name)
+            .is_some_and(|m| !m.is_empty());
+        if has_nodegroups || has_fargate {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "Cluster has {} attached that must be deleted first",
+                    if has_nodegroups {
+                        "nodegroups"
+                    } else {
+                        "Fargate profiles"
+                    }
+                ),
+            ));
+        }
+        // Cascade-remove every remaining cluster sub-resource so a same-name
+        // recreate does not inherit the previous cluster's orphaned state.
+        state.nodegroups.remove(name);
+        state.fargate_profiles.remove(name);
+        state.addons.remove(name);
+        state.access_entries.remove(name);
+        state.identity_provider_configs.remove(name);
+        state.pod_identity_associations.remove(name);
+        state.insights.remove(name);
+        state.insights_refresh.remove(name);
+        state.capabilities.remove(name);
         let mut cluster = state
             .clusters
             .remove(name)
-            .ok_or_else(not_found_cluster(name))?;
+            .expect("existence checked above");
         cluster.status = "DELETING".to_string();
         let id = arn_cluster_id(&cluster.endpoint);
         Ok(AwsResponse::json(
@@ -653,22 +695,85 @@ impl EksService {
             .get_mut(name)
             .ok_or_else(not_found_cluster(name))?;
 
-        let (update_type, params) = if let Some(logging) = body.get("logging") {
+        // A single UpdateClusterConfig call may carry more than one config
+        // aspect; apply every field present (previously all but logging and
+        // resourcesVpcConfig were silently dropped) and report the first-matched
+        // aspect as the Update's type for a faithful DescribeUpdate round-trip.
+        let mut update_type = "ConfigUpdate";
+        let mut matched = false;
+        let mut params: Vec<(String, String)> = Vec::new();
+        macro_rules! mark {
+            ($ty:expr) => {
+                if !matched {
+                    update_type = $ty;
+                    matched = true;
+                }
+            };
+        }
+
+        if let Some(logging) = body.get("logging") {
             cluster.logging = build_logging(Some(logging));
-            (
-                "LoggingUpdate",
-                vec![("ClusterLogging".to_string(), logging.to_string())],
-            )
-        } else if let Some(vpc) = body.get("resourcesVpcConfig") {
+            mark!("LoggingUpdate");
+            params.push(("ClusterLogging".to_string(), logging.to_string()));
+        }
+        if let Some(vpc) = body.get("resourcesVpcConfig") {
             let id = arn_cluster_id(&cluster.endpoint);
             cluster.resources_vpc_config = build_vpc_config_response(vpc, &id);
-            (
-                "EndpointAccessUpdate",
-                vec![("EndpointPublicAccess".to_string(), vpc.to_string())],
-            )
-        } else {
-            ("ConfigUpdate", Vec::new())
-        };
+            mark!("VpcConfigUpdate");
+            params.push(("ResourcesVpcConfig".to_string(), vpc.to_string()));
+        }
+        if let Some(ac) = body.get("accessConfig") {
+            cluster.access_config = build_access_config(Some(ac));
+            mark!("AccessConfigUpdate");
+            params.push((
+                "AuthenticationMode".to_string(),
+                cluster.access_config["authenticationMode"].to_string(),
+            ));
+        }
+        if let Some(up) = body.get("upgradePolicy") {
+            cluster.upgrade_policy = build_upgrade_policy(Some(up));
+            mark!("UpgradePolicyUpdate");
+            params.push((
+                "SupportType".to_string(),
+                cluster.upgrade_policy["supportType"].to_string(),
+            ));
+        }
+        if let Some(kn) = body.get("kubernetesNetworkConfig") {
+            cluster.kubernetes_network_config = build_k8s_network_config(Some(kn));
+            mark!("VpcConfigUpdate");
+            params.push(("KubernetesNetworkConfig".to_string(), kn.to_string()));
+        }
+        if let Some(cc) = body.get("computeConfig") {
+            cluster.compute_config = Some(cc.clone());
+            mark!("AutoModeUpdate");
+            params.push(("ComputeConfig".to_string(), cc.to_string()));
+        }
+        if let Some(sc) = body.get("storageConfig") {
+            cluster.storage_config = Some(sc.clone());
+            mark!("AutoModeUpdate");
+            params.push(("StorageConfig".to_string(), sc.to_string()));
+        }
+        if let Some(z) = body.get("zonalShiftConfig") {
+            cluster.zonal_shift_config = Some(z.clone());
+            mark!("ZonalShiftConfigUpdate");
+            params.push(("ZonalShiftConfig".to_string(), z.to_string()));
+        }
+        if let Some(rn) = body.get("remoteNetworkConfig") {
+            cluster.remote_network_config = Some(rn.clone());
+            mark!("RemoteNetworkConfigUpdate");
+            params.push(("RemoteNetworkConfig".to_string(), rn.to_string()));
+        }
+        if let Some(sp) = body.get("controlPlaneScalingConfig") {
+            cluster.control_plane_scaling_config = Some(sp.clone());
+            mark!("ControlPlaneScalingConfigUpdate");
+            params.push(("ControlPlaneScalingConfig".to_string(), sp.to_string()));
+        }
+        if let Some(dp) = body.get("deletionProtection").and_then(|v| v.as_bool()) {
+            cluster.deletion_protection = Some(dp);
+            mark!("DeletionProtectionUpdate");
+            params.push(("DeletionProtection".to_string(), dp.to_string()));
+        }
+        let _ = matched;
 
         let update = new_update(update_type, params);
         let out = update_json(&update);
@@ -822,16 +927,17 @@ impl EksService {
             .get("tags")
             .filter(|v| v.is_object())
             .ok_or_else(|| bad_request("tags is required"))?;
-        let name = cluster_name_from_arn(arn)?;
+        validate_eks_arn(arn)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let cluster = state
-            .clusters
-            .get_mut(&name)
-            .ok_or_else(not_found_arn(arn))?;
+        // Resolve the ARN to whichever resource owns it (cluster or any
+        // sub-resource) and tag that resource. Previously every non-cluster ARN
+        // was rejected with a 400, so tagging a node group / add-on failed.
+        let target = locate_tag_target(state, arn);
+        let dest = tags_mut(state, &target);
         for (k, v) in tags.as_object().unwrap() {
             if let Some(v) = v.as_str() {
-                cluster.tags.insert(k.clone(), v.to_string());
+                dest.insert(k.clone(), v.to_string());
             }
         }
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -839,15 +945,13 @@ impl EksService {
 
     fn untag_resource(&self, req: &AwsRequest, arn: &str) -> Result<AwsResponse, AwsServiceError> {
         let keys = parse_multi_query(&req.raw_query, "tagKeys");
-        let name = cluster_name_from_arn(arn)?;
+        validate_eks_arn(arn)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let cluster = state
-            .clusters
-            .get_mut(&name)
-            .ok_or_else(not_found_arn(arn))?;
+        let target = locate_tag_target(state, arn);
+        let dest = tags_mut(state, &target);
         for k in keys {
-            cluster.tags.remove(&k);
+            dest.remove(&k);
         }
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
@@ -857,17 +961,21 @@ impl EksService {
         req: &AwsRequest,
         arn: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = cluster_name_from_arn(arn)?;
+        validate_eks_arn(arn)?;
         let accounts = self.state.read();
-        let state = accounts
+        let tags: serde_json::Map<String, Value> = accounts
             .get(&req.account_id)
-            .ok_or_else(not_found_arn(arn))?;
-        let cluster = state.clusters.get(&name).ok_or_else(not_found_arn(arn))?;
-        let tags: serde_json::Map<String, Value> = cluster
-            .tags
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
+            .map(|state| {
+                let target = locate_tag_target(state, arn);
+                tags_ref(state, &target)
+                    .map(|t| {
+                        t.iter()
+                            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
         Ok(AwsResponse::json(
             StatusCode::OK,
             json!({ "tags": tags }).to_string(),
@@ -2342,11 +2450,20 @@ impl EksService {
     ) -> Result<AwsResponse, AwsServiceError> {
         // ListInsights is a POST carrying the filter/pagination in its body.
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
-        let max_results = body
-            .get("maxResults")
-            .and_then(|v| v.as_u64())
-            .map(|n| (n as usize).max(1))
-            .unwrap_or(100);
+        // maxResults is constrained to 1..=100 by the model; reject out-of-range
+        // values rather than silently clamping them.
+        let max_results = match body.get("maxResults") {
+            Some(v) => {
+                let n = v
+                    .as_i64()
+                    .ok_or_else(|| invalid_parameter("maxResults must be an integer"))?;
+                if !(1..=100).contains(&n) {
+                    return Err(invalid_parameter("maxResults must be between 1 and 100"));
+                }
+                n as usize
+            }
+            None => 100,
+        };
         let next_token = body
             .get("nextToken")
             .and_then(|v| v.as_str())
@@ -2614,6 +2731,12 @@ impl EksService {
             encryption_config: None,
             access_config: build_access_config(None),
             upgrade_policy: build_upgrade_policy(None),
+            compute_config: None,
+            storage_config: None,
+            zonal_shift_config: None,
+            remote_network_config: None,
+            control_plane_scaling_config: None,
+            deletion_protection: None,
         };
         let out = connected_cluster_json(&cluster, &id);
         state.clusters.insert(name, cluster);
@@ -2678,6 +2801,15 @@ impl EksService {
             .get("defaultOnly")
             .map(|v| v == "true")
             .unwrap_or(false);
+        // `includeAll=false` (the default) hides versions no longer in any
+        // support window (UNSUPPORTED); `includeAll=true` returns the full set.
+        let include_all = req
+            .query_params
+            .get("includeAll")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let status_filter = req.query_params.get("status").cloned();
+        let version_status_filter = req.query_params.get("versionStatus").cloned();
         let version_filter = parse_multi_query(&req.raw_query, "clusterVersions");
         let cluster_type = req
             .query_params
@@ -2694,6 +2826,22 @@ impl EksService {
                         .any(|f| v["clusterVersion"] == f.as_str())
             })
             .filter(|v| !default_only || v["defaultVersion"] == true)
+            // The `status` (deprecated) and `versionStatus` params narrow to a
+            // specific support tier; previously validated then ignored.
+            .filter(|v| status_filter.as_deref().is_none_or(|s| v["status"] == s))
+            .filter(|v| {
+                version_status_filter
+                    .as_deref()
+                    .is_none_or(|s| v["versionStatus"] == s)
+            })
+            // Drop UNSUPPORTED rows unless the caller asked to include all, or
+            // explicitly filtered to an unsupported tier.
+            .filter(|v| {
+                include_all
+                    || status_filter.is_some()
+                    || version_status_filter.is_some()
+                    || v["versionStatus"] != "UNSUPPORTED"
+            })
             .collect();
         // AWS reports the default version first; a stable sort keying non-default
         // rows after default ones preserves the ascending version order otherwise.
@@ -3477,30 +3625,193 @@ fn not_found_pod_identity_association(id: &str) -> impl Fn() -> AwsServiceError 
     }
 }
 
-fn not_found_arn(arn: &str) -> impl Fn() -> AwsServiceError + 'static {
-    let arn = arn.to_string();
-    move || {
-        AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "NotFoundException",
-            format!("Resource not found: {arn}"),
-        )
-    }
-}
-
-/// Extract the cluster name from an EKS cluster ARN, rejecting malformed or
-/// non-cluster ARNs with a BadRequestException (matching the tag ops' error set).
-fn cluster_name_from_arn(arn: &str) -> Result<String, AwsServiceError> {
+/// Validate that a string is a well-formed EKS ARN, rejecting anything else
+/// with a BadRequestException.
+fn validate_eks_arn(arn: &str) -> Result<(), AwsServiceError> {
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() < 6 || parts[0] != "arn" || parts[2] != "eks" {
         return Err(bad_request(format!("Invalid EKS ARN: {arn}")));
     }
-    let resource = parts[5];
-    let name = resource
-        .strip_prefix("cluster/")
-        .filter(|n| !n.is_empty())
-        .ok_or_else(|| bad_request(format!("Unsupported resource ARN: {arn}")))?;
-    Ok(name.to_string())
+    Ok(())
+}
+
+/// Which resource a tagging ARN points at. Located by scanning the stored
+/// resources for a matching ARN (rather than reverse-parsing every ARN shape),
+/// so the mutable borrow can be taken precisely afterwards.
+enum TagTarget {
+    Cluster(String),
+    Nodegroup(String, String),
+    Fargate(String, String),
+    Addon(String, String),
+    AccessEntry(String, String),
+    Idp(String, String),
+    PodIdentity(String, String),
+    Capability(String, String),
+    Subscription(String),
+    /// An ARN that matched no tracked resource; tags are kept in the account's
+    /// side `tags` map keyed by the ARN.
+    Generic(String),
+}
+
+fn locate_tag_target(state: &crate::state::EksState, arn: &str) -> TagTarget {
+    if let Some((n, _)) = state.clusters.iter().find(|(_, c)| c.arn == arn) {
+        return TagTarget::Cluster(n.clone());
+    }
+    for (cn, m) in &state.nodegroups {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::Nodegroup(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.fargate_profiles {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::Fargate(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.addons {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::Addon(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.access_entries {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::AccessEntry(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.identity_provider_configs {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::Idp(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.pod_identity_associations {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.association_arn == arn) {
+            return TagTarget::PodIdentity(cn.clone(), k.clone());
+        }
+    }
+    for (cn, m) in &state.capabilities {
+        if let Some((k, _)) = m.iter().find(|(_, r)| r.arn == arn) {
+            return TagTarget::Capability(cn.clone(), k.clone());
+        }
+    }
+    if let Some((k, _)) = state
+        .eks_anywhere_subscriptions
+        .iter()
+        .find(|(_, r)| r.arn == arn)
+    {
+        return TagTarget::Subscription(k.clone());
+    }
+    TagTarget::Generic(arn.to_string())
+}
+
+fn tags_mut<'a>(
+    state: &'a mut crate::state::EksState,
+    target: &TagTarget,
+) -> &'a mut crate::state::TagMap {
+    // Every arm but `Generic` was just located under the same write lock, so the
+    // lookups cannot miss.
+    match target {
+        TagTarget::Cluster(n) => &mut state.clusters.get_mut(n).unwrap().tags,
+        TagTarget::Nodegroup(c, k) => {
+            &mut state
+                .nodegroups
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::Fargate(c, k) => {
+            &mut state
+                .fargate_profiles
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::Addon(c, k) => &mut state.addons.get_mut(c).unwrap().get_mut(k).unwrap().tags,
+        TagTarget::AccessEntry(c, k) => {
+            &mut state
+                .access_entries
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::Idp(c, k) => {
+            &mut state
+                .identity_provider_configs
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::PodIdentity(c, k) => {
+            &mut state
+                .pod_identity_associations
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::Capability(c, k) => {
+            &mut state
+                .capabilities
+                .get_mut(c)
+                .unwrap()
+                .get_mut(k)
+                .unwrap()
+                .tags
+        }
+        TagTarget::Subscription(k) => {
+            &mut state.eks_anywhere_subscriptions.get_mut(k).unwrap().tags
+        }
+        TagTarget::Generic(a) => state.tags.entry(a.clone()).or_default(),
+    }
+}
+
+fn tags_ref<'a>(
+    state: &'a crate::state::EksState,
+    target: &TagTarget,
+) -> Option<&'a crate::state::TagMap> {
+    match target {
+        TagTarget::Cluster(n) => state.clusters.get(n).map(|c| &c.tags),
+        TagTarget::Nodegroup(c, k) => state
+            .nodegroups
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::Fargate(c, k) => state
+            .fargate_profiles
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::Addon(c, k) => state.addons.get(c).and_then(|m| m.get(k)).map(|r| &r.tags),
+        TagTarget::AccessEntry(c, k) => state
+            .access_entries
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::Idp(c, k) => state
+            .identity_provider_configs
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::PodIdentity(c, k) => state
+            .pod_identity_associations
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::Capability(c, k) => state
+            .capabilities
+            .get(c)
+            .and_then(|m| m.get(k))
+            .map(|r| &r.tags),
+        TagTarget::Subscription(k) => state.eks_anywhere_subscriptions.get(k).map(|r| &r.tags),
+        TagTarget::Generic(a) => state.tags.get(a),
+    }
 }
 
 fn parse_tag_map(v: Option<&Value>) -> crate::state::TagMap {
@@ -3683,6 +3994,24 @@ fn cluster_json(c: &Cluster, id: &str) -> Value {
     }
     if let Some(ec) = &c.encryption_config {
         out["encryptionConfig"] = ec.clone();
+    }
+    if let Some(v) = &c.compute_config {
+        out["computeConfig"] = v.clone();
+    }
+    if let Some(v) = &c.storage_config {
+        out["storageConfig"] = v.clone();
+    }
+    if let Some(v) = &c.zonal_shift_config {
+        out["zonalShiftConfig"] = v.clone();
+    }
+    if let Some(v) = &c.remote_network_config {
+        out["remoteNetworkConfig"] = v.clone();
+    }
+    if let Some(v) = &c.control_plane_scaling_config {
+        out["controlPlaneScalingConfig"] = v.clone();
+    }
+    if let Some(v) = c.deletion_protection {
+        out["deletionProtection"] = Value::Bool(v);
     }
     out
 }
@@ -4695,6 +5024,160 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(v["tags"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn update_cluster_config_persists_access_and_upgrade() {
+        let svc = EksService::new(make_state());
+        svc.handle(make_request(Method::POST, "/clusters", &create_body("uc")))
+            .await
+            .unwrap();
+        // Settle to ACTIVE.
+        svc.handle(make_request(Method::GET, "/clusters/uc", ""))
+            .await
+            .unwrap();
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/uc/update-config",
+                &json!({
+                    "accessConfig": { "authenticationMode": "API_AND_CONFIG_MAP" },
+                    "upgradePolicy": { "supportType": "STANDARD" },
+                    "computeConfig": { "enabled": true }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["update"]["status"], "InProgress");
+
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/uc", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            v["cluster"]["accessConfig"]["authenticationMode"],
+            "API_AND_CONFIG_MAP"
+        );
+        assert_eq!(v["cluster"]["upgradePolicy"]["supportType"], "STANDARD");
+        assert_eq!(v["cluster"]["computeConfig"]["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn tag_nodegroup_sub_resource_arn() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "tc").await;
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/tc/node-groups",
+                &nodegroup_body("tng"),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let ng_arn = v["nodegroup"]["nodegroupArn"].as_str().unwrap().to_string();
+        let encoded = ng_arn.replace('/', "%2F").replace(':', "%3A");
+
+        // Tagging a node-group ARN must succeed (previously rejected with 400).
+        svc.handle(make_request(
+            Method::POST,
+            &format!("/tags/{encoded}"),
+            &json!({ "tags": { "team": "core" } }).to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let resp = svc
+            .handle(make_request(Method::GET, &format!("/tags/{encoded}"), ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["tags"]["team"], "core");
+
+        // And it is reflected on the node group itself.
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/clusters/tc/node-groups/tng",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroup"]["tags"]["team"], "core");
+    }
+
+    #[tokio::test]
+    async fn delete_cluster_blocked_by_live_nodegroup() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "bc").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/bc/node-groups",
+            &nodegroup_body("ng"),
+        ))
+        .await
+        .unwrap();
+        let err = svc
+            .handle(make_request(Method::DELETE, "/clusters/bc", ""))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.code(), "ResourceInUseException");
+    }
+
+    #[tokio::test]
+    async fn delete_cluster_cascades_subresources() {
+        let svc = EksService::new(make_state());
+        create_cluster(&svc, "cc").await;
+        svc.handle(make_request(
+            Method::POST,
+            "/clusters/cc/node-groups",
+            &nodegroup_body("ng"),
+        ))
+        .await
+        .unwrap();
+        svc.handle(make_request(
+            Method::DELETE,
+            "/clusters/cc/node-groups/ng",
+            "",
+        ))
+        .await
+        .unwrap();
+        svc.handle(make_request(Method::DELETE, "/clusters/cc", ""))
+            .await
+            .unwrap();
+        // Recreate the same name: no orphaned node groups may leak through.
+        create_cluster(&svc, "cc").await;
+        let resp = svc
+            .handle(make_request(Method::GET, "/clusters/cc/node-groups", ""))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["nodegroups"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn describe_cluster_versions_filters_by_version_status() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                "/cluster-versions?versionStatus=EXTENDED_SUPPORT",
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let rows = v["clusterVersions"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows
+            .iter()
+            .all(|r| r["versionStatus"] == "EXTENDED_SUPPORT"));
     }
 
     // -----------------------------------------------------------------------
