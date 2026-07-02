@@ -28,7 +28,7 @@ fakecloud is a different tool for a different problem.
 | Real `docker push`/`pull` to ECR | Yes (OCI v2 Distribution) | **No** (Moto ships the JSON control plane only) |
 | Real cross-service wiring | Yes (S3 -> Lambda, SNS fan-out, etc fire end-to-end) | Partial (Moto simulates some events, not real execution) |
 | Setup for Python unit tests | HTTP endpoint override + fakecloud running | `@mock_aws` decorator |
-| Service count | 46 at true 100% conformance (depth-first) | 100+ at varying depth (breadth-first) |
+| Service count | 47 at true 100% conformance (depth-first) | 100+ at varying depth (breadth-first) |
 | Conformance methodology | Smithy-validated, 126,816/126,816 test variants pass on every commit | Not published |
 | License | AGPL-3.0 | Apache-2.0 |
 

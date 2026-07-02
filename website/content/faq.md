@@ -91,11 +91,11 @@ Moto is a Python library that patches boto3 inside a test process. fakecloud is 
 
 ### How does fakecloud compare to MinIO?
 
-MinIO is production-grade S3-compatible storage. fakecloud is an AWS testing emulator that happens to do S3 among 45 other services. Different tools for different jobs. See [fakecloud vs MinIO](/vs/minio/).
+MinIO is production-grade S3-compatible storage. fakecloud is an AWS testing emulator that happens to do S3 among 46 other services. Different tools for different jobs. See [fakecloud vs MinIO](/vs/minio/).
 
 ### How does fakecloud compare to DynamoDB Local?
 
-DynamoDB Local is AWS's official DynamoDB emulator (DynamoDB only). fakecloud emulates DynamoDB plus 45 other AWS services, with Streams fired through real Lambda execution. See [fakecloud vs DynamoDB Local](/vs/dynamodb-local/).
+DynamoDB Local is AWS's official DynamoDB emulator (DynamoDB only). fakecloud emulates DynamoDB plus 46 other AWS services, with Streams fired through real Lambda execution. See [fakecloud vs DynamoDB Local](/vs/dynamodb-local/).
 
 ### Where can I ask questions or report bugs?
 
@@ -125,8 +125,8 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "Can AI coding agents like Claude Code, Cursor, and GitHub Copilot use fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Paste-ready snippets for CLAUDE.md, .cursor/rules, and .github/copilot-instructions.md are in the README. Agents can also fetch https://fakecloud.dev/llms.txt for a structured API surface."}},
     {"@type": "Question", "name": "Is fakecloud production-ready cloud infrastructure?", "acceptedAnswer": {"@type": "Answer", "text": "No. fakecloud is a testing and local-development tool. It is not production AWS and is not intended to be."}},
     {"@type": "Question", "name": "How does fakecloud compare to Moto?", "acceptedAnswer": {"@type": "Answer", "text": "Moto is a Python library that patches boto3 inside a test process. fakecloud is a real HTTP server on port 4566. Moto is fast and Python-only; fakecloud is language-agnostic and runs real Lambda, RDS, and Redis."}},
-    {"@type": "Question", "name": "How does fakecloud compare to MinIO?", "acceptedAnswer": {"@type": "Answer", "text": "MinIO is production-grade S3-compatible storage. fakecloud is an AWS testing emulator that happens to do S3 among 45 other services."}},
-    {"@type": "Question", "name": "How does fakecloud compare to DynamoDB Local?", "acceptedAnswer": {"@type": "Answer", "text": "DynamoDB Local is AWS's official DynamoDB emulator, DynamoDB only. fakecloud emulates DynamoDB plus 45 other AWS services, with Streams fired through real Lambda execution."}},
+    {"@type": "Question", "name": "How does fakecloud compare to MinIO?", "acceptedAnswer": {"@type": "Answer", "text": "MinIO is production-grade S3-compatible storage. fakecloud is an AWS testing emulator that happens to do S3 among 46 other services."}},
+    {"@type": "Question", "name": "How does fakecloud compare to DynamoDB Local?", "acceptedAnswer": {"@type": "Answer", "text": "DynamoDB Local is AWS's official DynamoDB emulator, DynamoDB only. fakecloud emulates DynamoDB plus 46 other AWS services, with Streams fired through real Lambda execution."}},
     {"@type": "Question", "name": "Where can I ask questions or report bugs?", "acceptedAnswer": {"@type": "Answer", "text": "GitHub issues: github.com/faiscadev/fakecloud/issues. The roadmap is demand-driven."}}
   ]
 }

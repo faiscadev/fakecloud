@@ -33,7 +33,12 @@ pub const RESOURCE_GROUPS_TAGGING_ACTIONS: &[&str] = &[
     "UntagResources",
 ];
 
+/// `GetResources` ResourceARNList / ResourcesPerPage cap (Smithy length max).
 const MAX_RESOURCES_PER_PAGE: i64 = 100;
+/// `TagResources` / `UntagResources` ResourceARNList cap (Smithy length max).
+const MAX_TAG_UNTAG_ARNS: usize = 20;
+/// `TagResources` Tags / `UntagResources` TagKeys cap (Smithy length max).
+const MAX_TAGS: usize = 50;
 
 pub struct ResourceGroupsTaggingService {
     state: SharedResourceGroupsTaggingState,
@@ -108,10 +113,38 @@ impl ResourceGroupsTaggingService {
             Some(n) => n as usize,
             None => MAX_RESOURCES_PER_PAGE as usize,
         };
+        let tags_per_page = match body.get("TagsPerPage").and_then(Value::as_i64) {
+            Some(n) if n < 1 => {
+                return Err(invalid_param("TagsPerPage must be at least 1."));
+            }
+            Some(n) => Some(n as usize),
+            None => None,
+        };
 
-        let arn_filter: BTreeSet<String> = string_list(body.get("ResourceARNList"))
-            .into_iter()
-            .collect();
+        let arn_list = string_list(body.get("ResourceARNList"));
+        // AWS: ResourceARNList is mutually exclusive with the filter and
+        // pagination parameters.
+        if !arn_list.is_empty()
+            && (body.get("TagFilters").is_some()
+                || body.get("ResourceTypeFilters").is_some()
+                || body.get("ResourcesPerPage").is_some()
+                || body.get("TagsPerPage").is_some()
+                || body
+                    .get("PaginationToken")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| !t.is_empty()))
+        {
+            return Err(invalid_param(
+                "ResourceARNList cannot be used together with TagFilters, \
+                 ResourceTypeFilters, ResourcesPerPage, TagsPerPage, or PaginationToken.",
+            ));
+        }
+        if arn_list.len() > MAX_RESOURCES_PER_PAGE as usize {
+            return Err(invalid_param(&format!(
+                "ResourceARNList can contain at most {MAX_RESOURCES_PER_PAGE} ARNs."
+            )));
+        }
+        let arn_filter: BTreeSet<String> = arn_list.into_iter().collect();
         let type_filters = string_list(body.get("ResourceTypeFilters"));
         let tag_filters = parse_tag_filters(body.get("TagFilters"))?;
 
@@ -133,7 +166,22 @@ impl ResourceGroupsTaggingService {
             })));
         };
         let total = resources.len();
-        let end = start.saturating_add(per_page).min(total);
+        // Page ends when either the resource count OR (if TagsPerPage is set)
+        // the accumulated tag count is reached — whichever comes first — always
+        // emitting at least one resource so progress is guaranteed.
+        let mut end = start;
+        let mut tags_acc = 0usize;
+        while end < total {
+            let next_tags = resources[end].tags.len();
+            let hit_resource_cap = end - start >= per_page;
+            let hit_tag_cap =
+                tags_per_page.is_some_and(|cap| end > start && tags_acc + next_tags > cap);
+            if hit_resource_cap || hit_tag_cap {
+                break;
+            }
+            tags_acc += next_tags;
+            end += 1;
+        }
         let page = if start < total {
             &resources[start..end]
         } else {
@@ -195,9 +243,19 @@ impl ResourceGroupsTaggingService {
                 "ResourceARNList must contain at least one ARN.",
             ));
         }
+        if arns.len() > MAX_TAG_UNTAG_ARNS {
+            return Err(invalid_param(&format!(
+                "ResourceARNList can contain at most {MAX_TAG_UNTAG_ARNS} ARNs."
+            )));
+        }
         let tags = parse_tag_map(body.get("Tags"))?;
         if tags.is_empty() {
             return Err(invalid_param("Tags must contain at least one tag."));
+        }
+        if tags.len() > MAX_TAGS {
+            return Err(invalid_param(&format!(
+                "Tags can contain at most {MAX_TAGS} entries."
+            )));
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -218,9 +276,19 @@ impl ResourceGroupsTaggingService {
                 "ResourceARNList must contain at least one ARN.",
             ));
         }
+        if arns.len() > MAX_TAG_UNTAG_ARNS {
+            return Err(invalid_param(&format!(
+                "ResourceARNList can contain at most {MAX_TAG_UNTAG_ARNS} ARNs."
+            )));
+        }
         let keys = string_list(body.get("TagKeys"));
         if keys.is_empty() {
             return Err(invalid_param("TagKeys must contain at least one key."));
+        }
+        if keys.len() > MAX_TAGS {
+            return Err(invalid_param(&format!(
+                "TagKeys can contain at most {MAX_TAGS} entries."
+            )));
         }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -510,5 +578,134 @@ mod tests {
             values: vec!["dev".into()],
         };
         assert!(!miss.matches(&tags));
+    }
+
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::tag_index::TagProviderRegistry;
+    use parking_lot::RwLock;
+
+    fn svc() -> ResourceGroupsTaggingService {
+        let state = Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        )));
+        ResourceGroupsTaggingService::new(state, TagProviderRegistry::new(), None)
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "tagging".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn emsg(r: Result<AwsResponse, AwsServiceError>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => e.message(),
+        }
+    }
+
+    #[test]
+    fn tag_resources_rejects_over_limit_arns() {
+        let arns: Vec<String> = (0..21)
+            .map(|i| format!("arn:aws:x:us-east-1:0:t/{i}"))
+            .collect();
+        let msg = emsg(svc().tag_resources(&req(
+            "TagResources",
+            json!({ "ResourceARNList": arns, "Tags": { "k": "v" } }),
+        )));
+        assert!(msg.contains("at most 20"), "{msg}");
+    }
+
+    #[test]
+    fn tag_resources_rejects_over_limit_tags() {
+        let mut tags = serde_json::Map::new();
+        for i in 0..51 {
+            tags.insert(format!("k{i}"), json!("v"));
+        }
+        let msg = emsg(svc().tag_resources(&req(
+            "TagResources",
+            json!({ "ResourceARNList": ["arn:aws:x:us-east-1:0:t/a"], "Tags": tags }),
+        )));
+        assert!(msg.contains("at most 50"), "{msg}");
+    }
+
+    #[test]
+    fn get_resources_rejects_arnlist_with_filters() {
+        let msg = emsg(svc().get_resources(&req(
+            "GetResources",
+            json!({
+                "ResourceARNList": ["arn:aws:x:us-east-1:0:t/a"],
+                "ResourceTypeFilters": ["ec2"],
+            }),
+        )));
+        assert!(msg.contains("cannot be used together"), "{msg}");
+    }
+
+    #[test]
+    fn tag_then_get_and_untag_roundtrip() {
+        let s = svc();
+        let arn = "arn:aws:custom:us-east-1:000000000000:thing/abc";
+        s.tag_resources(&req(
+            "TagResources",
+            json!({ "ResourceARNList": [arn], "Tags": { "stage": "prod" } }),
+        ))
+        .unwrap();
+        let got = s.get_resources(&req("GetResources", json!({}))).unwrap();
+        let body: Value = serde_json::from_slice(got.body.expect_bytes()).unwrap();
+        assert_eq!(body["ResourceTagMappingList"][0]["ResourceARN"], arn);
+        // Region filtering: a resource whose ARN region differs is excluded.
+        let other_region = s
+            .get_resources(&AwsRequest {
+                region: "eu-west-1".into(),
+                ..req("GetResources", json!({}))
+            })
+            .unwrap();
+        let ob: Value = serde_json::from_slice(other_region.body.expect_bytes()).unwrap();
+        assert!(ob["ResourceTagMappingList"].as_array().unwrap().is_empty());
+        // Untag.
+        s.untag_resources(&req(
+            "UntagResources",
+            json!({ "ResourceARNList": [arn], "TagKeys": ["stage"] }),
+        ))
+        .unwrap();
+        let after = s.get_resources(&req("GetResources", json!({}))).unwrap();
+        let ab: Value = serde_json::from_slice(after.body.expect_bytes()).unwrap();
+        assert!(ab["ResourceTagMappingList"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_resources_paginates_by_tags_per_page() {
+        let s = svc();
+        // Two resources, 2 tags each. TagsPerPage=2 -> one resource per page.
+        for arn in ["arn:aws:x:us-east-1:0:t/a", "arn:aws:x:us-east-1:0:t/b"] {
+            s.tag_resources(&req(
+                "TagResources",
+                json!({ "ResourceARNList": [arn], "Tags": { "k1": "v", "k2": "v" } }),
+            ))
+            .unwrap();
+        }
+        let p1 = s
+            .get_resources(&req("GetResources", json!({ "TagsPerPage": 2 })))
+            .unwrap();
+        let b1: Value = serde_json::from_slice(p1.body.expect_bytes()).unwrap();
+        assert_eq!(b1["ResourceTagMappingList"].as_array().unwrap().len(), 1);
+        assert_eq!(b1["PaginationToken"], "1");
     }
 }

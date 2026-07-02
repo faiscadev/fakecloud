@@ -32,7 +32,7 @@ Run your actual test suite against both. Numbers published on landing pages are 
 | Distribution | Single static binary (~19 MB) + Docker image |
 | Startup | ~300ms |
 | Idle memory | ~10 MiB |
-| Services covered today | 46 (3,792 ops) at true 100% conformance (126,816/126,816 variants), incl. ECR + ECS + ELBv2 |
+| Services covered today | 47 (3,792 ops) at true 100% conformance (126,816/126,816 variants), incl. ECR + ECS + ELBv2 |
 | Lambda execution | Real code in 13 Docker runtime containers |
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey/Memcached via Docker |

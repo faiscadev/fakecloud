@@ -3862,7 +3862,15 @@ async fn main() {
     registry.register(Arc::new(resource_groups_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
-    // through a shared TagProviderRegistry; providers are wired per service.
+    // through a shared TagProviderRegistry, plus tags applied directly to
+    // arbitrary ARNs via TagResources (stored by the service itself).
+    //
+    // Per-service TagProvider adapters are wired in incrementally in follow-on
+    // batches — the same staged rollout used for the cross-service persistence
+    // sweep (each service crate gains an adapter over its own tag state). Until
+    // a given service is wired, its native tags simply don't appear here; tags
+    // applied through this API always do. The registry starts empty and grows
+    // as providers register at startup.
     let tag_provider_registry = fakecloud_core::tag_index::TagProviderRegistry::new();
     let resource_groups_tagging_snapshot_store: Option<
         Arc<dyn fakecloud_persistence::SnapshotStore>,

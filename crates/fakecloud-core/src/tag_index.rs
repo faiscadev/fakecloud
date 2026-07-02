@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 /// A resource discovered from a service's live state, with its tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaggedResource {
-    /// The resource ARN. Its embedded region is used for region filtering.
+    /// The resource ARN.
     pub arn: String,
     /// AWS tagging-API resource type, `service:resourceType`
     /// (e.g. `s3:bucket`, `ec2:instance`, `dynamodb:table`). Empty when the
@@ -28,25 +28,53 @@ pub struct TaggedResource {
     pub resource_type: String,
     /// The resource's tags, key -> value.
     pub tags: BTreeMap<String, String>,
+    /// The region this resource belongs to for region-filter purposes.
+    /// Providers set this from their own state (an S3 bucket's ARN carries no
+    /// region, but the bucket IS regional, so relying on the ARN alone would
+    /// over-return it). `None` means "region unknown" — treated as global
+    /// (matches every region filter), which is correct for genuinely global
+    /// resources and the safe default for arbitrary API-tagged ARNs.
+    region: Option<String>,
 }
 
 impl TaggedResource {
+    /// Construct with the region derived from the ARN. Use
+    /// [`TaggedResource::with_region`] when the owning service knows the true
+    /// region (e.g. S3, whose ARNs omit it).
     pub fn new(
         arn: impl Into<String>,
         resource_type: impl Into<String>,
         tags: BTreeMap<String, String>,
     ) -> Self {
+        let arn = arn.into();
+        let region = region_from_arn(&arn);
         Self {
-            arn: arn.into(),
+            arn,
             resource_type: resource_type.into(),
             tags,
+            region,
         }
     }
 
-    /// Region parsed from the ARN (`arn:partition:service:region:...`).
-    /// Empty for global resources (IAM, S3, Route 53, ...).
+    /// Override the region explicitly (for providers whose ARNs don't encode
+    /// it). Pass `None` to mark the resource global.
+    pub fn with_region(mut self, region: Option<String>) -> Self {
+        self.region = region;
+        self
+    }
+
+    /// The resource's region, or empty when global/unknown.
     pub fn region(&self) -> &str {
-        self.arn.split(':').nth(3).unwrap_or("")
+        self.region.as_deref().unwrap_or("")
+    }
+}
+
+/// Region from an ARN (`arn:partition:service:region:...`), `None` when the
+/// region field is empty (global services like IAM/S3/Route 53).
+fn region_from_arn(arn: &str) -> Option<String> {
+    match arn.split(':').nth(3) {
+        Some(r) if !r.is_empty() => Some(r.to_string()),
+        _ => None,
     }
 }
 

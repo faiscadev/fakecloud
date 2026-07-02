@@ -1613,7 +1613,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateGroup`
 - `UpdateGroupQuery`
 
-## [Resource Groups Tagging API](@/docs/services/tagging.md)
+## [Resource Groups Tagging API](@/docs/services/resource-groups-tagging.md)
 
 - `DescribeReportCreation`
 - `GetComplianceSummary`
