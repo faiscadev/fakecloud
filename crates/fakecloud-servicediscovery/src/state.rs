@@ -88,6 +88,24 @@ pub struct HealthCheckCustomConfig {
     pub failure_threshold: Option<i32>,
 }
 
+/// An instance registered into a service (via `RegisterInstance`). Cloud Map
+/// keys instances by the caller-supplied `InstanceId` within a service and
+/// materializes DNS records / health status from its `Attributes` map (the
+/// well-known `AWS_INSTANCE_*` keys plus arbitrary custom attributes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Instance {
+    pub id: String,
+    pub creator_request_id: String,
+    /// Arbitrary + well-known attributes (`AWS_INSTANCE_IPV4`, `AWS_INSTANCE_PORT`,
+    /// `AWS_INSTANCE_CNAME`, `AWS_ALIAS_DNS_NAME`, `AWS_INSTANCE_IPV6`,
+    /// `AWS_EC2_INSTANCE_ID`, and custom keys).
+    pub attributes: BTreeMap<String, String>,
+    /// Current health status, one of the `HealthStatus` enum values
+    /// (`HEALTHY`/`UNHEALTHY`/`UNKNOWN`). Instances start `HEALTHY`; a
+    /// custom-health service updates it via `UpdateInstanceCustomHealthStatus`.
+    pub health: String,
+}
+
 /// A Cloud Map service: instances register *into* a service, which lives within
 /// a namespace. Created synchronously (unlike namespaces), so `CreateService`
 /// returns the full `Service` shape rather than an `OperationId`.
@@ -111,6 +129,14 @@ pub struct Service {
     pub attributes: BTreeMap<String, String>,
     pub creator_request_id: String,
     pub create_date: DateTime<Utc>,
+    /// Instances registered into this service, keyed by `InstanceId`.
+    #[serde(default)]
+    pub instances: BTreeMap<String, Instance>,
+    /// Monotonic counter bumped on every register/deregister; surfaced by
+    /// `DiscoverInstances`/`DiscoverInstancesRevision` so clients can detect a
+    /// changed instance set without diffing.
+    #[serde(default)]
+    pub instances_revision: i64,
 }
 
 /// An asynchronous Cloud Map operation. Create/update/delete calls return an

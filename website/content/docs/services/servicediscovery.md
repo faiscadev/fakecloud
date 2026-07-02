@@ -5,12 +5,12 @@ weight = 47
 +++
 
 fakecloud implements **AWS Cloud Map** (`servicediscovery`), the service-discovery
-and application resource registry, as an awsJson1.1 control plane. The
-**namespace** control plane, **operation** tracking, and the **service** control
-plane ship now, backed by account-partitioned state that persists across restarts
-in persistent mode.
+and application resource registry, as an awsJson1.1 control plane. **The complete
+30-operation surface** ships — namespaces, operation tracking, services,
+instances, the `DiscoverInstances` data-plane lookup, and tagging — backed by
+account-partitioned state that persists across restarts in persistent mode.
 
-## Supported now (19 of 30 operations)
+## Supported now (all 30 operations)
 
 - **Namespaces** — `CreateHttpNamespace`, `CreatePrivateDnsNamespace`,
   `CreatePublicDnsNamespace`, `GetNamespace`, `ListNamespaces`,
@@ -35,18 +35,25 @@ in persistent mode.
   parent namespace's `ServiceCount`); `UpdateService` is asynchronous (returns an
   `OperationId`). `ListServices` filters by `NAMESPACE_ID`.
 
-`ListNamespaces`, `ListServices`, and `ListOperations` paginate with
-`MaxResults` / `NextToken` and honor `Filters`. 100% conformance across every
-shipped operation: all 655 generated Smithy probe variants for these 19
-operations pass.
+- **Instances** — `RegisterInstance`, `DeregisterInstance`, `GetInstance`,
+  `ListInstances`, `GetInstancesHealthStatus`, `UpdateInstanceCustomHealthStatus`.
+  Instances register with well-known attributes (`AWS_INSTANCE_IPV4` / `IPV6` /
+  `PORT` / `CNAME`, validated against the service's `DnsConfig` record types),
+  carry a health status (custom health for services with a
+  `HealthCheckCustomConfig`), and adjust the service's `InstanceCount`.
+  `RegisterInstance` / `DeregisterInstance` are asynchronous (return an
+  `OperationId`).
+- **Discovery** — `DiscoverInstances` resolves a namespace + service by name and
+  returns matching instances, filtered by `QueryParameters` (attribute equality)
+  and a `HealthStatus` filter (default `HEALTHY_OR_ELSE_ALL`); it carries a
+  per-service `InstancesRevision` counter surfaced by `DiscoverInstancesRevision`.
+- **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` over both
+  namespace and service ARNs (create-time `Tags` are reflected).
 
-## In progress (roadmap)
-
-The remaining Cloud Map surface lands in later batches: **instances**
-(`RegisterInstance` / `DeregisterInstance` / `GetInstance` / `ListInstances` +
-`GetInstancesHealthStatus` / `UpdateInstanceCustomHealthStatus`), the discovery
-data plane (`DiscoverInstances` / `DiscoverInstancesRevision`), and resource
-**tagging** (`TagResource` / `UntagResource` / `ListTagsForResource`).
+`ListNamespaces`, `ListServices`, `ListInstances`, and `ListOperations` paginate
+with `MaxResults` / `NextToken` and honor `Filters`. 100% conformance across the
+full surface: all 1,062 generated Smithy probe variants for the 30 operations
+pass. There is no DNS/HTTP data plane beyond the `DiscoverInstances` API.
 
 ## Example
 
