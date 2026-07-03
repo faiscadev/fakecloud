@@ -61,16 +61,43 @@ pub(crate) fn validate_create_queue_attributes(
     Ok(())
 }
 
-/// If the attribute is JSON-valued, parse + re-emit as compact JSON.
-/// Otherwise the value is passed through unchanged. Invalid JSON is also
-/// passed through; downstream validators reject it with proper errors.
+/// If the attribute is JSON-valued, parse + re-emit as compact JSON with
+/// keys sorted. Otherwise the value is passed through unchanged. Invalid JSON
+/// is also passed through; downstream validators reject it with proper errors.
+///
+/// Keys are sorted explicitly rather than relying on `serde_json`'s default
+/// `Value::Object` ordering: that default is `BTreeMap` (sorted) only while the
+/// `preserve_order` feature is off, but Cargo feature-unification can switch it
+/// to insertion-ordered `IndexMap` workspace-wide as soon as any dependency
+/// enables `serde_json/preserve_order` (e.g. `cedar-policy`). Sorting here keeps
+/// the canonical form deterministic regardless of that feature.
 pub(crate) fn canonicalize_json_attr(name: &str, value: String) -> String {
     if !JSON_VALUED_ATTRS.contains(&name) {
         return value;
     }
     match serde_json::from_str::<Value>(&value) {
-        Ok(parsed) => serde_json::to_string(&parsed).unwrap_or(value),
+        Ok(parsed) => serde_json::to_string(&sort_json_keys(&parsed)).unwrap_or(value),
         Err(_) => value,
+    }
+}
+
+/// Recursively rebuild a JSON value with every object's keys in sorted order,
+/// so compact re-serialization is deterministic independent of the
+/// `serde_json/preserve_order` feature.
+fn sort_json_keys(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, val)| (k.clone(), sort_json_keys(val)))
+                    .collect(),
+            )
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_json_keys).collect()),
+        other => other.clone(),
     }
 }
 
@@ -1452,6 +1479,36 @@ pub(crate) fn parse_numbered_params(body: &Value, prefix: &str) -> Vec<String> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod canonicalize_tests {
+    use super::canonicalize_json_attr;
+
+    #[test]
+    fn policy_keys_sorted_regardless_of_input_order() {
+        // Input has Version before Statement; canonical form sorts keys, so the
+        // output is deterministic even when `serde_json/preserve_order` is on.
+        let out = canonicalize_json_attr(
+            "Policy",
+            "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}\n".to_string(),
+        );
+        assert_eq!(out, r#"{"Statement":[],"Version":"2012-10-17"}"#);
+    }
+
+    #[test]
+    fn nested_objects_are_sorted_recursively() {
+        let out = canonicalize_json_attr("Policy", r#"{"b":1,"a":{"z":2,"y":3}}"#.to_string());
+        assert_eq!(out, r#"{"a":{"y":3,"z":2},"b":1}"#);
+    }
+
+    #[test]
+    fn non_json_attr_passes_through_unchanged() {
+        assert_eq!(
+            canonicalize_json_attr("VisibilityTimeout", "30".into()),
+            "30"
+        );
+    }
 }
 
 #[cfg(test)]
