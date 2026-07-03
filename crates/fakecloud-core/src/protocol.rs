@@ -37,6 +37,10 @@ const REST_JSON_SERVICES: &[&str] = &[
     "dsql",
     "resource-groups",
     "eks",
+    // Amazon OpenSearch Service + Amazon Elasticsearch Service both sign as
+    // `es` and speak restJson1; one service handles both, splitting on the
+    // URL path version prefix.
+    "es",
     "account",
 ];
 
@@ -585,6 +589,14 @@ fn normalize_service_name(service: &str) -> &str {
         // routed under `/v2/...` and the v1 handler under `/restapis/...`,
         // both reachable behind the `apigateway` SigV4 service.
         "apigatewayv2" => "apigateway",
+        // Amazon OpenSearch Service has no dedicated SigV4 signing scope: its
+        // SDK signs with `es` (the shared Elasticsearch Service scope), so a
+        // real OpenSearch request already arrives as `es` and needs no
+        // normalization. The conformance probe, however, signs with the
+        // Smithy service shape name `opensearch`; alias it to `es` so both the
+        // 2015 (Elasticsearch) and 2021 (OpenSearch) probes resolve to the one
+        // registry entry, which then routes on the URL path version prefix.
+        "opensearch" => "es",
         other => other,
     }
 }

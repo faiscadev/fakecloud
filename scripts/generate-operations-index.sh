@@ -64,6 +64,8 @@ SERVICES=(
     "elasticache|ElastiCache|elasticache"
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
+    "es|Elasticsearch Service|opensearch"
+    "opensearch|OpenSearch Service|opensearch"
     "servicediscovery|Cloud Map|servicediscovery"
     "account|Account Management|account"
     "identitystore|IAM Identity Center Identity Store|identitystore"

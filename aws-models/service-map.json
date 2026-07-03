@@ -203,6 +203,14 @@
     "repo_dir": "eks",
     "service_name": "eks"
   },
+  "es": {
+    "repo_dir": "elasticsearch-service",
+    "service_name": "es"
+  },
+  "opensearch": {
+    "repo_dir": "opensearch",
+    "service_name": "opensearch"
+  },
   "identitystore": {
     "repo_dir": "identitystore",
     "service_name": "identitystore"

@@ -43,6 +43,7 @@ fakecloud-resource-groups-tagging = { workspace = true }
 fakecloud-cloudcontrol = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-eks = { workspace = true }
+fakecloud-opensearch = { workspace = true }
 fakecloud-memorydb = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
 fakecloud-elbv2 = { workspace = true }

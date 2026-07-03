@@ -47,6 +47,8 @@ SERVICES=(
     "elasticache:elasticache"
     "memorydb:memorydb"
     "eks:eks"
+    "es:elasticsearch-service"
+    "opensearch:opensearch"
     "servicediscovery:servicediscovery"
     "sfn:sfn"
     "bedrock:bedrock"

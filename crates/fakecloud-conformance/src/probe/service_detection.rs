@@ -108,6 +108,12 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "monitoring" => Protocol::Query,
         "s3" => Protocol::Rest,
         "eks" => Protocol::Rest,
+        // Amazon Elasticsearch Service (2015) + Amazon OpenSearch Service
+        // (2021): both restJson1, both sign as `es`. Two probe ids so each
+        // API's operation set is exercised at its own path version prefix;
+        // the server normalizes the `opensearch` credential scope to `es`.
+        "es" => Protocol::Rest,
+        "opensearch" => Protocol::Rest,
         "lambda" => Protocol::Rest,
         // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate
         // Smithy models with distinct `service_name` entries in
