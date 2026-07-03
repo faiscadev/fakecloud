@@ -64,6 +64,7 @@ SERVICES=(
     "elasticache|ElastiCache|elasticache"
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
+    "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"
     "opensearch|OpenSearch Service|opensearch"
     "servicediscovery|Cloud Map|servicediscovery"

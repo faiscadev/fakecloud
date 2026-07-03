@@ -519,6 +519,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let backup_state: fakecloud_backup::SharedBackupState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4248,6 +4255,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("eks", h);
     }
     registry.register(Arc::new(eks_service));
+
+    // AWS Backup control plane.
+    let backup_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("backup").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_backup::persistence::load_into(&store, &backup_state) {
+                Ok(fakecloud_backup::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded backup persistence snapshot");
+                }
+                Ok(fakecloud_backup::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no backup persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut backup_service = fakecloud_backup::BackupService::new(backup_state.clone());
+    if let Some(store) = backup_snapshot_store {
+        backup_service = backup_service.with_snapshot_store(store);
+    }
+    if let Some(h) = backup_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("backup", h);
+    }
+    registry.register(Arc::new(backup_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

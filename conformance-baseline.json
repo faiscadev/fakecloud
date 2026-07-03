@@ -1,6 +1,6 @@
 {
-  "variants_passed": 148218,
-  "total_variants": 148218,
+  "variants_passed": 151307,
+  "total_variants": 151307,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -81,6 +81,10 @@
     "eks": {
       "passed": 1865,
       "total": 1865
+    },
+    "backup": {
+      "passed": 3089,
+      "total": 3089
     },
     "es": {
       "passed": 1463,
