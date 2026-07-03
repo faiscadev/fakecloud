@@ -203,6 +203,10 @@
     "repo_dir": "eks",
     "service_name": "eks"
   },
+  "backup": {
+    "repo_dir": "backup",
+    "service_name": "backup"
+  },
   "es": {
     "repo_dir": "elasticsearch-service",
     "service_name": "es"

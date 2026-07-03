@@ -47,6 +47,7 @@ SERVICES=(
     "elasticache:elasticache"
     "memorydb:memorydb"
     "eks:eks"
+    "backup:backup"
     "es:elasticsearch-service"
     "opensearch:opensearch"
     "servicediscovery:servicediscovery"

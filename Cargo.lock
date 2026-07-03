@@ -3439,6 +3439,7 @@ dependencies = [
  "fakecloud-athena",
  "fakecloud-autoscaling",
  "fakecloud-aws",
+ "fakecloud-backup",
  "fakecloud-batch",
  "fakecloud-bedrock",
  "fakecloud-bedrock-agent",
@@ -3691,6 +3692,27 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "fakecloud-backup"
+version = "0.33.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

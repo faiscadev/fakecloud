@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 4,483 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 4,592 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 4,483 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 4,592 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
 - **Total Operations**: 4,220
-- **Conformance Engine**: 148,218 Smithy-based test variants
+- **Conformance Engine**: 151,307 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -31,6 +31,7 @@ fakecloud provides 100% API conformance across 4,483 operations. Unlike mocks, f
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.
 - **EKS**: 65 operations (complete). Full Elastic Kubernetes Service control plane: clusters (incl. connected-cluster register/deregister), managed node groups, Fargate profiles, add-ons, access entries + access policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, and EKS Anywhere subscriptions (create/describe/list/delete, config + version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging), with persistence. Resources transition `CREATING` -> `ACTIVE` on describe. No real Kubernetes control-plane endpoint (models the AWS management API, not `kubectl`).
+- **AWS Backup**: 109 operations (complete). Full AWS Backup control plane: backup plans (with versions) + selections, backup vaults (standard / logically-air-gapped / restore-access) with notifications, access policies, and lock configuration, recovery points, backup / copy / restore / scan jobs (progressed synthetically to a terminal state so Describe/List show completed work; `StartBackupJob` records a synthetic recovery point that `DescribeRecoveryPoint` resolves), frameworks, report plans + jobs, legal holds, restore-testing plans + selections, tiering configurations, protected resources, tags, and account-scoped global / region settings, with persistence. No real backup engine runs (control-plane emulation, matching LocalStack Community).
 
 ### AI & Machine Learning
 - **Bedrock**: 214 operations across 4 APIs (Bedrock 101, Bedrock Runtime 10, Bedrock Agent 72, Bedrock Agent Runtime 31). Guardrails, Model Customization, Provisioned Throughput, Agents, Knowledge Bases.
