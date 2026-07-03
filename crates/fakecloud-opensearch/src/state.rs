@@ -165,6 +165,10 @@ pub struct OpenSearchState {
     /// Purchased reserved instances keyed by reservation id.
     #[serde(default)]
     pub reserved_instances: BTreeMap<String, Value>,
+    /// VPC-endpoint-access principals authorized per domain: domain name ->
+    /// principal key (account id or service SP) -> `AuthorizedPrincipal` JSON.
+    #[serde(default)]
+    pub vpc_endpoint_access: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 impl AccountState for OpenSearchState {

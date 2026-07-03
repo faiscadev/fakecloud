@@ -667,6 +667,84 @@ async fn vpc_endpoint_create_and_list() {
 }
 
 #[tokio::test]
+async fn vpc_endpoint_access_authorize_list_revoke_roundtrip() {
+    // Regression: AuthorizeVpcEndpointAccess must persist the principal (in the
+    // model's { PrincipalType, Principal } shape), ListVpcEndpointAccess must
+    // return it, and RevokeVpcEndpointAccess must remove it -- across the
+    // shared store, so a grant made via the 2021 API is visible via 2015.
+    let svc = service();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "vpcacc"}),
+        ),
+    )
+    .await;
+
+    let authed = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/domain/vpcacc/authorizeVpcEndpointAccess"),
+                json!({"Account": "111122223333"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        authed["AuthorizedPrincipal"]["PrincipalType"], "AWS_ACCOUNT",
+        "AuthorizedPrincipal must use the model shape"
+    );
+    assert_eq!(authed["AuthorizedPrincipal"]["Principal"], "111122223333");
+
+    // Listed via the legacy 2015 API (shared store).
+    let listed = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{ES}/es/domain/vpcacc/listVpcEndpointAccess"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let principals = listed["AuthorizedPrincipalList"].as_array().unwrap();
+    assert_eq!(principals.len(), 1, "authorized principal must persist");
+    assert_eq!(principals[0]["Principal"], "111122223333");
+    assert!(listed.get("NextToken").is_some());
+
+    // Revoke, then the list is empty again.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain/vpcacc/revokeVpcEndpointAccess"),
+            json!({"Account": "111122223333"}),
+        ),
+    )
+    .await;
+    let after = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/vpcacc/listVpcEndpointAccess"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert!(after["AuthorizedPrincipalList"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn outbound_connection_create_and_delete() {
     let svc = service();
     let created = json_of(
