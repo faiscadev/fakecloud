@@ -1870,6 +1870,28 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutContactInformation`
 - `StartPrimaryEmailUpdate`
 
+## [IAM Identity Center Identity Store](@/docs/services/identitystore.md)
+
+- `CreateGroup`
+- `CreateGroupMembership`
+- `CreateUser`
+- `DeleteGroup`
+- `DeleteGroupMembership`
+- `DeleteUser`
+- `DescribeGroup`
+- `DescribeGroupMembership`
+- `DescribeUser`
+- `GetGroupId`
+- `GetGroupMembershipId`
+- `GetUserId`
+- `IsMemberInGroups`
+- `ListGroupMemberships`
+- `ListGroupMembershipsForMember`
+- `ListGroups`
+- `ListUsers`
+- `UpdateGroup`
+- `UpdateUser`
+
 ## [Step Functions](@/docs/services/stepfunctions.md)
 
 - `CreateActivity`

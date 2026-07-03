@@ -21,6 +21,7 @@ cd repo
 # Service mapping: our_name:repo_dir
 SERVICES=(
     "account:account"
+    "identitystore:identitystore"
     "sqs:sqs"
     "sns:sns"
     "eventbridge:eventbridge"

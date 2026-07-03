@@ -3277,6 +3277,7 @@ dependencies = [
  "fakecloud-firehose",
  "fakecloud-glue",
  "fakecloud-iam",
+ "fakecloud-identitystore",
  "fakecloud-k8s",
  "fakecloud-kinesis",
  "fakecloud-kms",
@@ -4210,6 +4211,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-identitystore"
+version = "0.32.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

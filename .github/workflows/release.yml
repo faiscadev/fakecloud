@@ -203,6 +203,7 @@ jobs:
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
+          publish fakecloud-identitystore    # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock
