@@ -28,7 +28,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use firewall::{
-    render_ruleset, resolve_enforcement_mode, EnforcementMode, InstanceRules, SubnetFirewall,
+    render_bridge_ruleset, render_ruleset, resolve_enforcement_mode, EnforcementMode,
+    InstanceRules, SubnetFirewall,
 };
 
 /// Default base image an instance's container runs. AMIs don't map to a
@@ -244,40 +245,61 @@ impl FirewallEnforcer {
                 "could not run sysctl (is procps installed?); same-subnet security-group enforcement may filter nothing"
             ),
         }
-        let ruleset = render_ruleset(subnets);
         use tokio::io::AsyncWriteExt;
-        let mut child = match tokio::process::Command::new("nft")
-            .args(["-f", "-"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to spawn nft; security-group ruleset not applied");
-                return;
+        // Load a rendered ruleset via `nft -f -`. `required=false` marks the
+        // best-effort same-subnet bridge table: a kernel without
+        // `nf_conntrack_bridge` rejects its `ct state` line, and since the inet
+        // table is applied independently first, that rejection is logged at
+        // debug (degraded same-subnet enforcement) rather than warn.
+        async fn load_nft(label: &str, ruleset: &str, subnets: usize, required: bool) {
+            let mut child = match tokio::process::Command::new("nft")
+                .args(["-f", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, table = label, "failed to spawn nft; security-group ruleset not applied");
+                    return;
+                }
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(ruleset.as_bytes()).await;
+                let _ = stdin.shutdown().await;
             }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(ruleset.as_bytes()).await;
-            let _ = stdin.shutdown().await;
+            match child.wait_with_output().await {
+                Ok(out) if out.status.success() => {
+                    tracing::debug!(
+                        subnets,
+                        table = label,
+                        "applied EC2 security-group nft ruleset"
+                    );
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stderr = stderr.trim();
+                    if required {
+                        tracing::warn!(table = label, stderr = %stderr, "nft rejected the security-group ruleset; leaving the previous ruleset in place");
+                    } else {
+                        tracing::debug!(table = label, stderr = %stderr, "bridge-family SG ruleset not applied (kernel may lack nf_conntrack_bridge); same-subnet enforcement degraded to inet table only");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, table = label, "nft apply failed"),
+            }
         }
-        match child.wait_with_output().await {
-            Ok(out) if out.status.success() => {
-                tracing::debug!(
-                    subnets = subnets.len(),
-                    "applied EC2 security-group nft ruleset"
-                );
-            }
-            Ok(out) => {
-                tracing::warn!(
-                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                    "nft rejected the security-group ruleset; leaving the previous ruleset in place"
-                );
-            }
-            Err(e) => tracing::warn!(error = %e, "nft apply failed"),
-        }
+        let n = subnets.len();
+        // inet: cross-subnet routed enforcement (required). bridge: same-subnet
+        // L2 enforcement that the inet forward hook misses for bridged frames.
+        load_nft("inet fakecloud_ec2", &render_ruleset(subnets), n, true).await;
+        load_nft(
+            "bridge fakecloud_ec2_l2",
+            &render_bridge_ruleset(subnets),
+            n,
+            false,
+        )
+        .await;
     }
 }
 
