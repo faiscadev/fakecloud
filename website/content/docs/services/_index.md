@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 52 AWS services with 3,966 total operations. 132,082/132,082 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 53 AWS services with 3,966 total operations. 134,924/134,924 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -40,6 +40,7 @@ fakecloud implements 52 AWS services with 3,966 total operations. 132,082/132,08
 | Cloud Map              |  30 | Complete AWS Cloud Map (`servicediscovery`) control plane + discovery: namespaces, services, instances (register/deregister/health), `DiscoverInstances`/`DiscoverInstancesRevision`, tagging; async operation model — mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`; persisted (all 30 ops) |
 | Account Management     |  15 | Complete AWS Account control plane: alternate contacts (BILLING/OPERATIONS/SECURITY), primary contact information, account information + name, GovCloud pairing, primary-email OTP flow, Region opt-in (ListRegions/GetRegionOptStatus/Enable/DisableRegion with `ENABLING` -> `ENABLED` settle-on-read); honors optional `AccountId` for org management; persisted (all 15 ops) |
 | Identity Store         |  19 | Complete IAM Identity Center Identity Store directory: users, groups, memberships (create/describe/update/delete/list), `GetUserId`/`GetGroupId`/`GetGroupMembershipId` attribute lookups, `IsMemberInGroups`; SCIM attribute bags round-trip; persisted (all 19 ops) |
+| SSO Admin              |  79 | Complete IAM Identity Center SSO Admin control plane: instances, permission sets + policies, account assignments + provisioning (async settle), applications + assignments/scopes/methods/grants, provider catalogue, trusted token issuers, regions, attribute config, tagging; persisted (all 79 ops) |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |

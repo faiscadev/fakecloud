@@ -1,6 +1,6 @@
 {
-  "variants_passed": 132082,
-  "total_variants": 132082,
+  "variants_passed": 134924,
+  "total_variants": 134924,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -209,6 +209,10 @@
     "identitystore": {
       "passed": 726,
       "total": 726
+    },
+    "sso": {
+      "passed": 2842,
+      "total": 2842
     }
   }
 }

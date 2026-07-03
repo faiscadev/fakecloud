@@ -22,6 +22,7 @@ cd repo
 SERVICES=(
     "account:account"
     "identitystore:identitystore"
+    "ssoadmin:sso-admin"
     "sqs:sqs"
     "sns:sns"
     "eventbridge:eventbridge"

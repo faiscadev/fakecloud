@@ -268,30 +268,78 @@ fn paginate(rows: Vec<Value>, b: &Value) -> Result<(Vec<Value>, Option<String>),
     Ok((page, next))
 }
 
+/// Resolve `seg` to a bag key: reuse an existing key that matches
+/// case-insensitively, otherwise fall back to a PascalCase form of `seg`.
+///
+/// SCIM `AttributeOperations` (as emitted by the Terraform provider and other
+/// SCIM clients) address attributes in camelCase (`name.givenName`,
+/// `displayName`, `phoneNumbers`), but the attribute bag is stored with the
+/// PascalCase member names the awsJson `CreateUser`/`CreateGroup` request
+/// carried (`Name.GivenName`, `DisplayName`, `PhoneNumbers`). Without this
+/// mapping an update would write to a shadow lowercase key and the describe
+/// would keep returning the stale PascalCase value.
+fn canonical_key(bag: &Map<String, Value>, seg: &str) -> String {
+    if let Some(existing) = bag.keys().find(|k| k.eq_ignore_ascii_case(seg)) {
+        return existing.clone();
+    }
+    let mut chars = seg.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => seg.to_string(),
+    }
+}
+
 /// Set a (possibly dotted) attribute path on the bag; `None` removes it.
 fn set_attribute(bag: &mut Map<String, Value>, path: &str, value: Option<Value>) {
     let mut parts = path.split('.').peekable();
-    let head = match parts.next() {
+    let head_raw = match parts.next() {
         Some(h) => h,
         None => return,
     };
+    let head = canonical_key(bag, head_raw);
     if parts.peek().is_none() {
         match value {
             Some(v) => {
-                bag.insert(head.to_string(), v);
+                bag.insert(head, v);
             }
             None => {
-                bag.remove(head);
+                bag.remove(&head);
             }
         }
         return;
     }
     let rest: String = parts.collect::<Vec<_>>().join(".");
-    let child = bag
-        .entry(head.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
+    let child = bag.entry(head).or_insert_with(|| Value::Object(Map::new()));
     if let Value::Object(m) = child {
         set_attribute(m, &rest, value);
+    }
+}
+
+/// Recursively PascalCase the first letter of every object key. SCIM update
+/// clients (the Terraform provider in particular) hand-build the
+/// `AttributeValue` of a list operation with camelCase element keys
+/// (`{value, type, primary}`, `{streetAddress, postalCode, country}`), but the
+/// awsJson model — and therefore every SDK deserializing our `DescribeUser`
+/// response — uses PascalCase member names (`Value`, `Type`, `StreetAddress`).
+/// Canonicalizing on the way in keeps the stored bag model-conformant so the
+/// SDK reads the sub-fields back. Scalars are returned unchanged; already
+/// PascalCase keys are idempotent.
+fn canonicalize_keys(v: Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(
+            m.into_iter()
+                .map(|(k, val)| {
+                    let mut chars = k.chars();
+                    let key = match chars.next() {
+                        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => k,
+                    };
+                    (key, canonicalize_keys(val))
+                })
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.into_iter().map(canonicalize_keys).collect()),
+        other => other,
     }
 }
 
@@ -306,7 +354,11 @@ fn apply_operations(attributes: &mut Value, ops: &Value) {
         let Some(path) = op.get("AttributePath").and_then(Value::as_str) else {
             continue;
         };
-        set_attribute(bag, path, op.get("AttributeValue").cloned());
+        set_attribute(
+            bag,
+            path,
+            op.get("AttributeValue").cloned().map(canonicalize_keys),
+        );
     }
 }
 
@@ -479,7 +531,7 @@ impl IdentityStoreService {
             if path.eq_ignore_ascii_case("UserName") {
                 u.user_name.as_deref() == Some(want.as_str())
             } else {
-                u.attributes.get(&path).and_then(Value::as_str) == Some(want.as_str())
+                attribute_matches(&u.attributes, &path, &want)
             }
         });
         match found {
@@ -623,7 +675,7 @@ impl IdentityStoreService {
             if path.eq_ignore_ascii_case("DisplayName") {
                 g.display_name.as_deref() == Some(want.as_str())
             } else {
-                g.attributes.get(&path).and_then(Value::as_str) == Some(want.as_str())
+                attribute_matches(&g.attributes, &path, &want)
             }
         });
         match found {
@@ -859,6 +911,42 @@ fn alternate_identifier(b: &Value) -> Result<(String, String), AwsServiceError> 
     Ok((String::new(), "\u{0}__no_match__".to_string()))
 }
 
+/// Does the attribute at `path` (dot-separated, resolved case-insensitively)
+/// equal `want`? Descends into nested objects and, for list-valued segments,
+/// matches when *any* element satisfies the remaining path — so a
+/// `UniqueAttribute` lookup like `Emails.Value` finds the user whose `Emails`
+/// list has an element with that `Value`.
+fn attribute_matches(value: &Value, path: &str, want: &str) -> bool {
+    let mut segs = path.split('.');
+    let Some(head) = segs.next() else {
+        return false;
+    };
+    let child = match value {
+        Value::Object(m) => m
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(head))
+            .map(|(_, v)| v),
+        _ => None,
+    };
+    let Some(child) = child else {
+        return false;
+    };
+    let rest: Vec<&str> = segs.collect();
+    if rest.is_empty() {
+        return match child {
+            Value::String(s) => s == want,
+            Value::Array(arr) => arr.iter().any(|e| e.as_str() == Some(want)),
+            _ => false,
+        };
+    }
+    let rest_path = rest.join(".");
+    match child {
+        Value::Array(arr) => arr.iter().any(|e| attribute_matches(e, &rest_path, want)),
+        Value::Object(_) => attribute_matches(child, &rest_path, want),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,5 +1125,144 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn update_user_camelcase_scim_path_hits_pascalcase_bag() {
+        // SCIM clients (Terraform's aws_identitystore_user) address attributes
+        // in camelCase; the bag stores PascalCase member names. The update must
+        // land on the existing key, not a shadow lowercase one.
+        let s = svc();
+        let sid = "d-scim";
+        let created = call(
+            &s,
+            "CreateUser",
+            json!({
+                "IdentityStoreId": sid, "UserName": "j",
+                "Name": { "GivenName": "John", "FamilyName": "Doe" },
+                "Title": "Mr"
+            }),
+        );
+        let uid = created["UserId"].as_str().unwrap().to_string();
+        call(
+            &s,
+            "UpdateUser",
+            json!({
+                "IdentityStoreId": sid, "UserId": uid,
+                "Operations": [
+                    { "AttributePath": "name.givenName", "AttributeValue": "Jane" },
+                    { "AttributePath": "title", "AttributeValue": "Ms" }
+                ]
+            }),
+        );
+        let desc = call(
+            &s,
+            "DescribeUser",
+            json!({ "IdentityStoreId": sid, "UserId": uid }),
+        );
+        assert_eq!(desc["Name"]["GivenName"], json!("Jane"));
+        // The untouched sibling is preserved, not clobbered by a new object.
+        assert_eq!(desc["Name"]["FamilyName"], json!("Doe"));
+        assert_eq!(desc["Title"], json!("Ms"));
+        // No shadow lowercase keys leaked into the bag.
+        assert!(desc.get("title").is_none());
+        assert!(desc.get("name").is_none());
+    }
+
+    #[test]
+    fn update_user_list_attribute_canonicalizes_subkeys() {
+        // SCIM clients send list-attribute updates with camelCase element keys;
+        // the stored bag must expose PascalCase so SDKs read the sub-fields.
+        let s = svc();
+        let sid = "d-list";
+        let uid = call(
+            &s,
+            "CreateUser",
+            json!({ "IdentityStoreId": sid, "UserName": "l" }),
+        )["UserId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        call(
+            &s,
+            "UpdateUser",
+            json!({
+                "IdentityStoreId": sid, "UserId": uid,
+                "Operations": [{
+                    "AttributePath": "phoneNumbers",
+                    "AttributeValue": [{ "value": "+15551234", "type": "The Type 2", "primary": true }]
+                }]
+            }),
+        );
+        let desc = call(
+            &s,
+            "DescribeUser",
+            json!({ "IdentityStoreId": sid, "UserId": uid }),
+        );
+        assert_eq!(desc["PhoneNumbers"][0]["Type"], json!("The Type 2"));
+        assert_eq!(desc["PhoneNumbers"][0]["Value"], json!("+15551234"));
+        assert_eq!(desc["PhoneNumbers"][0]["Primary"], json!(true));
+    }
+
+    #[test]
+    fn get_user_id_by_nested_email_value() {
+        // `data.aws_identitystore_user` looks users up by `Emails.Value`, a
+        // nested list attribute path.
+        let s = svc();
+        let sid = "d-mail";
+        let created = call(
+            &s,
+            "CreateUser",
+            json!({
+                "IdentityStoreId": sid, "UserName": "z",
+                "Emails": [{ "Value": "z@example.com", "Primary": true }]
+            }),
+        );
+        let uid = created["UserId"].as_str().unwrap().to_string();
+        let got = call(
+            &s,
+            "GetUserId",
+            json!({
+                "IdentityStoreId": sid,
+                "AlternateIdentifier": { "UniqueAttribute": { "AttributePath": "Emails.Value", "AttributeValue": "z@example.com" } }
+            }),
+        );
+        assert_eq!(got["UserId"], json!(uid));
+    }
+
+    #[test]
+    fn update_group_camelcase_display_name() {
+        let s = svc();
+        let sid = "d-g";
+        let g = call(
+            &s,
+            "CreateGroup",
+            json!({ "IdentityStoreId": sid, "DisplayName": "old", "Description": "d" }),
+        );
+        let gid = g["GroupId"].as_str().unwrap().to_string();
+        call(
+            &s,
+            "UpdateGroup",
+            json!({
+                "IdentityStoreId": sid, "GroupId": gid,
+                "Operations": [{ "AttributePath": "displayName", "AttributeValue": "new" }]
+            }),
+        );
+        let desc = call(
+            &s,
+            "DescribeGroup",
+            json!({ "IdentityStoreId": sid, "GroupId": gid }),
+        );
+        assert_eq!(desc["DisplayName"], json!("new"));
+        // GetGroupId reflects the renamed display name.
+        let got = call(
+            &s,
+            "GetGroupId",
+            json!({
+                "IdentityStoreId": sid,
+                "AlternateIdentifier": { "UniqueAttribute": { "AttributePath": "DisplayName", "AttributeValue": "new" } }
+            }),
+        );
+        assert_eq!(got["GroupId"], json!(gid));
     }
 }
