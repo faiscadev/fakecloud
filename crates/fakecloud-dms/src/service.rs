@@ -441,6 +441,20 @@ fn arn(ctx: &Ctx, kind: &str, id: &str) -> String {
     format!("arn:aws:dms:{}:{}:{}:{}", ctx.region, ctx.account, kind, id)
 }
 
+/// Build the `VpcSecurityGroups` describe list from a `VpcSecurityGroupIds`
+/// input array (`["sg-x", ...]` -> `[{VpcSecurityGroupId, Status}, ...]`).
+fn vpc_security_groups(b: &Value) -> Vec<Value> {
+    b.get("VpcSecurityGroupIds")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| json!({ "VpcSecurityGroupId": s, "Status": "active" }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Copy a set of fields verbatim from `src` into `dst` when present.
 fn copy_fields(src: &Value, dst: &mut Map<String, Value>, fields: &[&str]) {
     for f in fields {
@@ -633,16 +647,7 @@ impl DmsService {
             )));
         }
         let instance_arn = arn(ctx, "rep", &res_id());
-        let vpc_sgs: Vec<Value> = b
-            .get("VpcSecurityGroupIds")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| json!({ "VpcSecurityGroupId": s, "Status": "active" }))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let vpc_sgs = vpc_security_groups(b);
         let mut inst = Map::new();
         inst.insert("ReplicationInstanceArn".into(), json!(instance_arn));
         inst.insert("ReplicationInstanceIdentifier".into(), json!(id));
@@ -771,6 +776,12 @@ impl DmsService {
             if let Some(v) = b.get(in_field) {
                 obj.insert(out_field.to_string(), v.clone());
             }
+        }
+        // `VpcSecurityGroupIds` is an input-only array that DMS reflects back
+        // as the derived `VpcSecurityGroups` describe list; rebuild it so a
+        // modified security-group set round-trips through Describe.
+        if b.get("VpcSecurityGroupIds").is_some() {
+            obj.insert("VpcSecurityGroups".into(), json!(vpc_security_groups(b)));
         }
         obj.insert("ReplicationInstanceStatus".into(), json!("available"));
         let inst = inst.clone();
