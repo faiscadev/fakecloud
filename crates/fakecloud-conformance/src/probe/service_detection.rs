@@ -108,6 +108,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "monitoring" => Protocol::Query,
         "s3" => Protocol::Rest,
         "eks" => Protocol::Rest,
+        // AWS Backup: restJson1 control plane (@http traits + JSON bodies).
+        "backup" => Protocol::Rest,
         // Amazon Elasticsearch Service (2015) + Amazon OpenSearch Service
         // (2021): both restJson1, both sign as `es`. Two probe ids so each
         // API's operation set is exercised at its own path version prefix;

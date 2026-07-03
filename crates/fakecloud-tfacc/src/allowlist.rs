@@ -665,6 +665,18 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "backup",
+        // AWS Backup is a control-plane mock (LocalStack Community treats it the
+        // same): no real backup engine runs. Vaults and plans are the standalone
+        // resources — a vault persists and describes; a plan round-trips through
+        // create/get/delete; a selection attaches to a plan; audit frameworks and
+        // report plans persist and settle to a COMPLETED deployment status on
+        // describe so the create waiters complete. Jobs / recovery points model
+        // data movement a control plane alone can't perform and are deferred.
+        run_regex: "^TestAccBackup(Vault|Plan|Selection|Framework|ReportPlan)_basic$",
+        deny: &[],
+    },
+    Service {
         name: "elasticsearch",
         // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
         // domain persists and settles to Processing=false / Created=true on
@@ -1342,6 +1354,12 @@ pub const SHARDS: &[Shard] = &[
             "|IdentityProviderConfig|PodIdentityAssociation",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "backup",
+        service: "backup",
+        run_regex: "^TestAccBackup(Vault|Plan|Selection|Framework|ReportPlan)_basic$",
         extra_deny: &[],
     },
     Shard {

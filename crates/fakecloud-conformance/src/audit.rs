@@ -184,6 +184,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         // legacy-ES tests are tagged `es`, the OpenSearch tests `opensearch`;
         // together they cover the whole union, so either tag counts for both
         // mappings (same pattern as the bedrock control/data-plane crate).
+        ("backup", "backup", &["service.rs"], &["backup"]),
         ("es", "opensearch", &["service.rs"], &["es", "opensearch"]),
         (
             "opensearch",
