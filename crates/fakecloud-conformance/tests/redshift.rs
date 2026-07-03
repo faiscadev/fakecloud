@@ -526,7 +526,10 @@ async fn redshift_tags_and_pagination() {
         &server,
         "CreateTags",
         &[
-            ("ResourceName", "arn:aws:redshift:us-east-1:123456789012:cluster:ghost"),
+            (
+                "ResourceName",
+                "arn:aws:redshift:us-east-1:123456789012:cluster:ghost",
+            ),
             ("Tags.Tag.1.Key", "k"),
             ("Tags.Tag.1.Value", "v"),
         ],
