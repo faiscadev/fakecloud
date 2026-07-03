@@ -656,6 +656,21 @@ fn pagination_marker() {
 }
 
 #[test]
+fn pagination_hostile_marker_does_not_panic() {
+    let s = svc();
+    new_endpoint(&s, "only", "source");
+    // A `usize::MAX` marker must not overflow `start + max` on the request
+    // path; the window is out of range so the page is empty and paging ends.
+    let out = call(
+        &s,
+        "DescribeEndpoints",
+        json!({ "Marker": "18446744073709551615" }),
+    );
+    assert!(out["Endpoints"].as_array().unwrap().is_empty());
+    assert_eq!(out["Marker"], json!(""));
+}
+
+#[test]
 fn filters_endpoints_by_engine() {
     let s = svc();
     new_endpoint(&s, "m", "source");
