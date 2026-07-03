@@ -742,6 +742,42 @@ async fn vpc_endpoint_create_and_list() {
 }
 
 #[tokio::test]
+async fn delete_vpc_endpoint_keeps_domain_arn() {
+    // Regression: DeleteVpcEndpoint dropped the real DomainArn from the summary
+    // because it always removed the key (the empty-string guard was a no-op).
+    let svc = service();
+    let arn = "arn:aws:es:us-east-1:000000000000:domain/d";
+    let created = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/vpcEndpoints"),
+                json!({"DomainArn": arn, "VpcOptions": {"SubnetIds": ["subnet-1"]}}),
+            ),
+        )
+        .await,
+    );
+    let id = created["VpcEndpoint"]["VpcEndpointId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let deleted = json_of(
+        &call(
+            &svc,
+            req(
+                Method::DELETE,
+                &format!("{OS}/opensearch/vpcEndpoints/{id}"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(deleted["VpcEndpointSummary"]["Status"], "DELETING");
+    assert_eq!(deleted["VpcEndpointSummary"]["DomainArn"], arn);
+}
+
+#[tokio::test]
 async fn vpc_endpoint_access_authorize_list_revoke_roundtrip() {
     // Regression: AuthorizeVpcEndpointAccess must persist the principal (in the
     // model's { PrincipalType, Principal } shape), ListVpcEndpointAccess must
