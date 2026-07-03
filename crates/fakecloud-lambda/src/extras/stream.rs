@@ -90,7 +90,10 @@ impl LambdaService {
             AwsServiceError::aws_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ServiceException",
-                "Docker/Podman is required for Lambda execution but is not available",
+                format!(
+                    "Docker/Podman is required for Lambda execution but is not available. {}",
+                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+                ),
             )
         })?;
 

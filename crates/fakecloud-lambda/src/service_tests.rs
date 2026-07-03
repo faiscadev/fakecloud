@@ -292,12 +292,14 @@ async fn test_invoke_without_runtime_returns_error() {
     let state = make_state();
     let svc = LambdaService::new(state);
 
+    // A real deployment package is required to get past the "no deployment
+    // package" guard and actually reach the runtime-missing branch.
     let create_body = json!({
         "FunctionName": "invoke-me",
         "Runtime": "python3.12",
         "Role": "arn:aws:iam::123456789012:role/test",
         "Handler": "index.handler",
-        "Code": {}
+        "Code": { "ZipFile": "UEsFBgAAAAAAAAAAAAAAAAAAAAA=" }
     });
 
     let req = make_request(
@@ -312,8 +314,18 @@ async fn test_invoke_without_runtime_returns_error() {
         "/2015-03-31/functions/invoke-me/invocations",
         r#"{"key": "value"}"#,
     );
-    let resp = svc.handle(req).await;
-    assert!(resp.is_err());
+    let err = match svc.handle(req).await {
+        Ok(_) => panic!("invoke with no runtime must error"),
+        Err(e) => e,
+    };
+    // The message must stay actionable: name the runtime and how to enable it.
+    let message = err.message();
+    assert!(
+        message.contains("Docker/Podman is required for Lambda execution")
+            && message.contains("Install and start Docker or Podman")
+            && message.contains("FAKECLOUD_CONTAINER_CLI"),
+        "runtime-missing Lambda error must explain how to fix it: {message}"
+    );
 }
 
 #[tokio::test]

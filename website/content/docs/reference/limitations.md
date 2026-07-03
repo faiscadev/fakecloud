@@ -42,7 +42,9 @@ Lambda function execution, RDS DB instances, and ElastiCache clusters all use re
 
 **Security note:** granting access to the Docker socket gives the fakecloud process the ability to manage containers on the host. Only use this in development or CI environments you trust. Don't run fakecloud with Docker socket access on shared infrastructure.
 
-If you don't need Lambda/RDS/ElastiCache, fakecloud runs fine without Docker at all — just don't mount the socket and those services will return errors only when you try to use them.
+If you don't need the container-backed services (Lambda, RDS, ECS, ElastiCache, EC2), fakecloud runs fine without Docker at all. Just don't mount the socket. The control plane keeps working; only the operations that need a real container are affected, and only when you actually call them: Lambda `Invoke`, RDS `CreateDBInstance` (and snapshot/replica ops), and ECS `RunTask` return errors, while ElastiCache and EC2 degrade to metadata-only resources with no data plane.
+
+When no container runtime is detected, fakecloud logs a single consolidated startup warning listing which services are degraded, and the per-operation errors tell you exactly how to fix it: install and start Docker or Podman, or set `FAKECLOUD_CONTAINER_CLI` to your container CLI path.
 
 ## SigV4 signatures and IAM policies are off by default
 
