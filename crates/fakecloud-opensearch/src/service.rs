@@ -1722,8 +1722,12 @@ impl OpenSearchService {
             "DomainArn": ep.domain_arn,
             "Status": "DELETING",
         });
+        // Omit DomainArn only when it is unknown (the endpoint didn't exist and
+        // we synthesized a DELETING summary); keep the real ARN otherwise.
         if let Value::Object(m) = &mut summary {
-            m.remove("DomainArn").filter(|v| v.as_str() == Some(""));
+            if m.get("DomainArn").and_then(Value::as_str) == Some("") {
+                m.remove("DomainArn");
+            }
         }
         Ok(ok(json!({ "VpcEndpointSummary": summary })))
     }
