@@ -180,6 +180,85 @@ pub fn render_ruleset(subnets: &[SubnetFirewall]) -> String {
     out
 }
 
+/// The bridge-family table fakecloud owns for **same-subnet L2 enforcement**.
+/// Kept separate from the `inet` table so it can be applied in its own
+/// best-effort `nft -f -` — a kernel without `nf_conntrack_bridge` rejects the
+/// `ct state` line, and isolating it means that failure never takes the `inet`
+/// table (cross-subnet routed enforcement) down with it.
+const BRIDGE_TABLE: &str = "bridge fakecloud_ec2_l2";
+
+/// Render the **bridge-family** mirror of [`render_ruleset`].
+///
+/// Traffic between two containers on the *same* fakecloud subnet bridge is
+/// L2-switched between bridge ports and only reaches the `inet` `forward` hook
+/// when `bridge-nf-call-iptables=1` — and on some kernels/runners not even
+/// then. The `bridge`-family `forward` hook sees those forwarded frames
+/// directly, so mirroring the SG/NACL drops here makes same-subnet enforcement
+/// hold regardless of the bridge-netfilter sysctl. IPv4 matches are guarded
+/// with `ether type ip` (required in the bridge family before an `ip` match);
+/// `ct state established,related` keeps replies flowing statefully via
+/// `nf_conntrack_bridge`.
+pub fn render_bridge_ruleset(subnets: &[SubnetFirewall]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("add table {BRIDGE_TABLE}\n"));
+    out.push_str(&format!("flush table {BRIDGE_TABLE}\n"));
+    out.push_str(&format!("table {BRIDGE_TABLE} {{\n"));
+    out.push_str("  chain forward {\n");
+    // Lower (earlier) priority than the default bridge filter so our decision
+    // lands before anything else in the bridge path.
+    out.push_str("    type filter hook forward priority -300; policy accept;\n");
+    out.push_str("    ct state established,related accept\n");
+
+    for subnet in subnets {
+        out.push_str(&format!("    # subnet {}\n", subnet.network_name));
+
+        let mut ordered = subnet.nacl.clone();
+        ordered.sort_by_key(|r| r.rule_number);
+        for (i, rule) in ordered.iter().enumerate() {
+            if rule.allow {
+                continue;
+            }
+            let shadowed = ordered[..i]
+                .iter()
+                .any(|earlier| earlier.allow && nacl_same_traffic(earlier, rule));
+            if shadowed {
+                continue;
+            }
+            if let Some(line) = render_nacl_drop(rule) {
+                out.push_str(&format!("    ether type ip {line}\n"));
+            }
+        }
+
+        for inst in &subnet.instances {
+            for rule in &inst.ingress {
+                out.push_str(&format!(
+                    "    ether type ip {}\n",
+                    render_rule(rule, Direction::Ingress, &inst.private_ip)
+                ));
+            }
+            out.push_str(&format!(
+                "    ether type ip ip daddr {} drop comment \"default-deny ingress\"\n",
+                inst.private_ip
+            ));
+
+            for rule in &inst.egress {
+                out.push_str(&format!(
+                    "    ether type ip {}\n",
+                    render_rule(rule, Direction::Egress, &inst.private_ip)
+                ));
+            }
+            out.push_str(&format!(
+                "    ether type ip ip saddr {} drop comment \"default-deny egress\"\n",
+                inst.private_ip
+            ));
+        }
+    }
+
+    out.push_str("  }\n");
+    out.push_str("}\n");
+    out
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     Ingress,
@@ -424,6 +503,47 @@ mod tests {
         assert!(rs.contains("ip daddr 172.30.0.2 drop comment \"default-deny ingress\""));
         // egress had no explicit allows -> still a default-deny line
         assert!(rs.contains("ip saddr 172.30.0.2 drop comment \"default-deny egress\""));
+    }
+
+    #[test]
+    fn bridge_ruleset_mirrors_inet_with_ether_type_guard() {
+        let model = vec![SubnetFirewall {
+            network_name: "fakecloud-subnet-a".into(),
+            instances: vec![InstanceFirewall {
+                private_ip: "172.30.0.2".into(),
+                ingress: vec![tcp(22, Some("10.0.0.0/8"))],
+                egress: vec![],
+            }],
+            nacl: vec![],
+        }];
+        let rs = render_bridge_ruleset(&model);
+        // Its own bridge-family table, atomically add-before-flush.
+        let add = rs
+            .find("add table bridge fakecloud_ec2_l2")
+            .expect("add table");
+        let flush = rs
+            .find("flush table bridge fakecloud_ec2_l2")
+            .expect("flush table");
+        assert!(add < flush, "add table must come before flush:\n{rs}");
+        // Bridge-family forward hook + conntrack for stateful replies.
+        assert!(rs.contains("type filter hook forward priority -300; policy accept;"));
+        assert!(rs.contains("ct state established,related accept"));
+        // Every IPv4 match is guarded with `ether type ip` (required in the
+        // bridge family before an `ip` match).
+        assert!(rs
+            .contains("ether type ip ip daddr 172.30.0.2 ip saddr 10.0.0.0/8 tcp dport 22 accept"));
+        assert!(
+            rs.contains("ether type ip ip daddr 172.30.0.2 drop comment \"default-deny ingress\"")
+        );
+        assert!(
+            rs.contains("ether type ip ip saddr 172.30.0.2 drop comment \"default-deny egress\"")
+        );
+        // No bare `ip daddr`/`ip saddr` outside an `ether type ip` guard.
+        for line in rs.lines().map(str::trim) {
+            if line.starts_with("ip daddr") || line.starts_with("ip saddr") {
+                panic!("unguarded ip match in bridge family:\n{line}");
+            }
+        }
     }
 
     #[test]
