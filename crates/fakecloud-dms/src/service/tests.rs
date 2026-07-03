@@ -39,6 +39,13 @@ fn call(s: &DmsService, action: &str, body: Value) -> Value {
     serde_json::from_slice(resp.body.expect_bytes()).unwrap()
 }
 
+fn call_region(s: &DmsService, action: &str, region: &str, body: Value) -> Value {
+    let mut r = req(action, body);
+    r.region = region.into();
+    let resp = dispatch(s, &r).expect("op ok");
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
 fn err(s: &DmsService, action: &str, body: Value) -> AwsServiceError {
     dispatch(s, &req(action, body))
         .err()
@@ -650,6 +657,95 @@ fn filters_endpoints_by_engine() {
     let list = filtered["Endpoints"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["EngineName"], json!("postgres"));
+}
+
+#[test]
+fn event_subscriptions_filter_and_unknown_name() {
+    let s = svc();
+    for n in ["sub-a", "sub-b"] {
+        call(
+            &s,
+            "CreateEventSubscription",
+            json!({ "SubscriptionName": n, "SnsTopicArn": "arn:aws:sns:us-east-1:000000000000:t" }),
+        );
+    }
+    // Declared `Filters` must narrow the list.
+    let filtered = call(
+        &s,
+        "DescribeEventSubscriptions",
+        json!({ "Filters": [{ "Name": "event-subscription-id", "Values": ["sub-b"] }] }),
+    );
+    let list = filtered["EventSubscriptionsList"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["CustSubscriptionId"], json!("sub-b"));
+    // A named lookup for a missing subscription raises ResourceNotFoundFault.
+    let e = err(
+        &s,
+        "DescribeEventSubscriptions",
+        json!({ "SubscriptionName": "nope" }),
+    );
+    assert_eq!(e.code(), "ResourceNotFoundFault");
+}
+
+#[test]
+fn recommendations_filter_narrows_list() {
+    let s = svc();
+    call(
+        &s,
+        "StartRecommendations",
+        json!({ "DatabaseId": "db-1", "Settings": { "InstanceSizingType": "default" } }),
+    );
+    call(
+        &s,
+        "StartRecommendations",
+        json!({ "DatabaseId": "db-2", "Settings": { "InstanceSizingType": "default" } }),
+    );
+    let filtered = call(
+        &s,
+        "DescribeRecommendations",
+        json!({ "Filters": [{ "Name": "database-id", "Values": ["db-2"] }] }),
+    );
+    let list = filtered["Recommendations"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["DatabaseId"], json!("db-2"));
+}
+
+#[test]
+fn fleet_advisor_collectors_filter_narrows_list() {
+    let s = svc();
+    for n in ["col-a", "col-b"] {
+        call(
+            &s,
+            "CreateFleetAdvisorCollector",
+            json!({ "CollectorName": n, "ServiceAccessRoleArn": "arn:aws:iam::000000000000:role/r", "S3BucketName": "b" }),
+        );
+    }
+    let filtered = call(
+        &s,
+        "DescribeFleetAdvisorCollectors",
+        json!({ "Filters": [{ "Name": "collector-name", "Values": ["col-a"] }] }),
+    );
+    let list = filtered["Collectors"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["CollectorName"], json!("col-a"));
+}
+
+#[test]
+fn orderable_instances_reflect_request_region() {
+    let s = svc();
+    let out = call_region(
+        &s,
+        "DescribeOrderableReplicationInstances",
+        "eu-west-1",
+        json!({}),
+    );
+    let azs = out["OrderableReplicationInstances"][0]["AvailabilityZones"]
+        .as_array()
+        .unwrap();
+    assert!(azs
+        .iter()
+        .all(|z| z.as_str().unwrap().starts_with("eu-west-1")));
+    assert_eq!(azs[0], json!("eu-west-1a"));
 }
 
 #[test]

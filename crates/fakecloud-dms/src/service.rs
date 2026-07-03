@@ -217,7 +217,9 @@ fn dispatch(s: &DmsService, req: &AwsRequest) -> Result<AwsResponse, AwsServiceE
         "DescribeReplicationInstanceTaskLogs" => {
             s.describe_replication_instance_task_logs(&acct, &b)
         }
-        "DescribeOrderableReplicationInstances" => s.describe_orderable_replication_instances(&b),
+        "DescribeOrderableReplicationInstances" => {
+            s.describe_orderable_replication_instances(&acct, &b)
+        }
         // endpoints
         "CreateEndpoint" => s.create_endpoint(&acct, &b),
         "DescribeEndpoints" => s.describe_endpoints(&acct, &b),
@@ -497,8 +499,9 @@ fn list_next_token(
     key: &str,
     mut rows: Vec<Value>,
     b: &Value,
+    filterable: &[(&str, &[&str])],
 ) -> Result<AwsResponse, AwsServiceError> {
-    apply_filters(&mut rows, b, &[]);
+    apply_filters(&mut rows, b, filterable);
     let (page, next) = paginate(rows, b);
     let mut out = Map::new();
     out.insert(key.to_string(), Value::Array(page));
@@ -870,8 +873,16 @@ impl DmsService {
 
     fn describe_orderable_replication_instances(
         &self,
+        ctx: &Ctx,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // AZ names are region-scoped (`<region>a`, `<region>b`, ...); a
+        // hard-coded `us-east-1a/b` list fails AZ validation for callers in
+        // any other region.
+        let azs: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .map(|z| json!(format!("{}{z}", ctx.region)))
+            .collect();
         let rows: Vec<Value> = [
             "dms.t3.micro",
             "dms.t3.medium",
@@ -888,7 +899,7 @@ impl DmsService {
                 "MaxAllocatedStorage": 6144,
                 "DefaultAllocatedStorage": 50,
                 "IncludedAllocatedStorage": 50,
-                "AvailabilityZones": ["us-east-1a", "us-east-1b"],
+                "AvailabilityZones": azs.clone(),
                 "ReleaseStatus": "available"
             })
         })
@@ -1758,19 +1769,36 @@ impl DmsService {
         ctx: &Ctx,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = opt_str(b, "SubscriptionName").map(String::from);
+        let name = opt_str(b, "SubscriptionName")
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         let guard = self.state.read();
-        let rows: Vec<Value> = guard
-            .get(&ctx.account)
-            .map(|d| {
-                d.event_subscriptions
-                    .iter()
+        let subs = guard.get(&ctx.account).map(|d| &d.event_subscriptions);
+        // A named lookup for a non-existent subscription raises the
+        // `ResourceNotFoundFault` the op declares, rather than a silent empty
+        // list. (An empty/omitted name lists everything.)
+        if let Some(n) = &name {
+            if !subs.map(|s| s.contains_key(n)).unwrap_or(false) {
+                return Err(not_found(&format!("Event subscription {n} not found.")));
+            }
+        }
+        let rows: Vec<Value> = subs
+            .map(|s| {
+                s.iter()
                     .filter(|(k, _)| name.as_ref().map(|n| *k == n).unwrap_or(true))
                     .map(|(_, v)| v.clone())
                     .collect()
             })
             .unwrap_or_default();
-        list_marker("EventSubscriptionsList", rows, b, &[])
+        list_marker(
+            "EventSubscriptionsList",
+            rows,
+            b,
+            &[
+                ("event-subscription-arn", &["EventSubscriptionArn"]),
+                ("event-subscription-id", &["CustSubscriptionId"]),
+            ],
+        )
     }
 
     fn modify_event_subscription(
@@ -3064,11 +3092,19 @@ impl DmsService {
             .get(&ctx.account)
             .map(|d| d.fleet_advisor_collectors.values().cloned().collect())
             .unwrap_or_default();
-        list_next_token("Collectors", rows, b)
+        list_next_token(
+            "Collectors",
+            rows,
+            b,
+            &[
+                ("collector-referenced-id", &["CollectorReferencedId"]),
+                ("collector-name", &["CollectorName"]),
+            ],
+        )
     }
 
     fn describe_fleet_advisor_databases(&self, b: &Value) -> Result<AwsResponse, AwsServiceError> {
-        list_next_token("Databases", vec![], b)
+        list_next_token("Databases", vec![], b, &[])
     }
 
     fn delete_fleet_advisor_databases(&self, b: &Value) -> Result<AwsResponse, AwsServiceError> {
@@ -3083,18 +3119,18 @@ impl DmsService {
         &self,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        list_next_token("Analysis", vec![], b)
+        list_next_token("Analysis", vec![], b, &[])
     }
 
     fn describe_fleet_advisor_schema_object_summary(
         &self,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        list_next_token("FleetAdvisorSchemaObjects", vec![], b)
+        list_next_token("FleetAdvisorSchemaObjects", vec![], b, &[])
     }
 
     fn describe_fleet_advisor_schemas(&self, b: &Value) -> Result<AwsResponse, AwsServiceError> {
-        list_next_token("FleetAdvisorSchemas", vec![], b)
+        list_next_token("FleetAdvisorSchemas", vec![], b, &[])
     }
 
     fn run_fleet_advisor_lsa_analysis(&self) -> Result<AwsResponse, AwsServiceError> {
@@ -3153,14 +3189,19 @@ impl DmsService {
             .get(&ctx.account)
             .map(|d| d.recommendations.values().cloned().collect())
             .unwrap_or_default();
-        list_next_token("Recommendations", rows, b)
+        list_next_token(
+            "Recommendations",
+            rows,
+            b,
+            &[("database-id", &["DatabaseId"]), ("status", &["Status"])],
+        )
     }
 
     fn describe_recommendation_limitations(
         &self,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        list_next_token("Limitations", vec![], b)
+        list_next_token("Limitations", vec![], b, &[])
     }
 }
 
