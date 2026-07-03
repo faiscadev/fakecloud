@@ -1186,16 +1186,18 @@ impl OpenSearchService {
             created: false,
             deleted: false,
             config: cfg,
-            tags: tags.clone(),
+            tags,
             created_at: Utc::now(),
             data_sources: Default::default(),
             indices: Default::default(),
             scheduled_actions: Default::default(),
             maintenances: Default::default(),
         };
-        if !tags.is_empty() {
-            st.tags.insert(arn, tags);
-        }
+        // A domain's tags live on the domain itself (`d.tags`); `AddTags` /
+        // `RemoveTags` / `ListTags` all operate there via `apply_tag_target`.
+        // Do NOT also copy them into the side `st.tags` map: that map takes
+        // precedence in `ListTags`, so a duplicate there would shadow later
+        // `AddTags` updates and resurrect `RemoveTags`-deleted tags.
         let out = domain_status(&d, api, /*created=*/ false, /*processing=*/ true);
         st.domains.insert(name, d);
         Ok(ok(json!({ status_key(api): out })))
