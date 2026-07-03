@@ -164,7 +164,11 @@ fn not_found(msg: &str) -> AwsServiceError {
 }
 
 fn conflict(msg: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ConflictException", msg)
+    // `ConflictException` is modeled with `@httpError(409)`; the SDKs and
+    // Terraform's retry/error handling key on the 409 status, so returning 400
+    // here would misclassify a duplicate-resource conflict as a plain
+    // client-validation error.
+    AwsServiceError::aws_error(StatusCode::CONFLICT, "ConflictException", msg)
 }
 
 fn req_str<'a>(b: &'a Value, f: &str) -> Result<&'a str, AwsServiceError> {
@@ -1026,6 +1030,48 @@ mod tests {
         dispatch(&s, &req("CreateUser", body.clone())).unwrap();
         let err = dispatch(&s, &req("CreateUser", body)).err().unwrap();
         assert_eq!(err.code(), "ConflictException");
+        // ConflictException is modeled with @httpError(409), not a generic 400.
+        assert_eq!(err.status(), http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn duplicate_group_and_membership_conflicts_are_409() {
+        let s = svc();
+        let sid = "d-c";
+        let g = call(
+            &s,
+            "CreateGroup",
+            json!({ "IdentityStoreId": sid, "DisplayName": "grp" }),
+        );
+        let gid = g["GroupId"].as_str().unwrap().to_string();
+        // Duplicate group display name.
+        let err = dispatch(
+            &s,
+            &req(
+                "CreateGroup",
+                json!({ "IdentityStoreId": sid, "DisplayName": "grp" }),
+            ),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code(), "ConflictException");
+        assert_eq!(err.status(), http::StatusCode::CONFLICT);
+        // Duplicate membership.
+        let uid = call(
+            &s,
+            "CreateUser",
+            json!({ "IdentityStoreId": sid, "UserName": "mm" }),
+        )["UserId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = json!({ "IdentityStoreId": sid, "GroupId": gid, "MemberId": { "UserId": uid } });
+        dispatch(&s, &req("CreateGroupMembership", body.clone())).unwrap();
+        let err = dispatch(&s, &req("CreateGroupMembership", body))
+            .err()
+            .unwrap();
+        assert_eq!(err.code(), "ConflictException");
+        assert_eq!(err.status(), http::StatusCode::CONFLICT);
     }
 
     #[test]
