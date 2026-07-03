@@ -11,8 +11,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use super::helpers::*;
 use super::RedshiftService;
 use crate::state::{
-    AuthenticationProfile, CustomDomainAssociation, DataShare, EndpointAccess, Integration,
-    Partner, RedshiftIdcApplication, ReservedNode,
+    AuthenticationProfile, CustomDomainAssociation, DataShare, EndpointAccess,
+    EndpointAuthorization, Integration, Partner, RedshiftIdcApplication, ReservedNode,
 };
 
 fn render_endpoint(e: &EndpointAccess) -> String {
@@ -55,6 +55,31 @@ fn render_endpoint(e: &EndpointAccess) -> String {
         owner = xml_escape(&e.resource_owner),
         port = e.port,
         addr = xml_escape(&e.address),
+    )
+}
+
+fn render_endpoint_authorization(a: &EndpointAuthorization) -> String {
+    // `AllowedVPCs` (`VpcIdentifierList`) serializes its members under the
+    // `VpcIdentifier` xmlName wrapper.
+    let vpcs: String = a
+        .allowed_vpcs
+        .iter()
+        .map(|v| tag_elem("VpcIdentifier", v))
+        .collect();
+    format!(
+        "<Grantor>{grantor}</Grantor><Grantee>{grantee}</Grantee>\
+         <ClusterIdentifier>{cluster}</ClusterIdentifier><AuthorizeTime>{time}</AuthorizeTime>\
+         <ClusterStatus>{cstatus}</ClusterStatus><Status>{status}</Status>\
+         <AllowedAllVPCs>{allowed_all}</AllowedAllVPCs><AllowedVPCs>{vpcs}</AllowedVPCs>\
+         <EndpointCount>{count}</EndpointCount>",
+        grantor = xml_escape(&a.grantor),
+        grantee = xml_escape(&a.grantee),
+        cluster = xml_escape(&a.cluster_identifier),
+        time = a.authorize_time.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        cstatus = xml_escape(&a.cluster_status),
+        status = xml_escape(&a.status),
+        allowed_all = a.allowed_all_vpcs,
+        count = a.endpoint_count,
     )
 }
 
@@ -288,40 +313,68 @@ impl RedshiftService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.endpoint_authorization(req, "AuthorizeEndpointAccess", "Authorized")
+        let grantee = param(req, "Account").unwrap_or_default();
+        let cluster = param(req, "ClusterIdentifier").unwrap_or_default();
+        let vpcs = member_list(req, "VpcIds", "VpcIdentifier");
+        let key = Self::endpoint_auth_key(&cluster, &grantee);
+        let mut guard = self.state.write();
+        let acct = guard.account(&req.account_id);
+        // The grantor must own the cluster it is sharing access to.
+        if !cluster.is_empty() && !acct.clusters.contains_key(&cluster) {
+            return Err(cluster_not_found(&cluster));
+        }
+        if acct.endpoint_authorizations.contains_key(&key) {
+            return Err(endpoint_authorization_already_exists(&grantee));
+        }
+        let auth = EndpointAuthorization {
+            grantor: req.account_id.clone(),
+            grantee: grantee.clone(),
+            cluster_identifier: cluster,
+            authorize_time: Utc::now(),
+            cluster_status: "available".to_string(),
+            status: "Authorized".to_string(),
+            allowed_all_vpcs: vpcs.is_empty(),
+            allowed_vpcs: vpcs,
+            endpoint_count: 0,
+        };
+        acct.endpoint_authorizations.insert(key, auth.clone());
+        Ok(xml_resp(
+            "AuthorizeEndpointAccess",
+            render_endpoint_authorization(&auth),
+            &req.request_id,
+        ))
     }
 
     pub(super) fn revoke_endpoint_access(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.endpoint_authorization(req, "RevokeEndpointAccess", "Revoking")
-    }
-
-    fn endpoint_authorization(
-        &self,
-        req: &AwsRequest,
-        action: &str,
-        status: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
         let grantee = param(req, "Account").unwrap_or_default();
         let cluster = param(req, "ClusterIdentifier").unwrap_or_default();
-        let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-        let vpcs = member_list(req, "VpcIds", "VpcIdentifier");
-        let allowed_all = vpcs.is_empty();
-        let vpc_xml: String = vpcs.iter().map(|v| tag_elem("VpcIdentifier", v)).collect();
+        let force = bool_param(req, "Force").unwrap_or(false);
+        let key = Self::endpoint_auth_key(&cluster, &grantee);
+        let mut guard = self.state.write();
+        let acct = guard.account(&req.account_id);
+        if !cluster.is_empty() && !acct.clusters.contains_key(&cluster) {
+            return Err(cluster_not_found(&cluster));
+        }
+        let mut auth = acct
+            .endpoint_authorizations
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| endpoint_authorization_not_found(&grantee))?;
+        // Revoking while endpoints still reference the authorization requires
+        // `Force`; without live endpoints (endpoint_count == 0) it is a no-op.
+        if auth.endpoint_count > 0 && !force {
+            return Err(invalid_authorization_state(
+                "This endpoint authorization has active endpoints; retry with Force=true.",
+            ));
+        }
+        acct.endpoint_authorizations.remove(&key);
+        auth.status = "Revoking".to_string();
         Ok(xml_resp(
-            action,
-            format!(
-                "<Grantor>{grantor}</Grantor><Grantee>{grantee}</Grantee>\
-                 <ClusterIdentifier>{cluster}</ClusterIdentifier><AuthorizeTime>{now}</AuthorizeTime>\
-                 <ClusterStatus>available</ClusterStatus><Status>{status}</Status>\
-                 <AllowedAllVPCs>{allowed_all}</AllowedAllVPCs><AllowedVPCs>{vpc_xml}</AllowedVPCs>\
-                 <EndpointCount>0</EndpointCount>",
-                grantor = xml_escape(&req.account_id),
-                grantee = xml_escape(&grantee),
-                cluster = xml_escape(&cluster),
-            ),
+            "RevokeEndpointAccess",
+            render_endpoint_authorization(&auth),
             &req.request_id,
         ))
     }
@@ -330,11 +383,58 @@ impl RedshiftService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let cluster_filter = param(req, "ClusterIdentifier");
+        let account_filter = param(req, "Account");
+        // `Grantee=true` lists authorizations where the caller is the grantee
+        // (access received); otherwise where the caller is the grantor (default).
+        let as_grantee = bool_param(req, "Grantee").unwrap_or(false);
+        let guard = self.state.read();
+        let all: Vec<EndpointAuthorization> = guard
+            .accounts
+            .get(&req.account_id)
+            .map(|a| {
+                a.endpoint_authorizations
+                    .values()
+                    .filter(|auth| {
+                        if as_grantee {
+                            auth.grantee == req.account_id
+                        } else {
+                            auth.grantor == req.account_id
+                        }
+                    })
+                    .filter(|auth| {
+                        cluster_filter
+                            .as_ref()
+                            .map(|c| &auth.cluster_identifier == c)
+                            .unwrap_or(true)
+                    })
+                    .filter(|auth| {
+                        account_filter
+                            .as_ref()
+                            .map(|acc| &auth.grantee == acc)
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (page, next) = paginate(&all, req);
+        let inner: String = page
+            .iter()
+            .map(|auth| format!("<member>{}</member>", render_endpoint_authorization(auth)))
+            .collect();
         Ok(xml_resp(
             "DescribeEndpointAuthorization",
-            "<EndpointAuthorizationList/>".to_string(),
+            format!(
+                "{}<EndpointAuthorizationList>{inner}</EndpointAuthorizationList>",
+                render_marker(next)
+            ),
             &req.request_id,
         ))
+    }
+
+    fn endpoint_auth_key(cluster: &str, grantee: &str) -> String {
+        format!("{cluster}\u{1}{grantee}")
     }
 
     // ── Datashares ────────────────────────────────────────────────

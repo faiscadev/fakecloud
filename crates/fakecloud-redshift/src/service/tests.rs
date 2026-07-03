@@ -472,6 +472,129 @@ fn unknown_cluster_operations_error_cleanly() {
 }
 
 #[test]
+fn endpoint_authorization_round_trip() {
+    let svc = service();
+    ok(
+        &svc,
+        "CreateCluster",
+        &[
+            ("ClusterIdentifier", "eac"),
+            ("NodeType", "ra3.xlplus"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "Passw0rd123"),
+        ],
+    );
+    // Authorize returns a persisted authorization.
+    let authed = ok(
+        &svc,
+        "AuthorizeEndpointAccess",
+        &[("ClusterIdentifier", "eac"), ("Account", "210987654321")],
+    );
+    assert!(authed.contains("<Grantee>210987654321</Grantee>"));
+    assert!(authed.contains("<Status>Authorized</Status>"));
+    assert!(authed.contains("<AllowedAllVPCs>true</AllowedAllVPCs>"));
+
+    // Describe sees it, wrapped in the `member` list wrapper.
+    let listed = ok(&svc, "DescribeEndpointAuthorization", &[]);
+    assert!(
+        listed.contains("<EndpointAuthorizationList><member><Grantor>"),
+        "expected member wrapper, got: {listed}"
+    );
+    assert!(listed.contains("<Grantee>210987654321</Grantee>"));
+    assert!(listed.contains("<ClusterIdentifier>eac</ClusterIdentifier>"));
+
+    // A duplicate authorization for the same (cluster, account) conflicts.
+    assert_eq!(
+        err_code(
+            &svc,
+            "AuthorizeEndpointAccess",
+            &[("ClusterIdentifier", "eac"), ("Account", "210987654321")],
+        ),
+        "EndpointAuthorizationAlreadyExists"
+    );
+
+    // Revoke removes it (status flips to Revoking on the echoed copy).
+    let revoked = ok(
+        &svc,
+        "RevokeEndpointAccess",
+        &[("ClusterIdentifier", "eac"), ("Account", "210987654321")],
+    );
+    assert!(revoked.contains("<Status>Revoking</Status>"));
+
+    // Describe is now empty, and a second revoke is a not-found fault.
+    let empty = ok(&svc, "DescribeEndpointAuthorization", &[]);
+    assert!(!empty.contains("<Grantee>210987654321</Grantee>"));
+    assert_eq!(
+        err_code(
+            &svc,
+            "RevokeEndpointAccess",
+            &[("ClusterIdentifier", "eac"), ("Account", "210987654321")],
+        ),
+        "EndpointAuthorizationNotFound"
+    );
+}
+
+#[test]
+fn endpoint_authorization_unknown_cluster_and_filters() {
+    let svc = service();
+    for id in ["ea1", "ea2"] {
+        ok(
+            &svc,
+            "CreateCluster",
+            &[
+                ("ClusterIdentifier", id),
+                ("NodeType", "ra3.xlplus"),
+                ("MasterUsername", "admin"),
+                ("MasterUserPassword", "Passw0rd123"),
+            ],
+        );
+    }
+    // Authorizing against a cluster that does not exist is ClusterNotFound.
+    assert_eq!(
+        err_code(
+            &svc,
+            "AuthorizeEndpointAccess",
+            &[("ClusterIdentifier", "ghost"), ("Account", "210987654321")],
+        ),
+        "ClusterNotFound"
+    );
+    ok(
+        &svc,
+        "AuthorizeEndpointAccess",
+        &[("ClusterIdentifier", "ea1"), ("Account", "210987654321")],
+    );
+    ok(
+        &svc,
+        "AuthorizeEndpointAccess",
+        &[("ClusterIdentifier", "ea2"), ("Account", "310987654321")],
+    );
+    // Filter by ClusterIdentifier.
+    let by_cluster = ok(
+        &svc,
+        "DescribeEndpointAuthorization",
+        &[("ClusterIdentifier", "ea1")],
+    );
+    assert!(by_cluster.contains("<Grantee>210987654321</Grantee>"));
+    assert!(!by_cluster.contains("<Grantee>310987654321</Grantee>"));
+    // Filter by grantee Account.
+    let by_account = ok(
+        &svc,
+        "DescribeEndpointAuthorization",
+        &[("Account", "310987654321")],
+    );
+    assert!(by_account.contains("<ClusterIdentifier>ea2</ClusterIdentifier>"));
+    assert!(!by_account.contains("<Grantee>210987654321</Grantee>"));
+    // Grantee=true asks for authorizations received by the caller; the caller is
+    // the grantor of both, so the list is empty.
+    let as_grantee = ok(
+        &svc,
+        "DescribeEndpointAuthorization",
+        &[("Grantee", "true")],
+    );
+    assert!(!as_grantee.contains("<Grantee>"));
+}
+
+#[test]
 fn custom_domain_associations_use_association_wrapper() {
     let svc = service();
     ok(

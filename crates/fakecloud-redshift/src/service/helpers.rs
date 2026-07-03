@@ -382,6 +382,26 @@ pub(crate) fn endpoint_already_exists(id: &str) -> AwsServiceError {
     )
 }
 
+pub(crate) fn endpoint_authorization_already_exists(account: &str) -> AwsServiceError {
+    err(
+        400,
+        "EndpointAuthorizationAlreadyExists",
+        format!("Endpoint authorization for account {account} already exists."),
+    )
+}
+
+pub(crate) fn endpoint_authorization_not_found(account: &str) -> AwsServiceError {
+    err(
+        404,
+        "EndpointAuthorizationNotFound",
+        format!("Endpoint authorization for account {account} not found."),
+    )
+}
+
+pub(crate) fn invalid_authorization_state(msg: impl Into<String>) -> AwsServiceError {
+    err(400, "InvalidAuthorizationState", msg.into())
+}
+
 pub(crate) fn authentication_profile_not_found(id: &str) -> AwsServiceError {
     err(
         404,
