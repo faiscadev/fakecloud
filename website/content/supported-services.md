@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 4,079 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 4,220 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 4,079 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 4,220 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
-- **Total Operations**: 4,079
-- **Conformance Engine**: 136,154 Smithy-based test variants
+- **Total Operations**: 4,220
+- **Conformance Engine**: 140,394 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -25,6 +25,7 @@ fakecloud provides 100% API conformance across 4,079 operations. Unlike mocks, f
 - **DynamoDB**: 57 operations. TTL, GSI/LSI, and DynamoDB Streams.
 - **RDS**: 163 operations. Real Postgres, MySQL, MariaDB, Oracle, SQL Server, and Db2 via Docker.
 - **RDS Data API**: 6 operations. Real SQL (`ExecuteStatement`/`BatchExecuteStatement`) on the backing Postgres/MySQL container with typed parameters and results, plus transactions (`BeginTransaction`/`CommitTransaction`/`RollbackTransaction`).
+- **Redshift**: 141 operations. Full control plane — clusters, snapshots, parameter/subnet/security groups, snapshot schedules and copy grants, endpoint access, per-cluster logging, cross-region snapshot-copy config, and tagging. No SQL data plane (that is the separate `redshift-data` API).
 - **Aurora DSQL**: 16 operations. Serverless distributed PostgreSQL control plane. Cluster lifecycle (`CreateCluster`/`GetCluster`/`UpdateCluster`/`DeleteCluster`/`ListClusters`) with async `CREATING`->`ACTIVE` transitions, cluster resource policies, change streams to Kinesis (`CreateStream`/`GetStream`/`DeleteStream`/`ListStreams`), `GetVpcEndpointServiceName`, and tagging. Data plane (reachable container + IAM-token auth) is a follow-up.
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.

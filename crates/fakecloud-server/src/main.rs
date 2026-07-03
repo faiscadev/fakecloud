@@ -421,6 +421,9 @@ async fn main() {
     let athena_state: fakecloud_athena::SharedAthenaState = Arc::new(parking_lot::RwLock::new(
         fakecloud_athena::AthenaAccounts::new(),
     ));
+    let redshift_state: fakecloud_redshift::SharedRedshiftState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_redshift::RedshiftAccounts::new()),
+    );
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3424,6 +3427,61 @@ async fn main() {
         cfn_snapshot_hooks.insert("athena", h);
     }
     registry.register(Arc::new(athena_service));
+    let redshift_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("redshift").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_redshift::RedshiftSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_redshift::REDSHIFT_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "redshift persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_redshift::REDSHIFT_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *redshift_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded redshift persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse redshift persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no redshift persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read redshift persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut redshift_service = fakecloud_redshift::RedshiftService::new(redshift_state.clone());
+    if let Some(store) = redshift_snapshot_store.clone() {
+        redshift_service = redshift_service.with_snapshot_store(store);
+    }
+    if let Some(h) = redshift_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("redshift", h);
+    }
+    registry.register(Arc::new(redshift_service));
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
         let mut sns_eb_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());

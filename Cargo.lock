@@ -3473,6 +3473,7 @@ dependencies = [
  "fakecloud-pipes",
  "fakecloud-rds",
  "fakecloud-rds-data",
+ "fakecloud-redshift",
  "fakecloud-resource-groups",
  "fakecloud-resource-groups-tagging",
  "fakecloud-route53",
@@ -4685,6 +4686,26 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-redshift"
+version = "0.33.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

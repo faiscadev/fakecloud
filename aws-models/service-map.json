@@ -214,5 +214,9 @@
   "verifiedpermissions": {
     "repo_dir": "verifiedpermissions",
     "service_name": "verifiedpermissions"
+  },
+  "redshift": {
+    "repo_dir": "redshift",
+    "service_name": "redshift"
   }
 }

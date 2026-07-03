@@ -1,6 +1,6 @@
 {
-  "variants_passed": 136154,
-  "total_variants": 136154,
+  "variants_passed": 140394,
+  "total_variants": 140394,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -217,6 +217,10 @@
     "verifiedpermissions": {
       "passed": 1230,
       "total": 1230
+    },
+    "redshift": {
+      "passed": 4240,
+      "total": 4240
     }
   }
 }
