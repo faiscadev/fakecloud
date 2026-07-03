@@ -243,10 +243,15 @@ async fn main() {
     } else {
         fakecloud_lambda::runtime::ContainerRuntime::new(bound_addr.port()).map(Arc::new)
     };
+    // Services backed by a container runtime degrade honestly when no
+    // Docker/Podman CLI is present. Collect which ones so a single
+    // consolidated banner can warn the operator once (below, after the EC2
+    // runtime is resolved) instead of scattering five separate log lines.
+    let mut degraded_runtimes: Vec<&str> = Vec::new();
     if let Some(ref rt) = container_runtime {
         tracing::info!(backend = rt.cli_name(), "Lambda execution enabled");
     } else {
-        tracing::info!("Docker/Podman not available — Lambda Invoke will return errors for functions with code");
+        degraded_runtimes.push("Lambda (Invoke returns errors for functions with code)");
     }
     let lambda_backend_is_k8s = lambda_backend == fakecloud_k8s::Backend::K8s;
     let secretsmanager_state = Arc::new(parking_lot::RwLock::new(
@@ -565,7 +570,7 @@ async fn main() {
             "RDS execution enabled via container runtime"
         );
     } else {
-        tracing::info!("Docker/Podman not available — RDS CreateDBInstance will return errors");
+        degraded_runtimes.push("RDS (CreateDBInstance and snapshot/replica ops return errors)");
     }
     let elasticache_runtime = if fakecloud_k8s::backend_choice("FAKECLOUD_ELASTICACHE_BACKEND")
         == fakecloud_k8s::Backend::K8s
@@ -596,9 +601,7 @@ async fn main() {
             "ElastiCache execution enabled via container runtime"
         );
     } else {
-        tracing::info!(
-            "Docker/Podman not available — ElastiCache CreateReplicationGroup will return errors"
-        );
+        degraded_runtimes.push("ElastiCache (metadata-only clusters, no cache data plane)");
     }
     // ECS runtime is constructed below, after the EventBridge + CloudWatch
     // Logs wiring is in place. Placeholder kept here so downstream blocks
@@ -807,7 +810,7 @@ async fn main() {
             "ECS task execution enabled via container runtime"
         );
     } else {
-        tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
+        degraded_runtimes.push("ECS (RunTask fails with TaskFailedToStart)");
     }
     // EC2 instance backing runtime. FAKECLOUD_EC2_BACKEND=k8s (or the global
     // FAKECLOUD_CONTAINER_BACKEND=k8s) runs instances as native Kubernetes
@@ -837,8 +840,16 @@ async fn main() {
             "EC2 instance execution enabled via container runtime"
         );
     } else {
-        tracing::info!(
-            "Docker/Podman not available — EC2 RunInstances will serve metadata-only instances"
+        degraded_runtimes.push("EC2 (RunInstances serves metadata-only instances)");
+    }
+    // One consolidated banner instead of five scattered lines: if any
+    // container-backed service is degraded, warn once and tell the operator
+    // exactly how to enable them.
+    if !degraded_runtimes.is_empty() {
+        tracing::warn!(
+            "No container runtime (Docker/Podman) detected. The following services run in degraded or metadata-only mode and will fail or serve metadata only for operations that need a real container: {}. {}",
+            degraded_runtimes.join("; "),
+            fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
         );
     }
     // Clone state refs for internal endpoints

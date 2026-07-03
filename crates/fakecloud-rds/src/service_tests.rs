@@ -2856,6 +2856,14 @@ async fn repro_issue_2107_corrupt_state_when_runtime_absent() {
         Err(e) => e,
     };
     assert_eq!(e1.code(), "InsufficientDBInstanceCapacity");
+    // The human-readable message must stay actionable: tell the operator how
+    // to enable the runtime rather than just that it is missing.
+    assert!(
+        e1.message().contains("Install and start Docker or Podman")
+            && e1.message().contains("FAKECLOUD_CONTAINER_CLI"),
+        "runtime-missing error must explain how to fix it: {}",
+        e1.message()
+    );
 
     // Second create must ALSO be InsufficientDBInstanceCapacity, NOT
     // DBInstanceAlreadyExists. A leaked reservation shows up here.

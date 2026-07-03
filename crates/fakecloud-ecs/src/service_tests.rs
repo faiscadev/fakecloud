@@ -368,6 +368,25 @@ mod scheduler_reconcile {
             "scheduler must spawn desiredCount tasks for a service at 0 running"
         );
 
+        // The stop reason must stay actionable: it names the missing runtime
+        // and tells the operator how to enable real task execution.
+        {
+            let accounts = state.read();
+            let reason = accounts
+                .get(ACCOUNT)
+                .unwrap()
+                .tasks
+                .values()
+                .find_map(|t| t.stopped_reason.clone())
+                .expect("a STOPPED task must carry a stopped_reason");
+            assert!(
+                reason.contains("No container runtime available")
+                    && reason.contains("Install and start Docker or Podman")
+                    && reason.contains("FAKECLOUD_CONTAINER_CLI"),
+                "runtime-missing stop reason must explain how to fix it: {reason}"
+            );
+        }
+
         // Simulate those tasks actually running (as the runtime would), then
         // tick again: the service is now at desiredCount so NO new tasks spawn.
         {
