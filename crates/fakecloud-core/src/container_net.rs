@@ -19,6 +19,12 @@
 //!   fakecloud's container as `host.docker.internal:<port>`, not
 //!   `127.0.0.1:<port>`.
 
+/// Actionable remediation appended to every error raised when a container
+/// runtime (Docker/Podman) is required for an operation but none is
+/// available. Kept in one place so RDS, Lambda, ECS, and the server startup
+/// banner all surface the same fix steps and can't drift apart.
+pub const CONTAINER_RUNTIME_HINT: &str = "Install and start Docker or Podman, or set FAKECLOUD_CONTAINER_CLI to your container CLI path.";
+
 /// Auto-detect an available container CLI. Honors `FAKECLOUD_CONTAINER_CLI`
 /// as an explicit override (returns `None` if the override doesn't work),
 /// otherwise prefers `docker` then `podman`. Returns `None` when neither

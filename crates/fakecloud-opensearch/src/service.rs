@@ -1186,16 +1186,18 @@ impl OpenSearchService {
             created: false,
             deleted: false,
             config: cfg,
-            tags: tags.clone(),
+            tags,
             created_at: Utc::now(),
             data_sources: Default::default(),
             indices: Default::default(),
             scheduled_actions: Default::default(),
             maintenances: Default::default(),
         };
-        if !tags.is_empty() {
-            st.tags.insert(arn, tags);
-        }
+        // A domain's tags live on the domain itself (`d.tags`); `AddTags` /
+        // `RemoveTags` / `ListTags` all operate there via `apply_tag_target`.
+        // Do NOT also copy them into the side `st.tags` map: that map takes
+        // precedence in `ListTags`, so a duplicate there would shadow later
+        // `AddTags` updates and resurrect `RemoveTags`-deleted tags.
         let out = domain_status(&d, api, /*created=*/ false, /*processing=*/ true);
         st.domains.insert(name, d);
         Ok(ok(json!({ status_key(api): out })))
@@ -1804,18 +1806,20 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let dom = label(l.domain.as_deref())?;
         let b = body(req);
-        let account = b.get("Account").and_then(|v| v.as_str()).unwrap_or("");
         let service = b.get("Service").and_then(|v| v.as_str());
+        let account = b.get("Account").and_then(|v| v.as_str());
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         if !st.domains.contains_key(&dom) {
             return Err(not_found_domain(&dom));
         }
-        let principal = if let Some(s) = service {
-            json!({"AWSService": s})
-        } else {
-            json!({"AWSAccount": account})
-        };
+        // `AuthorizedPrincipal` is `{ PrincipalType, Principal }` in both
+        // models (an AWS_SERVICE SP, or an AWS_ACCOUNT id).
+        let (key, principal) = authorized_principal(service, account);
+        st.vpc_endpoint_access
+            .entry(dom)
+            .or_default()
+            .insert(key, principal.clone());
         Ok(ok(json!({ "AuthorizedPrincipal": principal })))
     }
 
@@ -1825,10 +1829,17 @@ impl OpenSearchService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let dom = label(l.domain.as_deref())?;
+        let b = body(req);
+        let service = b.get("Service").and_then(|v| v.as_str());
+        let account = b.get("Account").and_then(|v| v.as_str());
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         if !st.domains.contains_key(&dom) {
             return Err(not_found_domain(&dom));
+        }
+        let (key, _) = authorized_principal(service, account);
+        if let Some(principals) = st.vpc_endpoint_access.get_mut(&dom) {
+            principals.remove(&key);
         }
         Ok(ok(json!({})))
     }
@@ -1840,13 +1851,17 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let dom = label(l.domain.as_deref())?;
         let accounts = self.state.read();
+        let mut list = Vec::new();
         if let Some(st) = accounts.get(&req.account_id) {
             if !st.domains.contains_key(&dom) {
                 return Err(not_found_domain(&dom));
             }
+            if let Some(principals) = st.vpc_endpoint_access.get(&dom) {
+                list.extend(principals.values().cloned());
+            }
         }
         Ok(ok(
-            json!({ "AuthorizedPrincipalList": [], "NextToken": "" }),
+            json!({ "AuthorizedPrincipalList": list, "NextToken": "" }),
         ))
     }
 
@@ -3108,6 +3123,24 @@ fn label(v: Option<&str>) -> Result<String, AwsServiceError> {
     match v {
         Some(s) if !s.is_empty() => Ok(s.to_string()),
         _ => Err(validation("A required path parameter is missing.")),
+    }
+}
+
+/// Build an `AuthorizedPrincipal` (`{ PrincipalType, Principal }`) for a
+/// VPC-endpoint-access grant, plus the map key it is stored under. A `Service`
+/// SP takes precedence over an `Account` id, matching real AWS.
+fn authorized_principal(service: Option<&str>, account: Option<&str>) -> (String, Value) {
+    if let Some(s) = service {
+        (
+            format!("service:{s}"),
+            json!({"PrincipalType": "AWS_SERVICE", "Principal": s}),
+        )
+    } else {
+        let a = account.unwrap_or("");
+        (
+            format!("account:{a}"),
+            json!({"PrincipalType": "AWS_ACCOUNT", "Principal": a}),
+        )
     }
 }
 

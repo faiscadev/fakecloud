@@ -763,7 +763,10 @@ impl RdsService {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "InsufficientDBInstanceCapacity",
-                "Docker/Podman is required for RDS DB instances but is not available",
+                format!(
+                    "Docker/Podman is required for RDS DB instances but is not available. {}",
+                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+                ),
             )
         })
     }

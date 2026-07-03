@@ -19,7 +19,10 @@ impl RdsService {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "InvalidDBSnapshotState",
-                "Docker/Podman is required for RDS snapshots but is not available",
+                format!(
+                    "Docker/Podman is required for RDS snapshots but is not available. {}",
+                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+                ),
             )
         })?;
 
@@ -159,7 +162,10 @@ impl RdsService {
             AwsServiceError::aws_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "InvalidDBInstanceState",
-                "Docker/Podman is required for RDS snapshots but is not available",
+                format!(
+                    "Docker/Podman is required for RDS snapshots but is not available. {}",
+                    fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
+                ),
             )
         })?;
 
