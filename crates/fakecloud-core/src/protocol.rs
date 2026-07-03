@@ -449,6 +449,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Cloud Map (servicediscovery): awsJson1.1, target prefix carries the
         // dated Route53 Auto Naming service version.
         "Route53AutoNaming_v20170314" => "servicediscovery",
+        // Database Migration Service: awsJson1.1.
+        "AmazonDMSv20160101" => "dms",
         // IAM Identity Center Identity Store: awsJson1.1.
         "AWSIdentityStore" => "identitystore",
         // IAM Identity Center SSO Admin: awsJson1.1.

@@ -36,6 +36,7 @@ fakecloud-kinesis = { workspace = true }
 fakecloud-rds = { workspace = true }
 fakecloud-redshift = { workspace = true }
 fakecloud-rds-data = { workspace = true }
+fakecloud-dms = { workspace = true }
 fakecloud-dsql = { workspace = true }
 fakecloud-resource-groups = { workspace = true }
 fakecloud-resource-groups-tagging = { workspace = true }

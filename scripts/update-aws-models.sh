@@ -41,6 +41,7 @@ SERVICES=(
     "sesv2:sesv2"
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
+    "dms:database-migration-service"
     "rds-data:rds-data"
     "dsql:dsql"
     "elasticache:elasticache"

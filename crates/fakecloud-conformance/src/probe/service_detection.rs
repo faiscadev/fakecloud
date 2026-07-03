@@ -86,6 +86,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "servicediscovery" => Protocol::Json {
             target_prefix: "Route53AutoNaming_v20170314",
         },
+        // Database Migration Service: awsJson1.1.
+        "dms" => Protocol::Json {
+            target_prefix: "AmazonDMSv20160101",
+        },
         // IAM Identity Center Identity Store: awsJson1.1.
         "identitystore" => Protocol::Json {
             target_prefix: "AWSIdentityStore",
