@@ -472,6 +472,43 @@ fn unknown_cluster_operations_error_cleanly() {
 }
 
 #[test]
+fn custom_domain_associations_use_association_wrapper() {
+    let svc = service();
+    ok(
+        &svc,
+        "CreateCluster",
+        &[
+            ("ClusterIdentifier", "cdc"),
+            ("NodeType", "ra3.xlplus"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "Passw0rd123"),
+        ],
+    );
+    ok(
+        &svc,
+        "CreateCustomDomainAssociation",
+        &[
+            ("ClusterIdentifier", "cdc"),
+            ("CustomDomainName", "redshift.example.com"),
+            (
+                "CustomDomainCertificateArn",
+                "arn:aws:acm:us-east-1:123456789012:certificate/abc123def456",
+            ),
+        ],
+    );
+    let listed = ok(&svc, "DescribeCustomDomainAssociations", &[]);
+    // The `AssociationList` member's xmlName is `Association`; the AWS SDK /
+    // Terraform provider parses an empty list if the wrapper is anything else.
+    assert!(
+        listed.contains("<Associations><Association>"),
+        "expected <Association> list wrapper, got: {listed}"
+    );
+    assert!(!listed.contains("<CustomDomainAssociation>"));
+    assert!(listed.contains("<CustomDomainName>redshift.example.com</CustomDomainName>"));
+    assert!(listed.contains("<ClusterIdentifier>cdc</ClusterIdentifier>"));
+}
+
+#[test]
 fn tag_operations_round_trip() {
     let svc = service();
     ok(
