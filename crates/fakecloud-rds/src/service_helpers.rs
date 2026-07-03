@@ -2012,6 +2012,23 @@ pub fn default_port_for_engine(engine: &str) -> i32 {
     }
 }
 
+/// Pick the default `EngineVersion` for `engine` when the caller omits
+/// it. Must land on a version in that engine's supported list
+/// (`validate_create_request`) -- a fixed postgres default like `16.3`
+/// would make every version-less mysql/mariadb/oracle/... create fail
+/// with "EngineVersion '16.3' is not available". See issue #2107.
+pub(crate) fn default_engine_version(engine: &str) -> &'static str {
+    match engine {
+        "postgres" => "16.3",
+        "mysql" => "8.0",
+        "mariadb" => "10.11",
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => "19.0.0",
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => "15.00.4322.2.v1",
+        "db2-se" | "db2-ae" => "11.5.9.0.sb00000000.r1",
+        _ => "16.3",
+    }
+}
+
 /// Pick the built-in parameter group name AWS assigns to a new
 /// instance when the caller doesn't override it. The name encodes the
 /// engine family plus its major version (e.g. `default.postgres16`,
