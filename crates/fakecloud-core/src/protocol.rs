@@ -453,6 +453,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AWSIdentityStore" => "identitystore",
         // IAM Identity Center SSO Admin: awsJson1.1.
         "SWBExternalService" => "sso",
+        // Verified Permissions: awsJson1.0.
+        "VerifiedPermissions" => "verifiedpermissions",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with

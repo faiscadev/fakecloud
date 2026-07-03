@@ -906,6 +906,17 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccIdentityStore",
         deny: &[],
     },
+    Service {
+        name: "verifiedpermissions",
+        // AWS Verified Permissions. Exercises policy stores (+ data source),
+        // Cedar schemas, static and template-linked policies, policy templates,
+        // and Cognito/OIDC identity sources. The `_disappears` tests delete the
+        // resource out-of-band and assert it's gone; the identity-source Cognito
+        // tests stand up a real `aws_cognito_user_pool` first (fakecloud's
+        // Cognito service), then link it. Nested configuration round-trips.
+        run_regex: "^TestAccVerifiedPermissions",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1403,6 +1414,12 @@ pub const SHARDS: &[Shard] = &[
         name: "identitystore",
         service: "identitystore",
         run_regex: "^TestAccIdentityStore",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "verifiedpermissions",
+        service: "verifiedpermissions",
+        run_regex: "^TestAccVerifiedPermissions",
         extra_deny: &[],
     },
 ];

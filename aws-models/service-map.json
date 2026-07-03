@@ -210,5 +210,9 @@
   "ssoadmin": {
     "repo_dir": "sso-admin",
     "service_name": "sso"
+  },
+  "verifiedpermissions": {
+    "repo_dir": "verifiedpermissions",
+    "service_name": "verifiedpermissions"
   }
 }

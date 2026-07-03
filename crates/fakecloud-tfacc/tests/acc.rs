@@ -316,3 +316,8 @@ async fn ssoadmin_acceptance() {
 async fn identitystore_acceptance() {
     run_shard("identitystore").await;
 }
+
+#[tokio::test]
+async fn verifiedpermissions_acceptance() {
+    run_shard("verifiedpermissions").await;
+}

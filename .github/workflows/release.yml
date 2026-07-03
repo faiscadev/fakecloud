@@ -205,6 +205,7 @@ jobs:
           publish fakecloud-account          # only core/persistence/aws deps
           publish fakecloud-identitystore    # only core/persistence/aws deps
           publish fakecloud-ssoadmin         # only core/persistence/aws deps
+          publish fakecloud-verifiedpermissions # core/persistence/aws + cedar-policy
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock

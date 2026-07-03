@@ -480,6 +480,14 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let verifiedpermissions_state: fakecloud_verifiedpermissions::SharedVerifiedPermissionsState =
+        Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                &cli.account_id,
+                &cli.region,
+                &endpoint_url,
+            ),
+        ));
     let memorydb_state: fakecloud_memorydb::SharedMemoryDbState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4003,6 +4011,43 @@ async fn main() {
         ssoadmin_service = ssoadmin_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ssoadmin_service));
+
+    // Verified Permissions control plane + Cedar authorization.
+    let verifiedpermissions_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("verifiedpermissions").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_verifiedpermissions::persistence::load_into(
+                &store,
+                &verifiedpermissions_state,
+            ) {
+                Ok(fakecloud_verifiedpermissions::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded verifiedpermissions persistence snapshot");
+                }
+                Ok(fakecloud_verifiedpermissions::persistence::LoadOutcome::Empty) => {
+                    tracing::info!(
+                        "no verifiedpermissions persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut verifiedpermissions_service =
+        fakecloud_verifiedpermissions::VerifiedPermissionsService::new(
+            verifiedpermissions_state.clone(),
+        );
+    if let Some(store) = verifiedpermissions_snapshot_store {
+        verifiedpermissions_service = verifiedpermissions_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(verifiedpermissions_service));
 
     // MemoryDB control plane.
     let memorydb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

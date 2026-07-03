@@ -1,6 +1,6 @@
 {
-  "variants_passed": 134924,
-  "total_variants": 134924,
+  "variants_passed": 136154,
+  "total_variants": 136154,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -213,6 +213,10 @@
     "sso": {
       "passed": 2842,
       "total": 2842
+    },
+    "verifiedpermissions": {
+      "passed": 1230,
+      "total": 1230
     }
   }
 }
