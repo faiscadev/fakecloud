@@ -468,6 +468,22 @@ fn is_authorized_with_token_resolves_principal_from_sub() {
 }
 
 #[test]
+fn list_policies_rejects_invalid_max_results() {
+    // maxResults has @range(min: 1); the list ops must reject maxResults < 1
+    // with a ValidationException instead of silently returning a page.
+    let s = svc();
+    let id = new_store(&s);
+    for op in ["ListPolicies", "ListPolicyTemplates", "ListIdentitySources"] {
+        let err = call_err(&s, op, json!({ "policyStoreId": id, "maxResults": 0 }));
+        assert_eq!(
+            err.code(),
+            "ValidationException",
+            "{op} should reject maxResults=0"
+        );
+    }
+}
+
+#[test]
 fn batch_get_policy_mixes_found_and_errors() {
     let s = svc();
     let id = new_store(&s);
