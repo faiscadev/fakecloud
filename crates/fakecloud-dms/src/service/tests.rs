@@ -97,6 +97,28 @@ fn replication_instance_crud() {
 }
 
 #[test]
+fn modify_instance_updates_vpc_security_groups() {
+    let s = svc();
+    let arn = new_instance(&s);
+    let modified = call(
+        &s,
+        "ModifyReplicationInstance",
+        json!({ "ReplicationInstanceArn": arn, "VpcSecurityGroupIds": ["sg-aaa", "sg-bbb"] }),
+    );
+    let sgs = modified["ReplicationInstance"]["VpcSecurityGroups"]
+        .as_array()
+        .unwrap();
+    assert_eq!(sgs.len(), 2);
+    assert_eq!(sgs[0]["VpcSecurityGroupId"], json!("sg-aaa"));
+    assert_eq!(sgs[0]["Status"], json!("active"));
+    // The change must round-trip through Describe, not just the modify echo.
+    let desc = call(&s, "DescribeReplicationInstances", json!({}));
+    let listed = &desc["ReplicationInstances"][0]["VpcSecurityGroups"];
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(listed[1]["VpcSecurityGroupId"], json!("sg-bbb"));
+}
+
+#[test]
 fn replication_instance_dup_rejected() {
     let s = svc();
     call(
