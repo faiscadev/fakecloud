@@ -128,6 +128,11 @@ async fn rds_acceptance() {
 }
 
 #[tokio::test]
+async fn redshift_acceptance() {
+    run_shard("redshift").await;
+}
+
+#[tokio::test]
 async fn rds_param_groups_acceptance() {
     run_shard("rds-param-groups").await;
 }

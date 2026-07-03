@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 54 AWS services with 3,966 total operations. 136,154/136,154 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 55 AWS services with 3,966 total operations. 140,394/140,394 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -32,6 +32,7 @@ fakecloud implements 54 AWS services with 3,966 total operations. 136,154/136,15
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | RDS Data API           |   6 | Real SQL on the backing Postgres/MySQL container; typed params/results incl. `bytea`/`BLOB`, transactions, batch |
+| Redshift               | 141 | Full control plane: clusters (progress to `available`, synthetic endpoint), snapshots (real `SnapshotArn`), parameter groups (`Source=user` filter), subnet/security groups, snapshot schedules + copy grants, endpoint access (synthesized VPC endpoint), per-cluster logging, cross-region snapshot-copy config, tagging. No SQL data plane (separate `redshift-data` API) |
 | Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
 | Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |

@@ -56,6 +56,7 @@ SERVICES=(
     "kinesis|Kinesis|kinesis"
     "rds|RDS|rds"
     "rds-data|RDS Data|rds-data"
+    "redshift|Redshift|redshift"
     "dsql|Aurora DSQL|dsql"
     "resource-groups|Resource Groups|resource-groups"
     "tagging|Resource Groups Tagging API|resource-groups-tagging"

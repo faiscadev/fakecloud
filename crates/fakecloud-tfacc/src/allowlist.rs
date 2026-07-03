@@ -546,6 +546,35 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "redshift",
+        // Amazon Redshift is a full control plane (no real warehouse container
+        // is stood up). The Terraform provider's `_basic` suite exercises the
+        // whole surface: clusters (which transition creating -> available on
+        // describe so the create waiter completes, and report a synthetic
+        // Endpoint/leader node/public key/MultiAZ status), parameter groups
+        // (Source=user round-trips so there's no perpetual drift), subnet
+        // groups (+ data source), snapshots (with a real SnapshotArn), snapshot
+        // copy grants/schedules (+ cluster association), HSM client certs and
+        // configurations, event subscriptions, usage limits, per-cluster
+        // logging (LogExports round-trip), cross-region snapshot-copy config,
+        // authentication profiles, IAM-role attach, endpoint access (with a
+        // synthesized interface VPC endpoint), the cluster + credentials data
+        // sources, and Partner registration.
+        run_regex: "^TestAccRedshift[A-Za-z]+_basic$",
+        deny: &[
+            // --- unsupportable: these resources create a Redshift *Serverless*
+            //     namespace first (redshift-serverless CreateNamespace), a
+            //     separate AWS service that fakecloud does not implement, so the
+            //     apply fails before any Redshift call is made. Data sharing and
+            //     zero-ETL integrations are built on that serverless surface. ---
+            "TestAccRedshiftDataShareAuthorization_basic",
+            "TestAccRedshiftDataShareConsumerAssociation_basic",
+            "TestAccRedshiftDataSharesDataSource_basic",
+            "TestAccRedshiftProducerDataSharesDataSource_basic",
+            "TestAccRedshiftIntegration_basic",
+        ],
+    },
+    Service {
         name: "rds",
         // RDS control-plane resources that need no DB engine container. The DB
         // subnet group reports `supported_network_types = [IPV4]` and a
@@ -1199,6 +1228,12 @@ pub const SHARDS: &[Shard] = &[
         name: "rds",
         service: "rds",
         run_regex: "^TestAccRDSSubnetGroup_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "redshift",
+        service: "redshift",
+        run_regex: "^TestAccRedshift[A-Za-z]+_basic$",
         extra_deny: &[],
     },
     // DB and DB-cluster parameter groups. Both need no engine container:
