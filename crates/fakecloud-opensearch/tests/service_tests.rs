@@ -859,6 +859,158 @@ async fn outbound_connection_create_and_delete() {
     );
 }
 
+#[tokio::test]
+async fn accept_connection_makes_both_views_active() {
+    // Regression: a cross-cluster connection is single-sourced, so accepting it
+    // moves BOTH the inbound (accepter) and outbound (requester) describe views
+    // to ACTIVE -- they must never disagree.
+    let svc = service();
+    let created = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/cc/outboundConnection"),
+                json!({
+                    "LocalDomainInfo": {"AWSDomainInformation": {"DomainName": "local"}},
+                    "RemoteDomainInfo": {"AWSDomainInformation": {"DomainName": "remote"}},
+                    "ConnectionAlias": "link"
+                }),
+            ),
+        )
+        .await,
+    );
+    let cid = created["ConnectionId"].as_str().unwrap().to_string();
+
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            &format!("{OS}/opensearch/cc/inboundConnection/{cid}/accept"),
+            json!({}),
+        ),
+    )
+    .await;
+
+    let inbound = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/cc/inboundConnection/search"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let in_list = inbound["Connections"].as_array().unwrap();
+    assert_eq!(in_list.len(), 1);
+    assert_eq!(in_list[0]["ConnectionStatus"]["StatusCode"], "ACTIVE");
+
+    let outbound = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/cc/outboundConnection/search"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let out_list = outbound["Connections"].as_array().unwrap();
+    assert_eq!(out_list.len(), 1);
+    assert_eq!(
+        out_list[0]["ConnectionStatus"]["StatusCode"], "ACTIVE",
+        "outbound view must agree with inbound after accept"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade (engine version persistence)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn upgrade_domain_persists_target_version_across_both_apis() {
+    // Regression: UpgradeDomain is the only path that changes a domain's engine
+    // version, so the target must persist and be visible via both API shapes.
+    let svc = service();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "upgd", "EngineVersion": "OpenSearch_2.9"}),
+        ),
+    )
+    .await;
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/upgradeDomain"),
+            json!({"DomainName": "upgd", "TargetVersion": "OpenSearch_2.11"}),
+        ),
+    )
+    .await;
+    let os = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/upgd"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(os["DomainStatus"]["EngineVersion"], "OpenSearch_2.11");
+    // Same entity via the legacy 2015 API: prefix stripped.
+    let es = json_of(
+        &call(
+            &svc,
+            req(Method::GET, &format!("{ES}/es/domain/upgd"), json!({})),
+        )
+        .await,
+    );
+    assert_eq!(es["DomainStatus"]["ElasticsearchVersion"], "2.11");
+}
+
+#[tokio::test]
+async fn upgrade_domain_check_only_does_not_persist() {
+    let svc = service();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "upgdry", "EngineVersion": "OpenSearch_2.9"}),
+        ),
+    )
+    .await;
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/upgradeDomain"),
+            json!({"DomainName": "upgdry", "TargetVersion": "OpenSearch_2.11", "PerformCheckOnly": true}),
+        ),
+    )
+    .await;
+    let described = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/upgdry"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(described["DomainStatus"]["EngineVersion"], "OpenSearch_2.9");
+}
+
 // ---------------------------------------------------------------------------
 // Applications + reserved instances + versions
 // ---------------------------------------------------------------------------
