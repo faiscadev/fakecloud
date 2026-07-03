@@ -261,6 +261,12 @@ jobs:
       - name: Enable bridge netfilter
         run: |
           sudo modprobe br_netfilter
+          # Load conntrack for the bridge family so fakecloud's bridge-family
+          # SG table (`ct state established,related accept`) applies — this is
+          # what makes same-subnet L2-switched traffic enforce reliably even
+          # when bridge-nf-call-iptables doesn't route bridged frames to the
+          # inet forward hook on this runner's kernel.
+          sudo modprobe nf_conntrack_bridge || echo "nf_conntrack_bridge unavailable; bridge-family SG enforcement will degrade"
           for knob in bridge-nf-call-iptables bridge-nf-call-ip6tables bridge-nf-call-arptables; do
             echo 1 | sudo tee "/proc/sys/net/bridge/$knob" >/dev/null
           done
@@ -304,6 +310,7 @@ jobs:
           # bug, not a leaked host-firewall state from a prior attempt.
           ensure_bridge_nf() {
             sudo modprobe br_netfilter || true
+            sudo modprobe nf_conntrack_bridge || true
             echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables >/dev/null || true
             got=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo missing)
             echo "bridge-nf-call-iptables=${got}"
