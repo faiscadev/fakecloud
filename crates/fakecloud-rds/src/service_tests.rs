@@ -2832,3 +2832,70 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[tokio::test]
+async fn create_without_runtime_does_not_corrupt_state() {
+    // Regression for issue #2107. With no container runtime, a failed
+    // CreateDBInstance must not leak the in-progress reservation, or the
+    // service jams: re-create -> DBInstanceAlreadyExists while
+    // Describe/Delete see nothing.
+    let svc = make_service();
+    let create = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "corrupt-db"),
+            ("Engine", "mysql"),
+            ("EngineVersion", "8.0"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+
+    for _ in 0..2 {
+        let err = match svc.create_db_instance(&create).await {
+            Ok(_) => panic!("expected failure with no runtime"),
+            Err(e) => e,
+        };
+        // Never DBInstanceAlreadyExists -- always the honest
+        // runtime-unavailable error, every attempt.
+        assert_eq!(err.code(), "InsufficientDBInstanceCapacity");
+    }
+
+    let accounts = svc.state.read();
+    let state = accounts.default_ref();
+    assert!(
+        state.in_progress_instance_ids.is_empty(),
+        "failed create leaked an in-progress reservation"
+    );
+    assert!(state.instances.is_empty());
+}
+
+#[tokio::test]
+async fn create_defaults_engine_version_per_engine() {
+    // Issue #2107: a version-less MySQL create must not inherit the
+    // postgres default "16.3" and fail validation. Stub runtime lets the
+    // handler reach the stored placeholder without a container daemon.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    let create = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "mysql-default-ver"),
+            ("Engine", "mysql"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    svc.create_db_instance(&create)
+        .await
+        .expect("version-less mysql create should succeed");
+
+    let accounts = svc.state.read();
+    let inst = accounts
+        .default_ref()
+        .instances
+        .get("mysql-default-ver")
+        .expect("placeholder stored");
+    assert_eq!(inst.engine_version, "8.0");
+}
