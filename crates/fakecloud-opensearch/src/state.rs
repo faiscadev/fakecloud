@@ -111,8 +111,6 @@ pub struct Connection {
     pub alias: String,
     pub mode: String,
     pub properties: Value,
-    #[serde(default)]
-    pub inbound: bool,
 }
 
 /// An OpenSearch application (2021 API only).
