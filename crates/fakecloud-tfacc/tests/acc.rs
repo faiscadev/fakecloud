@@ -326,3 +326,8 @@ async fn identitystore_acceptance() {
 async fn verifiedpermissions_acceptance() {
     run_shard("verifiedpermissions").await;
 }
+
+#[tokio::test]
+async fn dms_acceptance() {
+    run_shard("dms").await;
+}

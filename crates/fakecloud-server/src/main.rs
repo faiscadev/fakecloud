@@ -483,6 +483,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let dms_state: fakecloud_dms::SharedDmsState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let verifiedpermissions_state: fakecloud_verifiedpermissions::SharedVerifiedPermissionsState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -4069,6 +4076,35 @@ async fn main() {
         ssoadmin_service = ssoadmin_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ssoadmin_service));
+
+    // Database Migration Service control plane.
+    let dms_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("dms").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_dms::persistence::load_into(&store, &dms_state) {
+                Ok(fakecloud_dms::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded dms persistence snapshot");
+                }
+                Ok(fakecloud_dms::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no dms persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut dms_service = fakecloud_dms::DmsService::new(dms_state.clone());
+    if let Some(store) = dms_snapshot_store {
+        dms_service = dms_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(dms_service));
 
     // Verified Permissions control plane + Cedar authorization.
     let verifiedpermissions_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

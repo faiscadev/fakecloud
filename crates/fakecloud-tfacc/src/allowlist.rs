@@ -946,6 +946,19 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccVerifiedPermissions",
         deny: &[],
     },
+    Service {
+        name: "dms",
+        // AWS Database Migration Service control plane. Scoped to the two
+        // standalone `_basic` resources that need no VPC / replication-instance
+        // co-resources: `aws_dms_certificate` (ImportCertificate + describe +
+        // delete, then ImportStateVerify) and `aws_dms_endpoint` (create +
+        // in-place update of a source endpoint, with tag add/update/remove).
+        // The replication-instance / subnet-group / task / config / S3-endpoint
+        // resources and the data sources stand up a VPC + subnets + a settled
+        // replication instance first; those come in a later widening batch.
+        run_regex: "^TestAccDMS(Certificate|Endpoint)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1455,6 +1468,12 @@ pub const SHARDS: &[Shard] = &[
         name: "verifiedpermissions",
         service: "verifiedpermissions",
         run_regex: "^TestAccVerifiedPermissions",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "dms",
+        service: "dms",
+        run_regex: "^TestAccDMS(Certificate|Endpoint)_basic$",
         extra_deny: &[],
     },
 ];
