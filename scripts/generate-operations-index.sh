@@ -63,6 +63,7 @@ SERVICES=(
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
     "servicediscovery|Cloud Map|servicediscovery"
+    "account|Account Management|account"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"
     "apigatewayv2|API Gateway v2|apigatewayv2"

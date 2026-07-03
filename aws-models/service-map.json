@@ -1,4 +1,8 @@
 {
+  "account": {
+    "repo_dir": "account",
+    "service_name": "account"
+  },
   "sqs": {
     "repo_dir": "sqs",
     "service_name": "sqs"

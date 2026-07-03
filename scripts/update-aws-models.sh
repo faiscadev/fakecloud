@@ -20,6 +20,7 @@ cd repo
 
 # Service mapping: our_name:repo_dir
 SERVICES=(
+    "account:account"
     "sqs:sqs"
     "sns:sns"
     "eventbridge:eventbridge"

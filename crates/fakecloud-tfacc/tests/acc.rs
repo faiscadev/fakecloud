@@ -113,6 +113,11 @@ async fn servicediscovery_acceptance() {
 }
 
 #[tokio::test]
+async fn account_acceptance() {
+    run_shard("account").await;
+}
+
+#[tokio::test]
 async fn eks_acceptance() {
     run_shard("eks").await;
 }

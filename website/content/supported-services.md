@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 3,932 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 3,947 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 3,932 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 3,947 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 50
-- **Total Operations**: 3,932
-- **Conformance Engine**: 130,944 Smithy-based test variants
+- **Total Operations**: 3,947
+- **Conformance Engine**: 131,356 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -40,6 +40,7 @@ fakecloud provides 100% API conformance across 3,932 operations. Unlike mocks, f
 - **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) and EventBridge Pipes (10 operations) are separate services.
 - **EventBridge Pipes**: 10 operations. Point-to-point source -> filter -> Lambda enrichment -> target integrations with per-target InputTemplate transforms, driven by a real background runner.
 - **Cloud Map**: 30 operations (complete). Full AWS Cloud Map (`servicediscovery`) control plane + discovery API: HTTP/public-DNS/private-DNS namespaces, services (DnsConfig/HealthCheck + attributes), instance register/deregister/get/list + health status, `DiscoverInstances`/`DiscoverInstancesRevision` lookup, and tagging — driven by the async operation model (mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`); persisted.
+- **Account Management**: 15 operations (complete). Full AWS Account control plane: alternate contacts (BILLING/OPERATIONS/SECURITY), primary contact information, account information + name, GovCloud account pairing, primary-email management (start/accept OTP flow), and Region opt-in control (ListRegions, GetRegionOptStatus, Enable/DisableRegion with `ENABLING` -> `ENABLED` settle-on-read over the real opt-in-region catalogue). Honors the optional `AccountId` member so an organization's management account can act on a member; persisted.
 
 ### Security & Management
 - **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.

@@ -1852,6 +1852,24 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateService`
 - `UpdateServiceAttributes`
 
+## [Account Management](@/docs/services/account.md)
+
+- `AcceptPrimaryEmailUpdate`
+- `DeleteAlternateContact`
+- `DisableRegion`
+- `EnableRegion`
+- `GetAccountInformation`
+- `GetAlternateContact`
+- `GetContactInformation`
+- `GetGovCloudAccountInformation`
+- `GetPrimaryEmail`
+- `GetRegionOptStatus`
+- `ListRegions`
+- `PutAccountName`
+- `PutAlternateContact`
+- `PutContactInformation`
+- `StartPrimaryEmailUpdate`
+
 ## [Step Functions](@/docs/services/stepfunctions.md)
 
 - `CreateActivity`
