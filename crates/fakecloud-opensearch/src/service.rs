@@ -396,6 +396,8 @@ fn is_mutating(action: &str) -> bool {
             | "PurchaseReservedElasticsearchInstanceOffering"
             | "StartDomainMaintenance"
             | "PutDefaultApplicationSetting"
+            | "UpgradeDomain"
+            | "UpgradeElasticsearchDomain"
     )
 }
 
@@ -1076,7 +1078,7 @@ impl OpenSearchService {
                 Ok(ok(compatible_versions(api)))
             }
             // ---- Upgrade ----
-            "UpgradeDomain" | "UpgradeElasticsearchDomain" => self.upgrade_domain(l, req),
+            "UpgradeDomain" | "UpgradeElasticsearchDomain" => self.upgrade_domain(api, req),
             "GetUpgradeHistory" => Ok(ok(json!({"UpgradeHistories": []}))),
             "GetUpgradeStatus" => Ok(ok(json!({
                 "UpgradeStep": "PRE_UPGRADE_CHECK",
@@ -1164,11 +1166,7 @@ impl OpenSearchService {
             .or_else(|| b.get("ElasticsearchVersion"))
             .and_then(|v| v.as_str())
         {
-            Some(v) if v.contains('_') => v.to_string(),
-            Some(v) => match api {
-                Api::Es => format!("Elasticsearch_{v}"),
-                Api::OpenSearch => format!("OpenSearch_{v}"),
-            },
+            Some(v) => canonical_engine_version(api, v),
             None => match api {
                 Api::Es => "Elasticsearch_7.10".to_string(),
                 Api::OpenSearch => "OpenSearch_2.11".to_string(),
@@ -1904,13 +1902,12 @@ impl OpenSearchService {
                 .unwrap_or("DIRECT")
                 .to_string(),
             properties: b.get("ConnectionProperties").cloned().unwrap_or(json!({})),
-            inbound: false,
         };
-        // The same connection is also visible inbound to the remote domain.
-        let mut inbound = conn.clone();
-        inbound.inbound = true;
+        // A cross-cluster connection is ONE entity with one status, viewed as
+        // "outbound" by the requester and "inbound" by the accepter. Store it
+        // once (keyed by id) so every transition is single-sourced and the two
+        // describe views always agree.
         st.connections.insert(id.clone(), conn.clone());
-        st.connections.insert(format!("{id}-in"), inbound);
         Ok(ok(connection_create_json(api, &conn)))
     }
 
@@ -1924,15 +1921,9 @@ impl OpenSearchService {
         let id = label(l.connection_id.as_deref())?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let key = format!("{id}-in");
-        let real_key = if st.connections.contains_key(&key) {
-            key
-        } else {
-            id.clone()
-        };
         let conn = st
             .connections
-            .get_mut(&real_key)
+            .get_mut(&id)
             .ok_or_else(|| not_found_generic(&format!("Connection {id} not found.")))?;
         conn.status_code = new_status.to_string();
         Ok(ok(
@@ -1950,20 +1941,11 @@ impl OpenSearchService {
         let id = label(l.connection_id.as_deref())?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let key = if inbound {
-            format!("{id}-in")
-        } else {
-            id.clone()
-        };
-        let mut conn = match st.connections.remove(&key) {
-            Some(c) => c,
-            None => st
-                .connections
-                .remove(&id)
-                .ok_or_else(|| not_found_generic(&format!("Connection {id} not found.")))?,
-        };
+        let mut conn = st
+            .connections
+            .remove(&id)
+            .ok_or_else(|| not_found_generic(&format!("Connection {id} not found.")))?;
         conn.status_code = "DELETING".to_string();
-        conn.inbound = inbound;
         if inbound {
             Ok(ok(
                 json!({ "CrossClusterSearchConnection": inbound_connection_json(api, &conn) }),
@@ -1984,8 +1966,10 @@ impl OpenSearchService {
         let accounts = self.state.read();
         let mut list = Vec::new();
         if let Some(st) = accounts.get(&req.account_id) {
+            // The single stored record is both an inbound and an outbound
+            // connection; render it into whichever view the caller asked for.
             for conn in st.connections.values() {
-                if conn.inbound == inbound && connection_well_formed(conn) {
+                if connection_well_formed(conn) {
                     list.push(if inbound {
                         inbound_connection_json(api, conn)
                     } else {
@@ -2648,16 +2632,43 @@ impl OpenSearchService {
     // Upgrade / software update / maintenance
     // ===================================================================
 
-    fn upgrade_domain(&self, l: &Labels, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let _ = l;
+    fn upgrade_domain(&self, api: Api, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let dom = req_str(&b, "DomainName")?;
-        self.require_domain(&dom, &req.account_id)?;
+        let target = b
+            .get("TargetVersion")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        // A check-only upgrade is a dry run: report what would happen but do
+        // not change the domain's engine version.
+        let check_only = b
+            .get("PerformCheckOnly")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let d = st
+            .domains
+            .get_mut(&dom)
+            .ok_or_else(|| not_found_domain(&dom))?;
+        // Upgrade is the only path that changes a domain's engine version
+        // (UpdateDomainConfig has no version member), so persist the requested
+        // target in canonical prefixed form. Both APIs then reflect it: the
+        // 2021 view via `EngineVersion`, the 2015 view via `ElasticsearchVersion`
+        // (prefix stripped).
+        if !check_only {
+            if let Some(t) = target.as_deref() {
+                d.engine_version = canonical_engine_version(api, t);
+            }
+        }
+        let response_target = target
+            .map(Value::from)
+            .unwrap_or_else(|| json!("OpenSearch_2.11"));
         Ok(ok(json!({
             "UpgradeId": short_id(),
             "DomainName": dom,
-            "TargetVersion": b.get("TargetVersion").cloned().unwrap_or(json!("OpenSearch_2.11")),
-            "PerformCheckOnly": b.get("PerformCheckOnly").cloned().unwrap_or(json!(false)),
+            "TargetVersion": response_target,
+            "PerformCheckOnly": check_only,
             "AdvancedOptions": b.get("AdvancedOptions").cloned().unwrap_or(json!({})),
         })))
     }
@@ -2866,6 +2877,21 @@ fn default_cluster_config() -> Value {
         "ZoneAwarenessEnabled": false,
         "WarmEnabled": false,
     })
+}
+
+/// Canonicalize an engine version to the prefixed form (`OpenSearch_x.y` /
+/// `Elasticsearch_x.y`) the shared store keeps. An already-prefixed value
+/// (any string carrying `_`, e.g. `OpenSearch_2.11`) is kept verbatim; a bare
+/// number (the 2015 API's `7.10`) is prefixed per the requesting API.
+fn canonical_engine_version(api: Api, v: &str) -> String {
+    if v.contains('_') {
+        v.to_string()
+    } else {
+        match api {
+            Api::Es => format!("Elasticsearch_{v}"),
+            Api::OpenSearch => format!("OpenSearch_{v}"),
+        }
+    }
 }
 
 /// Strip the engine prefix (`OpenSearch_2.11` / `Elasticsearch_7.10`) to the
