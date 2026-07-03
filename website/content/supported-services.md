@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 4,045 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 4,079 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 4,045 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 4,079 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
-- **Total Services**: 53
-- **Total Operations**: 4,045
-- **Conformance Engine**: 134,924 Smithy-based test variants
+- **Total Services**: 54
+- **Total Operations**: 4,079
+- **Conformance Engine**: 136,154 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -43,6 +43,7 @@ fakecloud provides 100% API conformance across 4,045 operations. Unlike mocks, f
 - **Account Management**: 15 operations (complete). Full AWS Account control plane: alternate contacts (BILLING/OPERATIONS/SECURITY), primary contact information, account information + name, GovCloud account pairing, primary-email management (start/accept OTP flow), and Region opt-in control (ListRegions, GetRegionOptStatus, Enable/DisableRegion with `ENABLING` -> `ENABLED` settle-on-read over the real opt-in-region catalogue). Honors the optional `AccountId` member so an organization's management account can act on a member; persisted.
 - **IAM Identity Center Identity Store**: 19 operations (complete). Full `identitystore` directory control plane: users, groups, and group memberships (create/describe/update/delete/list), the attribute-lookup helpers `GetUserId`/`GetGroupId`/`GetGroupMembershipId` (by `UniqueAttribute`), and `IsMemberInGroups`. Nested SCIM attribute bags round-trip verbatim; `@length`/`@range` constraints enforced. Account-partitioned and persisted.
 - **IAM Identity Center SSO Admin**: 79 operations (complete). Full `sso-admin` control plane: IAM Identity Center instances and regions, permission sets with inline/managed/customer-managed/boundary policies, account assignments and permission-set provisioning (async status settle), applications with assignments/access-scopes/authentication-methods/grants/session config, the application-provider catalogue, trusted token issuers, access-control attribute configuration, and tagging. Nested config objects round-trip verbatim; `@length`/`@range` constraints enforced. Account-partitioned and persisted.
+- **Verified Permissions**: 34 operations (complete). Full `verifiedpermissions` Cedar authorization control plane: policy stores, Cedar schemas (`PutSchema`/`GetSchema`), static and template-linked policies, policy templates, identity sources (Cognito/OIDC), policy-store aliases, and tagging. `IsAuthorized`/`IsAuthorizedWithToken`/`BatchIsAuthorized`/`BatchIsAuthorizedWithToken` compute real Cedar decisions via the official `cedar-policy` engine — policies compile into a Cedar `PolicySet` and the request is evaluated to an `ALLOW`/`DENY` with determining policies and errors. `*WithToken` resolves the principal from the JWT `sub` claim. `@length`/`@range`/enum constraints enforced. Account-partitioned and persisted.
 
 ### Security & Management
 - **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.

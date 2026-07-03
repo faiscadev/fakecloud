@@ -1974,6 +1974,43 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdatePermissionSet`
 - `UpdateTrustedTokenIssuer`
 
+## [Verified Permissions](@/docs/services/verifiedpermissions.md)
+
+- `BatchGetPolicy`
+- `BatchIsAuthorized`
+- `BatchIsAuthorizedWithToken`
+- `CreateIdentitySource`
+- `CreatePolicy`
+- `CreatePolicyStore`
+- `CreatePolicyStoreAlias`
+- `CreatePolicyTemplate`
+- `DeleteIdentitySource`
+- `DeletePolicy`
+- `DeletePolicyStore`
+- `DeletePolicyStoreAlias`
+- `DeletePolicyTemplate`
+- `GetIdentitySource`
+- `GetPolicy`
+- `GetPolicyStore`
+- `GetPolicyStoreAlias`
+- `GetPolicyTemplate`
+- `GetSchema`
+- `IsAuthorized`
+- `IsAuthorizedWithToken`
+- `ListIdentitySources`
+- `ListPolicies`
+- `ListPolicyStoreAliases`
+- `ListPolicyStores`
+- `ListPolicyTemplates`
+- `ListTagsForResource`
+- `PutSchema`
+- `TagResource`
+- `UntagResource`
+- `UpdateIdentitySource`
+- `UpdatePolicy`
+- `UpdatePolicyStore`
+- `UpdatePolicyTemplate`
+
 ## [Step Functions](@/docs/services/stepfunctions.md)
 
 - `CreateActivity`

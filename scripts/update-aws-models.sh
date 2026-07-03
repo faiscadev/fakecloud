@@ -23,6 +23,7 @@ SERVICES=(
     "account:account"
     "identitystore:identitystore"
     "ssoadmin:sso-admin"
+    "verifiedpermissions:verifiedpermissions"
     "sqs:sqs"
     "sns:sns"
     "eventbridge:eventbridge"
