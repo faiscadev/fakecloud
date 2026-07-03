@@ -818,6 +818,7 @@ impl VerifiedPermissionsService {
     fn list_policies(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let store_id = policy_store_id(&b)?;
+        check_pagination(&b)?;
         let filter = b.get("filter");
         let rows = self.with_store_read(&req.account_id, &store_id, |store| {
             store
@@ -1003,6 +1004,7 @@ impl VerifiedPermissionsService {
     fn list_policy_templates(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let store_id = policy_store_id(&b)?;
+        check_pagination(&b)?;
         let rows = self.with_store_read(&req.account_id, &store_id, |store| {
             store
                 .templates
@@ -1153,6 +1155,7 @@ impl VerifiedPermissionsService {
     fn list_identity_sources(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let store_id = policy_store_id(&b)?;
+        check_pagination(&b)?;
         let rows = self.with_store_read(&req.account_id, &store_id, |store| {
             store
                 .identity_sources
