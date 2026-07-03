@@ -548,6 +548,81 @@ async fn add_and_remove_tags_roundtrip() {
     assert!(after["TagList"].as_array().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn create_time_tag_can_be_removed_and_overridden() {
+    // Regression: tags supplied at CreateDomain must not be double-stored in
+    // the side tag map, or a later RemoveTags would leave a stale copy that
+    // ListTags resurrects, and an AddTags value update would be shadowed.
+    let svc = service();
+    let created = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/domain"),
+                json!({"DomainName": "tagfix", "TagList": [{"Key": "env", "Value": "prod"}]}),
+            ),
+        )
+        .await,
+    );
+    let arn = created["DomainStatus"]["ARN"].as_str().unwrap().to_string();
+
+    // Overriding the create-time value via the 2015 ES AddTags must win.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{ES}/tags"),
+            json!({"ARN": arn, "TagList": [{"Key": "env", "Value": "dev"}]}),
+        ),
+    )
+    .await;
+    let listed = json_of(
+        &call(
+            &svc,
+            with_query(
+                req(Method::GET, &format!("{OS}/tags"), json!({})),
+                "arn",
+                &arn,
+            ),
+        )
+        .await,
+    );
+    let tags = listed["TagList"].as_array().unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0]["Key"], "env");
+    assert_eq!(
+        tags[0]["Value"], "dev",
+        "AddTags update must not be shadowed"
+    );
+
+    // Removing the create-time tag must actually delete it (not resurrect).
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/tags-removal"),
+            json!({"ARN": arn, "TagKeys": ["env"]}),
+        ),
+    )
+    .await;
+    let after = json_of(
+        &call(
+            &svc,
+            with_query(
+                req(Method::GET, &format!("{ES}/tags"), json!({})),
+                "arn",
+                &arn,
+            ),
+        )
+        .await,
+    );
+    assert!(
+        after["TagList"].as_array().unwrap().is_empty(),
+        "removed create-time tag must not reappear"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Packages
 // ---------------------------------------------------------------------------
