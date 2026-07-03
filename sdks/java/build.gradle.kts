@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.fakecloud"
-version = "0.33.0"
+version = "0.34.0"
 
 repositories {
     mavenCentral()
