@@ -3301,6 +3301,7 @@ dependencies = [
  "fakecloud-sns",
  "fakecloud-sqs",
  "fakecloud-ssm",
+ "fakecloud-ssoadmin",
  "fakecloud-stepfunctions",
  "fakecloud-wafv2",
  "libc",
@@ -4769,6 +4770,26 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-ssoadmin"
+version = "0.32.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

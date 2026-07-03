@@ -473,6 +473,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let ssoadmin_state: fakecloud_ssoadmin::SharedSsoAdminState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let memorydb_state: fakecloud_memorydb::SharedMemoryDbState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3962,6 +3969,40 @@ async fn main() {
         identitystore_service = identitystore_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(identitystore_service));
+
+    // IAM Identity Center SSO Admin control plane.
+    let ssoadmin_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ssoadmin").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_ssoadmin::persistence::load_into(&store, &ssoadmin_state) {
+                Ok(fakecloud_ssoadmin::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded ssoadmin persistence snapshot");
+                }
+                Ok(fakecloud_ssoadmin::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no ssoadmin persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    fakecloud_ssoadmin::state::ensure_default_instance(
+        &ssoadmin_state,
+        &cli.account_id,
+        &cli.region,
+    );
+    let mut ssoadmin_service = fakecloud_ssoadmin::SsoAdminService::new(ssoadmin_state.clone());
+    if let Some(store) = ssoadmin_snapshot_store {
+        ssoadmin_service = ssoadmin_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(ssoadmin_service));
 
     // MemoryDB control plane.
     let memorydb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

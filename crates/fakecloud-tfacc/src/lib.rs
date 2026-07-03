@@ -401,4 +401,6 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
         "AWS_ENDPOINT_URL_APPLICATION_AUTO_SCALING",
         "application-autoscaling",
     ),
+    ("AWS_ENDPOINT_URL_SSO_ADMIN", "sso"),
+    ("AWS_ENDPOINT_URL_IDENTITYSTORE", "identitystore"),
 ];

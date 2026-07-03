@@ -90,6 +90,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "identitystore" => Protocol::Json {
             target_prefix: "AWSIdentityStore",
         },
+        // IAM Identity Center SSO Admin: awsJson1.1.
+        "sso" => Protocol::Json {
+            target_prefix: "SWBExternalService",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).

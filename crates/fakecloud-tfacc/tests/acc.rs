@@ -306,3 +306,13 @@ async fn firehose_acceptance() {
 async fn cloudwatch_acceptance() {
     run_shard("cloudwatch").await;
 }
+
+#[tokio::test]
+async fn ssoadmin_acceptance() {
+    run_shard("ssoadmin").await;
+}
+
+#[tokio::test]
+async fn identitystore_acceptance() {
+    run_shard("identitystore").await;
+}

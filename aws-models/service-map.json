@@ -206,5 +206,9 @@
   "identitystore": {
     "repo_dir": "identitystore",
     "service_name": "identitystore"
+  },
+  "ssoadmin": {
+    "repo_dir": "sso-admin",
+    "service_name": "sso"
   }
 }

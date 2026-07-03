@@ -869,6 +869,43 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccBatch(ComputeEnvironment|JobQueue|JobDefinition)_basic$",
         deny: &[],
     },
+    Service {
+        name: "ssoadmin",
+        // IAM Identity Center SSO Admin. fakecloud seeds a default ACTIVE
+        // instance at startup so `PreCheckSSOAdminInstances` (which lists
+        // instances and skips when none exist) proceeds and the
+        // `aws_ssoadmin_instances` data source resolves. The full control plane
+        // — permission sets and their inline/managed/customer-managed/boundary
+        // policies, applications with access scopes and assignments, trusted
+        // token issuers, and the account-assignment async lifecycle — is
+        // exercisable. The data sources round-trip against the seeded instance's
+        // identity store.
+        run_regex: concat!(
+            "^TestAccSSOAdmin(",
+            "InstancesDataSource",
+            "|PermissionSet|PermissionSetInlinePolicy|PermissionSetsDataSource",
+            "|PermissionSetDataSource|ManagedPolicyAttachment",
+            "|CustomerManagedPolicyAttachment|PermissionsBoundaryAttachment",
+            "|Application|ApplicationAccessScope|ApplicationAssignment",
+            "|ApplicationAssignmentConfiguration|ApplicationDataSource",
+            "|ApplicationProvidersDataSource|ApplicationAssignmentsDataSource",
+            "|PrincipalApplicationAssignmentsDataSource|TrustedTokenIssuer",
+            "|AccountAssignment",
+            ")",
+        ),
+        deny: &[],
+    },
+    Service {
+        name: "identitystore",
+        // IAM Identity Center Identity Store. Resolves the seeded instance's
+        // `identity_store_id` via the SSO Admin `aws_ssoadmin_instances` data
+        // source, then exercises users, groups, group memberships, and their
+        // data sources (unique-attribute + filter lookups). Nested user
+        // attribute bags (Name, Emails, Addresses, PhoneNumbers, ...)
+        // round-trip.
+        run_regex: "^TestAccIdentityStore",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1342,6 +1379,30 @@ pub const SHARDS: &[Shard] = &[
         name: "batch",
         service: "batch",
         run_regex: "^TestAccBatch(ComputeEnvironment|JobQueue|JobDefinition)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ssoadmin",
+        service: "ssoadmin",
+        run_regex: concat!(
+            "^TestAccSSOAdmin(",
+            "InstancesDataSource",
+            "|PermissionSet|PermissionSetInlinePolicy|PermissionSetsDataSource",
+            "|PermissionSetDataSource|ManagedPolicyAttachment",
+            "|CustomerManagedPolicyAttachment|PermissionsBoundaryAttachment",
+            "|Application|ApplicationAccessScope|ApplicationAssignment",
+            "|ApplicationAssignmentConfiguration|ApplicationDataSource",
+            "|ApplicationProvidersDataSource|ApplicationAssignmentsDataSource",
+            "|PrincipalApplicationAssignmentsDataSource|TrustedTokenIssuer",
+            "|AccountAssignment",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "identitystore",
+        service: "identitystore",
+        run_regex: "^TestAccIdentityStore",
         extra_deny: &[],
     },
 ];
