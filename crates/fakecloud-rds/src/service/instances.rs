@@ -25,8 +25,8 @@ impl RdsService {
         let master_user_password = optional_query_param(request, "MasterUserPassword")
             .unwrap_or_else(|| "Password1!".to_string());
         let db_name = optional_query_param(request, "DBName");
-        let engine_version =
-            optional_query_param(request, "EngineVersion").unwrap_or_else(|| "16.3".to_string());
+        let engine_version = optional_query_param(request, "EngineVersion")
+            .unwrap_or_else(|| default_engine_version(&engine).to_string());
         let publicly_accessible =
             parse_optional_bool(optional_query_param(request, "PubliclyAccessible").as_deref())?
                 .unwrap_or(true);
@@ -94,6 +94,14 @@ impl RdsService {
             port,
         )?;
 
+        // Resolve the container runtime BEFORE reserving the identifier.
+        // If it is unavailable this returns early, and reserving first
+        // would leak the reservation into `in_progress_instance_ids`
+        // (nothing ever cancels it), corrupting the service: every later
+        // CreateDBInstance then fails with DBInstanceAlreadyExists while
+        // Describe/Delete see an empty instance map. See issue #2107.
+        let runtime = self.require_runtime()?.clone();
+
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
@@ -116,8 +124,6 @@ impl RdsService {
                 }
             }
         }
-
-        let runtime = self.require_runtime()?.clone();
 
         let logical_db_name = db_name
             .clone()

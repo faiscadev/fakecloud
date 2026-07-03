@@ -2832,3 +2832,79 @@ async fn snapshot_hook_fires_with_store() {
         .expect("hook present when a store is set");
     hook().await;
 }
+
+#[tokio::test]
+async fn repro_issue_2107_corrupt_state_when_runtime_absent() {
+    // No runtime -> require_runtime() fails. Reproduce issue #2107:
+    // a failed create must NOT leak the in-progress reservation.
+    let svc = make_service();
+    let create = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "corrupt-db"),
+            ("Engine", "mysql"),
+            ("EngineVersion", "8.0"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+
+    // First create fails because there is no container runtime.
+    let e1 = match svc.create_db_instance(&create).await {
+        Ok(_) => panic!("expected failure with no runtime"),
+        Err(e) => e,
+    };
+    assert_eq!(e1.code(), "InsufficientDBInstanceCapacity");
+
+    // Second create must ALSO be InsufficientDBInstanceCapacity, NOT
+    // DBInstanceAlreadyExists. A leaked reservation shows up here.
+    let e2 = match svc.create_db_instance(&create).await {
+        Ok(_) => panic!("expected failure with no runtime"),
+        Err(e) => e,
+    };
+    assert_ne!(
+        e2.code(),
+        "DBInstanceAlreadyExists",
+        "leaked in-progress reservation corrupts state"
+    );
+
+    let state = svc.state.read();
+    assert!(
+        state.default_ref().in_progress_instance_ids.is_empty(),
+        "failed create left a leaked reservation"
+    );
+}
+
+#[tokio::test]
+async fn create_without_engine_version_uses_engine_default() {
+    // Issue #2107: a version-less create must default EngineVersion to a
+    // version in the requested engine's supported list -- not a fixed
+    // postgres value like "16.3", which would make every version-less
+    // mysql/mariadb/oracle/... create fail validation with
+    // "EngineVersion '16.3' is not available" before it ever reaches the
+    // runtime. With no runtime the create still fails, but it must fail
+    // at require_runtime (InsufficientDBInstanceCapacity), proving
+    // validation passed with the engine-appropriate default.
+    let svc = make_service();
+    let create = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "mysql-nover"),
+            ("Engine", "mysql"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    let err = match svc.create_db_instance(&create).await {
+        Ok(_) => panic!("expected failure with no runtime"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err.code(),
+        "InsufficientDBInstanceCapacity",
+        "version-less mysql create must pass validation via the engine default, \
+         not fail on a hardcoded postgres version"
+    );
+}
