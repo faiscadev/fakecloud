@@ -1058,8 +1058,12 @@ impl RedshiftService {
         let inner: String = all
             .iter()
             .map(|c| {
+                // The `Associations` (`AssociationList`) member serializes each
+                // element under its `xmlName` wrapper `Association` — not
+                // `CustomDomainAssociation`. Using the wrong wrapper makes the
+                // AWS SDK / Terraform provider parse an empty association list.
                 format!(
-                    "<CustomDomainAssociation><CustomDomainCertificateArn>{cert}</CustomDomainCertificateArn><CustomDomainCertificateExpiryDate>{expiry}</CustomDomainCertificateExpiryDate><CertificateAssociations><CertificateAssociation><CustomDomainName>{name}</CustomDomainName><ClusterIdentifier>{cluster}</ClusterIdentifier></CertificateAssociation></CertificateAssociations></CustomDomainAssociation>",
+                    "<Association><CustomDomainCertificateArn>{cert}</CustomDomainCertificateArn><CustomDomainCertificateExpiryDate>{expiry}</CustomDomainCertificateExpiryDate><CertificateAssociations><CertificateAssociation><CustomDomainName>{name}</CustomDomainName><ClusterIdentifier>{cluster}</ClusterIdentifier></CertificateAssociation></CertificateAssociations></Association>",
                     cert = xml_escape(&c.custom_domain_certificate_arn),
                     expiry = c.custom_domain_certificate_expiry_date.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                     name = xml_escape(&c.custom_domain_name),
