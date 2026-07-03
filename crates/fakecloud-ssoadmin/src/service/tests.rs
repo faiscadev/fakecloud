@@ -575,3 +575,39 @@ fn not_found_and_validation() {
     let e = err(&s, "ListInstances", json!({ "MaxResults": 500 }));
     assert_eq!(e.code(), "ValidationException");
 }
+
+#[test]
+fn list_account_assignments_for_principal_filters_by_principal_type() {
+    let s = svc();
+    let inst = new_instance(&s);
+    let ps_arn = call(
+        &s,
+        "CreatePermissionSet",
+        json!({ "InstanceArn": inst, "Name": "PS" }),
+    )["PermissionSet"]["PermissionSetArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Two assignments that share a principal id but differ in principal type.
+    let shared_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    for (ptype, target) in [("USER", "111122223333"), ("GROUP", "444455556666")] {
+        call(
+            &s,
+            "CreateAccountAssignment",
+            json!({
+                "InstanceArn": inst, "TargetId": target, "TargetType": "AWS_ACCOUNT",
+                "PermissionSetArn": ps_arn, "PrincipalType": ptype, "PrincipalId": shared_id
+            }),
+        );
+    }
+    let listed = call(
+        &s,
+        "ListAccountAssignmentsForPrincipal",
+        json!({ "InstanceArn": inst, "PrincipalId": shared_id, "PrincipalType": "USER" }),
+    );
+    let rows = listed["AccountAssignments"].as_array().unwrap();
+    // Only the USER assignment must come back, not the GROUP one.
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["PrincipalType"], json!("USER"));
+    assert_eq!(rows[0]["AccountId"], json!("111122223333"));
+}

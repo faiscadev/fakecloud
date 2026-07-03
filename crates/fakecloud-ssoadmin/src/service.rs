@@ -1260,14 +1260,20 @@ impl SsoAdminService {
         validate_common(&b)?;
         req_str(&b, "InstanceArn")?;
         let principal_id = req_str(&b, "PrincipalId")?.to_string();
-        req_str(&b, "PrincipalType")?;
+        let principal_type = req_str(&b, "PrincipalType")?.to_string();
         let guard = self.state.read();
         let rows: Vec<Value> = guard
             .get(&req.account_id)
             .map(|a| {
                 a.assignments
                     .iter()
-                    .filter(|x| x.principal_id == principal_id)
+                    // `PrincipalType` is a required input and AWS filters on it
+                    // together with `PrincipalId`; ignoring it would surface a
+                    // USER assignment when the caller queried a GROUP (and vice
+                    // versa) whose id happened to collide.
+                    .filter(|x| {
+                        x.principal_id == principal_id && x.principal_type == principal_type
+                    })
                     .map(|x| {
                         json!({
                             "AccountId": x.account_id,
