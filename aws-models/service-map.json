@@ -203,6 +203,10 @@
     "repo_dir": "eks",
     "service_name": "eks"
   },
+  "glacier": {
+    "repo_dir": "glacier",
+    "service_name": "glacier"
+  },
   "backup": {
     "repo_dir": "backup",
     "service_name": "backup"

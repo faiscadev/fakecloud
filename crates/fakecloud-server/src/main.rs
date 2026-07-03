@@ -517,6 +517,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let glacier_state: fakecloud_glacier::SharedGlacierState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let eks_state: fakecloud_eks::SharedEksState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4266,6 +4273,39 @@ async fn main() {
         cfn_snapshot_hooks.insert("eks", h);
     }
     registry.register(Arc::new(eks_service));
+
+    // Amazon S3 Glacier: vaults, archives (real bytes + tree hash), multipart
+    // uploads, retrieval/inventory jobs, vault lock, tags, and policies.
+    let glacier_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("glacier").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_glacier::persistence::load_into(&store, &glacier_state) {
+                Ok(fakecloud_glacier::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded glacier persistence snapshot");
+                }
+                Ok(fakecloud_glacier::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no glacier persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut glacier_service = fakecloud_glacier::GlacierService::new(glacier_state.clone());
+    if let Some(store) = glacier_snapshot_store {
+        glacier_service = glacier_service.with_snapshot_store(store);
+    }
+    if let Some(h) = glacier_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("glacier", h);
+    }
+    registry.register(Arc::new(glacier_service));
 
     // AWS Backup control plane.
     let backup_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

@@ -406,6 +406,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_MEMORYDB", "memorydb"),
     ("AWS_ENDPOINT_URL_SERVICEDISCOVERY", "servicediscovery"),
     ("AWS_ENDPOINT_URL_EKS", "eks"),
+    ("AWS_ENDPOINT_URL_GLACIER", "glacier"),
     ("AWS_ENDPOINT_URL_BACKUP", "backup"),
     // Amazon Elasticsearch Service (legacy) + Amazon OpenSearch Service both
     // sign as `es`; terraform-provider-aws exposes a distinct endpoint env var

@@ -665,6 +665,21 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "glacier",
+        // Amazon S3 Glacier stores real archive bytes and computes a real
+        // SHA-256 tree hash, so the standalone vault resource round-trips
+        // through create/describe/delete, its notification, access-policy, and
+        // tag sub-resources persist and read back, and the vault lock settles
+        // the InProgress state machine (create with complete_lock=false, read
+        // via GetVaultLock, abort on destroy). completeLock permanently locks a
+        // vault (destroy can't abort it) and disappears/ignoreEquivalent model
+        // policy-equivalence + drift a control plane alone doesn't reproduce, so
+        // they are deferred.
+        run_regex:
+            "^TestAccGlacier(Vault_basic|Vault_notification|Vault_policy|Vault_tags|VaultLock_basic)$",
+        deny: &[],
+    },
+    Service {
         name: "backup",
         // AWS Backup is a control-plane mock (LocalStack Community treats it the
         // same): no real backup engine runs. Vaults and plans are the standalone
@@ -1354,6 +1369,13 @@ pub const SHARDS: &[Shard] = &[
             "|IdentityProviderConfig|PodIdentityAssociation",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "glacier",
+        service: "glacier",
+        run_regex:
+            "^TestAccGlacier(Vault_basic|Vault_notification|Vault_policy|Vault_tags|VaultLock_basic)$",
         extra_deny: &[],
     },
     Shard {
