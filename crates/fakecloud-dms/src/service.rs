@@ -464,7 +464,10 @@ fn paginate(rows: Vec<Value>, b: &Value) -> (Vec<Value>, Option<String>) {
         .and_then(Value::as_u64)
         .map(|m| m.clamp(1, 10_000) as usize)
         .unwrap_or(100);
-    let end = (start + max).min(rows.len());
+    // `saturating_add` keeps a hostile numeric `Marker` (e.g. `usize::MAX`)
+    // from overflowing `start + max` and panicking on the request path; an
+    // out-of-range window simply yields an empty page.
+    let end = start.saturating_add(max).min(rows.len());
     let page = rows.get(start..end).unwrap_or(&[]).to_vec();
     let next = if end < rows.len() {
         Some(end.to_string())
