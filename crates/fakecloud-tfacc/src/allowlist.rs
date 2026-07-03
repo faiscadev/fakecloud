@@ -665,6 +665,25 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "elasticsearch",
+        // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
+        // domain persists and settles to Processing=false / Created=true on
+        // describe so the create waiter completes, and delete removes it so the
+        // destroy waiter sees ResourceNotFound. Only the basic domain resource
+        // is exercised; VPC/Cognito/SAML-wired variants model networking a
+        // control plane alone can't stand up.
+        run_regex: "^TestAccElasticsearchDomain_basic$",
+        deny: &[],
+    },
+    Service {
+        name: "opensearch",
+        // Amazon OpenSearch Service shares the same control-plane domain store
+        // as Elasticsearch Service (one `es` scope). The basic domain resource
+        // round-trips through the create/describe/delete waiters.
+        run_regex: "^TestAccOpenSearchDomain_basic$",
+        deny: &[],
+    },
+    Service {
         name: "cloudfront",
         // Cache/origin-request/realtime-log/log-delivery data sources. The
         // CloudFront resources (distribution, function, OAC, ...) are deferred.
@@ -1323,6 +1342,18 @@ pub const SHARDS: &[Shard] = &[
             "|IdentityProviderConfig|PodIdentityAssociation",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "elasticsearch",
+        service: "elasticsearch",
+        run_regex: "^TestAccElasticsearchDomain_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "opensearch",
+        service: "opensearch",
+        run_regex: "^TestAccOpenSearchDomain_basic$",
         extra_deny: &[],
     },
     Shard {

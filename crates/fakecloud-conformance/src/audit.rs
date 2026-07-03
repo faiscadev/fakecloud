@@ -173,6 +173,24 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service/mod.rs", "service.rs"],
             &["organizations"],
         ),
+        // Amazon Elasticsearch Service (2015) + Amazon OpenSearch Service
+        // (2021) share ONE crate and ONE `supported_actions()` list (the
+        // deduplicated union `ALL_ACTIONS`). Two audit keys (one per Smithy
+        // service_name / probe id) both point at that list; each probe filters
+        // by its own model's operation set.
+        // Amazon Elasticsearch Service (2015) and Amazon OpenSearch Service
+        // (2021) are two AWS services served by ONE crate with ONE
+        // `supported_actions()` list (the union of both API op sets). The
+        // legacy-ES tests are tagged `es`, the OpenSearch tests `opensearch`;
+        // together they cover the whole union, so either tag counts for both
+        // mappings (same pattern as the bedrock control/data-plane crate).
+        ("es", "opensearch", &["service.rs"], &["es", "opensearch"]),
+        (
+            "opensearch",
+            "opensearch",
+            &["service.rs"],
+            &["es", "opensearch"],
+        ),
     ];
 
     mappings

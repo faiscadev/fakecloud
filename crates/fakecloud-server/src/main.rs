@@ -519,6 +519,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -4241,6 +4248,39 @@ async fn main() {
         cfn_snapshot_hooks.insert("eks", h);
     }
     registry.register(Arc::new(eks_service));
+
+    // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
+    let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("opensearch").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_opensearch::persistence::load_into(&store, &opensearch_state) {
+                Ok(fakecloud_opensearch::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded opensearch persistence snapshot");
+                }
+                Ok(fakecloud_opensearch::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no opensearch persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut opensearch_service =
+        fakecloud_opensearch::OpenSearchService::new(opensearch_state.clone());
+    if let Some(store) = opensearch_snapshot_store {
+        opensearch_service = opensearch_service.with_snapshot_store(store);
+    }
+    if let Some(h) = opensearch_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("es", h);
+    }
+    registry.register(Arc::new(opensearch_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to
