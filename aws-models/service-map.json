@@ -202,5 +202,9 @@
   "eks": {
     "repo_dir": "eks",
     "service_name": "eks"
+  },
+  "identitystore": {
+    "repo_dir": "identitystore",
+    "service_name": "identitystore"
   }
 }

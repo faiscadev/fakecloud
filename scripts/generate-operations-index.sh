@@ -64,6 +64,7 @@ SERVICES=(
     "eks|EKS|eks"
     "servicediscovery|Cloud Map|servicediscovery"
     "account|Account Management|account"
+    "identitystore|IAM Identity Center Identity Store|identitystore"
     "sfn|Step Functions|stepfunctions"
     "apigateway|API Gateway v1|apigateway"
     "apigatewayv2|API Gateway v2|apigatewayv2"

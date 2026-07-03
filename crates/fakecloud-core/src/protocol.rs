@@ -449,6 +449,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Cloud Map (servicediscovery): awsJson1.1, target prefix carries the
         // dated Route53 Auto Naming service version.
         "Route53AutoNaming_v20170314" => "servicediscovery",
+        // IAM Identity Center Identity Store: awsJson1.1.
+        "AWSIdentityStore" => "identitystore",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with

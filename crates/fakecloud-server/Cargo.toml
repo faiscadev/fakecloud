@@ -47,6 +47,7 @@ fakecloud-elbv2 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }
 fakecloud-route53 = { workspace = true }
 fakecloud-account = { workspace = true }
+fakecloud-identitystore = { workspace = true }
 fakecloud-acm = { workspace = true }
 fakecloud-firehose = { workspace = true }
 fakecloud-glue = { workspace = true }

@@ -466,6 +466,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let identitystore_state: fakecloud_identitystore::SharedIdentityStoreState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let memorydb_state: fakecloud_memorydb::SharedMemoryDbState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3925,6 +3932,36 @@ async fn main() {
         account_service = account_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(account_service));
+
+    // IAM Identity Center Identity Store control plane.
+    let identitystore_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("identitystore").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_identitystore::persistence::load_into(&store, &identitystore_state) {
+                Ok(fakecloud_identitystore::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded identitystore persistence snapshot");
+                }
+                Ok(fakecloud_identitystore::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no identitystore persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut identitystore_service =
+        fakecloud_identitystore::IdentityStoreService::new(identitystore_state.clone());
+    if let Some(store) = identitystore_snapshot_store {
+        identitystore_service = identitystore_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(identitystore_service));
 
     // MemoryDB control plane.
     let memorydb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
