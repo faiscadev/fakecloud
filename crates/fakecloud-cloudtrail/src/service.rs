@@ -862,11 +862,20 @@ impl CloudTrailService {
         eds.insert("EventDataStoreArn".into(), json!(arn));
         eds.insert("Name".into(), json!(name));
         eds.insert("Status".into(), json!("ENABLED"));
+        // AWS defaults an event data store with no explicit selectors to a
+        // single "Default management events" advanced selector rather than an
+        // empty list.
         eds.insert(
             "AdvancedEventSelectors".into(),
-            b.get("AdvancedEventSelectors")
-                .cloned()
-                .unwrap_or(json!([])),
+            b.get("AdvancedEventSelectors").cloned().unwrap_or_else(|| {
+                json!([{
+                    "Name": "Default management events",
+                    "FieldSelectors": [{
+                        "Field": "eventCategory",
+                        "Equals": ["Management"]
+                    }]
+                }])
+            }),
         );
         eds.insert(
             "MultiRegionEnabled".into(),

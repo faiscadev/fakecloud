@@ -189,6 +189,17 @@ fn event_data_store_lifecycle() {
     assert_eq!(got["Status"], json!("ENABLED"));
     assert_eq!(got["Name"], json!("eds1"));
 
+    // With no selectors specified, AWS returns the default management-events
+    // advanced selector (terraform's basic acceptance test asserts this).
+    let aes = &got["AdvancedEventSelectors"];
+    assert_eq!(aes.as_array().unwrap().len(), 1);
+    assert_eq!(aes[0]["Name"], json!("Default management events"));
+    assert_eq!(aes[0]["FieldSelectors"][0]["Field"], json!("eventCategory"));
+    assert_eq!(
+        aes[0]["FieldSelectors"][0]["Equals"][0],
+        json!("Management")
+    );
+
     let list = call(&s, "ListEventDataStores", json!({}));
     assert_eq!(list["EventDataStores"].as_array().unwrap().len(), 1);
 
