@@ -322,6 +322,12 @@ fn now_ts() -> f64 {
     chrono::Utc::now().timestamp() as f64
 }
 
+/// Current time as an ISO-8601 / RFC-3339 UTC string (e.g. `2023-01-01T00:00:00Z`),
+/// matching the model's string type for the `TimeLogging{Started,Stopped}` members.
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 fn new_uuid() -> String {
     Uuid::new_v4().to_string()
 }
@@ -357,8 +363,12 @@ fn paginate(rows: Vec<Value>, b: &Value, default_max: usize) -> (Vec<Value>, Opt
         .unwrap_or(default_max);
     let end = start.saturating_add(max).min(rows.len());
     let page = rows.get(start..end).unwrap_or(&[]).to_vec();
+    // Zero-pad to >=4 chars so the token satisfies the model's
+    // `PaginationToken @length(min:4)` validation on the follow-up request.
+    // The read side parses with `parse::<usize>()`, which recovers the value
+    // from a padded token (e.g. "0100" -> 100).
     let next = if end < rows.len() {
-        Some(end.to_string())
+        Some(format!("{end:04}"))
     } else {
         None
     };
@@ -536,6 +546,12 @@ impl CloudTrailService {
         data.trail_status.remove(&name);
         data.event_selectors.remove(&name);
         data.insight_selectors.remove(&name);
+        // Trail ARN is name-derived, so a destroy+recreate reuses it. Purge
+        // tags and event configuration keyed by the ARN to avoid leaking stale
+        // state onto the recreated trail.
+        let arn = trail_arn(ctx, &name);
+        data.tags.remove(&arn);
+        data.event_configurations.remove(&arn);
         empty_ok()
     }
 
@@ -625,10 +641,10 @@ impl CloudTrailService {
         if let Some(obj) = status.as_object_mut() {
             if logging {
                 obj.insert("StartLoggingTime".into(), json!(now_ts()));
-                obj.insert("TimeLoggingStarted".into(), json!(now_ts().to_string()));
+                obj.insert("TimeLoggingStarted".into(), json!(now_iso()));
             } else {
                 obj.insert("StopLoggingTime".into(), json!(now_ts()));
-                obj.insert("TimeLoggingStopped".into(), json!(now_ts().to_string()));
+                obj.insert("TimeLoggingStopped".into(), json!(now_iso()));
             }
         }
         empty_ok()
@@ -1117,20 +1133,31 @@ impl CloudTrailService {
             ctx.account,
             new_uuid()
         );
+        // The channel's source configuration. CreateChannel exposes no input
+        // members for `ApplyToAllRegions`/`AdvancedEventSelectors`, so persist a
+        // per-channel config (honouring `SourceConfig` if a client supplies it)
+        // that GetChannel later echoes back verbatim, rather than a shared literal.
+        let source_config = b
+            .get("SourceConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({ "ApplyToAllRegions": false, "AdvancedEventSelectors": [] }));
         let mut chan = Map::new();
         chan.insert("ChannelArn".into(), json!(arn));
         chan.insert("Name".into(), json!(name));
         chan.insert("Source".into(), json!(source));
         chan.insert("Destinations".into(), destinations);
+        chan.insert("SourceConfig".into(), source_config);
+        chan.insert("IngestionStatus".into(), json!({}));
         if let Some(tags) = b.get("Tags") {
             chan.insert("Tags".into(), tags.clone());
         }
         store_tags(data, &arn, b);
         let chan = Value::Object(chan);
         data.channels.insert(arn, chan.clone());
-        // CreateChannel output echoes name/source/destinations/tags.
+        // CreateChannel output echoes name/source/destinations/tags only.
         let mut out = chan.as_object().cloned().unwrap_or_default();
         out.remove("SourceConfig");
+        out.remove("IngestionStatus");
         ok(Value::Object(out))
     }
 
@@ -1144,11 +1171,11 @@ impl CloudTrailService {
             .ok_or_else(|| channel_not_found(&arn))?;
         let mut out = chan.as_object().cloned().unwrap_or_default();
         out.remove("Tags");
-        out.insert(
-            "SourceConfig".into(),
-            json!({ "ApplyToAllRegions": true, "AdvancedEventSelectors": [] }),
-        );
-        out.insert("IngestionStatus".into(), json!({}));
+        // Echo the channel's own persisted config, defaulting for channels
+        // stored before these fields were persisted.
+        out.entry("SourceConfig")
+            .or_insert_with(|| json!({ "ApplyToAllRegions": false, "AdvancedEventSelectors": [] }));
+        out.entry("IngestionStatus").or_insert_with(|| json!({}));
         ok(Value::Object(out))
     }
 
@@ -1171,6 +1198,8 @@ impl CloudTrailService {
         let chan = chan.clone();
         let mut out = chan.as_object().cloned().unwrap_or_default();
         out.remove("Tags");
+        out.remove("SourceConfig");
+        out.remove("IngestionStatus");
         ok(Value::Object(out))
     }
 
@@ -1591,6 +1620,9 @@ impl CloudTrailService {
         if data.dashboards.remove(&id).is_none() {
             return Err(dashboard_not_found(&id));
         }
+        // Dashboard ARN is name-derived, so destroy+recreate reuses it. Purge
+        // tags keyed by the ARN so they don't leak onto the recreated dashboard.
+        data.tags.remove(&id);
         empty_ok()
     }
 

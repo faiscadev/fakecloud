@@ -534,3 +534,155 @@ fn validation_rejects_bad_enum() {
         "InvalidParameterException"
     );
 }
+
+// Regression (#1): the NextToken minted for page 2 must satisfy the model's
+// `PaginationToken @length(min:4)` validation, or feeding it back into a second
+// list call is rejected with InvalidParameterException.
+#[test]
+fn pagination_token_survives_second_page_call() {
+    let s = svc();
+    for i in 0..5 {
+        new_eds(&s, &format!("eds-{i}"));
+    }
+    let page1 = call(&s, "ListEventDataStores", json!({ "MaxResults": 2 }));
+    let token = page1["NextToken"].as_str().expect("page 1 has NextToken");
+    // Token must be >= 4 chars so it passes input validation.
+    assert!(token.len() >= 4, "token {token:?} too short for min:4 rule");
+
+    // The follow-up call must not be rejected and must return the next page.
+    let page2 = call(
+        &s,
+        "ListEventDataStores",
+        json!({ "MaxResults": 2, "NextToken": token }),
+    );
+    assert_eq!(
+        page2["EventDataStores"].as_array().unwrap().len(),
+        2,
+        "second page should return the next 2 rows"
+    );
+    // And it must not surface as a validation error.
+    assert!(dispatch(
+        &s,
+        &req(
+            "ListEventDataStores",
+            json!({ "MaxResults": 2, "NextToken": token }),
+        )
+    )
+    .is_ok());
+}
+
+// Regression (#2): DeleteTrail must purge tags and event config keyed by the
+// name-derived ARN, so a recreated same-name trail does not inherit stale tags.
+#[test]
+fn delete_trail_purges_tags_on_recreate() {
+    let s = svc();
+    let created = new_trail(&s, "t");
+    let arn = created["TrailARN"].as_str().unwrap().to_string();
+    call(
+        &s,
+        "AddTags",
+        json!({ "ResourceId": arn, "TagsList": [{ "Key": "old", "Value": "1" }] }),
+    );
+
+    call(&s, "DeleteTrail", json!({ "Name": "t" }));
+
+    // Recreate the same name (reuses the deterministic ARN) with a new tag.
+    new_trail(&s, "t");
+    call(
+        &s,
+        "AddTags",
+        json!({ "ResourceId": arn, "TagsList": [{ "Key": "new", "Value": "2" }] }),
+    );
+    let listed = call(&s, "ListTags", json!({ "ResourceIdList": [arn] }));
+    let tags = listed["ResourceTagList"][0]["TagsList"].as_array().unwrap();
+    assert_eq!(
+        tags.len(),
+        1,
+        "stale tag leaked onto recreated trail: {tags:?}"
+    );
+    assert_eq!(tags[0]["Key"], json!("new"));
+}
+
+// Regression (#2): DeleteDashboard must purge tags keyed by the name-derived ARN.
+#[test]
+fn delete_dashboard_purges_tags_on_recreate() {
+    let s = svc();
+    let created = call(
+        &s,
+        "CreateDashboard",
+        json!({ "Name": "dash", "TagsList": [{ "Key": "old", "Value": "1" }] }),
+    );
+    let arn = created["DashboardArn"].as_str().unwrap().to_string();
+
+    call(&s, "DeleteDashboard", json!({ "DashboardId": arn }));
+
+    call(
+        &s,
+        "CreateDashboard",
+        json!({ "Name": "dash", "TagsList": [{ "Key": "new", "Value": "2" }] }),
+    );
+    let listed = call(&s, "ListTags", json!({ "ResourceIdList": [arn] }));
+    let tags = listed["ResourceTagList"][0]["TagsList"].as_array().unwrap();
+    assert_eq!(
+        tags.len(),
+        1,
+        "stale tag leaked onto recreated dashboard: {tags:?}"
+    );
+    assert_eq!(tags[0]["Key"], json!("new"));
+}
+
+// Regression (#3): TimeLoggingStarted/Stopped must be ISO-8601 strings, not
+// stringified epoch numbers.
+#[test]
+fn get_trail_status_time_logging_is_iso8601() {
+    let s = svc();
+    new_trail(&s, "t");
+    call(&s, "StartLogging", json!({ "Name": "t" }));
+    let status = call(&s, "GetTrailStatus", json!({ "Name": "t" }));
+    let started = status["TimeLoggingStarted"].as_str().unwrap();
+    assert!(
+        started.contains('T') && started.ends_with('Z'),
+        "TimeLoggingStarted not ISO-8601: {started:?}"
+    );
+
+    call(&s, "StopLogging", json!({ "Name": "t" }));
+    let status = call(&s, "GetTrailStatus", json!({ "Name": "t" }));
+    let stopped = status["TimeLoggingStopped"].as_str().unwrap();
+    assert!(
+        stopped.contains('T') && stopped.ends_with('Z'),
+        "TimeLoggingStopped not ISO-8601: {stopped:?}"
+    );
+}
+
+// Regression (#4): GetChannel must echo the channel's own persisted config, not
+// a hardcoded literal identical for every channel.
+#[test]
+fn get_channel_echoes_persisted_source_config() {
+    let s = svc();
+    let created = call(
+        &s,
+        "CreateChannel",
+        json!({
+            "Name": "chanX",
+            "Source": "custom",
+            "Destinations": [{ "Type": "EVENT_DATA_STORE", "Location": "arn" }],
+            "SourceConfig": {
+                "ApplyToAllRegions": true,
+                "AdvancedEventSelectors": [{ "Name": "sel" }]
+            }
+        }),
+    );
+    let arn = created["ChannelArn"].as_str().unwrap().to_string();
+    // CreateChannel output must not carry the internal config fields.
+    assert!(created.get("SourceConfig").is_none());
+    assert!(created.get("IngestionStatus").is_none());
+
+    let got = call(&s, "GetChannel", json!({ "Channel": arn }));
+    assert_eq!(got["SourceConfig"]["ApplyToAllRegions"], json!(true));
+    assert_eq!(
+        got["SourceConfig"]["AdvancedEventSelectors"][0]["Name"],
+        json!("sel")
+    );
+    assert!(got.get("IngestionStatus").is_some());
+    assert!(got.get("Tags").is_none());
+}
