@@ -282,7 +282,8 @@ fn not_found(msg: &str) -> AwsServiceError {
 }
 
 fn resource_exists(msg: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ResourceExistsException", msg)
+    // The Smithy model marks `ResourceExistsException` with `httpError: 409`.
+    AwsServiceError::aws_error(StatusCode::CONFLICT, "ResourceExistsException", msg)
 }
 
 /// Read a required, non-empty string field.
@@ -410,6 +411,28 @@ const SERVER_FIELDS: &[&str] = &[
     "Domain",
 ];
 
+/// Fields an `UpdateServer` request may mutate. Mirrors `SERVER_FIELDS` but
+/// excludes create-only members (`Domain`) that are absent from the model's
+/// `UpdateServerRequest` shape, so an `UpdateServer` carrying `Domain` cannot
+/// silently rewrite an immutable attribute.
+const UPDATE_SERVER_FIELDS: &[&str] = &[
+    "Certificate",
+    "ProtocolDetails",
+    "EndpointDetails",
+    "EndpointType",
+    "IdentityProviderDetails",
+    "IdentityProviderType",
+    "LoggingRole",
+    "PostAuthenticationLoginBanner",
+    "PreAuthenticationLoginBanner",
+    "Protocols",
+    "SecurityPolicyName",
+    "WorkflowDetails",
+    "StructuredLogDestinations",
+    "S3StorageOptions",
+    "IpAddressType",
+];
+
 impl TransferService {
     fn require_server<'a>(
         &self,
@@ -441,6 +464,12 @@ impl TransferService {
                 .cloned()
                 .unwrap_or(json!("SERVICE_MANAGED")),
         );
+        // AWS defaults `Protocols` to `["SFTP"]` and `DescribedServer` always
+        // echoes it, so default it here to avoid terraform drift.
+        srv.insert(
+            "Protocols".into(),
+            b.get("Protocols").cloned().unwrap_or(json!(["SFTP"])),
+        );
         // Settle to ONLINE immediately so `server-online` waiters complete
         // against the synchronous control plane.
         srv.insert("State".into(), json!("ONLINE"));
@@ -451,16 +480,10 @@ impl TransferService {
         );
         copy_present(b, &mut srv, SERVER_FIELDS);
         let srv = Value::Object(srv);
-        self.state
-            .write()
-            .get_or_create(&ctx.account)
-            .servers
-            .insert(server_id.clone(), srv);
-        {
-            let mut guard = self.state.write();
-            let data = guard.get_or_create(&ctx.account);
-            store_tags(data, &server_arn, b);
-        }
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        data.servers.insert(server_id.clone(), srv);
+        store_tags(data, &server_arn, b);
         ok(json!({ "ServerId": server_id }))
     }
 
@@ -499,7 +522,7 @@ impl TransferService {
             .get_mut(&server_id)
             .ok_or_else(|| not_found(&format!("Server {server_id} does not exist.")))?;
         let obj = srv.as_object_mut().unwrap();
-        copy_present(b, obj, SERVER_FIELDS);
+        copy_present(b, obj, UPDATE_SERVER_FIELDS);
         ok(json!({ "ServerId": server_id }))
     }
 
@@ -515,6 +538,26 @@ impl TransferService {
             data.tags.remove(arn);
         }
         let prefix = format!("{server_id}/");
+        // Collect the ARNs of every cascaded child so their tag entries are
+        // removed too (otherwise deleting the server leaks child tags).
+        let mut child_arns: Vec<String> = Vec::new();
+        for map in [
+            &data.users,
+            &data.accesses,
+            &data.host_keys,
+            &data.agreements,
+        ] {
+            for (k, v) in map.iter() {
+                if k.starts_with(&prefix) {
+                    if let Some(arn) = v.get("Arn").and_then(Value::as_str) {
+                        child_arns.push(arn.to_string());
+                    }
+                }
+            }
+        }
+        for arn in &child_arns {
+            data.tags.remove(arn);
+        }
         data.users.retain(|k, _| !k.starts_with(&prefix));
         data.accesses.retain(|k, _| !k.starts_with(&prefix));
         data.host_keys.retain(|k, _| !k.starts_with(&prefix));
@@ -802,10 +845,30 @@ fn listed_user(user: &Value) -> Value {
 
 // ===================== host keys =====================
 
+/// Derive the `HostKeyType` AWS reports from the supplied key material. AWS
+/// inspects the algorithm embedded in the (private or public) key body; we
+/// detect the algorithm token pragmatically and fall back to `ssh-rsa`.
+fn host_key_type(body: &str) -> &'static str {
+    // The algorithm token appears verbatim in an OpenSSH public key line and in
+    // the header/blob of a private key. Probe the more specific tokens first;
+    // RSA (`ssh-rsa`, PEM `BEGIN RSA`, generic OpenSSH) is the default.
+    for token in [
+        "ssh-ed25519",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+    ] {
+        if body.contains(token) {
+            return token;
+        }
+    }
+    "ssh-rsa"
+}
+
 impl TransferService {
     fn import_host_key(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
         let server_id = req_str(b, "ServerId")?.to_string();
-        req_str(b, "HostKeyBody")?;
+        let host_key_body = req_str(b, "HostKeyBody")?.to_string();
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         self.require_server(data, &server_id)?;
@@ -819,7 +882,7 @@ impl TransferService {
             "HostKeyFingerprint".into(),
             json!(format!("SHA256:{}", hex17())),
         );
-        hk.insert("Type".into(), json!("ssh-rsa"));
+        hk.insert("Type".into(), json!(host_key_type(&host_key_body)));
         hk.insert("DateImported".into(), json!(now_ts()));
         copy_present(b, &mut hk, &["Description"]);
         data.host_keys.insert(key, Value::Object(hk));
@@ -1622,10 +1685,31 @@ impl TransferService {
 
 // ===================== certificates =====================
 
+/// Parse a PEM `Certificate` body and extract the computed
+/// `Serial`/`NotBeforeDate`/`NotAfterDate` fields AWS returns on a
+/// `DescribedCertificate`. Returns `None` on any parse failure (never panics).
+fn parse_certificate_fields(pem: &str) -> Option<(String, f64, f64)> {
+    use x509_cert::der::DecodePem;
+    use x509_cert::Certificate;
+
+    let cert = Certificate::from_pem(pem.as_bytes()).ok()?;
+    let tbs = &cert.tbs_certificate;
+    // Serial number as a lowercase hex string, matching AWS's rendering.
+    let serial = tbs
+        .serial_number
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let not_before = tbs.validity.not_before.to_unix_duration().as_secs() as f64;
+    let not_after = tbs.validity.not_after.to_unix_duration().as_secs() as f64;
+    Some((serial, not_before, not_after))
+}
+
 impl TransferService {
     fn import_certificate(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
         req_str(b, "Usage")?;
-        req_str(b, "Certificate")?;
+        let certificate_pem = req_str(b, "Certificate")?.to_string();
         let certificate_id = format!("cert-{}", hex17());
         let c_arn = arn(ctx, &format!("certificate/{certificate_id}"));
         let mut c = Map::new();
@@ -1633,6 +1717,14 @@ impl TransferService {
         c.insert("CertificateId".into(), json!(certificate_id));
         c.insert("Status".into(), json!("ACTIVE"));
         c.insert("Type".into(), json!("CERTIFICATE"));
+        // Populate the computed Serial/NotBeforeDate/NotAfterDate from the PEM.
+        // A body that does not parse (e.g. a placeholder) simply leaves them
+        // unset, exactly as an unparsable cert would omit them.
+        if let Some((serial, not_before, not_after)) = parse_certificate_fields(&certificate_pem) {
+            c.insert("Serial".into(), json!(serial));
+            c.insert("NotBeforeDate".into(), json!(not_before));
+            c.insert("NotAfterDate".into(), json!(not_after));
+        }
         copy_present(
             b,
             &mut c,
@@ -2051,6 +2143,13 @@ impl TransferService {
                     .collect()
             })
             .unwrap_or_default();
-        ok(json!({ "Arn": resource_arn, "Tags": tags }))
+        // `ListTagsForResourceResponse` carries `MaxResults`/`NextToken`, so
+        // honour the pagination window the validator already accepts.
+        ok(list_response(
+            "Tags",
+            tags,
+            b,
+            &[("Arn", json!(resource_arn))],
+        ))
     }
 }

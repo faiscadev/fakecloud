@@ -62,6 +62,15 @@ async fn err_code(s: &TransferService, action: &str, body: Value) -> String {
     e.code().to_string()
 }
 
+async fn err_status(s: &TransferService, action: &str, body: Value) -> u16 {
+    let e = s
+        .handle(request(action, body))
+        .await
+        .err()
+        .expect("expected error");
+    e.status().as_u16()
+}
+
 async fn new_server(s: &TransferService) -> String {
     call(
         s,
@@ -75,6 +84,20 @@ async fn new_server(s: &TransferService) -> String {
 }
 
 const ROLE: &str = "arn:aws:iam::000000000000:role/transfer-role";
+
+/// A real self-signed ECDSA P-256 certificate (serial 0x3039), used to exercise
+/// the PEM-parsing path in `ImportCertificate`.
+const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBfzCCASWgAwIBAgICMDkwCgYIKoZIzj0EAwIwHjEcMBoGA1UEAwwTZmFrZWNs\n\
+b3VkLXRlc3QtY2VydDAeFw0yNjA3MDQwNDMyNDBaFw0zNjA3MDEwNDMyNDBaMB4x\n\
+HDAaBgNVBAMME2Zha2VjbG91ZC10ZXN0LWNlcnQwWTATBgcqhkjOPQIBBggqhkjO\n\
+PQMBBwNCAAR8LePc+d6fQ07Gd8HC18k6FdRwW2uBUzceP0iwL2O9Hh7bjacYNJPf\n\
+FelbZTDBUUaAjnj7s7Uo4fLUGpa03pADo1MwUTAdBgNVHQ4EFgQUQUA6HL+QbCOx\n\
+mRXO4LoqwQMxvSswHwYDVR0jBBgwFoAUQUA6HL+QbCOxmRXO4LoqwQMxvSswDwYD\n\
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEAlpmlaZLCBcJYDs+j3B47\n\
+6J3PptcVgoSmAetCad/w1uQCIHFdmHdYR2QBGis74scDSWqLR/DAqhpQtPPFpD9o\n\
+Lljq\n\
+-----END CERTIFICATE-----\n";
 
 #[tokio::test]
 async fn server_crud_and_state_transitions() {
@@ -576,4 +599,225 @@ async fn duplicate_server_children_conflict() {
         .await,
         "ResourceExistsException"
     );
+}
+
+// ===================== regression tests (post-merge bug-hunt) =====================
+
+/// Fix 1: a duplicate create returns HTTP 409 (ResourceExistsException maps to
+/// `httpError: 409` in the model), not 400.
+#[tokio::test]
+async fn resource_exists_returns_409() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+    call(
+        &s,
+        "CreateUser",
+        json!({ "ServerId": server_id, "UserName": "dup", "Role": ROLE }),
+    )
+    .await;
+    let status = err_status(
+        &s,
+        "CreateUser",
+        json!({ "ServerId": server_id, "UserName": "dup", "Role": ROLE }),
+    )
+    .await;
+    assert_eq!(status, 409);
+}
+
+/// Fix 2: a server created without `Protocols` still reports the AWS default
+/// `["SFTP"]` on describe, avoiding terraform drift.
+#[tokio::test]
+async fn server_protocols_default_to_sftp() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+    let desc = call(&s, "DescribeServer", json!({ "ServerId": server_id })).await;
+    assert_eq!(desc["Server"]["Protocols"], json!(["SFTP"]));
+
+    // An explicit value is preserved.
+    let sid2 = call(
+        &s,
+        "CreateServer",
+        json!({ "IdentityProviderType": "SERVICE_MANAGED", "Protocols": ["FTP", "FTPS"] }),
+    )
+    .await["ServerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let desc2 = call(&s, "DescribeServer", json!({ "ServerId": sid2 })).await;
+    assert_eq!(desc2["Server"]["Protocols"], json!(["FTP", "FTPS"]));
+}
+
+/// Fix 3: the host-key `Type` is derived from the key material, not hardcoded.
+#[tokio::test]
+async fn host_key_type_derived_from_body() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+
+    let cases = [
+        (
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host",
+            "ssh-ed25519",
+        ),
+        (
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY... user@host",
+            "ecdsa-sha2-nistp256",
+        ),
+        ("ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB... user@host", "ssh-rsa"),
+    ];
+    for (body, expected) in cases {
+        let hk = call(
+            &s,
+            "ImportHostKey",
+            json!({ "ServerId": server_id, "HostKeyBody": body }),
+        )
+        .await;
+        let host_key_id = hk["HostKeyId"].as_str().unwrap().to_string();
+        let desc = call(
+            &s,
+            "DescribeHostKey",
+            json!({ "ServerId": server_id, "HostKeyId": host_key_id }),
+        )
+        .await;
+        assert_eq!(desc["HostKey"]["Type"], json!(expected), "body: {body}");
+    }
+}
+
+/// Fix 4: deleting a server also removes the tag entries of its cascaded
+/// children so no orphaned tags linger.
+#[tokio::test]
+async fn delete_server_removes_child_tags() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+    call(
+        &s,
+        "CreateUser",
+        json!({ "ServerId": server_id, "UserName": "tagged", "Role": ROLE,
+                "Tags": [{ "Key": "team", "Value": "ops" }] }),
+    )
+    .await;
+    let user_arn = call(
+        &s,
+        "DescribeUser",
+        json!({ "ServerId": server_id, "UserName": "tagged" }),
+    )
+    .await["User"]["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Tags are visible before deletion.
+    let tags = call(&s, "ListTagsForResource", json!({ "Arn": user_arn })).await;
+    assert_eq!(tags["Tags"].as_array().unwrap().len(), 1);
+
+    call(&s, "DeleteServer", json!({ "ServerId": server_id })).await;
+
+    // After cascade the child's tags are gone.
+    let tags = call(&s, "ListTagsForResource", json!({ "Arn": user_arn })).await;
+    assert!(tags["Tags"].as_array().unwrap().is_empty());
+}
+
+/// Fix 5: UpdateServer must ignore the create-only `Domain` member.
+#[tokio::test]
+async fn update_server_ignores_domain() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+    let before = call(&s, "DescribeServer", json!({ "ServerId": server_id })).await;
+    assert_eq!(before["Server"]["Domain"], json!("S3"));
+
+    call(
+        &s,
+        "UpdateServer",
+        json!({ "ServerId": server_id, "Domain": "EFS", "LoggingRole": ROLE }),
+    )
+    .await;
+    let after = call(&s, "DescribeServer", json!({ "ServerId": server_id })).await;
+    // Domain is unchanged; the legitimate LoggingRole update still applied.
+    assert_eq!(after["Server"]["Domain"], json!("S3"));
+    assert_eq!(after["Server"]["LoggingRole"], json!(ROLE));
+}
+
+/// Fix 6: ListTagsForResource honours MaxResults/NextToken.
+#[tokio::test]
+async fn list_tags_paginates() {
+    let s = svc();
+    let server_id = new_server(&s).await;
+    let arn = call(&s, "DescribeServer", json!({ "ServerId": server_id })).await["Server"]["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(
+        &s,
+        "TagResource",
+        json!({ "Arn": arn, "Tags": [
+            { "Key": "a", "Value": "1" },
+            { "Key": "b", "Value": "2" },
+            { "Key": "c", "Value": "3" }
+        ] }),
+    )
+    .await;
+
+    let page = call(
+        &s,
+        "ListTagsForResource",
+        json!({ "Arn": arn, "MaxResults": 2 }),
+    )
+    .await;
+    assert_eq!(page["Tags"].as_array().unwrap().len(), 2);
+    let next = page["NextToken"]
+        .as_str()
+        .expect("NextToken present")
+        .to_string();
+
+    let page2 = call(
+        &s,
+        "ListTagsForResource",
+        json!({ "Arn": arn, "MaxResults": 2, "NextToken": next }),
+    )
+    .await;
+    assert_eq!(page2["Tags"].as_array().unwrap().len(), 1);
+    assert!(page2.get("NextToken").is_none());
+}
+
+/// Fix 8: importing a real PEM certificate populates the computed
+/// Serial/NotBeforeDate/NotAfterDate fields; a non-PEM body leaves them unset.
+#[tokio::test]
+async fn certificate_dates_populated_from_pem() {
+    let s = svc();
+    let pem = TEST_CERT_PEM;
+    let cert = call(
+        &s,
+        "ImportCertificate",
+        json!({ "Usage": "SIGNING", "Certificate": pem }),
+    )
+    .await;
+    let certificate_id = cert["CertificateId"].as_str().unwrap().to_string();
+    let desc = call(
+        &s,
+        "DescribeCertificate",
+        json!({ "CertificateId": certificate_id }),
+    )
+    .await["Certificate"]
+        .clone();
+    assert!(
+        desc.get("Serial").is_some(),
+        "Serial should be populated: {desc}"
+    );
+    assert!(desc.get("NotBeforeDate").is_some(), "NotBeforeDate missing");
+    assert!(desc.get("NotAfterDate").is_some(), "NotAfterDate missing");
+    // Dates are epoch-seconds numbers; NotAfter is after NotBefore.
+    let nb = desc["NotBeforeDate"].as_f64().unwrap();
+    let na = desc["NotAfterDate"].as_f64().unwrap();
+    assert!(na > nb);
+
+    // A non-PEM placeholder body leaves the computed fields unset (no panic).
+    let cert2 = call(
+        &s,
+        "ImportCertificate",
+        json!({ "Usage": "SIGNING", "Certificate": "-----BEGIN CERTIFICATE-----" }),
+    )
+    .await;
+    let cid2 = cert2["CertificateId"].as_str().unwrap().to_string();
+    let desc2 = call(&s, "DescribeCertificate", json!({ "CertificateId": cid2 })).await
+        ["Certificate"]
+        .clone();
+    assert!(desc2.get("Serial").is_none());
 }
