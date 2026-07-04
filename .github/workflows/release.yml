@@ -214,6 +214,7 @@ jobs:
           publish fakecloud-transfer         # only core/persistence/aws deps
           publish fakecloud-appconfig        # only core/persistence/aws deps
           publish fakecloud-cloudtrail       # only core/persistence/aws deps
+          publish fakecloud-ram               # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock

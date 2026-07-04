@@ -39,6 +39,9 @@ const REST_JSON_SERVICES: &[&str] = &[
     "eks",
     "glacier",
     "backup",
+    // AWS Resource Access Manager: restJson1 control plane (single-segment
+    // `@http` POST/DELETE URIs + JSON bodies).
+    "ram",
     // Amazon OpenSearch Service + Amazon Elasticsearch Service both sign as
     // `es` and speak restJson1; one service handles both, splitting on the
     // URL path version prefix.

@@ -3477,6 +3477,7 @@ dependencies = [
  "fakecloud-organizations",
  "fakecloud-persistence",
  "fakecloud-pipes",
+ "fakecloud-ram",
  "fakecloud-rds",
  "fakecloud-rds-data",
  "fakecloud-redshift",
@@ -4771,6 +4772,26 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fakecloud-ram"
+version = "0.35.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

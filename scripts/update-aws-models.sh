@@ -80,6 +80,7 @@ SERVICES=(
     "cloudcontrolapi:cloudcontrol"
     "resource-groups:resource-groups"
     "tagging:resource-groups-tagging-api"
+    "ram:ram"
 )
 
 # Sparse checkout only the models we need
