@@ -231,6 +231,7 @@ version = "0.34.1"
 
 [workspace.dependencies.fakecloud-glacier]
 path = "crates/fakecloud-glacier"
+version = "0.34.1"
 
 [workspace.dependencies.fakecloud-backup]
 path = "crates/fakecloud-backup"
