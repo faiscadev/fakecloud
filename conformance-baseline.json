@@ -1,6 +1,6 @@
 {
-  "variants_passed": 154915,
-  "total_variants": 154915,
+  "variants_passed": 157239,
+  "total_variants": 157239,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -13,6 +13,14 @@
     "apigatewayv2": {
       "passed": 2789,
       "total": 2789
+    },
+    "appconfig": {
+      "passed": 2257,
+      "total": 2257
+    },
+    "appconfigdata": {
+      "passed": 67,
+      "total": 67
     },
     "application-autoscaling": {
       "passed": 949,

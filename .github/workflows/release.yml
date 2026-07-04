@@ -212,6 +212,7 @@ jobs:
           publish fakecloud-backup           # only core/persistence/aws deps
           publish fakecloud-glacier          # only core/persistence/aws deps
           publish fakecloud-transfer         # only core/persistence/aws deps
+          publish fakecloud-appconfig        # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock

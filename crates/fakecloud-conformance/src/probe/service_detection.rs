@@ -146,6 +146,12 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "resource-groups" => Protocol::Rest,
         // Account Management: restJson1 control plane (contacts, regions, email).
         "account" => Protocol::Rest,
+        // AWS AppConfig control plane + AppConfig Data plane: both restJson1,
+        // both sign as `appconfig`. Two probe ids so each model-service's
+        // operation set is exercised; the server normalizes the
+        // `appconfigdata` credential scope to `appconfig`.
+        "appconfig" => Protocol::Rest,
+        "appconfigdata" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

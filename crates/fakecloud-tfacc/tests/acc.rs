@@ -351,3 +351,8 @@ async fn dms_acceptance() {
 async fn transfer_acceptance() {
     run_shard("transfer").await;
 }
+
+#[tokio::test]
+async fn appconfig_acceptance() {
+    run_shard("appconfig").await;
+}

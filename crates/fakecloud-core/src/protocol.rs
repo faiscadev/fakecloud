@@ -44,6 +44,10 @@ const REST_JSON_SERVICES: &[&str] = &[
     // URL path version prefix.
     "es",
     "account",
+    // AWS AppConfig control plane + AppConfig Data plane both sign as
+    // `appconfig` and speak restJson1; one service handles both, splitting on
+    // the URL path (control `/applications/...` vs data `/configuration...`).
+    "appconfig",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
@@ -601,6 +605,12 @@ fn normalize_service_name(service: &str) -> &str {
         // 2015 (Elasticsearch) and 2021 (OpenSearch) probes resolve to the one
         // registry entry, which then routes on the URL path version prefix.
         "opensearch" => "es",
+        // AWS AppConfig Data signs with the shared `appconfig` scope, so a real
+        // request already arrives as `appconfig`. The conformance probe signs
+        // the data-plane operations with the Smithy service shape name
+        // `appconfigdata`; alias it to `appconfig` so both model-services
+        // resolve to the one registry entry, which routes on the URL path.
+        "appconfigdata" => "appconfig",
         other => other,
     }
 }

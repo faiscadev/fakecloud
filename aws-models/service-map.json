@@ -242,5 +242,13 @@
   "transfer": {
     "repo_dir": "transfer",
     "service_name": "transfer"
+  },
+  "appconfig": {
+    "repo_dir": "appconfig",
+    "service_name": "appconfig"
+  },
+  "appconfigdata": {
+    "repo_dir": "appconfigdata",
+    "service_name": "appconfigdata"
   }
 }

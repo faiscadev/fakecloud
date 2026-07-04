@@ -45,6 +45,7 @@ fakecloud-cloudcontrol = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-glacier = { workspace = true }
+fakecloud-appconfig = { workspace = true }
 fakecloud-backup = { workspace = true }
 fakecloud-opensearch = { workspace = true }
 fakecloud-memorydb = { workspace = true }

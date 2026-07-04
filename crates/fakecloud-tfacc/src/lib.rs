@@ -409,6 +409,10 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_EKS", "eks"),
     ("AWS_ENDPOINT_URL_GLACIER", "glacier"),
     ("AWS_ENDPOINT_URL_BACKUP", "backup"),
+    // AWS AppConfig control plane + AppConfig Data plane (both route to the one
+    // fakecloud `appconfig` handler).
+    ("AWS_ENDPOINT_URL_APPCONFIG", "appconfig"),
+    ("AWS_ENDPOINT_URL_APPCONFIGDATA", "appconfig"),
     // Amazon Elasticsearch Service (legacy) + Amazon OpenSearch Service both
     // sign as `es`; terraform-provider-aws exposes a distinct endpoint env var
     // for each, both pointing at the same fakecloud endpoint.
