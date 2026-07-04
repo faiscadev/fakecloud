@@ -706,6 +706,17 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "ce",
+        // AWS Cost Explorer is a control-plane service: anomaly monitors +
+        // subscriptions and cost category definitions round-trip through
+        // create/read/update/delete, and cost-allocation tag status persists.
+        // The cost/usage analytics data sources return zeroed result sets (an
+        // emulator has no billed spend), so tests that assert on real cost
+        // figures are out of scope; only the config-resource smokes run.
+        run_regex: "^TestAccCE(AnomalyMonitor_basic|AnomalySubscription_basic|CostCategory_basic|CostAllocationTag_basic)$",
+        deny: &[],
+    },
+    Service {
         name: "elasticsearch",
         // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
         // domain persists and settles to Processing=false / Created=true on
@@ -1622,6 +1633,12 @@ pub const SHARDS: &[Shard] = &[
         name: "ram",
         service: "ram",
         run_regex: "^TestAccRAM(ResourceShare_basic|ResourceShare_tags|PrincipalAssociation_basic|ResourceAssociation_basic)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ce",
+        service: "ce",
+        run_regex: "^TestAccCE(AnomalyMonitor_basic|AnomalySubscription_basic|CostCategory_basic|CostAllocationTag_basic)$",
         extra_deny: &[],
     },
 ];

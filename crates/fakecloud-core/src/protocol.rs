@@ -469,6 +469,11 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // name; aws-sdk-go-v1 sends the fully-qualified form. Accept both.
         "CloudTrail_20131101" => "cloudtrail",
         "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101" => "cloudtrail",
+        // Cost Explorer: awsJson1.1. aws-sdk / smithy clients (and terraform)
+        // send the short service-shape name; older clients may send the
+        // fully-qualified form. Accept both.
+        "AWSInsightsIndexService" => "ce",
+        "com.amazonaws.costexplorer.v20171025.AWSInsightsIndexService" => "ce",
         // Transfer Family: awsJson1.1.
         "TransferService" => "transfer",
         // IAM Identity Center Identity Store: awsJson1.1.

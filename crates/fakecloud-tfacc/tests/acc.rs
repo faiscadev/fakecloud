@@ -366,3 +366,8 @@ async fn cloudtrail_acceptance() {
 async fn ram_acceptance() {
     run_shard("ram").await;
 }
+
+#[tokio::test]
+async fn ce_acceptance() {
+    run_shard("ce").await;
+}

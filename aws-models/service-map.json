@@ -258,5 +258,9 @@
   "cloudtrail": {
     "repo_dir": "cloudtrail",
     "service_name": "cloudtrail"
+  },
+  "ce": {
+    "repo_dir": "ce",
+    "service_name": "ce"
   }
 }

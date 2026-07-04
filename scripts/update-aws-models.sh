@@ -79,6 +79,7 @@ SERVICES=(
     "pipes:pipes"
     "cloudcontrolapi:cloudcontrol"
     "resource-groups:resource-groups"
+    "ce:cost-explorer"
     "tagging:resource-groups-tagging-api"
     "ram:ram"
 )

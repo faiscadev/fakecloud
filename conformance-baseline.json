@@ -1,6 +1,6 @@
 {
-  "variants_passed": 160222,
-  "total_variants": 160222,
+  "variants_passed": 162003,
+  "total_variants": 162003,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -261,6 +261,10 @@
     "ram": {
       "passed": 1073,
       "total": 1073
+    },
+    "ce": {
+      "passed": 1781,
+      "total": 1781
     }
   }
 }
