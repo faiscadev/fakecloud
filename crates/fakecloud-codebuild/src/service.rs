@@ -472,6 +472,70 @@ fn paginate_body(items: Vec<Value>, list_key: &str, b: &Value) -> Result<Value, 
     Ok(Value::Object(out))
 }
 
+/// Order an insertion-order id list per the request `sortOrder` and project to
+/// JSON strings. The `*_order` vecs are oldest-first (insertion order). AWS's
+/// default (absent) `sortOrder` is DESCENDING (newest-first), so DESCENDING
+/// reverses the vec and ASCENDING keeps insertion order.
+fn apply_sort_order(mut ids: Vec<String>, b: &Value) -> Vec<Value> {
+    if str_field(b, "sortOrder").as_deref() != Some("ASCENDING") {
+        ids.reverse();
+    }
+    ids.into_iter().map(Value::String).collect()
+}
+
+/// Extract and validate the optional `BuildBatchFilter.status` filter shared by
+/// the ListBuildBatches operations. An unknown status value is rejected.
+fn build_batch_filter_status(b: &Value) -> Result<Option<String>, AwsServiceError> {
+    let Some(status) = b
+        .get("filter")
+        .and_then(|f| f.get("status"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if !validate::is_enum(validate::STATUS_TYPE, status) {
+        return Err(invalid(format!("Invalid build batch status: {status}")));
+    }
+    Ok(Some(status.to_string()))
+}
+
+/// Whether a build batch's current (settled) `buildBatchStatus` matches an
+/// optional status filter. A `None` filter matches every batch.
+fn batch_matches_status(st: &CodeBuildState, id: &str, filter: Option<&str>) -> bool {
+    match filter {
+        None => true,
+        Some(want) => {
+            st.build_batches
+                .get(id)
+                .and_then(|batch| batch.get("buildBatchStatus"))
+                .and_then(Value::as_str)
+                == Some(want)
+        }
+    }
+}
+
+/// Enforce a CodeBuild name `@pattern` of the form
+/// `^[A-Za-z0-9][A-Za-z0-9\-_]{1,N}$`: the first character must be
+/// alphanumeric and every remaining character alphanumeric, hyphen, or
+/// underscore. The `@length` bound `N` is validated separately by `req_len`.
+fn check_name_pattern(key: &str, v: &str) -> Result<(), AwsServiceError> {
+    let ok_first = v
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphanumeric())
+        .unwrap_or(false);
+    let ok_rest = v
+        .chars()
+        .skip(1)
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok_first || !ok_rest {
+        return Err(invalid(format!(
+            "Member {key} does not satisfy the required pattern"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
@@ -590,6 +654,7 @@ impl CodeBuildService {
         let b = body(req);
         self.validate_project_input(&b, true)?;
         let name = req_len(&b, "name", 2, 150)?;
+        check_name_pattern("name", &name)?;
         let (region, account) = self.region_account(req);
         let arn_str = arn(&region, &account, &format!("project/{name}"));
         let now = Utc::now();
@@ -659,7 +724,14 @@ impl CodeBuildService {
         // project recreated later starts numbering from 1. Build/build-batch
         // history is deliberately retained: AWS keeps prior builds queryable by
         // id after a project is deleted.
-        st.projects.remove(&name);
+        if let Some(project) = st.projects.remove(&name) {
+            // Drop any resource policy attached to the deleted project so a
+            // later GetResourcePolicy 404s instead of returning an orphan.
+            if let Some(project_arn) = project.get("arn").and_then(Value::as_str) {
+                let project_arn = project_arn.to_string();
+                st.resource_policies.remove(&project_arn);
+            }
+        }
         st.build_numbers.remove(&name);
         st.build_batch_numbers.remove(&name);
         ok(json!({}))
@@ -1093,7 +1165,7 @@ impl CodeBuildService {
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        let ids: Vec<Value> = st.build_order.iter().rev().map(|k| json!(k)).collect();
+        let ids = apply_sort_order(st.build_order.clone(), &b);
         let out = paginate_body(ids, "ids", &b)?;
         ok(out)
     }
@@ -1111,14 +1183,13 @@ impl CodeBuildService {
             return Err(not_found(format!("Project does not exist: {project_name}")));
         }
         let prefix = format!("{project_name}:");
-        let ids: Vec<Value> = st
+        let ids: Vec<String> = st
             .build_order
             .iter()
-            .rev()
             .filter(|id| id.starts_with(&prefix))
-            .map(|k| json!(k))
+            .cloned()
             .collect();
-        let out = paginate_body(ids, "ids", &b)?;
+        let out = paginate_body(apply_sort_order(ids, &b), "ids", &b)?;
         ok(out)
     }
 }
@@ -1204,6 +1275,12 @@ impl CodeBuildService {
         let Some(batch) = st.build_batches.get_mut(&id) else {
             return Err(not_found(format!("Build batch does not exist: {id}")));
         };
+        // Only a terminal (non-in-progress) batch can be retried; AWS rejects
+        // retrying an in-progress batch (the model documents "Only batch builds
+        // that have failed can be retried" and declares InvalidInputException).
+        if batch.get("buildBatchStatus").and_then(Value::as_str) == Some("IN_PROGRESS") {
+            return Err(invalid(format!("Build batch is in progress: {id}")));
+        }
         if let Some(obj) = batch.as_object_mut() {
             obj.insert("buildBatchStatus".into(), json!("IN_PROGRESS"));
             obj.insert("currentPhase".into(), json!("QUEUED"));
@@ -1260,16 +1337,17 @@ impl CodeBuildService {
     fn list_build_batches(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         validate_sort(&b, None)?;
+        let filter_status = build_batch_filter_status(&b)?;
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        let ids: Vec<Value> = st
+        let ids: Vec<String> = st
             .build_batch_order
             .iter()
-            .rev()
-            .map(|k| json!(k))
+            .filter(|id| batch_matches_status(st, id, filter_status.as_deref()))
+            .cloned()
             .collect();
-        let out = paginate_body(ids, "ids", &b)?;
+        let out = paginate_body(apply_sort_order(ids, &b), "ids", &b)?;
         ok(out)
     }
 
@@ -1279,30 +1357,26 @@ impl CodeBuildService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         validate_sort(&b, None)?;
+        let filter_status = build_batch_filter_status(&b)?;
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        if let Some(project_name) = str_field(&b, "projectName") {
+        let prefix = if let Some(project_name) = str_field(&b, "projectName") {
             if !st.projects.contains_key(&project_name) {
                 return Err(not_found(format!("Project does not exist: {project_name}")));
             }
-            let prefix = format!("{project_name}:");
-            let ids: Vec<Value> = st
-                .build_batch_order
-                .iter()
-                .rev()
-                .filter(|id| id.starts_with(&prefix))
-                .map(|k| json!(k))
-                .collect();
-            return ok(paginate_body(ids, "ids", &b)?);
-        }
-        let ids: Vec<Value> = st
+            Some(format!("{project_name}:"))
+        } else {
+            None
+        };
+        let ids: Vec<String> = st
             .build_batch_order
             .iter()
-            .rev()
-            .map(|k| json!(k))
+            .filter(|id| prefix.as_ref().is_none_or(|p| id.starts_with(p)))
+            .filter(|id| batch_matches_status(st, id, filter_status.as_deref()))
+            .cloned()
             .collect();
-        ok(paginate_body(ids, "ids", &b)?)
+        ok(paginate_body(apply_sort_order(ids, &b), "ids", &b)?)
     }
 }
 
@@ -1358,6 +1432,12 @@ impl CodeBuildService {
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
+        // Existence is checked before input validation: an update against a
+        // nonexistent report group is a ResourceNotFoundException regardless of
+        // whether the supplied exportConfig is well-formed.
+        if !st.report_groups.contains_key(&arn_str) {
+            return Err(not_found(format!("Report group does not exist: {arn_str}")));
+        }
         if let Some(ec) = b.get("exportConfig").filter(|v| !v.is_null()) {
             validate_export_config(ec)?;
         }
@@ -1379,10 +1459,37 @@ impl CodeBuildService {
     fn delete_report_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let arn_str = req_len(&b, "arn", 1, usize::MAX)?;
+        let delete_reports = b
+            .get("deleteReports")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
+        // A report group that still holds reports cannot be deleted unless
+        // `deleteReports` is set; AWS throws InvalidInputException otherwise.
+        let report_arns: Vec<String> = st
+            .reports
+            .iter()
+            .filter(|(_, r)| {
+                r.get("reportGroupArn").and_then(Value::as_str) == Some(arn_str.as_str())
+            })
+            .map(|(a, _)| a.clone())
+            .collect();
+        if !report_arns.is_empty() && !delete_reports {
+            return Err(invalid(format!(
+                "Report group contains reports and cannot be deleted: {arn_str}"
+            )));
+        }
+        // When deleteReports is set, remove the group's reports first.
+        for a in &report_arns {
+            st.reports.remove(a);
+            st.report_order.retain(|x| x != a);
+        }
         st.report_groups.remove(&arn_str);
+        // Drop any resource policy attached to the deleted report group so a
+        // later GetResourcePolicy 404s instead of returning an orphan.
+        st.resource_policies.remove(&arn_str);
         ok(json!({}))
     }
 
@@ -1573,6 +1680,7 @@ impl CodeBuildService {
     fn create_fleet(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = req_len(&b, "name", 2, 128)?;
+        check_name_pattern("name", &name)?;
         if b.get("baseCapacity").and_then(Value::as_i64).is_none() {
             return Err(invalid("A base capacity must be specified"));
         }
@@ -2087,7 +2195,7 @@ impl CodeBuildService {
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        let ids: Vec<Value> = st.sandbox_order.iter().rev().map(|k| json!(k)).collect();
+        let ids = apply_sort_order(st.sandbox_order.clone(), &b);
         ok(paginate_body(ids, "ids", &b)?)
     }
 
@@ -2103,13 +2211,20 @@ impl CodeBuildService {
         if !st.projects.contains_key(&project_name) {
             return Err(not_found(format!("Project does not exist: {project_name}")));
         }
-        let ids: Vec<Value> = st
-            .sandboxes
-            .values()
-            .filter(|s| s.get("projectName").and_then(Value::as_str) == Some(project_name.as_str()))
-            .filter_map(|s| s.get("id").cloned())
+        // Iterate sandbox insertion order (not BTreeMap/uuid order) so the
+        // result honors sortOrder consistently with the other list ops.
+        let ids: Vec<String> = st
+            .sandbox_order
+            .iter()
+            .filter(|id| {
+                st.sandboxes
+                    .get(*id)
+                    .and_then(|s| s.get("projectName").and_then(Value::as_str))
+                    == Some(project_name.as_str())
+            })
+            .cloned()
             .collect();
-        ok(paginate_body(ids, "ids", &b)?)
+        ok(paginate_body(apply_sort_order(ids, &b), "ids", &b)?)
     }
 
     fn start_command_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -2717,5 +2832,350 @@ mod tests {
             .map(|e| e["id"].as_str().unwrap())
             .collect();
         assert_eq!(got, ids.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    // Helper: create a project and start `n` builds, returning their ids in
+    // creation (oldest-first) order.
+    fn start_n_builds(s: &CodeBuildService, project: &str, n: usize) -> Vec<String> {
+        s.create_project(&req("CreateProject", minimal_project(project)))
+            .unwrap();
+        (0..n)
+            .map(|_| {
+                body_of(
+                    s.start_build(&req("StartBuild", json!({ "projectName": project })))
+                        .unwrap(),
+                )["build"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn ids_of(v: &Value) -> Vec<String> {
+        v["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // T1.1: sortOrder is honored on id-list ops (default DESCENDING, ASCENDING
+    // returns oldest-first insertion order).
+    #[test]
+    fn list_builds_honors_sort_order() {
+        let s = svc();
+        let created = start_n_builds(&s, "so", 3);
+        // Default -> newest first (reverse of creation order).
+        let mut desc = created.clone();
+        desc.reverse();
+        let default = ids_of(&body_of(
+            s.list_builds(&req("ListBuilds", json!({}))).unwrap(),
+        ));
+        assert_eq!(default, desc);
+        let descending = ids_of(&body_of(
+            s.list_builds(&req("ListBuilds", json!({ "sortOrder": "DESCENDING" })))
+                .unwrap(),
+        ));
+        assert_eq!(descending, desc);
+        // ASCENDING -> creation (oldest-first) order.
+        let ascending = ids_of(&body_of(
+            s.list_builds(&req("ListBuilds", json!({ "sortOrder": "ASCENDING" })))
+                .unwrap(),
+        ));
+        assert_eq!(ascending, created);
+    }
+
+    #[test]
+    fn list_builds_for_project_honors_sort_order() {
+        let s = svc();
+        let created = start_n_builds(&s, "sop", 3);
+        let ascending = ids_of(&body_of(
+            s.list_builds_for_project(&req(
+                "ListBuildsForProject",
+                json!({ "projectName": "sop", "sortOrder": "ASCENDING" }),
+            ))
+            .unwrap(),
+        ));
+        assert_eq!(ascending, created);
+    }
+
+    // T1.2: ListSandboxesForProject follows insertion order and sortOrder,
+    // not arbitrary uuid (BTreeMap) order.
+    #[test]
+    fn list_sandboxes_for_project_honors_insertion_and_sort_order() {
+        let s = svc();
+        s.create_project(&req("CreateProject", minimal_project("sbp")))
+            .unwrap();
+        let mut created = Vec::new();
+        for _ in 0..3 {
+            created.push(
+                body_of(
+                    s.start_sandbox(&req("StartSandbox", json!({ "projectName": "sbp" })))
+                        .unwrap(),
+                )["sandbox"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        let ascending = ids_of(&body_of(
+            s.list_sandboxes_for_project(&req(
+                "ListSandboxesForProject",
+                json!({ "projectName": "sbp", "sortOrder": "ASCENDING" }),
+            ))
+            .unwrap(),
+        ));
+        assert_eq!(ascending, created);
+        let mut desc = created.clone();
+        desc.reverse();
+        let default = ids_of(&body_of(
+            s.list_sandboxes_for_project(&req(
+                "ListSandboxesForProject",
+                json!({ "projectName": "sbp" }),
+            ))
+            .unwrap(),
+        ));
+        assert_eq!(default, desc);
+    }
+
+    // T1.3: ListBuildBatches applies filter.status and validates the enum.
+    #[test]
+    fn list_build_batches_filters_by_status() {
+        let s = svc();
+        s.create_project(&req("CreateProject", minimal_project("bf")))
+            .unwrap();
+        // Two batches: one left IN_PROGRESS, one stopped -> terminal.
+        let running = body_of(
+            s.start_build_batch(&req("StartBuildBatch", json!({ "projectName": "bf" })))
+                .unwrap(),
+        )["buildBatch"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stopped = body_of(
+            s.start_build_batch(&req("StartBuildBatch", json!({ "projectName": "bf" })))
+                .unwrap(),
+        )["buildBatch"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.stop_build_batch(&req("StopBuildBatch", json!({ "id": stopped })))
+            .unwrap();
+        let in_progress = ids_of(&body_of(
+            s.list_build_batches(&req(
+                "ListBuildBatches",
+                json!({ "filter": { "status": "IN_PROGRESS" } }),
+            ))
+            .unwrap(),
+        ));
+        assert_eq!(in_progress, vec![running]);
+        let stopped_only = ids_of(&body_of(
+            s.list_build_batches(&req(
+                "ListBuildBatches",
+                json!({ "filter": { "status": "STOPPED" } }),
+            ))
+            .unwrap(),
+        ));
+        assert_eq!(stopped_only.len(), 1);
+        // An unknown status is rejected.
+        let err = err_of(s.list_build_batches(&req(
+            "ListBuildBatches",
+            json!({ "filter": { "status": "NOPE" } }),
+        )));
+        assert!(err.to_string().contains("status"), "{err}");
+    }
+
+    #[test]
+    fn list_build_batches_for_project_filters_by_status() {
+        let s = svc();
+        s.create_project(&req("CreateProject", minimal_project("bfp")))
+            .unwrap();
+        let stopped = body_of(
+            s.start_build_batch(&req("StartBuildBatch", json!({ "projectName": "bfp" })))
+                .unwrap(),
+        )["buildBatch"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.stop_build_batch(&req("StopBuildBatch", json!({ "id": stopped })))
+            .unwrap();
+        let in_progress = ids_of(&body_of(
+            s.list_build_batches_for_project(&req(
+                "ListBuildBatchesForProject",
+                json!({ "projectName": "bfp", "filter": { "status": "IN_PROGRESS" } }),
+            ))
+            .unwrap(),
+        ));
+        assert!(in_progress.is_empty());
+    }
+
+    // T2.4: deleting a project/report group drops its resource policy.
+    #[test]
+    fn delete_project_removes_resource_policy() {
+        let s = svc();
+        s.create_project(&req("CreateProject", minimal_project("rp")))
+            .unwrap();
+        let arn = "arn:aws:codebuild:us-east-1:000000000000:project/rp";
+        s.put_resource_policy(&req(
+            "PutResourcePolicy",
+            json!({ "resourceArn": arn, "policy": "{}" }),
+        ))
+        .unwrap();
+        s.delete_project(&req("DeleteProject", json!({ "name": "rp" })))
+            .unwrap();
+        let err =
+            err_of(s.get_resource_policy(&req("GetResourcePolicy", json!({ "resourceArn": arn }))));
+        assert!(err.to_string().contains("No resource policy"), "{err}");
+    }
+
+    #[test]
+    fn delete_report_group_removes_resource_policy() {
+        let s = svc();
+        let arn = body_of(
+            s.create_report_group(&req(
+                "CreateReportGroup",
+                json!({
+                    "name": "rgp",
+                    "type": "TEST",
+                    "exportConfig": { "exportConfigType": "NO_EXPORT" }
+                }),
+            ))
+            .unwrap(),
+        )["reportGroup"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.put_resource_policy(&req(
+            "PutResourcePolicy",
+            json!({ "resourceArn": arn, "policy": "{}" }),
+        ))
+        .unwrap();
+        s.delete_report_group(&req("DeleteReportGroup", json!({ "arn": arn })))
+            .unwrap();
+        let err =
+            err_of(s.get_resource_policy(&req("GetResourcePolicy", json!({ "resourceArn": arn }))));
+        assert!(err.to_string().contains("No resource policy"), "{err}");
+    }
+
+    // T2.5: DeleteReportGroup rejects a group that still holds reports unless
+    // deleteReports=true.
+    #[test]
+    fn delete_report_group_guards_on_reports() {
+        let s = svc();
+        let arn = body_of(
+            s.create_report_group(&req(
+                "CreateReportGroup",
+                json!({
+                    "name": "rgr",
+                    "type": "TEST",
+                    "exportConfig": { "exportConfigType": "NO_EXPORT" }
+                }),
+            ))
+            .unwrap(),
+        )["reportGroup"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Inject a report belonging to the group directly into state.
+        let report_arn = format!("{arn}:report-1");
+        {
+            let mut guard = s.state.write();
+            let st = guard.get_or_create("000000000000");
+            st.reports.insert(
+                report_arn.clone(),
+                json!({ "arn": report_arn, "reportGroupArn": arn }),
+            );
+            st.report_order.push(report_arn.clone());
+        }
+        // Without deleteReports -> InvalidInputException, group survives.
+        let err = err_of(s.delete_report_group(&req("DeleteReportGroup", json!({ "arn": arn }))));
+        assert!(err.to_string().contains("cannot be deleted"), "{err}");
+        assert!(s
+            .state
+            .write()
+            .get_or_create("000000000000")
+            .report_groups
+            .contains_key(&arn));
+        // With deleteReports -> succeeds and clears the reports.
+        s.delete_report_group(&req(
+            "DeleteReportGroup",
+            json!({ "arn": arn, "deleteReports": true }),
+        ))
+        .unwrap();
+        let mut guard = s.state.write();
+        let st = guard.get_or_create("000000000000");
+        assert!(!st.report_groups.contains_key(&arn));
+        assert!(!st.reports.contains_key(&report_arn));
+    }
+
+    // T2.6: create_project / create_fleet enforce the name @pattern.
+    #[test]
+    fn create_project_rejects_bad_name_pattern() {
+        let s = svc();
+        let err = err_of(s.create_project(&req("CreateProject", minimal_project("bad name"))));
+        assert!(err.to_string().contains("pattern"), "{err}");
+        // A leading hyphen violates the first-character class.
+        let err = err_of(s.create_project(&req("CreateProject", minimal_project("-lead"))));
+        assert!(err.to_string().contains("pattern"), "{err}");
+        // A valid name with hyphen/underscore still passes.
+        s.create_project(&req("CreateProject", minimal_project("ok-name_1")))
+            .unwrap();
+    }
+
+    #[test]
+    fn create_fleet_rejects_bad_name_pattern() {
+        let s = svc();
+        let err = err_of(s.create_fleet(&req(
+            "CreateFleet",
+            json!({
+                "name": "bad name",
+                "baseCapacity": 1,
+                "environmentType": "LINUX_CONTAINER",
+                "computeType": "BUILD_GENERAL1_SMALL"
+            }),
+        )));
+        assert!(err.to_string().contains("pattern"), "{err}");
+    }
+
+    // retry_build_batch: an in-progress batch cannot be retried; a terminal one can.
+    #[test]
+    fn retry_build_batch_rejects_in_progress() {
+        let s = svc();
+        s.create_project(&req("CreateProject", minimal_project("rbb")))
+            .unwrap();
+        let id = body_of(
+            s.start_build_batch(&req("StartBuildBatch", json!({ "projectName": "rbb" })))
+                .unwrap(),
+        )["buildBatch"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let err = err_of(s.retry_build_batch(&req("RetryBuildBatch", json!({ "id": id.clone() }))));
+        assert!(err.to_string().contains("in progress"), "{err}");
+        // Settle the batch to a terminal state, then retry succeeds.
+        s.batch_get_build_batches(&req("BatchGetBuildBatches", json!({ "ids": [id.clone()] })))
+            .unwrap();
+        let retried = body_of(
+            s.retry_build_batch(&req("RetryBuildBatch", json!({ "id": id })))
+                .unwrap(),
+        );
+        assert_eq!(retried["buildBatch"]["buildBatchStatus"], "IN_PROGRESS");
+    }
+
+    // update_report_group checks existence before validating exportConfig.
+    #[test]
+    fn update_report_group_existence_before_validation() {
+        let s = svc();
+        let err = err_of(s.update_report_group(&req(
+            "UpdateReportGroup",
+            json!({
+                "arn": "arn:aws:codebuild:us-east-1:000000000000:report-group/ghost",
+                "exportConfig": { "exportConfigType": "NOT_A_TYPE" }
+            }),
+        )));
+        // ResourceNotFound wins over the malformed exportConfig.
+        assert!(err.to_string().contains("does not exist"), "{err}");
     }
 }
