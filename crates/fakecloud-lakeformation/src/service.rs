@@ -1027,6 +1027,20 @@ impl LakeFormationService {
         update: bool,
     ) -> Result<AwsResponse, AwsServiceError> {
         let td = body.get("TableData").cloned().unwrap_or(json!({}));
+        // `DatabaseName`, `TableName`, and `Name` are `@required` inside the
+        // nested `DataCellsFilter` shape. Without them the filter would be keyed
+        // off empty parts and become unreachable by Get/Delete (which require
+        // non-empty identifiers), so reject them up front.
+        let nonempty = |k: &str| {
+            td.get(k)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+        };
+        if !nonempty("DatabaseName") || !nonempty("TableName") || !nonempty("Name") {
+            return Err(invalid_input(
+                "TableData.DatabaseName, TableData.TableName, and TableData.Name are required and must be non-empty.",
+            ));
+        }
         let key = data_cells_key_parts(&td, &req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
@@ -1488,16 +1502,17 @@ impl LakeFormationService {
         } else if resource.get("Table").is_some() {
             out.insert("LFTagsOnTable".to_string(), Value::Array(tags));
         } else if let Some(twc) = resource.get("TableWithColumns") {
-            let col = twc
+            // Fan the stored tags out to one `ColumnLFTag` per column name in
+            // the request, rather than collapsing them under the first column.
+            let col_tags: Vec<Value> = twc
                 .get("ColumnNames")
                 .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(Value::as_str)
-                .unwrap_or("col");
-            out.insert(
-                "LFTagsOnColumns".to_string(),
-                json!([{ "Name": col, "LFTags": tags }]),
-            );
+                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|col| json!({ "Name": col, "LFTags": tags.clone() }))
+                .collect();
+            out.insert("LFTagsOnColumns".to_string(), Value::Array(col_tags));
         } else {
             out.insert("LFTagsOnTable".to_string(), Value::Array(tags));
         }
@@ -1508,18 +1523,90 @@ impl LakeFormationService {
 
     fn search_databases(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        page_response(Vec::new(), "DatabaseList", body, &[])
+        let catalog = catalog_id(body, &req.account_id);
+        // `Expression` is `@required`; an omitted or empty condition list is
+        // rejected rather than treated as a match-everything wildcard.
+        let expression = body
+            .get("Expression")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+        if expression.as_array().is_none_or(|a| a.is_empty()) {
+            return Err(invalid_input("Expression cannot be empty."));
+        }
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.resource_lf_tags
+                    .iter()
+                    .filter_map(|(sig, tags)| {
+                        let parts: Vec<&str> = sig.split('\u{1}').collect();
+                        // `db\u{1}{catalog}\u{1}{name}` — Database resources only.
+                        if parts.first() != Some(&"db") {
+                            return None;
+                        }
+                        let cat = parts.get(1).copied().unwrap_or("");
+                        let name = parts.get(2).copied().unwrap_or("");
+                        if cat != catalog || !expression_satisfied(tags, &expression) {
+                            return None;
+                        }
+                        Some(json!({
+                            "Database": { "CatalogId": cat, "Name": name },
+                            "LFTags": tags,
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        page_response(items, "DatabaseList", body, &[])
     }
 
     fn search_tables(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        page_response(Vec::new(), "TableList", body, &[])
+        let catalog = catalog_id(body, &req.account_id);
+        // `Expression` is `@required`; an omitted or empty condition list is
+        // rejected rather than treated as a match-everything wildcard.
+        let expression = body
+            .get("Expression")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+        if expression.as_array().is_none_or(|a| a.is_empty()) {
+            return Err(invalid_input("Expression cannot be empty."));
+        }
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| {
+                st.resource_lf_tags
+                    .iter()
+                    .filter_map(|(sig, tags)| {
+                        let parts: Vec<&str> = sig.split('\u{1}').collect();
+                        // `table\u{1}{catalog}\u{1}{db}\u{1}{name}\u{1}{wildcard}` —
+                        // Table resources only.
+                        if parts.first() != Some(&"table") {
+                            return None;
+                        }
+                        let cat = parts.get(1).copied().unwrap_or("");
+                        let db = parts.get(2).copied().unwrap_or("");
+                        let name = parts.get(3).copied().unwrap_or("");
+                        if cat != catalog || !expression_satisfied(tags, &expression) {
+                            return None;
+                        }
+                        Some(json!({
+                            "Table": { "CatalogId": cat, "DatabaseName": db, "Name": name },
+                            "LFTagsOnTable": tags,
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        page_response(items, "TableList", body, &[])
     }
 
     // ---------------- storage optimizers ----------------
@@ -1716,11 +1803,14 @@ impl LakeFormationService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let query_id = str_field(body, "QueryId").unwrap_or_default();
         let accounts = self.state.read();
+        // A QueryId that was never issued is not a finished query. GetQueryState
+        // does not declare `EntityNotFoundException`, so the unknown-query case
+        // surfaces via the declared `InvalidInputException`.
         let state = accounts
             .get(&req.account_id)
             .and_then(|st| st.queries.get(&query_id))
             .map(|q| q.state.clone())
-            .unwrap_or_else(|| "FINISHED".to_string());
+            .ok_or_else(|| invalid_input(format!("Query {query_id} not found.")))?;
         Ok(ok(json!({ "State": state })))
     }
 
@@ -1891,6 +1981,35 @@ fn resource_matches(filter: &Value, stored: &Value, account_id: &str) -> bool {
     resource_signature(filter, account_id) == resource_signature(stored, account_id)
 }
 
+/// Whether a resource's attached LF-tags satisfy a search `Expression`. The
+/// expression is a list of `{TagKey, TagValues}` terms; the resource matches
+/// when, for every term, it carries that `TagKey` with at least one value in
+/// the term's `TagValues` (AND across terms, matching AWS LF-tag expression
+/// semantics). An empty expression matches every tagged resource.
+fn expression_satisfied(tags: &[Value], expression: &Value) -> bool {
+    let Some(terms) = expression.as_array() else {
+        return false;
+    };
+    terms.iter().all(|term| {
+        let key = term.get("TagKey").and_then(Value::as_str);
+        let wanted: Vec<&str> = term
+            .get("TagValues")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        tags.iter().any(|t| {
+            t.get("TagKey").and_then(Value::as_str) == key
+                && t.get("TagValues")
+                    .and_then(Value::as_array)
+                    .is_some_and(|vals| {
+                        vals.iter()
+                            .filter_map(Value::as_str)
+                            .any(|v| wanted.contains(&v))
+                    })
+        })
+    })
+}
+
 /// Whether a stored grant's resource references the given ARN (used by
 /// `GetEffectivePermissionsForPath`, which filters by a data-location ARN).
 fn grant_touches_arn(resource: &Value, arn: &str) -> bool {
@@ -1978,4 +2097,176 @@ fn apply_revoke(
 /// is a `@httpPayload` streaming blob (an empty stream is an empty body).
 fn ok_empty_blob() -> AwsResponse {
     AwsResponse::json(StatusCode::OK, Vec::<u8>::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+
+    const ACCOUNT: &str = "123456789012";
+
+    fn svc() -> LakeFormationService {
+        LakeFormationService::new(Arc::new(RwLock::new(MultiAccountState::new(
+            ACCOUNT,
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn req(body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "lakeformation".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: ACCOUNT.to_string(),
+            request_id: "test".to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn err_of(r: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
+        match r {
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn search_databases_finds_matching_tagged_resource() {
+        let svc = svc();
+        let tag_body = json!({
+            "Resource": { "Database": { "Name": "sales" } },
+            "LFTags": [{ "TagKey": "env", "TagValues": ["prod"] }],
+        });
+        svc.add_lf_tags_to_resource(&req(tag_body.clone()), &tag_body)
+            .unwrap();
+
+        // Matching expression finds the tagged database.
+        let hit = json!({ "Expression": [{ "TagKey": "env", "TagValues": ["prod"] }] });
+        let out = body_of(svc.search_databases(&req(hit.clone()), &hit).unwrap());
+        let list = out["DatabaseList"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["Database"]["Name"], "sales");
+        assert_eq!(list[0]["LFTags"][0]["TagKey"], "env");
+
+        // Non-matching value returns nothing.
+        let miss = json!({ "Expression": [{ "TagKey": "env", "TagValues": ["dev"] }] });
+        let out = body_of(svc.search_databases(&req(miss.clone()), &miss).unwrap());
+        assert!(out["DatabaseList"].as_array().unwrap().is_empty());
+
+        // Non-matching key returns nothing.
+        let miss_key = json!({ "Expression": [{ "TagKey": "team", "TagValues": ["prod"] }] });
+        let out = body_of(
+            svc.search_databases(&req(miss_key.clone()), &miss_key)
+                .unwrap(),
+        );
+        assert!(out["DatabaseList"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_tables_finds_matching_tagged_table() {
+        let svc = svc();
+        let tag_body = json!({
+            "Resource": { "Table": { "DatabaseName": "db", "Name": "orders" } },
+            "LFTags": [{ "TagKey": "tier", "TagValues": ["gold", "silver"] }],
+        });
+        svc.add_lf_tags_to_resource(&req(tag_body.clone()), &tag_body)
+            .unwrap();
+
+        let hit = json!({ "Expression": [{ "TagKey": "tier", "TagValues": ["gold"] }] });
+        let out = body_of(svc.search_tables(&req(hit.clone()), &hit).unwrap());
+        let list = out["TableList"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["Table"]["Name"], "orders");
+        assert_eq!(list[0]["Table"]["DatabaseName"], "db");
+
+        // A Database search must not return the tagged Table.
+        let out = body_of(svc.search_databases(&req(hit.clone()), &hit).unwrap());
+        assert!(out["DatabaseList"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_rejects_missing_or_empty_expression() {
+        let svc = svc();
+        // A tagged resource exists, so a match-all bug would leak it.
+        let tag_body = json!({
+            "Resource": { "Database": { "Name": "sales" } },
+            "LFTags": [{ "TagKey": "env", "TagValues": ["prod"] }],
+        });
+        svc.add_lf_tags_to_resource(&req(tag_body.clone()), &tag_body)
+            .unwrap();
+
+        // Missing Expression.
+        let none = json!({});
+        assert_eq!(
+            err_of(svc.search_databases(&req(none.clone()), &none)).code(),
+            "InvalidInputException"
+        );
+        assert_eq!(
+            err_of(svc.search_tables(&req(none.clone()), &none)).code(),
+            "InvalidInputException"
+        );
+
+        // Empty Expression list.
+        let empty = json!({ "Expression": [] });
+        assert_eq!(
+            err_of(svc.search_databases(&req(empty.clone()), &empty)).code(),
+            "InvalidInputException"
+        );
+        assert_eq!(
+            err_of(svc.search_tables(&req(empty.clone()), &empty)).code(),
+            "InvalidInputException"
+        );
+    }
+
+    #[test]
+    fn create_data_cells_filter_rejects_empty_table_data() {
+        let svc = svc();
+        let empty = json!({ "TableData": {} });
+        let e = err_of(svc.create_data_cells_filter(&req(empty.clone()), &empty, false));
+        assert_eq!(e.code(), "InvalidInputException");
+
+        // Missing just `Name` is also rejected.
+        let partial =
+            json!({ "TableData": { "DatabaseName": "db", "TableName": "t", "Name": "" } });
+        let e = err_of(svc.create_data_cells_filter(&req(partial.clone()), &partial, false));
+        assert_eq!(e.code(), "InvalidInputException");
+
+        // A well-formed filter is accepted and round-trips.
+        let ok_body = json!({
+            "TableData": { "DatabaseName": "db", "TableName": "t", "Name": "f1" }
+        });
+        svc.create_data_cells_filter(&req(ok_body.clone()), &ok_body, false)
+            .unwrap();
+        let get = json!({ "TableCatalogId": ACCOUNT, "DatabaseName": "db", "TableName": "t", "Name": "f1" });
+        let out = body_of(svc.get_data_cells_filter(&req(get.clone()), &get).unwrap());
+        assert_eq!(out["DataCellsFilter"]["Name"], "f1");
+    }
+
+    #[test]
+    fn get_query_state_unknown_id_errors() {
+        let svc = svc();
+        let b = json!({ "QueryId": "00000000-0000-0000-0000-000000000000" });
+        let e = err_of(svc.get_query_state(&req(b.clone()), &b));
+        assert_eq!(e.code(), "InvalidInputException");
+    }
 }
