@@ -3471,6 +3471,7 @@ dependencies = [
  "fakecloud-k8s",
  "fakecloud-kinesis",
  "fakecloud-kms",
+ "fakecloud-lakeformation",
  "fakecloud-lambda",
  "fakecloud-logs",
  "fakecloud-memorydb",
@@ -4625,6 +4626,26 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "signature 2.2.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-lakeformation"
+version = "0.36.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

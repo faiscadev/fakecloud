@@ -1,6 +1,6 @@
 {
-  "variants_passed": 163648,
-  "total_variants": 163648,
+  "variants_passed": 165633,
+  "total_variants": 165633,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -269,6 +269,10 @@
     "s3tables": {
       "passed": 1645,
       "total": 1645
+    },
+    "lakeformation": {
+      "passed": 1985,
+      "total": 1985
     }
   }
 }

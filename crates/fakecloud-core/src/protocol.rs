@@ -45,6 +45,9 @@ const REST_JSON_SERVICES: &[&str] = &[
     // Amazon S3 Tables: restJson1 control plane (path-labelled `@http` URIs
     // over the table bucket -> namespace -> table hierarchy + JSON bodies).
     "s3tables",
+    // AWS Lake Formation: restJson1 governance control plane over Glue
+    // (single-segment `@http` `POST /<Op>` URIs + JSON bodies).
+    "lakeformation",
     // Amazon OpenSearch Service + Amazon Elasticsearch Service both sign as
     // `es` and speak restJson1; one service handles both, splitting on the
     // URL path version prefix.

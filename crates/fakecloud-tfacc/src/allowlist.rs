@@ -729,6 +729,24 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "lakeformation",
+        // AWS Lake Formation is a governance control plane over Glue. Three
+        // families round-trip fully against the mock and run here: the
+        // registered-resource lifecycle (`aws_lakeformation_resource`:
+        // RegisterResource / DescribeResource / DeregisterResource over an S3
+        // location + IAM role), data-lake settings (`PutDataLakeSettings` /
+        // `GetDataLakeSettings` verbatim round-trip incl. admins + default
+        // permissions), and LF-tags (`aws_lakeformation_lf_tag`: Create / Get /
+        // Update / Delete + Terraform import). Most other provider tests are
+        // subtests of `TestAccLakeFormation_serial` that depend on a real Glue
+        // catalogue (databases/tables) and fine-grained tag/permission
+        // propagation across an actual query engine, which the mock does not
+        // model (permissions / data-cells-filter over Glue tables, opt-ins on
+        // real resources), so they are deferred.
+        run_regex: "^TestAccLakeFormation(Resource_basic|Resource_hybridAccessEnabled|_serial)$/^(DataLakeSettings|LFTags)$/^basic$",
+        deny: &[],
+    },
+    Service {
         name: "elasticsearch",
         // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
         // domain persists and settles to Processing=false / Created=true on
@@ -1657,6 +1675,12 @@ pub const SHARDS: &[Shard] = &[
         name: "s3tables",
         service: "s3tables",
         run_regex: "^TestAccS3Tables(TableBucket|Namespace|Table|TableBucketPolicy|TablePolicy)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "lakeformation",
+        service: "lakeformation",
+        run_regex: "^TestAccLakeFormation(Resource_basic|Resource_hybridAccessEnabled|_serial)$/^(DataLakeSettings|LFTags)$/^basic$",
         extra_deny: &[],
     },
 ];

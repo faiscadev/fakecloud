@@ -3788,6 +3788,70 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UntagResource`
 - `UpdateTableMetadataLocation`
 
+## [AWS Lake Formation](@/docs/services/lakeformation.md)
+
+- `AddLFTagsToResource`
+- `AssumeDecoratedRoleWithSAML`
+- `BatchGrantPermissions`
+- `BatchRevokePermissions`
+- `CancelTransaction`
+- `CommitTransaction`
+- `CreateDataCellsFilter`
+- `CreateLFTag`
+- `CreateLFTagExpression`
+- `CreateLakeFormationIdentityCenterConfiguration`
+- `CreateLakeFormationOptIn`
+- `DeleteDataCellsFilter`
+- `DeleteLFTag`
+- `DeleteLFTagExpression`
+- `DeleteLakeFormationIdentityCenterConfiguration`
+- `DeleteLakeFormationOptIn`
+- `DeleteObjectsOnCancel`
+- `DeregisterResource`
+- `DescribeLakeFormationIdentityCenterConfiguration`
+- `DescribeResource`
+- `DescribeTransaction`
+- `ExtendTransaction`
+- `GetDataCellsFilter`
+- `GetDataLakePrincipal`
+- `GetDataLakeSettings`
+- `GetEffectivePermissionsForPath`
+- `GetLFTag`
+- `GetLFTagExpression`
+- `GetQueryState`
+- `GetQueryStatistics`
+- `GetResourceLFTags`
+- `GetTableObjects`
+- `GetTemporaryDataLocationCredentials`
+- `GetTemporaryGluePartitionCredentials`
+- `GetTemporaryGlueTableCredentials`
+- `GetWorkUnitResults`
+- `GetWorkUnits`
+- `GrantPermissions`
+- `ListDataCellsFilter`
+- `ListLFTagExpressions`
+- `ListLFTags`
+- `ListLakeFormationOptIns`
+- `ListPermissions`
+- `ListResources`
+- `ListTableStorageOptimizers`
+- `ListTransactions`
+- `PutDataLakeSettings`
+- `RegisterResource`
+- `RemoveLFTagsFromResource`
+- `RevokePermissions`
+- `SearchDatabasesByLFTags`
+- `SearchTablesByLFTags`
+- `StartQueryPlanning`
+- `StartTransaction`
+- `UpdateDataCellsFilter`
+- `UpdateLFTag`
+- `UpdateLFTagExpression`
+- `UpdateLakeFormationIdentityCenterConfiguration`
+- `UpdateResource`
+- `UpdateTableObjects`
+- `UpdateTableStorageOptimizer`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

@@ -130,6 +130,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "ram" => Protocol::Rest,
         // Amazon S3 Tables: restJson1 control plane (path-labelled URIs).
         "s3tables" => Protocol::Rest,
+        // AWS Lake Formation: restJson1 governance control plane over Glue.
+        "lakeformation" => Protocol::Rest,
         // Amazon Elasticsearch Service (2015) + Amazon OpenSearch Service
         // (2021): both restJson1, both sign as `es`. Two probe ids so each
         // API's operation set is exercised at its own path version prefix;

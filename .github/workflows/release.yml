@@ -217,6 +217,7 @@ jobs:
           publish fakecloud-ram               # only core/persistence/aws deps
           publish fakecloud-ce                # only core/persistence/aws deps
           publish fakecloud-s3tables          # only core/persistence/aws deps
+          publish fakecloud-lakeformation     # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock
