@@ -3451,6 +3451,7 @@ dependencies = [
  "fakecloud-cloudfront",
  "fakecloud-cloudtrail",
  "fakecloud-cloudwatch",
+ "fakecloud-codebuild",
  "fakecloud-codeconnections",
  "fakecloud-cognito",
  "fakecloud-core",
@@ -3993,6 +3994,25 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-codebuild"
+version = "0.36.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

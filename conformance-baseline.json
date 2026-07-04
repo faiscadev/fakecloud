@@ -1,6 +1,6 @@
 {
-  "variants_passed": 166550,
-  "total_variants": 166550,
+  "variants_passed": 168601,
+  "total_variants": 168601,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -277,6 +277,10 @@
     "codeconnections": {
       "passed": 917,
       "total": 917
+    },
+    "codebuild": {
+      "passed": 2051,
+      "total": 2051
     }
   }
 }

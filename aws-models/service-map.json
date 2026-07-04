@@ -223,6 +223,10 @@
     "repo_dir": "lakeformation",
     "service_name": "lakeformation"
   },
+  "codebuild": {
+    "repo_dir": "codebuild",
+    "service_name": "codebuild"
+  },
   "es": {
     "repo_dir": "elasticsearch-service",
     "service_name": "es"

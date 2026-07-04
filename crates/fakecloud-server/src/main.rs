@@ -587,6 +587,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let codebuild_state: fakecloud_codebuild::SharedCodeBuildState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4579,6 +4586,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("lakeformation", h);
     }
     registry.register(Arc::new(lakeformation_service));
+
+    // AWS CodeBuild control plane.
+    let codebuild_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("codebuild").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_codebuild::persistence::load_into(&store, &codebuild_state) {
+                Ok(fakecloud_codebuild::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded codebuild persistence snapshot");
+                }
+                Ok(fakecloud_codebuild::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no codebuild persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut codebuild_service = fakecloud_codebuild::CodeBuildService::new(codebuild_state.clone());
+    if let Some(store) = codebuild_snapshot_store {
+        codebuild_service = codebuild_service.with_snapshot_store(store);
+    }
+    if let Some(h) = codebuild_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("codebuild", h);
+    }
+    registry.register(Arc::new(codebuild_service));
 
     // AWS CodeConnections: awsJson1.0 control plane (connections, hosts,
     // repository links, sync configurations).

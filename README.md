@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 166,550 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 168,601 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-68 services, 5,033 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+69 services, 5,092 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |

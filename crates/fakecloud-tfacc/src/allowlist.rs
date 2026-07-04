@@ -1109,6 +1109,18 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccCodeConnections(Connection|Host)_basic$",
         deny: &[],
     },
+    Service {
+        name: "codebuild",
+        // AWS CodeBuild control plane. Scoped to the standalone `_basic`
+        // resources whose create/read/update/delete round-trips through the
+        // fakecloud control plane: `aws_codebuild_project`,
+        // `aws_codebuild_report_group`, `aws_codebuild_source_credential`,
+        // `aws_codebuild_fleet`, and `aws_codebuild_resource_policy`. Webhooks
+        // and data sources come in a later widening batch.
+        run_regex:
+            "^TestAccCodeBuild(Project|ReportGroup|SourceCredential|Fleet|ResourcePolicy)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1698,6 +1710,13 @@ pub const SHARDS: &[Shard] = &[
         name: "codeconnections",
         service: "codeconnections",
         run_regex: "^TestAccCodeConnections(Connection|Host)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codebuild",
+        service: "codebuild",
+        run_regex:
+            "^TestAccCodeBuild(Project|ReportGroup|SourceCredential|Fleet|ResourcePolicy)_basic$",
         extra_deny: &[],
     },
 ];
