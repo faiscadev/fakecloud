@@ -371,3 +371,8 @@ async fn ram_acceptance() {
 async fn ce_acceptance() {
     run_shard("ce").await;
 }
+
+#[tokio::test]
+async fn s3tables_acceptance() {
+    run_shard("s3tables").await;
+}

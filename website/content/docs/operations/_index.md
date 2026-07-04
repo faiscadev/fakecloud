@@ -3736,6 +3736,58 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateCostAllocationTagsStatus`
 - `UpdateCostCategoryDefinition`
 
+## [Amazon S3 Tables](@/docs/services/s3tables.md)
+
+- `CreateNamespace`
+- `CreateTable`
+- `CreateTableBucket`
+- `DeleteNamespace`
+- `DeleteTable`
+- `DeleteTableBucket`
+- `DeleteTableBucketEncryption`
+- `DeleteTableBucketMetricsConfiguration`
+- `DeleteTableBucketPolicy`
+- `DeleteTableBucketReplication`
+- `DeleteTablePolicy`
+- `DeleteTableReplication`
+- `GetNamespace`
+- `GetTable`
+- `GetTableBucket`
+- `GetTableBucketEncryption`
+- `GetTableBucketMaintenanceConfiguration`
+- `GetTableBucketMetricsConfiguration`
+- `GetTableBucketPolicy`
+- `GetTableBucketReplication`
+- `GetTableBucketStorageClass`
+- `GetTableEncryption`
+- `GetTableMaintenanceConfiguration`
+- `GetTableMaintenanceJobStatus`
+- `GetTableMetadataLocation`
+- `GetTablePolicy`
+- `GetTableRecordExpirationConfiguration`
+- `GetTableRecordExpirationJobStatus`
+- `GetTableReplication`
+- `GetTableReplicationStatus`
+- `GetTableStorageClass`
+- `ListNamespaces`
+- `ListTableBuckets`
+- `ListTables`
+- `ListTagsForResource`
+- `PutTableBucketEncryption`
+- `PutTableBucketMaintenanceConfiguration`
+- `PutTableBucketMetricsConfiguration`
+- `PutTableBucketPolicy`
+- `PutTableBucketReplication`
+- `PutTableBucketStorageClass`
+- `PutTableMaintenanceConfiguration`
+- `PutTablePolicy`
+- `PutTableRecordExpirationConfiguration`
+- `PutTableReplication`
+- `RenameTable`
+- `TagResource`
+- `UntagResource`
+- `UpdateTableMetadataLocation`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

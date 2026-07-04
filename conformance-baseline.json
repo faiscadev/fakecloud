@@ -1,6 +1,6 @@
 {
-  "variants_passed": 162003,
-  "total_variants": 162003,
+  "variants_passed": 163648,
+  "total_variants": 163648,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -265,6 +265,10 @@
     "ce": {
       "passed": 1781,
       "total": 1781
+    },
+    "s3tables": {
+      "passed": 1645,
+      "total": 1645
     }
   }
 }

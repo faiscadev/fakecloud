@@ -412,6 +412,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_BACKUP", "backup"),
     ("AWS_ENDPOINT_URL_RAM", "ram"),
     ("AWS_ENDPOINT_URL_CE", "ce"),
+    ("AWS_ENDPOINT_URL_S3TABLES", "s3tables"),
     ("AWS_ENDPOINT_URL_COST_EXPLORER", "ce"),
     // AWS AppConfig control plane + AppConfig Data plane (both route to the one
     // fakecloud `appconfig` handler).

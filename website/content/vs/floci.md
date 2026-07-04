@@ -16,7 +16,7 @@ Both are free, open-source, local AWS emulators. Real HTTP server speaking the A
 
 **floci's approach** (check their site for the current details — the project publishes performance claims like startup time, memory, and SDK-test pass rate): a free LocalStack replacement. Verify their numbers against the version you'd actually run.
 
-**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. A service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 65 services shipped today (including full ECR with OCI v2 `docker push`/`pull`, full ECS, full ELBv2 ALB/NLB/GWLB control plane). Built around real Lambda execution (23 runtimes in Docker), real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey/Memcached via Docker), real cross-service wiring, and validation on every commit against AWS's own Smithy models — 162,003/162,003 generated test variants pass, true 100% conformance — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
+**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. A service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 66 services shipped today (including full ECR with OCI v2 `docker push`/`pull`, full ECS, full ELBv2 ALB/NLB/GWLB control plane). Built around real Lambda execution (23 runtimes in Docker), real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey/Memcached via Docker), real cross-service wiring, and validation on every commit against AWS's own Smithy models — 163,648/163,648 generated test variants pass, true 100% conformance — plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
 
 Breadth-first and depth-first are both valid tradeoffs. Pick by whether your tests need real downstream execution and cross-service flows, or surface-level plausibility across more services.
 
@@ -32,12 +32,12 @@ Run your actual test suite against both. Numbers published on landing pages are 
 | Distribution | Single static binary (~19 MB) + Docker image |
 | Startup | ~300ms |
 | Idle memory | ~10 MiB |
-| Services covered today | 49 (3,966 ops) at true 100% conformance (162,003/162,003 variants), incl. ECR + ECS + ELBv2 |
+| Services covered today | 49 (3,966 ops) at true 100% conformance (163,648/163,648 variants), incl. ECR + ECS + ELBv2 |
 | Lambda execution | Real code in 13 Docker runtime containers |
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey/Memcached via Docker |
 | Cross-service wiring | S3 -> Lambda, SNS fan-out, EventBridge -> Step Functions, SES inbound -> S3/SNS/Lambda, 15+ more fire end-to-end |
-| Conformance methodology | Smithy-validated, 162,003/162,003 test variants pass on every commit |
+| Conformance methodology | Smithy-validated, 163,648/163,648 test variants pass on every commit |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust |
 | Multi-account, SCPs, ABAC | Yes |

@@ -186,6 +186,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         // mappings (same pattern as the bedrock control/data-plane crate).
         ("backup", "backup", &["service.rs"], &["backup"]),
         ("ram", "ram", &["service.rs"], &["ram"]),
+        ("s3tables", "s3tables", &["service.rs"], &["s3tables"]),
         // AWS AppConfig control plane + AppConfig Data plane share one crate and
         // one `supported_actions()` list across both AWS service tags, so both
         // mappings accept either tag (the opensearch/bedrock dual-API pattern).

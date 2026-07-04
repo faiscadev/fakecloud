@@ -90,6 +90,7 @@ SERVICES=(
     "cloudtrail|CloudTrail|cloudtrail"
     "ram|AWS Resource Access Manager|ram"
     "ce|AWS Cost Explorer|ce"
+    "s3tables|Amazon S3 Tables|s3tables"
     "route53|Route 53|route53"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"
