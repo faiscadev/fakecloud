@@ -1332,7 +1332,12 @@ impl RamService {
         req: &AwsRequest,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let arn = req_str(body, "resourceShareArn")?;
+        // `resourceShareArn` is bound to `@httpQuery`, so real SDK / Terraform
+        // clients send it in the query string (empty body). Accept the body form
+        // too for permissive round-tripping.
+        let arn = query_str(req, "resourceShareArn")
+            .or_else(|| str_field(body, "resourceShareArn"))
+            .ok_or_else(|| invalid_param("resourceShareArn is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let share = st

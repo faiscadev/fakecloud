@@ -135,14 +135,18 @@ fn input_rules(action: &str) -> Vec<Rule> {
         }
         "AssociateResourceShare"
         | "DisassociateResourceShare"
-        | "PromoteResourceShareCreatedFromPolicy"
         | "UpdateResourceShare"
         | "ListResourceSharePermissions" => {
             vec![Rule::Required("resourceShareArn")]
         }
-        // The `Delete*` operations bind their identifiers to `@httpQuery`, not
-        // the JSON body; the handlers validate those from the query string.
-        "DeletePermission" | "DeletePermissionVersion" | "DeleteResourceShare" => Vec::new(),
+        // These operations bind their identifiers to `@httpQuery`, not the JSON
+        // body; the handlers validate those from the query string. The `Delete*`
+        // ops and `PromoteResourceShareCreatedFromPolicy` (single `@httpQuery`
+        // `resourceShareArn`, no body members) all fall here.
+        "DeletePermission"
+        | "DeletePermissionVersion"
+        | "DeleteResourceShare"
+        | "PromoteResourceShareCreatedFromPolicy" => Vec::new(),
         "AssociateResourceSharePermission" | "DisassociateResourceSharePermission" => vec![
             Rule::Required("resourceShareArn"),
             Rule::Required("permissionArn"),
