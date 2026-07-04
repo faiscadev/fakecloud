@@ -29,7 +29,7 @@ fakecloud is a different tool for a different problem.
 | Real cross-service wiring | Yes (S3 -> Lambda, SNS fan-out, etc fire end-to-end) | Partial (Moto simulates some events, not real execution) |
 | Setup for Python unit tests | HTTP endpoint override + fakecloud running | `@mock_aws` decorator |
 | Service count | 47 at true 100% conformance (depth-first) | 100+ at varying depth (breadth-first) |
-| Conformance methodology | Smithy-validated, 166,550/166,550 test variants pass on every commit | Not published |
+| Conformance methodology | Smithy-validated, 168,601/168,601 test variants pass on every commit | Not published |
 | License | AGPL-3.0 | Apache-2.0 |
 
 ## When Moto is the right pick

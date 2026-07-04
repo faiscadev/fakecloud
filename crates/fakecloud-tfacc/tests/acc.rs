@@ -386,3 +386,8 @@ async fn lakeformation_acceptance() {
 async fn codeconnections_acceptance() {
     run_shard("codeconnections").await;
 }
+
+#[tokio::test]
+async fn codebuild_acceptance() {
+    run_shard("codebuild").await;
+}

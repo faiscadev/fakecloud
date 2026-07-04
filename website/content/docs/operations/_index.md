@@ -3852,6 +3852,68 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateTableObjects`
 - `UpdateTableStorageOptimizer`
 
+## [AWS CodeBuild](@/docs/services/codebuild.md)
+
+- `BatchDeleteBuilds`
+- `BatchGetBuildBatches`
+- `BatchGetBuilds`
+- `BatchGetCommandExecutions`
+- `BatchGetFleets`
+- `BatchGetProjects`
+- `BatchGetReportGroups`
+- `BatchGetReports`
+- `BatchGetSandboxes`
+- `CreateFleet`
+- `CreateProject`
+- `CreateReportGroup`
+- `CreateWebhook`
+- `DeleteBuildBatch`
+- `DeleteFleet`
+- `DeleteProject`
+- `DeleteReport`
+- `DeleteReportGroup`
+- `DeleteResourcePolicy`
+- `DeleteSourceCredentials`
+- `DeleteWebhook`
+- `DescribeCodeCoverages`
+- `DescribeTestCases`
+- `GetReportGroupTrend`
+- `GetResourcePolicy`
+- `ImportSourceCredentials`
+- `InvalidateProjectCache`
+- `ListBuildBatches`
+- `ListBuildBatchesForProject`
+- `ListBuilds`
+- `ListBuildsForProject`
+- `ListCommandExecutionsForSandbox`
+- `ListCuratedEnvironmentImages`
+- `ListFleets`
+- `ListProjects`
+- `ListReportGroups`
+- `ListReports`
+- `ListReportsForReportGroup`
+- `ListSandboxes`
+- `ListSandboxesForProject`
+- `ListSharedProjects`
+- `ListSharedReportGroups`
+- `ListSourceCredentials`
+- `PutResourcePolicy`
+- `RetryBuild`
+- `RetryBuildBatch`
+- `StartBuild`
+- `StartBuildBatch`
+- `StartCommandExecution`
+- `StartSandbox`
+- `StartSandboxConnection`
+- `StopBuild`
+- `StopBuildBatch`
+- `StopSandbox`
+- `UpdateFleet`
+- `UpdateProject`
+- `UpdateProjectVisibility`
+- `UpdateReportGroup`
+- `UpdateWebhook`
+
 ## [AWS CodeConnections](@/docs/services/codeconnections.md)
 
 - `CreateConnection`

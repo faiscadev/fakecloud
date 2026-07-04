@@ -104,6 +104,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "transfer" => Protocol::Json {
             target_prefix: "TransferService",
         },
+        // AWS CodeBuild: awsJson1.1.
+        "codebuild" => Protocol::Json {
+            target_prefix: "CodeBuild_20161006",
+        },
         // IAM Identity Center Identity Store: awsJson1.1.
         "identitystore" => Protocol::Json {
             target_prefix: "AWSIdentityStore",
