@@ -90,6 +90,11 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "dms" => Protocol::Json {
             target_prefix: "AmazonDMSv20160101",
         },
+        // CloudTrail: awsJson1.1.
+        "cloudtrail" => Protocol::Json {
+            // Real SDK/terraform clients send the short Smithy shape name.
+            target_prefix: "CloudTrail_20131101",
+        },
         // Transfer Family: awsJson1.1.
         "transfer" => Protocol::Json {
             target_prefix: "TransferService",

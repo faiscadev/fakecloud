@@ -495,6 +495,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let cloudtrail_state: fakecloud_cloudtrail::SharedCloudTrailState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let transfer_state: fakecloud_transfer::SharedTransferState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4151,6 +4158,36 @@ async fn main() {
         dms_service = dms_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(dms_service));
+
+    // CloudTrail control plane.
+    let cloudtrail_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("cloudtrail").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_cloudtrail::persistence::load_into(&store, &cloudtrail_state) {
+                Ok(fakecloud_cloudtrail::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded cloudtrail persistence snapshot");
+                }
+                Ok(fakecloud_cloudtrail::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no cloudtrail persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut cloudtrail_service =
+        fakecloud_cloudtrail::CloudTrailService::new(cloudtrail_state.clone());
+    if let Some(store) = cloudtrail_snapshot_store {
+        cloudtrail_service = cloudtrail_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(cloudtrail_service));
 
     // Transfer Family control plane.
     let transfer_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

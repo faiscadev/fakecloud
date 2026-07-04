@@ -402,6 +402,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_DMS", "dms"),
     ("AWS_ENDPOINT_URL_DATABASE_MIGRATION_SERVICE", "dms"),
     ("AWS_ENDPOINT_URL_TRANSFER", "transfer"),
+    ("AWS_ENDPOINT_URL_CLOUDTRAIL", "cloudtrail"),
     ("AWS_ENDPOINT_URL_REDSHIFT", "redshift"),
     ("AWS_ENDPOINT_URL_ELASTICACHE", "elasticache"),
     ("AWS_ENDPOINT_URL_MEMORYDB", "memorydb"),

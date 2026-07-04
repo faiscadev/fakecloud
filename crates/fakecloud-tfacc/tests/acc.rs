@@ -356,3 +356,8 @@ async fn transfer_acceptance() {
 async fn appconfig_acceptance() {
     run_shard("appconfig").await;
 }
+
+#[tokio::test]
+async fn cloudtrail_acceptance() {
+    run_shard("cloudtrail").await;
+}

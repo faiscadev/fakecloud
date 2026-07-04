@@ -6,10 +6,10 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 62 services (4,754 operations) are shipped today, all at true 100% conformance — 157,239/157,239 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 63 services (4,814 operations) are shipped today, all at true 100% conformance — 159,149/159,149 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
-- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 157,239/157,239 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 159,149/159,149 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
 - **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
 - **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 23 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
 - **Zero friction**: no auth tokens, no accounts, no config files needed
@@ -87,13 +87,13 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 62 services persist their durable state: S3, SQS, SNS, EventBridge,
+All 63 services persist their durable state: S3, SQS, SNS, EventBridge,
 EventBridge Pipes, EventBridge Scheduler, Lambda, DynamoDB, IAM, STS, SSM, Secrets Manager,
 CloudWatch Logs, CloudWatch (Metrics & Alarms), KMS, CloudFormation, Cloud Control API, SES,
 Cognito User Pools, Cognito Identity, Kinesis, Firehose, RDS, RDS Data API, Aurora DSQL, Resource Groups, Resource Groups Tagging API, ElastiCache, MemoryDB, EKS, AWS Backup, AWS AppConfig,
 Step Functions, API Gateway v1, API Gateway v2, Bedrock, Bedrock Agent,
 Bedrock Agent Runtime, Bedrock Runtime, ECR, ECS, Elastic Load Balancing v2,
-CloudFront, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue,
+CloudFront, CloudTrail, Route 53, WAF v2, Application Auto Scaling, Athena, ACM, Glue,
 EC2, and Organizations. State is
 written to disk on every mutation and reloaded on startup. The one exception
 is CloudWatch metric datapoints, which are in-memory only (matching how
@@ -530,6 +530,27 @@ Protocol: REST-JSON (HTTP method + path-based routing, JSON responses)
 Features: Full `DistributionConfig` round-trip including origins, cache behaviors, custom error responses, viewer certificates, geo restrictions. ETag-based optimistic concurrency on every mutating operation.
 
 Protocol: REST-XML (HTTP method + path-based routing under `/2020-05-31/`)
+
+### CloudTrail (60 actions)
+
+**Trails:** CreateTrail, GetTrail, UpdateTrail, DeleteTrail, DescribeTrails, ListTrails
+**Logging status:** GetTrailStatus, StartLogging, StopLogging
+**Event + Insight selectors:** GetEventSelectors, PutEventSelectors, GetInsightSelectors, PutInsightSelectors
+**CloudTrail Lake event data stores:** CreateEventDataStore, GetEventDataStore, UpdateEventDataStore, DeleteEventDataStore, ListEventDataStores, RestoreEventDataStore
+**Ingestion + federation:** StartEventDataStoreIngestion, StopEventDataStoreIngestion, EnableFederation, DisableFederation
+**Channels:** CreateChannel, GetChannel, UpdateChannel, DeleteChannel, ListChannels
+**Imports:** StartImport, StopImport, GetImport, ListImports, ListImportFailures
+**Lake queries:** StartQuery, DescribeQuery, GetQueryResults, CancelQuery, ListQueries, GenerateQuery, SearchSampleQueries
+**Dashboards:** CreateDashboard, GetDashboard, UpdateDashboard, DeleteDashboard, ListDashboards, StartDashboardRefresh
+**Resource policies:** PutResourcePolicy, GetResourcePolicy, DeleteResourcePolicy
+**Organization delegated admins:** RegisterOrganizationDelegatedAdmin, DeregisterOrganizationDelegatedAdmin
+**Event configuration:** GetEventConfiguration, PutEventConfiguration
+**Tagging:** AddTags, RemoveTags, ListTags
+**Read-only lookups:** LookupEvents, ListPublicKeys, ListInsightsMetricData, ListInsightsData
+
+Features: Trails round-trip `S3BucketName`/`S3KeyPrefix`/`SnsTopicName`/`HomeRegion`/CloudWatch Logs wiring/KMS key/multi-region + organization flags; `CreateTrail` leaves logging off (`IsLogging: false`) until `StartLogging`. Event data stores settle to `ENABLED` synchronously; `DeleteEventDataStore` moves a store to `PENDING_DELETION` and `RestoreEventDataStore` brings it back. Lake queries settle to `FINISHED` with empty result rows. `LookupEvents`, `ListPublicKeys`, and `ListInsightsMetricData` return real, empty result sets — a fake records no activity of its own. `@length`/`@range`/enum constraints validated against the Smithy model. Account-partitioned and persisted. Control-plane only — no event-recording engine, matching how LocalStack Community mocks CloudTrail.
+
+Protocol: awsJson1.1 (`X-Amz-Target: CloudTrail_20131101.<Operation>`)
 
 ### Route 53 (71 actions)
 

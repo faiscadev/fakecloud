@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 4,754 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 4,814 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 4,754 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 4,814 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
 - **Total Operations**: 4,220
-- **Conformance Engine**: 157,239 Smithy-based test variants
+- **Conformance Engine**: 159,149 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -28,6 +28,7 @@ fakecloud provides 100% API conformance across 4,754 operations. Unlike mocks, f
 - **Redshift**: 141 operations. Full control plane — clusters, snapshots, parameter/subnet/security groups, snapshot schedules and copy grants, endpoint access, per-cluster logging, cross-region snapshot-copy config, and tagging. No SQL data plane (that is the separate `redshift-data` API).
 - **Database Migration Service (DMS)**: 119 operations. Full control plane — replication instances (settle to `available`), endpoints with per-engine settings, replication tasks (with assessment runs and table statistics), replication subnet groups, event subscriptions, certificates, connections (`TestConnection`), serverless replication configs and replications, data providers, instance profiles, migration projects, schema-conversion / metadata-model requests, Fleet Advisor, recommendations, account attributes, and tagging. Real CRUD with pagination and filters. No data-migration engine — the actual row movement is out of scope, matching how LocalStack Community mocks DMS.
 - **Transfer Family**: 71 operations. Full control plane — SFTP/FTPS/FTP/AS2 servers (`StartServer`/`StopServer` settle `State` to `ONLINE`/`OFFLINE`), users and their SSH public keys, host keys, service-managed accesses, workflows and executions (`SendWorkflowStepState`), AS2 agreements, connectors (SFTP + AS2, with `TestConnection`, `StartFileTransfer`, `StartDirectoryListing`, `StartRemoteDelete`/`StartRemoteMove`, `ListFileTransferResults`), profiles, certificates, the managed security-policy catalogue, web apps (+ customization), `TestIdentityProvider`, and tagging. Real CRUD with `MaxResults`/`NextToken` pagination and enforced `@length`/`@range`/enum constraints. No SFTP daemon or AS2 transport engine — the file movement itself is out of scope, matching how LocalStack Community mocks Transfer.
+- **CloudTrail**: 60 operations. Full control plane — trails (`CreateTrail`/`GetTrail`/`UpdateTrail`/`DeleteTrail`, `DescribeTrails`, `ListTrails`) with per-trail logging status that `GetTrailStatus` reflects (`StartLogging`/`StopLogging` toggle `IsLogging`, which starts `false`), event selectors and insight selectors that persist and round-trip, CloudTrail Lake event data stores (full CRUD + `RestoreEventDataStore` PENDING_DELETION -> ENABLED + ingestion start/stop + federation enable/disable), channels, imports, Lake queries (`StartQuery`/`DescribeQuery`/`GetQueryResults` settle to `FINISHED` with empty rows, `CancelQuery`), dashboards, resource policies, organization delegated admins, event configuration, and tagging. `LookupEvents`, `ListPublicKeys`, and `ListInsightsMetricData` return real empty result sets. Real CRUD with pagination and enforced `@length`/`@range`/enum constraints. No event-recording engine — a fake needn't record its own API activity, matching how LocalStack Community mocks CloudTrail.
 - **Aurora DSQL**: 16 operations. Serverless distributed PostgreSQL control plane. Cluster lifecycle (`CreateCluster`/`GetCluster`/`UpdateCluster`/`DeleteCluster`/`ListClusters`) with async `CREATING`->`ACTIVE` transitions, cluster resource policies, change streams to Kinesis (`CreateStream`/`GetStream`/`DeleteStream`/`ListStreams`), `GetVpcEndpointServiceName`, and tagging. Data plane (reachable container + IAM-token auth) is a follow-up.
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.

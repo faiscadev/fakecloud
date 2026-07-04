@@ -1,6 +1,6 @@
 {
-  "variants_passed": 157239,
-  "total_variants": 157239,
+  "variants_passed": 159149,
+  "total_variants": 159149,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -57,6 +57,10 @@
     "cloudfront": {
       "passed": 4112,
       "total": 4112
+    },
+    "cloudtrail": {
+      "passed": 1910,
+      "total": 1910
     },
     "cognito-identity": {
       "passed": 773,
