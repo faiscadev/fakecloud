@@ -116,6 +116,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "verifiedpermissions" => Protocol::Json {
             target_prefix: "VerifiedPermissions",
         },
+        // CodeConnections (successor to CodeStar Connections): awsJson1.0.
+        "codeconnections" => Protocol::Json {
+            target_prefix: "CodeConnections_20231201",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).

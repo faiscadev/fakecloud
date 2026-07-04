@@ -580,6 +580,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let codeconnections_state: fakecloud_codeconnections::SharedCodeConnectionsState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4572,6 +4579,41 @@ async fn main() {
         cfn_snapshot_hooks.insert("lakeformation", h);
     }
     registry.register(Arc::new(lakeformation_service));
+
+    // AWS CodeConnections: awsJson1.0 control plane (connections, hosts,
+    // repository links, sync configurations).
+    let codeconnections_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("codeconnections").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_codeconnections::persistence::load_into(&store, &codeconnections_state)
+            {
+                Ok(fakecloud_codeconnections::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded codeconnections persistence snapshot");
+                }
+                Ok(fakecloud_codeconnections::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no codeconnections persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut codeconnections_service =
+        fakecloud_codeconnections::CodeConnectionsService::new(codeconnections_state.clone());
+    if let Some(store) = codeconnections_snapshot_store {
+        codeconnections_service = codeconnections_service.with_snapshot_store(store);
+    }
+    if let Some(h) = codeconnections_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("codeconnections", h);
+    }
+    registry.register(Arc::new(codeconnections_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

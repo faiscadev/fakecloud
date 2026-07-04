@@ -3852,6 +3852,36 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateTableObjects`
 - `UpdateTableStorageOptimizer`
 
+## [AWS CodeConnections](@/docs/services/codeconnections.md)
+
+- `CreateConnection`
+- `CreateHost`
+- `CreateRepositoryLink`
+- `CreateSyncConfiguration`
+- `DeleteConnection`
+- `DeleteHost`
+- `DeleteRepositoryLink`
+- `DeleteSyncConfiguration`
+- `GetConnection`
+- `GetHost`
+- `GetRepositoryLink`
+- `GetRepositorySyncStatus`
+- `GetResourceSyncStatus`
+- `GetSyncBlockerSummary`
+- `GetSyncConfiguration`
+- `ListConnections`
+- `ListHosts`
+- `ListRepositoryLinks`
+- `ListRepositorySyncDefinitions`
+- `ListSyncConfigurations`
+- `ListTagsForResource`
+- `TagResource`
+- `UntagResource`
+- `UpdateHost`
+- `UpdateRepositoryLink`
+- `UpdateSyncBlocker`
+- `UpdateSyncConfiguration`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

@@ -202,6 +202,16 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // handler returning AccessDenied to the probes' synthetic (nonexistent)
         // role ARNs ran correctly. Source: STS API "Common Errors" + per-op docs.
         "sts" => &["AccessDenied"],
+        // CodeConnections' CreateConnection / CreateHost require the caller to
+        // resolve a provider type: CreateConnection needs a ProviderType or a
+        // HostArn to inherit one from, and both reject malformed input. AWS
+        // returns InvalidInputException (the service's canonical input-validation
+        // error, defined in the model and enumerated on its repository-link /
+        // sync operations) for these, but the connection/host operations'
+        // per-op `errors:` lists omit it even though the real API returns it for
+        // a connection created with neither ProviderType nor HostArn. A handler
+        // returning it to the probes' synthetic inputs ran correctly.
+        "codeconnections" => &["InvalidInputException"],
         _ => &[],
     }
 }

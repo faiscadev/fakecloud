@@ -1,6 +1,6 @@
 {
-  "variants_passed": 165633,
-  "total_variants": 165633,
+  "variants_passed": 166550,
+  "total_variants": 166550,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -273,6 +273,10 @@
     "lakeformation": {
       "passed": 1985,
       "total": 1985
+    },
+    "codeconnections": {
+      "passed": 917,
+      "total": 917
     }
   }
 }

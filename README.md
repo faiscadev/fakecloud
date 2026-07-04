@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 165,633 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 166,550 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-67 services, 5,006 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+68 services, 5,033 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
@@ -76,6 +76,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 | Database Migration Service | 119 | Full control plane: replication instances/tasks/endpoints, subnet groups, event subscriptions, certificates, serverless replication configs, data providers, instance profiles, migration projects, schema conversion, Fleet Advisor, tagging; persisted. No data-migration engine |
 | Transfer Family           | 71  | Full control plane: SFTP/FTPS/FTP/AS2 servers (start/stop settle state), users + SSH keys, host keys, accesses, workflows + executions, agreements, connectors (`TestConnection`, file transfer, directory listing, remote delete/move), profiles, certificates, security policies, web apps, `TestIdentityProvider`, tagging; persisted. No SFTP/AS2 transport engine |
 | CloudTrail                | 60  | Full control plane: trails (logging status toggles `IsLogging`), event + insight selectors, CloudTrail Lake event data stores (restore, ingestion, federation), channels, imports, Lake queries, dashboards, resource policies, org delegated admins, tagging; persisted. `LookupEvents` returns empty — no event-recording engine |
+| CodeConnections           | 27  | Full control plane (successor to CodeStar Connections): connections (created `PENDING` per the real console-handshake default), self-managed hosts, repository links, CloudFormation Git-sync configurations, sync-status/blocker read surface, tagging; persisted. No third-party OAuth handshake or Git-sync engine |
 | Aurora DSQL               | 16  | Serverless distributed Postgres control plane: clusters, resource policies, change streams to Kinesis, multi-region, tagging |
 | Resource Groups           | 23  | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, tag-sync tasks |
 | Resource Groups Tagging API | 9 | Cross-service tag reads/writes, compliance summary, tag reports, backed by a real cross-service tag index |

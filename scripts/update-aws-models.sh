@@ -84,6 +84,7 @@ SERVICES=(
     "lakeformation:lakeformation"
     "s3tables:s3tables"
     "ram:ram"
+    "codeconnections:codeconnections"
 )
 
 # Sparse checkout only the models we need

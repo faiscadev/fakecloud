@@ -270,5 +270,9 @@
   "ce": {
     "repo_dir": "ce",
     "service_name": "ce"
+  },
+  "codeconnections": {
+    "repo_dir": "codeconnections",
+    "service_name": "codeconnections"
   }
 }
