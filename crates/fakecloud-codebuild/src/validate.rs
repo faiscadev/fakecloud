@@ -50,6 +50,17 @@ pub const COMPUTE_TYPE: &[&str] = &[
 
 pub const REPORT_TYPE: &[&str] = &["TEST", "CODE_COVERAGE"];
 
+/// Build / build-batch settled status values (the `StatusType` model enum),
+/// used to validate the `BuildBatchFilter.status` filter.
+pub const STATUS_TYPE: &[&str] = &[
+    "SUCCEEDED",
+    "FAILED",
+    "FAULT",
+    "TIMED_OUT",
+    "IN_PROGRESS",
+    "STOPPED",
+];
+
 pub const SERVER_TYPE: &[&str] = &[
     "GITHUB",
     "BITBUCKET",
