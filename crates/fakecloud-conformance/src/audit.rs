@@ -185,6 +185,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         // together they cover the whole union, so either tag counts for both
         // mappings (same pattern as the bedrock control/data-plane crate).
         ("backup", "backup", &["service.rs"], &["backup"]),
+        ("glacier", "glacier", &["service.rs"], &["glacier"]),
         ("es", "opensearch", &["service.rs"], &["es", "opensearch"]),
         (
             "opensearch",

@@ -123,6 +123,11 @@ async fn eks_acceptance() {
 }
 
 #[tokio::test]
+async fn glacier_acceptance() {
+    run_shard("glacier").await;
+}
+
+#[tokio::test]
 async fn elasticsearch_acceptance() {
     run_shard("elasticsearch").await;
 }

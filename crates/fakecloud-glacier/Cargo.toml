@@ -1,0 +1,29 @@
+[package]
+name = "fakecloud-glacier"
+description = "Amazon S3 Glacier (glacier) implementation for FakeCloud"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+
+[dependencies]
+fakecloud-aws = { workspace = true }
+fakecloud-core = { workspace = true }
+fakecloud-persistence = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+bytes = { workspace = true }

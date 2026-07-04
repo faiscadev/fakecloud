@@ -37,6 +37,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "dsql",
     "resource-groups",
     "eks",
+    "glacier",
     "backup",
     // Amazon OpenSearch Service + Amazon Elasticsearch Service both sign as
     // `es` and speak restJson1; one service handles both, splitting on the

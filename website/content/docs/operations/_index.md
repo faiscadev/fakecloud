@@ -2085,6 +2085,42 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateNodegroupVersion`
 - `UpdatePodIdentityAssociation`
 
+## [Amazon S3 Glacier](@/docs/services/glacier.md)
+
+- `AbortMultipartUpload`
+- `AbortVaultLock`
+- `AddTagsToVault`
+- `CompleteMultipartUpload`
+- `CompleteVaultLock`
+- `CreateVault`
+- `DeleteArchive`
+- `DeleteVault`
+- `DeleteVaultAccessPolicy`
+- `DeleteVaultNotifications`
+- `DescribeJob`
+- `DescribeVault`
+- `GetDataRetrievalPolicy`
+- `GetJobOutput`
+- `GetVaultAccessPolicy`
+- `GetVaultLock`
+- `GetVaultNotifications`
+- `InitiateJob`
+- `InitiateMultipartUpload`
+- `InitiateVaultLock`
+- `ListJobs`
+- `ListMultipartUploads`
+- `ListParts`
+- `ListProvisionedCapacity`
+- `ListTagsForVault`
+- `ListVaults`
+- `PurchaseProvisionedCapacity`
+- `RemoveTagsFromVault`
+- `SetDataRetrievalPolicy`
+- `SetVaultAccessPolicy`
+- `SetVaultNotifications`
+- `UploadArchive`
+- `UploadMultipartPart`
+
 ## [AWS Backup](@/docs/services/backup.md)
 
 - `AssociateBackupVaultMpaApprovalTeam`

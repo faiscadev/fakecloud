@@ -3461,6 +3461,7 @@ dependencies = [
  "fakecloud-elbv2",
  "fakecloud-eventbridge",
  "fakecloud-firehose",
+ "fakecloud-glacier",
  "fakecloud-glue",
  "fakecloud-iam",
  "fakecloud-identitystore",
@@ -4398,6 +4399,28 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-glacier"
+version = "0.34.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
