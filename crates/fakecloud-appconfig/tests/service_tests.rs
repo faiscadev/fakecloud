@@ -285,7 +285,11 @@ async fn hosted_version_bytes_roundtrip_and_autoincrement() {
     .await;
     assert_eq!(raw_bytes(&got), content2);
     assert_eq!(header(&got, "Content-Type"), "application/octet-stream");
-    assert_eq!(header(&got, "Application-Id"), "");
+    // The id headers the model binds are populated on both create and get.
+    assert_eq!(header(&got, "Application-Id"), app);
+    assert_eq!(header(&got, "Configuration-Profile-Id"), profile);
+    assert_eq!(header(&v1, "Application-Id"), app);
+    assert_eq!(header(&v1, "Configuration-Profile-Id"), profile);
 
     // List returns both summaries.
     let list = body_of(
@@ -506,6 +510,21 @@ async fn extension_and_association_crud() {
     );
     assert_eq!(got["Name"], "ext");
 
+    // UpdateExtension bumps VersionNumber (AWS increments on every update).
+    let updated = body_of(
+        &call(
+            &svc,
+            req(
+                Method::PATCH,
+                &format!("/extensions/{ext_id}"),
+                json!({ "Description": "v2" }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(updated["VersionNumber"], 2);
+    assert_eq!(updated["Description"], "v2");
+
     let assoc = body_of(
         &call(
             &svc,
@@ -544,6 +563,108 @@ async fn extension_and_association_crud() {
     )
     .await;
     assert_eq!(del.status.as_u16(), 204);
+}
+
+#[tokio::test]
+async fn delete_application_cascades_child_tags() {
+    // Regression: deleting an application must drop the tags of its child
+    // environments and profiles, not just the application's own tags.
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+
+    let app_arn = format!("arn:aws:appconfig:us-east-1:000000000000:application/{app}");
+    let env_arn = format!("{app_arn}/environment/{env}");
+    let profile_arn = format!("{app_arn}/configurationprofile/{profile}");
+    for arn in [&app_arn, &env_arn, &profile_arn] {
+        let enc = arn.replace('/', "%2F");
+        call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("/tags/{enc}"),
+                json!({ "Tags": { "team": "infra" } }),
+            ),
+        )
+        .await;
+    }
+
+    // Delete the application; its cascade must sweep child tags too.
+    let del = call(
+        &svc,
+        req(Method::DELETE, &format!("/applications/{app}"), Value::Null),
+    )
+    .await;
+    assert_eq!(del.status.as_u16(), 204);
+
+    for arn in [&app_arn, &env_arn, &profile_arn] {
+        let enc = arn.replace('/', "%2F");
+        let tags =
+            body_of(&call(&svc, req(Method::GET, &format!("/tags/{enc}"), Value::Null)).await);
+        assert!(
+            tags["Tags"].as_object().unwrap().is_empty(),
+            "tags for {arn} should have been cascaded away"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_extension_association_removes_referenced_extension() {
+    // Regression: deleting the sole association referencing an AWS-authored
+    // extension must drop the referenced-extension shim it created.
+    let svc = service();
+    let assoc = body_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                "/extensionassociations",
+                json!({
+                    "ExtensionIdentifier": "AWS.AppConfig.JiraServiceManagement",
+                    "ResourceIdentifier": "arn:aws:appconfig:us-east-1:000000000000:application/abc1234",
+                }),
+            ),
+        )
+        .await,
+    );
+    let assoc_id = id_of(&assoc);
+
+    // GetExtension resolves via the referenced-extension shim.
+    let got = body_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                "/extensions/AWS.AppConfig.JiraServiceManagement",
+                Value::Null,
+            ),
+        )
+        .await,
+    );
+    assert_eq!(got["Name"], "AWS.AppConfig.JiraServiceManagement");
+
+    call(
+        &svc,
+        req(
+            Method::DELETE,
+            &format!("/extensionassociations/{assoc_id}"),
+            Value::Null,
+        ),
+    )
+    .await;
+
+    // The shim is gone now that no association references it.
+    let (code, _) = call_err(
+        &svc,
+        req(
+            Method::GET,
+            "/extensions/AWS.AppConfig.JiraServiceManagement",
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(code, 404);
 }
 
 #[tokio::test]
@@ -658,19 +779,29 @@ async fn tags_roundtrip() {
     assert!(after["Tags"].as_object().unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn appconfigdata_session_returns_deployed_bytes() {
-    let svc = service();
-    let app = make_app(&svc, "app").await;
-    let profile = make_profile(&svc, &app, "prof").await;
-    let env = make_env(&svc, &app, "env").await;
-    let content = b"{\"feature\": \"on\"}";
-    make_hosted_version(&svc, &app, &profile, content, "application/json").await;
+/// Deploy `version` of `profile` to `env` via AllAtOnce (settles COMPLETE).
+async fn deploy(svc: &AppConfigService, app: &str, env: &str, profile: &str, version: &str) {
+    let resp = call(
+        svc,
+        req(
+            Method::POST,
+            &format!("/applications/{app}/environments/{env}/deployments"),
+            json!({
+                "DeploymentStrategyId": "AppConfig.AllAtOnce",
+                "ConfigurationProfileId": profile,
+                "ConfigurationVersion": version,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 201);
+}
 
-    // Start a session bound to the app/env/profile.
+/// Start a data-plane session, returning its InitialConfigurationToken.
+async fn start_session(svc: &AppConfigService, app: &str, env: &str, profile: &str) -> String {
     let session = body_of(
         &call(
-            &svc,
+            svc,
             req(
                 Method::POST,
                 "/configurationsessions",
@@ -683,10 +814,23 @@ async fn appconfigdata_session_returns_deployed_bytes() {
         )
         .await,
     );
-    let token = session["InitialConfigurationToken"]
+    session["InitialConfigurationToken"]
         .as_str()
         .unwrap()
-        .to_string();
+        .to_string()
+}
+
+#[tokio::test]
+async fn appconfigdata_session_returns_deployed_bytes() {
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+    let content = b"{\"feature\": \"on\"}";
+    make_hosted_version(&svc, &app, &profile, content, "application/json").await;
+    deploy(&svc, &app, &env, &profile, "1").await;
+
+    let token = start_session(&svc, &app, &env, &profile).await;
 
     // GetLatestConfiguration returns the deployed hosted-config bytes.
     let cfg = call(
@@ -714,6 +858,152 @@ async fn appconfigdata_session_returns_deployed_bytes() {
     .await;
     assert_eq!(code, 400);
     assert_eq!(name, "BadRequestException");
+}
+
+#[tokio::test]
+async fn appconfigdata_next_poll_token_resolves_on_second_poll() {
+    // Regression: the rotated Next-Poll-Configuration-Token must be a live
+    // token, or the AWS poll loop dies with "Invalid ConfigurationToken".
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+    let content = b"{\"k\": 1}";
+    make_hosted_version(&svc, &app, &profile, content, "application/json").await;
+    deploy(&svc, &app, &env, &profile, "1").await;
+
+    let token = start_session(&svc, &app, &env, &profile).await;
+    let first = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/configuration?configuration_token={token}"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(first.status.as_u16(), 200);
+    let next = header(&first, "Next-Poll-Configuration-Token");
+    assert!(!next.is_empty());
+
+    // Poll again with the rotated token: still 200, still the bytes.
+    let second = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/configuration?configuration_token={next}"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(second.status.as_u16(), 200);
+    assert_eq!(raw_bytes(&second), content);
+    assert!(!header(&second, "Next-Poll-Configuration-Token").is_empty());
+}
+
+#[tokio::test]
+async fn appconfigdata_serves_deployed_version_not_latest() {
+    // Regression: the data plane must serve the DEPLOYED version, not merely
+    // the newest hosted version.
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+
+    let v1_bytes = b"{\"v\": 1}";
+    make_hosted_version(&svc, &app, &profile, v1_bytes, "application/json").await;
+    deploy(&svc, &app, &env, &profile, "1").await;
+
+    // Create v2 but DO NOT deploy it.
+    make_hosted_version(&svc, &app, &profile, b"{\"v\": 2}", "application/json").await;
+
+    let token = start_session(&svc, &app, &env, &profile).await;
+    let cfg = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/configuration?configuration_token={token}"),
+            Value::Null,
+        ),
+    )
+    .await;
+    // Deployed v1 wins over the newer, undeployed v2.
+    assert_eq!(raw_bytes(&cfg), v1_bytes);
+
+    // Legacy GetConfiguration agrees.
+    let legacy = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!(
+                "/applications/{app}/environments/{env}/configurations/{profile}?client_id=c1"
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(raw_bytes(&legacy), v1_bytes);
+    assert_eq!(header(&legacy, "Configuration-Version"), "1");
+}
+
+#[tokio::test]
+async fn appconfigdata_no_deployment_returns_empty() {
+    // An environment with no deployment serves an empty configuration.
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+    make_hosted_version(&svc, &app, &profile, b"{\"x\": 1}", "application/json").await;
+
+    let token = start_session(&svc, &app, &env, &profile).await;
+    let cfg = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/configuration?configuration_token={token}"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(cfg.status.as_u16(), 200);
+    assert!(raw_bytes(&cfg).is_empty());
+    // No served version => no Version-Label header (never the literal "null").
+    assert_eq!(header(&cfg, "Version-Label"), "");
+}
+
+#[tokio::test]
+async fn appconfigdata_version_label_is_the_label_not_number() {
+    // Regression: Version-Label must carry the served version's label string,
+    // not its number, and be omitted when unlabeled.
+    let svc = service();
+    let app = make_app(&svc, "app").await;
+    let profile = make_profile(&svc, &app, "prof").await;
+    let env = make_env(&svc, &app, "env").await;
+
+    // Hosted version 1 carries a VersionLabel header.
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/json".parse().unwrap());
+    headers.insert("VersionLabel", "release-2024".parse().unwrap());
+    let r = build(
+        Method::POST,
+        &format!("/applications/{app}/configurationprofiles/{profile}/hostedconfigurationversions"),
+        Bytes::from_static(b"{\"labeled\": true}"),
+        headers,
+    );
+    call(&svc, r).await;
+    deploy(&svc, &app, &env, &profile, "1").await;
+
+    let token = start_session(&svc, &app, &env, &profile).await;
+    let cfg = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/configuration?configuration_token={token}"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(header(&cfg, "Version-Label"), "release-2024");
 }
 
 #[tokio::test]
