@@ -488,6 +488,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "SWBExternalService" => "sso",
         // Verified Permissions: awsJson1.0.
         "VerifiedPermissions" => "verifiedpermissions",
+        // CodeConnections (successor to CodeStar Connections): awsJson1.0.
+        "CodeConnections_20231201" => "codeconnections",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with

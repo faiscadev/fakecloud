@@ -10,7 +10,7 @@ A short reference for the terms that show up across the fakecloud docs, [conform
 The measure of whether an emulator reproduces real AWS behavior — request and response shapes, field names, error codes, and observable side effects — not just whether a given API call returns a 200. fakecloud aims at 100% behavioral parity on every service it implements. See [What fakecloud is (and isn't)](/docs/about/what-it-is/).
 
 ### Conformance
-The automated check that fakecloud's responses match AWS's [Smithy](#smithy) models exactly. fakecloud's conformance harness runs **165,633 generated test variants** on every commit, all of which pass. See [How conformance works](/docs/about/conformance/).
+The automated check that fakecloud's responses match AWS's [Smithy](#smithy) models exactly. fakecloud's conformance harness runs **166,550 generated test variants** on every commit, all of which pass. See [How conformance works](/docs/about/conformance/).
 
 ### Configurable response
 A test-only mechanism for setting the exact response (or error) fakecloud will return for a given operation, without modifying application code. Used for testing failure paths — throttles, timeouts, specific error codes — that are hard to trigger against real AWS.

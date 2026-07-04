@@ -1098,6 +1098,17 @@ pub const SERVICES: &[Service] = &[
             "^TestAccAppConfig(Application|Environment|ConfigurationProfile|DeploymentStrategy|Extension)_basic$",
         deny: &[],
     },
+    Service {
+        name: "codeconnections",
+        // AWS CodeConnections control plane. The `_basic` resources whose
+        // create/read/update/delete round-trips through the fakecloud control
+        // plane: `aws_codeconnections_connection` (created PENDING, matching the
+        // real handshake-pending default) and `aws_codeconnections_host`
+        // (settles to PENDING, a valid target state for the provider's create
+        // waiter).
+        run_regex: "^TestAccCodeConnections(Connection|Host)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1681,6 +1692,12 @@ pub const SHARDS: &[Shard] = &[
         name: "lakeformation",
         service: "lakeformation",
         run_regex: "^TestAccLakeFormation(Resource_basic|Resource_hybridAccessEnabled|_serial)$/^(DataLakeSettings|LFTags)$/^basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codeconnections",
+        service: "codeconnections",
+        run_regex: "^TestAccCodeConnections(Connection|Host)_basic$",
         extra_deny: &[],
     },
 ];

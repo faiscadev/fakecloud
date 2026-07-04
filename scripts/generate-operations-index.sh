@@ -92,6 +92,7 @@ SERVICES=(
     "ce|AWS Cost Explorer|ce"
     "s3tables|Amazon S3 Tables|s3tables"
     "lakeformation|AWS Lake Formation|lakeformation"
+    "codeconnections|AWS CodeConnections|codeconnections"
     "route53|Route 53|route53"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"

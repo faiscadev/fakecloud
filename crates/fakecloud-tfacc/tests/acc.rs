@@ -381,3 +381,8 @@ async fn s3tables_acceptance() {
 async fn lakeformation_acceptance() {
     run_shard("lakeformation").await;
 }
+
+#[tokio::test]
+async fn codeconnections_acceptance() {
+    run_shard("codeconnections").await;
+}
