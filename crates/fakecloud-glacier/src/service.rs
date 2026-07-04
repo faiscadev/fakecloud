@@ -437,9 +437,21 @@ impl GlacierService {
     fn delete_vault(&self, req: &AwsRequest, name: &str) -> Result<AwsResponse, GlacierError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if state.vaults.remove(name).is_none() {
-            return Err(not_found_vault(name));
+        let vault = state
+            .vaults
+            .get(name)
+            .ok_or_else(|| not_found_vault(name))?;
+        // AWS deletes a vault only if it holds no archives as of the last
+        // inventory and there have been no writes since; a non-empty vault
+        // fails with InvalidParameterValueException rather than silently
+        // dropping its archives.
+        if !vault.archives.is_empty() {
+            return Err(invalid_param(format!(
+                "Vault not empty or recently written to: {}",
+                vault_arn(&req.region, &req.account_id, name)
+            )));
         }
+        state.vaults.remove(name);
         Ok(empty(StatusCode::NO_CONTENT))
     }
 
@@ -603,6 +615,26 @@ impl GlacierService {
             .multipart_uploads
             .get_mut(upload_id)
             .ok_or_else(|| not_found_upload(upload_id))?;
+        // The Content-Range must describe exactly the bytes in the body, the
+        // start must be aligned to the upload's part size, and no part may
+        // exceed the part size. AWS rejects misaligned/oversized parts with
+        // InvalidParameterValueException; silently accepting them yields an
+        // archive whose combined tree hash never matches a from-scratch hash.
+        if end < start || end - start + 1 != data.len() as u64 {
+            return Err(invalid_param(
+                "The Content-Range does not match the length of the request body",
+            ));
+        }
+        if !start.is_multiple_of(upload.part_size) {
+            return Err(invalid_param(
+                "The byte range in Content-Range must be aligned to the part size",
+            ));
+        }
+        if data.len() as u64 > upload.part_size {
+            return Err(invalid_param(
+                "The part is larger than the multipart upload's part size",
+            ));
+        }
         upload.parts.insert(
             start,
             Part {
@@ -639,6 +671,13 @@ impl GlacierService {
             .multipart_uploads
             .get(upload_id)
             .ok_or_else(|| not_found_upload(upload_id))?;
+        // Completing an upload with no parts would mint a zero-byte archive;
+        // AWS rejects it.
+        if upload.parts.is_empty() {
+            return Err(invalid_param(
+                "Cannot complete a multipart upload with no uploaded parts",
+            ));
+        }
 
         // Assemble parts in ascending range order.
         let mut data: Vec<u8> = Vec::new();
@@ -867,6 +906,9 @@ impl GlacierService {
                 job.inventory_size = Some(bytes.len() as u64);
                 job.output = bytes;
                 job.output_content_type = "application/json".to_string();
+                // An inventory ran, so DescribeVault's LastInventoryDate must
+                // advance; without this it stays null forever.
+                v.last_inventory_date = Some(Utc::now());
             }
             "select" => {
                 // SELECT jobs run a query over an archive; we model the control
@@ -980,11 +1022,28 @@ impl GlacierService {
         // Honour a Range header for partial retrieval.
         let (slice, content_range, status) = match header(req, "range") {
             Some(r) => match parse_bytes_range(&r, full.len()) {
-                Some((s, e)) => (
-                    full[s..=e.min(full.len().saturating_sub(1))].to_vec(),
-                    Some(format!("bytes {}-{}/{}", s, e, full.len())),
-                    StatusCode::PARTIAL_CONTENT,
-                ),
+                Some((s, e)) => {
+                    // A start past the end of the payload is unsatisfiable;
+                    // AWS returns 416 rather than crashing on an inverted slice.
+                    if full.is_empty() || s >= full.len() {
+                        let mut resp =
+                            AwsResponse::json(StatusCode::RANGE_NOT_SATISFIABLE, Vec::new());
+                        set_header(
+                            &mut resp,
+                            "Content-Range",
+                            &format!("bytes */{}", full.len()),
+                        );
+                        return Ok(resp);
+                    }
+                    // Clamp the end to the last byte and report the *clamped*
+                    // end in Content-Range, matching AWS.
+                    let end = e.min(full.len() - 1);
+                    (
+                        full[s..=end].to_vec(),
+                        Some(format!("bytes {}-{}/{}", s, end, full.len())),
+                        StatusCode::PARTIAL_CONTENT,
+                    )
+                }
                 None => (full.clone(), None, StatusCode::OK),
             },
             None => (full.clone(), None, StatusCode::OK),
