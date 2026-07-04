@@ -346,3 +346,8 @@ async fn verifiedpermissions_acceptance() {
 async fn dms_acceptance() {
     run_shard("dms").await;
 }
+
+#[tokio::test]
+async fn transfer_acceptance() {
+    run_shard("transfer").await;
+}

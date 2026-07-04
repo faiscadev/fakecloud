@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 60 AWS services with 3,966 total operations. 152,159/152,159 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 61 AWS services with 3,966 total operations. 154,915/154,915 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -34,6 +34,7 @@ fakecloud implements 60 AWS services with 3,966 total operations. 152,159/152,15
 | RDS Data API           |   6 | Real SQL on the backing Postgres/MySQL container; typed params/results incl. `bytea`/`BLOB`, transactions, batch |
 | Redshift               | 141 | Full control plane: clusters (progress to `available`, synthetic endpoint), snapshots (real `SnapshotArn`), parameter groups (`Source=user` filter), subnet/security groups, snapshot schedules + copy grants, endpoint access (synthesized VPC endpoint), per-cluster logging, cross-region snapshot-copy config, tagging. No SQL data plane (separate `redshift-data` API) |
 | Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
+| Transfer Family        |  71 | Full control plane: SFTP/FTPS/FTP/AS2 servers (start/stop settle `State`), users + SSH keys, host keys, accesses, workflows + executions, agreements, connectors (`TestConnection`, file transfer, directory listing, remote delete/move), profiles, certificates, security policies, web apps, `TestIdentityProvider`, tagging; persisted. No SFTP daemon or AS2 transport engine |
 | Resource Groups        |  23 | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, grouping statuses, tag-sync tasks; `arn:...:group/<name>/<id>` ARNs, persisted |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                                |
 | MemoryDB               |  45 | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted. Redis/Valkey data-plane container backing is a follow-up |

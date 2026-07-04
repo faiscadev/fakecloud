@@ -3492,6 +3492,7 @@ dependencies = [
  "fakecloud-ssm",
  "fakecloud-ssoadmin",
  "fakecloud-stepfunctions",
+ "fakecloud-transfer",
  "fakecloud-verifiedpermissions",
  "fakecloud-wafv2",
  "libc",
@@ -5186,6 +5187,26 @@ version = "0.34.1"
 dependencies = [
  "fakecloud-testkit",
  "tokio",
+]
+
+[[package]]
+name = "fakecloud-transfer"
+version = "0.34.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

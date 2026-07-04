@@ -58,6 +58,7 @@ SERVICES=(
     "rds-data|RDS Data|rds-data"
     "redshift|Redshift|redshift"
     "dms|Database Migration Service|dms"
+    "transfer|Transfer Family|transfer"
     "dsql|Aurora DSQL|dsql"
     "resource-groups|Resource Groups|resource-groups"
     "tagging|Resource Groups Tagging API|resource-groups-tagging"

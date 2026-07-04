@@ -49,6 +49,7 @@ SERVICES=(
     "eks:eks"
     "glacier:glacier"
     "backup:backup"
+    "transfer:transfer"
     "es:elasticsearch-service"
     "opensearch:opensearch"
     "servicediscovery:servicediscovery"

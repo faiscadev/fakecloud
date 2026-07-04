@@ -1005,6 +1005,19 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccDMS(Certificate|Endpoint)_basic$",
         deny: &[],
     },
+    Service {
+        name: "transfer",
+        // AWS Transfer Family control plane. Scoped to the standalone `_basic`
+        // resources whose create/read/update/delete round-trips through the
+        // fakecloud control plane: `aws_transfer_server` (SERVICE_MANAGED
+        // server that settles to ONLINE), `aws_transfer_user` +
+        // `aws_transfer_ssh_key` (a user and an imported SSH public key on that
+        // server), and `aws_transfer_access` (a directory-group access). Wider
+        // resources (connectors, agreements, profiles, certificates, workflows,
+        // web apps) come in a later widening batch.
+        run_regex: "^TestAccTransfer(Server|User|SSHKey|Access)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1545,6 +1558,12 @@ pub const SHARDS: &[Shard] = &[
         name: "dms",
         service: "dms",
         run_regex: "^TestAccDMS(Certificate|Endpoint)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "transfer",
+        service: "transfer",
+        run_regex: "^TestAccTransfer(Server|User|SSHKey|Access)_basic$",
         extra_deny: &[],
     },
 ];

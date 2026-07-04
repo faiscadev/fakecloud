@@ -457,6 +457,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "Route53AutoNaming_v20170314" => "servicediscovery",
         // Database Migration Service: awsJson1.1.
         "AmazonDMSv20160101" => "dms",
+        // Transfer Family: awsJson1.1.
+        "TransferService" => "transfer",
         // IAM Identity Center Identity Store: awsJson1.1.
         "AWSIdentityStore" => "identitystore",
         // IAM Identity Center SSO Admin: awsJson1.1.

@@ -238,5 +238,9 @@
   "dms": {
     "repo_dir": "database-migration-service",
     "service_name": "dms"
+  },
+  "transfer": {
+    "repo_dir": "transfer",
+    "service_name": "transfer"
   }
 }
