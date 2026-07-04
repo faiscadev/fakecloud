@@ -550,7 +550,7 @@ Protocol: REST-XML (HTTP method + path-based routing under `/2020-05-31/`)
 
 Features: Trails round-trip `S3BucketName`/`S3KeyPrefix`/`SnsTopicName`/`HomeRegion`/CloudWatch Logs wiring/KMS key/multi-region + organization flags; `CreateTrail` leaves logging off (`IsLogging: false`) until `StartLogging`. Event data stores settle to `ENABLED` synchronously; `DeleteEventDataStore` moves a store to `PENDING_DELETION` and `RestoreEventDataStore` brings it back. Lake queries settle to `FINISHED` with empty result rows. `LookupEvents`, `ListPublicKeys`, and `ListInsightsMetricData` return real, empty result sets — a fake records no activity of its own. `@length`/`@range`/enum constraints validated against the Smithy model. Account-partitioned and persisted. Control-plane only — no event-recording engine, matching how LocalStack Community mocks CloudTrail.
 
-Protocol: awsJson1.1 (`X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.<Operation>`)
+Protocol: awsJson1.1 (`X-Amz-Target: CloudTrail_20131101.<Operation>`)
 
 ### Route 53 (71 actions)
 

@@ -462,6 +462,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Database Migration Service: awsJson1.1.
         "AmazonDMSv20160101" => "dms",
         // CloudTrail: awsJson1.1.
+        // aws-sdk-go-v2 / smithy clients (and terraform) send the short shape
+        // name; aws-sdk-go-v1 sends the fully-qualified form. Accept both.
+        "CloudTrail_20131101" => "cloudtrail",
         "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101" => "cloudtrail",
         // Transfer Family: awsJson1.1.
         "TransferService" => "transfer",

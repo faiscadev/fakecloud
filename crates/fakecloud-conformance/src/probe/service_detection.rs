@@ -92,7 +92,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         },
         // CloudTrail: awsJson1.1.
         "cloudtrail" => Protocol::Json {
-            target_prefix: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101",
+            // Real SDK/terraform clients send the short Smithy shape name.
+            target_prefix: "CloudTrail_20131101",
         },
         // Transfer Family: awsJson1.1.
         "transfer" => Protocol::Json {
