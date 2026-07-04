@@ -3435,6 +3435,7 @@ dependencies = [
  "fakecloud-acm",
  "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
+ "fakecloud-appconfig",
  "fakecloud-application-autoscaling",
  "fakecloud-athena",
  "fakecloud-autoscaling",
@@ -3609,6 +3610,27 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-appconfig"
+version = "0.34.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]

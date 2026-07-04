@@ -552,6 +552,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let appconfig_state: fakecloud_appconfig::SharedAppConfigState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -4407,6 +4414,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("es", h);
     }
     registry.register(Arc::new(opensearch_service));
+
+    // AWS AppConfig control plane + AppConfig Data plane (both `appconfig`).
+    let appconfig_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("appconfig").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_appconfig::persistence::load_into(&store, &appconfig_state) {
+                Ok(fakecloud_appconfig::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded appconfig persistence snapshot");
+                }
+                Ok(fakecloud_appconfig::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no appconfig persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut appconfig_service = fakecloud_appconfig::AppConfigService::new(appconfig_state.clone());
+    if let Some(store) = appconfig_snapshot_store {
+        appconfig_service = appconfig_service.with_snapshot_store(store);
+    }
+    if let Some(h) = appconfig_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("appconfig", h);
+    }
+    registry.register(Arc::new(appconfig_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to

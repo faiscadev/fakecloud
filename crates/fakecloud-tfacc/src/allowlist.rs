@@ -1018,6 +1018,17 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccTransfer(Server|User|SSHKey|Access)_basic$",
         deny: &[],
     },
+    Service {
+        name: "appconfig",
+        // AWS AppConfig control plane. Scoped to the standalone `_basic`
+        // resources whose create/read/update/delete round-trips through the
+        // fakecloud control plane: `aws_appconfig_application`,
+        // `aws_appconfig_environment`, `aws_appconfig_configuration_profile`,
+        // `aws_appconfig_deployment_strategy`, and `aws_appconfig_extension`.
+        run_regex:
+            "^TestAccAppConfig(Application|Environment|ConfigurationProfile|DeploymentStrategy|Extension)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1564,6 +1575,13 @@ pub const SHARDS: &[Shard] = &[
         name: "transfer",
         service: "transfer",
         run_regex: "^TestAccTransfer(Server|User|SSHKey|Access)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "appconfig",
+        service: "appconfig",
+        run_regex:
+            "^TestAccAppConfig(Application|Environment|ConfigurationProfile|DeploymentStrategy|Extension)_basic$",
         extra_deny: &[],
     },
 ];

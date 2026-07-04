@@ -50,6 +50,8 @@ SERVICES=(
     "glacier:glacier"
     "backup:backup"
     "transfer:transfer"
+    "appconfig:appconfig"
+    "appconfigdata:appconfigdata"
     "es:elasticsearch-service"
     "opensearch:opensearch"
     "servicediscovery:servicediscovery"

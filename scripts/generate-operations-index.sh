@@ -69,6 +69,8 @@ SERVICES=(
     "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"
     "opensearch|OpenSearch Service|opensearch"
+    "appconfig|AWS AppConfig|appconfig"
+    "appconfigdata|AWS AppConfig Data|appconfig"
     "servicediscovery|Cloud Map|servicediscovery"
     "account|Account Management|account"
     "identitystore|IAM Identity Center Identity Store|identitystore"

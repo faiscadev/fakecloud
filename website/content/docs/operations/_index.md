@@ -2457,6 +2457,70 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateVpcEndpoint`
 - `UpgradeDomain`
 
+## [AWS AppConfig](@/docs/services/appconfig.md)
+
+- `CreateApplication`
+- `CreateConfigurationProfile`
+- `CreateDeploymentStrategy`
+- `CreateEnvironment`
+- `CreateExperimentDefinition`
+- `CreateExtension`
+- `CreateExtensionAssociation`
+- `CreateHostedConfigurationVersion`
+- `DeleteApplication`
+- `DeleteConfigurationProfile`
+- `DeleteDeploymentStrategy`
+- `DeleteEnvironment`
+- `DeleteExperimentDefinition`
+- `DeleteExtension`
+- `DeleteExtensionAssociation`
+- `DeleteHostedConfigurationVersion`
+- `GetAccountSettings`
+- `GetApplication`
+- `GetConfiguration`
+- `GetConfigurationProfile`
+- `GetDeployment`
+- `GetDeploymentStrategy`
+- `GetEnvironment`
+- `GetExperimentDefinition`
+- `GetExperimentRun`
+- `GetExtension`
+- `GetExtensionAssociation`
+- `GetHostedConfigurationVersion`
+- `ListApplications`
+- `ListConfigurationProfiles`
+- `ListDeploymentStrategies`
+- `ListDeployments`
+- `ListEnvironments`
+- `ListExperimentDefinitions`
+- `ListExperimentRunEvents`
+- `ListExperimentRuns`
+- `ListExtensionAssociations`
+- `ListExtensions`
+- `ListHostedConfigurationVersions`
+- `ListTagsForResource`
+- `StartDeployment`
+- `StartExperimentRun`
+- `StopDeployment`
+- `StopExperimentRun`
+- `TagResource`
+- `UntagResource`
+- `UpdateAccountSettings`
+- `UpdateApplication`
+- `UpdateConfigurationProfile`
+- `UpdateDeploymentStrategy`
+- `UpdateEnvironment`
+- `UpdateExperimentDefinition`
+- `UpdateExperimentRun`
+- `UpdateExtension`
+- `UpdateExtensionAssociation`
+- `ValidateConfiguration`
+
+## [AWS AppConfig Data](@/docs/services/appconfig.md)
+
+- `GetLatestConfiguration`
+- `StartConfigurationSession`
+
 ## [Cloud Map](@/docs/services/servicediscovery.md)
 
 - `CreateHttpNamespace`
