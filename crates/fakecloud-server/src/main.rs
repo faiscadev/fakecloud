@@ -552,6 +552,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let ram_state: fakecloud_ram::SharedRamState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4418,6 +4425,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("backup", h);
     }
     registry.register(Arc::new(backup_service));
+
+    // AWS Resource Access Manager control plane.
+    let ram_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ram").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_ram::persistence::load_into(&store, &ram_state) {
+                Ok(fakecloud_ram::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded ram persistence snapshot");
+                }
+                Ok(fakecloud_ram::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no ram persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut ram_service = fakecloud_ram::RamService::new(ram_state.clone());
+    if let Some(store) = ram_snapshot_store {
+        ram_service = ram_service.with_snapshot_store(store);
+    }
+    if let Some(h) = ram_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("ram", h);
+    }
+    registry.register(Arc::new(ram_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

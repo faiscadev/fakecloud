@@ -692,6 +692,20 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "ram",
+        // AWS Resource Access Manager is a control-plane service: a resource
+        // share round-trips through create/read/update/delete (settling ACTIVE
+        // immediately), its tags persist, and principal / resource associations
+        // settle straight to ASSOCIATED so the create waiters complete. The
+        // cross-account accepter flow (aws_ram_resource_share_accepter) and
+        // aws_ram_sharing_with_organization need a second account / a real
+        // organization a single-account acceptance run can't stand up, and
+        // customer-managed permission versioning has no standalone resource, so
+        // those are deferred.
+        run_regex: "^TestAccRAM(ResourceShare_basic|ResourceShare_tags|PrincipalAssociation_basic|ResourceAssociation_basic)$",
+        deny: &[],
+    },
+    Service {
         name: "elasticsearch",
         // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
         // domain persists and settles to Processing=false / Created=true on
@@ -1602,6 +1616,12 @@ pub const SHARDS: &[Shard] = &[
         name: "cloudtrail",
         service: "cloudtrail",
         run_regex: "^TestAccCloudTrailEventDataStore_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "ram",
+        service: "ram",
+        run_regex: "^TestAccRAM(ResourceShare_basic|ResourceShare_tags|PrincipalAssociation_basic|ResourceAssociation_basic)$",
         extra_deny: &[],
     },
 ];

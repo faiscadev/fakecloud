@@ -211,6 +211,10 @@
     "repo_dir": "backup",
     "service_name": "backup"
   },
+  "ram": {
+    "repo_dir": "ram",
+    "service_name": "ram"
+  },
   "es": {
     "repo_dir": "elasticsearch-service",
     "service_name": "es"

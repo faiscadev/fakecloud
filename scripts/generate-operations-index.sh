@@ -88,6 +88,7 @@ SERVICES=(
     "elasticloadbalancingv2|Elastic Load Balancing v2|elbv2"
     "cloudfront|CloudFront|cloudfront"
     "cloudtrail|CloudTrail|cloudtrail"
+    "ram|AWS Resource Access Manager|ram"
     "route53|Route 53|route53"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"

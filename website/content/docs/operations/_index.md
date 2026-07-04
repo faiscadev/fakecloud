@@ -3648,6 +3648,44 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateEventDataStore`
 - `UpdateTrail`
 
+## [AWS Resource Access Manager](@/docs/services/ram.md)
+
+- `AcceptResourceShareInvitation`
+- `AssociateResourceShare`
+- `AssociateResourceSharePermission`
+- `CreatePermission`
+- `CreatePermissionVersion`
+- `CreateResourceShare`
+- `DeletePermission`
+- `DeletePermissionVersion`
+- `DeleteResourceShare`
+- `DisassociateResourceShare`
+- `DisassociateResourceSharePermission`
+- `EnableSharingWithAwsOrganization`
+- `GetPermission`
+- `GetResourcePolicies`
+- `GetResourceShareAssociations`
+- `GetResourceShareInvitations`
+- `GetResourceShares`
+- `ListPendingInvitationResources`
+- `ListPermissionAssociations`
+- `ListPermissionVersions`
+- `ListPermissions`
+- `ListPrincipals`
+- `ListReplacePermissionAssociationsWork`
+- `ListResourceSharePermissions`
+- `ListResourceTypes`
+- `ListResources`
+- `ListSourceAssociations`
+- `PromotePermissionCreatedFromPolicy`
+- `PromoteResourceShareCreatedFromPolicy`
+- `RejectResourceShareInvitation`
+- `ReplacePermissionAssociations`
+- `SetDefaultPermissionVersion`
+- `TagResource`
+- `UntagResource`
+- `UpdateResourceShare`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`
