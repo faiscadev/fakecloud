@@ -140,7 +140,7 @@ fn label_fields(action: &str) -> &'static [&'static str] {
         "DeleteApplication" => &["ApplicationId"],
         "DeleteConfigurationProfile" => &["ApplicationId", "ConfigurationProfileId"],
         "DeleteDeploymentStrategy" => &["DeploymentStrategyId"],
-        "DeleteEnvironment" => &["EnvironmentId", "ApplicationId"],
+        "DeleteEnvironment" => &["ApplicationId", "EnvironmentId"],
         "DeleteExperimentDefinition" => {
             &["ApplicationIdentifier", "ExperimentDefinitionIdentifier"]
         }

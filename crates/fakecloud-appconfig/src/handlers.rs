@@ -153,6 +153,18 @@ fn gen_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// The hosted configuration version number the environment's most recent
+/// deployment pinned, if any (data plane serves the DEPLOYED version, not the
+/// latest hosted one).
+fn deployed_version(env: &EnvironmentRecord) -> Option<i64> {
+    env.deployments
+        .values()
+        .next_back()
+        .and_then(|d| d.deployment.get("ConfigurationVersion"))
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
 // ---------------------------------------------------------------------------
 // Record -> JSON
 // ---------------------------------------------------------------------------
@@ -218,13 +230,20 @@ fn profile_summary_json(p: &ProfileRecord) -> Value {
 }
 
 /// Serve the hosted-version raw bytes plus AppConfig's metadata headers.
-fn hosted_version_response(status: u16, v: &HostedVersionRecord) -> AwsResponse {
+fn hosted_version_response(
+    status: u16,
+    app_id: &str,
+    profile_id: &str,
+    v: &HostedVersionRecord,
+) -> AwsResponse {
     let mut resp = AwsResponse::json(
         StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
         v.content.clone(),
     );
     resp.content_type = v.content_type.clone();
     set_header(&mut resp, "Content-Type", &v.content_type);
+    set_header(&mut resp, "Application-Id", app_id);
+    set_header(&mut resp, "Configuration-Profile-Id", profile_id);
     set_header(&mut resp, "Version-Number", &v.version_number.to_string());
     if let Some(d) = &v.description {
         set_header(&mut resp, "Description", d);
@@ -362,8 +381,13 @@ impl AppConfigService {
         if st.applications.remove(id).is_none() {
             return Err(not_found(format!("Application not found: {id}")));
         }
+        // Cascade also drops the tags of the removed children: every taggable
+        // child (environment, configuration profile) has an ARN nested under
+        // the application's ARN, so a prefix sweep removes them all.
         let arn = application_arn(&req.region, &req.account_id, id);
-        st.tags.remove(&arn);
+        let child_prefix = format!("{arn}/");
+        st.tags
+            .retain(|k, _| k != &arn && !k.starts_with(&child_prefix));
         Ok(empty(204))
     }
 
@@ -503,8 +527,11 @@ impl AppConfigService {
         if app.profiles.remove(id).is_none() {
             return Err(not_found(format!("ConfigurationProfile not found: {id}")));
         }
+        // Drop the profile's tags and any nested child ARN tags with it.
         let arn = profile_arn(&req.region, &req.account_id, app_id, id);
-        st.tags.remove(&arn);
+        let child_prefix = format!("{arn}/");
+        st.tags
+            .retain(|k, _| k != &arn && !k.starts_with(&child_prefix));
         Ok(empty(204))
     }
 
@@ -578,7 +605,7 @@ impl AppConfigService {
             content_type,
             version_label,
         };
-        let out = hosted_version_response(201, &record);
+        let out = hosted_version_response(201, app_id, profile_id, &record);
         p.hosted_versions.insert(version_number, record);
         Ok(out)
     }
@@ -600,7 +627,7 @@ impl AppConfigService {
             .and_then(|app| app.profiles.get(profile_id))
             .and_then(|p| p.hosted_versions.get(&version_number))
             .ok_or_else(|| not_found(format!("HostedConfigurationVersion not found: {version}")))?;
-        Ok(hosted_version_response(200, v))
+        Ok(hosted_version_response(200, app_id, profile_id, v))
     }
 
     fn delete_hosted_version(
@@ -995,28 +1022,33 @@ impl AppConfigService {
             .get(&req.account_id)
             .and_then(|st| st.applications.get(app_id))
             .ok_or_else(|| not_found(format!("Application not found: {app_id}")))?;
-        if !app.environments.contains_key(env_id) {
-            return Err(not_found(format!("Environment not found: {env_id}")));
-        }
+        let env = app
+            .environments
+            .get(env_id)
+            .ok_or_else(|| not_found(format!("Environment not found: {env_id}")))?;
         let profile = app
             .profiles
             .get(config_id)
             .or_else(|| app.profiles.values().find(|p| p.name == config_id))
             .ok_or_else(|| not_found(format!("Configuration not found: {config_id}")))?;
-        let latest = profile
-            .hosted_versions
-            .values()
-            .next_back()
-            .ok_or_else(|| not_found("No configuration content deployed"))?;
-        let mut resp =
-            AwsResponse::json(StatusCode::OK, latest.content.clone());
-        resp.content_type = latest.content_type.clone();
-        set_header(&mut resp, "Content-Type", &latest.content_type);
-        set_header(
-            &mut resp,
-            "Configuration-Version",
-            &latest.version_number.to_string(),
-        );
+        // Serve the version the environment's latest deployment pinned, not
+        // merely the newest hosted version. No deployment => empty config.
+        let served = deployed_version(env)
+            .and_then(|n| profile.hosted_versions.get(&n));
+        let (content, content_type, version) = match served {
+            Some(v) => (
+                v.content.clone(),
+                v.content_type.clone(),
+                Some(v.version_number.to_string()),
+            ),
+            None => (Vec::new(), "application/json".to_string(), None),
+        };
+        let mut resp = AwsResponse::json(StatusCode::OK, content);
+        resp.content_type = content_type.clone();
+        set_header(&mut resp, "Content-Type", &content_type);
+        if let Some(v) = &version {
+            set_header(&mut resp, "Configuration-Version", v);
+        }
         Ok(resp)
     }
 
@@ -1214,6 +1246,13 @@ impl AppConfigService {
                     obj.insert(key.to_string(), v.clone());
                 }
             }
+            // AWS increments the extension's VersionNumber on every update.
+            let next = obj
+                .get("VersionNumber")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                + 1;
+            obj.insert("VersionNumber".to_string(), json!(next));
         }
         Ok(ok(e.clone()))
     }
@@ -1350,9 +1389,27 @@ impl AppConfigService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        if st.extension_associations.remove(id).is_none() {
-            return Err(not_found(format!("ExtensionAssociation not found: {id}")));
+        let removed = st
+            .extension_associations
+            .remove(id)
+            .ok_or_else(|| not_found(format!("ExtensionAssociation not found: {id}")))?;
+        // Drop the referenced-extension shim this association created, unless
+        // another association still points at the same extension ARN.
+        if let Some(ext_arn) = removed
+            .get("ExtensionArn")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let still_used = st.extension_associations.values().any(|a| {
+                a.get("ExtensionArn").and_then(Value::as_str) == Some(ext_arn.as_str())
+            });
+            if !still_used {
+                st.referenced_extensions
+                    .retain(|_, e| e.get("Arn").and_then(Value::as_str) != Some(ext_arn.as_str()));
+            }
         }
+        let arn = extension_association_arn(&req.region, &req.account_id, id);
+        st.tags.remove(&arn);
         Ok(empty(204))
     }
 
@@ -1846,14 +1903,17 @@ impl AppConfigService {
             .get("configuration_token")
             .cloned()
             .ok_or_else(|| bad_request("ConfigurationToken is required"))?;
-        let accounts = self.state.read();
+        let mut accounts = self.state.write();
         let st = accounts
-            .get(&req.account_id)
+            .get_mut(&req.account_id)
             .ok_or_else(|| bad_request("Invalid ConfigurationToken"))?;
+        // Clone the binding so we can drop the read borrow before rotating the
+        // poll token below (which mutates `st.sessions`).
         let session = st
             .sessions
             .get(&token)
-            .ok_or_else(|| bad_request("Invalid ConfigurationToken"))?;
+            .ok_or_else(|| bad_request("Invalid ConfigurationToken"))?
+            .clone();
         let app = st
             .applications
             .get(&session.application_id)
@@ -1862,24 +1922,43 @@ impl AppConfigService {
             .profiles
             .get(&session.configuration_profile_id)
             .ok_or_else(|| not_found("ConfigurationProfile not found"))?;
-        // Resolve the latest deployed hosted-config version's bytes (highest
-        // version number wins) for this app/env/profile.
-        let latest = profile.hosted_versions.values().next_back();
-        let (content, content_type, version) = match latest {
+        // Serve the version the environment's latest deployment pinned, not the
+        // newest hosted version. No deployment => empty configuration.
+        let served = app
+            .environments
+            .get(&session.environment_id)
+            .and_then(deployed_version)
+            .and_then(|n| profile.hosted_versions.get(&n));
+        let (content, content_type, version_label) = match served {
             Some(v) => (
                 v.content.clone(),
                 v.content_type.clone(),
-                v.version_number.to_string(),
+                v.version_label.clone(),
             ),
-            None => (Vec::new(), "application/json".to_string(), "null".to_string()),
+            None => (Vec::new(), "application/json".to_string(), None),
         };
+        // Rotate the poll token: AWS mints a fresh single-use token each poll.
+        // Register it against the same binding so the client's next poll with
+        // the rotated token resolves (the old token stays valid too, which is
+        // harmless for a mock). Without this the AWS poll loop dies on poll 2.
         let next_token = gen_token();
+        st.sessions.insert(
+            next_token.clone(),
+            SessionRecord {
+                token: next_token.clone(),
+                application_id: session.application_id.clone(),
+                environment_id: session.environment_id.clone(),
+                configuration_profile_id: session.configuration_profile_id.clone(),
+            },
+        );
         let mut resp = AwsResponse::json(StatusCode::OK, content);
         resp.content_type = content_type.clone();
         set_header(&mut resp, "Content-Type", &content_type);
         set_header(&mut resp, "Next-Poll-Configuration-Token", &next_token);
         set_header(&mut resp, "Next-Poll-Interval-In-Seconds", "60");
-        set_header(&mut resp, "Version-Label", &version);
+        if let Some(l) = &version_label {
+            set_header(&mut resp, "Version-Label", l);
+        }
         Ok(resp)
     }
 }
