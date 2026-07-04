@@ -918,3 +918,189 @@ async fn unroutable_path_returns_aws_error() {
     assert_eq!(status, 400);
     assert_eq!(code, "InvalidParameterValueException");
 }
+
+// Initiate an archive-retrieval job and return its job id.
+async fn retrieve_job(svc: &GlacierService, vault: &str, archive_id: &str) -> String {
+    let resp = call(
+        svc,
+        req(
+            Method::POST,
+            &format!("/-/vaults/{vault}/jobs"),
+            json!({ "Type": "archive-retrieval", "ArchiveId": archive_id }),
+        ),
+    )
+    .await;
+    header_of(&resp, "x-amz-job-id").unwrap()
+}
+
+#[tokio::test]
+async fn delete_non_empty_vault_is_rejected() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    upload(&svc, "v", b"payload").await;
+
+    // A vault holding archives must not be deletable.
+    let (status, code) = err_of(&call(&svc, req(Method::DELETE, "/-/vaults/v", Value::Null)).await);
+    assert_eq!(status, 400);
+    assert_eq!(code, "InvalidParameterValueException");
+
+    // Still present.
+    let d = body_of(&call(&svc, req(Method::GET, "/-/vaults/v", Value::Null)).await);
+    assert_eq!(d["NumberOfArchives"], 1);
+}
+
+#[tokio::test]
+async fn get_job_output_range_past_end_is_416_not_panic() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    let archive_id = upload(&svc, "v", b"0123456789").await;
+    let job_id = retrieve_job(&svc, "v", &archive_id).await;
+
+    // start beyond the payload length: must not panic, must be unsatisfiable.
+    let out = call(
+        &svc,
+        req_raw(
+            Method::GET,
+            &format!("/-/vaults/v/jobs/{job_id}/output"),
+            Bytes::new(),
+            &[("Range", "bytes=100-200")],
+        ),
+    )
+    .await;
+    assert_eq!(out.status.as_u16(), 416);
+    assert_eq!(header_of(&out, "Content-Range").unwrap(), "bytes */10");
+}
+
+#[tokio::test]
+async fn get_job_output_range_end_clamped_to_payload() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    let archive_id = upload(&svc, "v", b"0123456789").await;
+    let job_id = retrieve_job(&svc, "v", &archive_id).await;
+
+    // end past the last byte is clamped, and Content-Range reports the clamp.
+    let out = call(
+        &svc,
+        req_raw(
+            Method::GET,
+            &format!("/-/vaults/v/jobs/{job_id}/output"),
+            Bytes::new(),
+            &[("Range", "bytes=8-99")],
+        ),
+    )
+    .await;
+    assert_eq!(out.status.as_u16(), 206);
+    assert_eq!(raw_body(&out).as_ref(), b"89");
+    assert_eq!(header_of(&out, "Content-Range").unwrap(), "bytes 8-9/10");
+}
+
+#[tokio::test]
+async fn inventory_job_sets_last_inventory_date() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    upload(&svc, "v", b"payload").await;
+
+    // Before any inventory job, LastInventoryDate is null.
+    let d = body_of(&call(&svc, req(Method::GET, "/-/vaults/v", Value::Null)).await);
+    assert!(d["LastInventoryDate"].is_null());
+
+    call(
+        &svc,
+        req(
+            Method::POST,
+            "/-/vaults/v/jobs",
+            json!({ "Type": "inventory-retrieval" }),
+        ),
+    )
+    .await;
+
+    // Running an inventory job advances LastInventoryDate.
+    let d = body_of(&call(&svc, req(Method::GET, "/-/vaults/v", Value::Null)).await);
+    assert!(
+        d["LastInventoryDate"].as_str().is_some(),
+        "LastInventoryDate should be populated after an inventory job, got {:?}",
+        d["LastInventoryDate"]
+    );
+}
+
+#[tokio::test]
+async fn upload_part_misaligned_or_oversized_rejected() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    let one_mib = 1024usize * 1024;
+    let init = call(
+        &svc,
+        req_raw(
+            Method::POST,
+            "/-/vaults/v/multipart-uploads",
+            Bytes::new(),
+            &[("x-amz-part-size", &one_mib.to_string())],
+        ),
+    )
+    .await;
+    let upload_id = header_of(&init, "x-amz-multipart-upload-id").unwrap();
+
+    // Start not aligned to the part size.
+    let (status, code) = err_of(
+        &call(
+            &svc,
+            req_raw(
+                Method::PUT,
+                &format!("/-/vaults/v/multipart-uploads/{upload_id}"),
+                Bytes::from(vec![0u8; 100]),
+                &[("Content-Range", "bytes 100-199/*")],
+            ),
+        )
+        .await,
+    );
+    assert_eq!(status, 400);
+    assert_eq!(code, "InvalidParameterValueException");
+
+    // Content-Range length not matching the body.
+    let (status, _) = err_of(
+        &call(
+            &svc,
+            req_raw(
+                Method::PUT,
+                &format!("/-/vaults/v/multipart-uploads/{upload_id}"),
+                Bytes::from(vec![0u8; 10]),
+                &[("Content-Range", "bytes 0-99/*")],
+            ),
+        )
+        .await,
+    );
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn complete_multipart_with_no_parts_rejected() {
+    let svc = service();
+    make_vault(&svc, "v").await;
+    let one_mib = 1024usize * 1024;
+    let init = call(
+        &svc,
+        req_raw(
+            Method::POST,
+            "/-/vaults/v/multipart-uploads",
+            Bytes::new(),
+            &[("x-amz-part-size", &one_mib.to_string())],
+        ),
+    )
+    .await;
+    let upload_id = header_of(&init, "x-amz-multipart-upload-id").unwrap();
+
+    let (status, code) = err_of(
+        &call(
+            &svc,
+            req_raw(
+                Method::POST,
+                &format!("/-/vaults/v/multipart-uploads/{upload_id}"),
+                Bytes::new(),
+                &[("x-amz-archive-size", "0")],
+            ),
+        )
+        .await,
+    );
+    assert_eq!(status, 400);
+    assert_eq!(code, "InvalidParameterValueException");
+}
