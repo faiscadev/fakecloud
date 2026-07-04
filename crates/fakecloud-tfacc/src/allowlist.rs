@@ -717,6 +717,18 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "s3tables",
+        // Amazon S3 Tables is a control-plane service: table buckets,
+        // namespaces, and tables round-trip through create/read/delete (tables
+        // carry a real metadata-location pointer + version token), and the
+        // bucket/table policy sub-resources persist. The Iceberg data plane
+        // (real table maintenance / compaction / record expiration) runs no
+        // engine, so tests that assert on materialized table data are out of
+        // scope; the resource smokes run.
+        run_regex: "^TestAccS3Tables(TableBucket|Namespace|Table|TableBucketPolicy|TablePolicy)_basic$",
+        deny: &[],
+    },
+    Service {
         name: "elasticsearch",
         // Amazon Elasticsearch Service (legacy) is a control-plane mock: a
         // domain persists and settles to Processing=false / Created=true on
@@ -1639,6 +1651,12 @@ pub const SHARDS: &[Shard] = &[
         name: "ce",
         service: "ce",
         run_regex: "^TestAccCE(AnomalyMonitor_basic|AnomalySubscription_basic|CostCategory_basic|CostAllocationTag_basic)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "s3tables",
+        service: "s3tables",
+        run_regex: "^TestAccS3Tables(TableBucket|Namespace|Table|TableBucketPolicy|TablePolicy)_basic$",
         extra_deny: &[],
     },
 ];

@@ -215,6 +215,10 @@
     "repo_dir": "ram",
     "service_name": "ram"
   },
+  "s3tables": {
+    "repo_dir": "s3tables",
+    "service_name": "s3tables"
+  },
   "es": {
     "repo_dir": "elasticsearch-service",
     "service_name": "es"

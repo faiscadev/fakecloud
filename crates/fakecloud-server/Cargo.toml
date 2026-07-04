@@ -50,6 +50,7 @@ fakecloud-glacier = { workspace = true }
 fakecloud-appconfig = { workspace = true }
 fakecloud-backup = { workspace = true }
 fakecloud-ram = { workspace = true }
+fakecloud-s3tables = { workspace = true }
 fakecloud-opensearch = { workspace = true }
 fakecloud-memorydb = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
