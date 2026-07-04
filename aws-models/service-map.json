@@ -250,5 +250,9 @@
   "appconfigdata": {
     "repo_dir": "appconfigdata",
     "service_name": "appconfigdata"
+  },
+  "cloudtrail": {
+    "repo_dir": "cloudtrail",
+    "service_name": "cloudtrail"
   }
 }

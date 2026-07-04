@@ -3448,6 +3448,7 @@ dependencies = [
  "fakecloud-cloudcontrol",
  "fakecloud-cloudformation",
  "fakecloud-cloudfront",
+ "fakecloud-cloudtrail",
  "fakecloud-cloudwatch",
  "fakecloud-cognito",
  "fakecloud-core",
@@ -3922,6 +3923,26 @@ dependencies = [
  "parking_lot",
  "quick-xml",
  "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-cloudtrail"
+version = "0.34.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -1006,6 +1006,20 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "cloudtrail",
+        // AWS CloudTrail control plane. Scoped to the standalone
+        // `aws_cloudtrail_event_data_store` `_basic` resource, whose
+        // create/read/update/delete round-trips through the fakecloud control
+        // plane (the store settles to ENABLED synchronously, then
+        // ImportStateVerify re-reads it). The plain `aws_cloudtrail` trail
+        // resource tests are grouped under the `TestAccCloudTrail_serial`
+        // super-test (Trail/*) and, together with channels, imports, Lake
+        // queries, dashboards and organization delegated admin, come in a
+        // later widening batch.
+        run_regex: "^TestAccCloudTrailEventDataStore_basic$",
+        deny: &[],
+    },
+    Service {
         name: "transfer",
         // AWS Transfer Family control plane. Scoped to the standalone `_basic`
         // resources whose create/read/update/delete round-trips through the
@@ -1582,6 +1596,12 @@ pub const SHARDS: &[Shard] = &[
         service: "appconfig",
         run_regex:
             "^TestAccAppConfig(Application|Environment|ConfigurationProfile|DeploymentStrategy|Extension)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "cloudtrail",
+        service: "cloudtrail",
+        run_regex: "^TestAccCloudTrailEventDataStore_basic$",
         extra_deny: &[],
     },
 ];

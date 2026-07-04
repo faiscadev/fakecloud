@@ -461,6 +461,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "Route53AutoNaming_v20170314" => "servicediscovery",
         // Database Migration Service: awsJson1.1.
         "AmazonDMSv20160101" => "dms",
+        // CloudTrail: awsJson1.1.
+        "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101" => "cloudtrail",
         // Transfer Family: awsJson1.1.
         "TransferService" => "transfer",
         // IAM Identity Center Identity Store: awsJson1.1.

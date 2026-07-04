@@ -90,6 +90,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "dms" => Protocol::Json {
             target_prefix: "AmazonDMSv20160101",
         },
+        // CloudTrail: awsJson1.1.
+        "cloudtrail" => Protocol::Json {
+            target_prefix: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101",
+        },
         // Transfer Family: awsJson1.1.
         "transfer" => Protocol::Json {
             target_prefix: "TransferService",

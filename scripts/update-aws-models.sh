@@ -42,6 +42,7 @@ SERVICES=(
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
     "dms:database-migration-service"
+    "cloudtrail:cloudtrail"
     "rds-data:rds-data"
     "dsql:dsql"
     "elasticache:elasticache"

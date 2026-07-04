@@ -202,6 +202,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         ),
         ("glacier", "glacier", &["service.rs"], &["glacier"]),
         ("transfer", "transfer", &["service.rs"], &["transfer"]),
+        ("cloudtrail", "cloudtrail", &["service.rs"], &["cloudtrail"]),
         ("es", "opensearch", &["service.rs"], &["es", "opensearch"]),
         (
             "opensearch",
