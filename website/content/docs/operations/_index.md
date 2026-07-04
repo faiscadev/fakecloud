@@ -3686,6 +3686,56 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UntagResource`
 - `UpdateResourceShare`
 
+## [AWS Cost Explorer](@/docs/services/ce.md)
+
+- `CreateAnomalyMonitor`
+- `CreateAnomalySubscription`
+- `CreateCostCategoryDefinition`
+- `DeleteAnomalyMonitor`
+- `DeleteAnomalySubscription`
+- `DeleteCostCategoryDefinition`
+- `DescribeCostCategoryDefinition`
+- `GetAnomalies`
+- `GetAnomalyMonitors`
+- `GetAnomalySubscriptions`
+- `GetApproximateUsageRecords`
+- `GetCommitmentPurchaseAnalysis`
+- `GetCostAndUsage`
+- `GetCostAndUsageComparisons`
+- `GetCostAndUsageWithResources`
+- `GetCostCategories`
+- `GetCostComparisonDrivers`
+- `GetCostForecast`
+- `GetDimensionValues`
+- `GetReservationCoverage`
+- `GetReservationPurchaseRecommendation`
+- `GetReservationUtilization`
+- `GetRightsizingRecommendation`
+- `GetSavingsPlanPurchaseRecommendationDetails`
+- `GetSavingsPlansCoverage`
+- `GetSavingsPlansPurchaseRecommendation`
+- `GetSavingsPlansUtilization`
+- `GetSavingsPlansUtilizationDetails`
+- `GetTags`
+- `GetUsageForecast`
+- `ListCommitmentPurchaseAnalyses`
+- `ListCostAllocationTagBackfillHistory`
+- `ListCostAllocationTags`
+- `ListCostCategoryDefinitions`
+- `ListCostCategoryResourceAssociations`
+- `ListSavingsPlansPurchaseRecommendationGeneration`
+- `ListTagsForResource`
+- `ProvideAnomalyFeedback`
+- `StartCommitmentPurchaseAnalysis`
+- `StartCostAllocationTagBackfill`
+- `StartSavingsPlansPurchaseRecommendationGeneration`
+- `TagResource`
+- `UntagResource`
+- `UpdateAnomalyMonitor`
+- `UpdateAnomalySubscription`
+- `UpdateCostAllocationTagsStatus`
+- `UpdateCostCategoryDefinition`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

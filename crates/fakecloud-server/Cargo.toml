@@ -37,6 +37,7 @@ fakecloud-rds = { workspace = true }
 fakecloud-redshift = { workspace = true }
 fakecloud-rds-data = { workspace = true }
 fakecloud-cloudtrail = { workspace = true }
+fakecloud-ce = { workspace = true }
 fakecloud-dms = { workspace = true }
 fakecloud-transfer = { workspace = true }
 fakecloud-dsql = { workspace = true }

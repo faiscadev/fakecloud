@@ -3445,6 +3445,7 @@ dependencies = [
  "fakecloud-bedrock",
  "fakecloud-bedrock-agent",
  "fakecloud-bedrock-agent-runtime",
+ "fakecloud-ce",
  "fakecloud-cloudcontrol",
  "fakecloud-cloudformation",
  "fakecloud-cloudfront",
@@ -3817,6 +3818,26 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-ce"
+version = "0.35.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

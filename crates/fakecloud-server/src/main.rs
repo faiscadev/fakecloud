@@ -502,6 +502,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let ce_state: fakecloud_ce::SharedCeState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let transfer_state: fakecloud_transfer::SharedTransferState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4195,6 +4202,35 @@ async fn main() {
         cloudtrail_service = cloudtrail_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(cloudtrail_service));
+
+    // Cost Explorer control plane.
+    let ce_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ce").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_ce::persistence::load_into(&store, &ce_state) {
+                Ok(fakecloud_ce::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded ce persistence snapshot");
+                }
+                Ok(fakecloud_ce::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no ce persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut ce_service = fakecloud_ce::CeService::new(ce_state.clone());
+    if let Some(store) = ce_snapshot_store {
+        ce_service = ce_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(ce_service));
 
     // Transfer Family control plane.
     let transfer_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
