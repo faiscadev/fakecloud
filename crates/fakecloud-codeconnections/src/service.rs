@@ -376,20 +376,27 @@ fn page(
     body: &Value,
     token_max: usize,
 ) -> Result<AwsResponse, AwsServiceError> {
-    if let Some(n) = body.get("MaxResults").and_then(Value::as_i64) {
-        if !(0..=100).contains(&n) {
-            return Err(validation(
-                "MaxResults must be between 0 and 100, inclusive.",
-            ));
-        }
-    }
     check_len(body, "NextToken", 1, token_max)?;
     // An explicit MaxResults (including the model-valid 0) is honored as-is; an
     // absent one uses the default page size. No falsy-zero coalescing: 0 means
-    // "return zero items this page", not "use the default".
-    let max = match body.get("MaxResults").and_then(Value::as_u64) {
-        Some(n) => n as usize,
-        None => 100,
+    // "return zero items this page", not "use the default". A present-but-not-
+    // integer value (for example the JSON float 50.0) is rejected rather than
+    // silently defaulting: as_i64 returns None for a float, so validate against
+    // the model's @range on the raw JSON number instead of coalescing to the
+    // default page size.
+    let max = match body.get("MaxResults") {
+        None | Some(Value::Null) => 100,
+        Some(v) => {
+            let n = v.as_i64().ok_or_else(|| {
+                validation("MaxResults must be an integer between 0 and 100, inclusive.")
+            })?;
+            if !(0..=100).contains(&n) {
+                return Err(validation(
+                    "MaxResults must be between 0 and 100, inclusive.",
+                ));
+            }
+            n as usize
+        }
     };
     let start = body
         .get("NextToken")
@@ -574,6 +581,13 @@ impl CodeConnectionsService {
         let resource_name = req_str(body, "ResourceName")?.to_string();
         let role_arn = req_str(body, "RoleArn")?.to_string();
         let sync_type = req_str(body, "SyncType")?.to_string();
+        // Enforce the model's @length bounds on every sync-config field that
+        // declares one, so a create cannot store a value its own delete/update
+        // path would later reject (create/delete asymmetry). ConfigFile
+        // (DeploymentFilePath) and RepositoryLinkId carry no @length.
+        check_len(body, "ResourceName", 1, 100)?;
+        check_len(body, "Branch", 1, 255)?;
+        check_len(body, "RoleArn", 1, 1024)?;
         check_enum(body, "SyncType", SYNC_TYPES)?;
         check_enum(body, "PublishDeploymentStatus", &["ENABLED", "DISABLED"])?;
         check_enum(
@@ -1091,6 +1105,13 @@ impl CodeConnectionsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let resource_name = req_str(body, "ResourceName")?.to_string();
         let sync_type = req_str(body, "SyncType")?.to_string();
+        // Enforce the model's @length bounds on the mutable sync-config fields
+        // that declare one, symmetric with CreateSyncConfiguration. Branch and
+        // RoleArn are optional on update, so they are only checked when present
+        // (check_len is a no-op for absent fields).
+        check_len(body, "ResourceName", 1, 100)?;
+        check_len(body, "Branch", 1, 255)?;
+        check_len(body, "RoleArn", 1, 1024)?;
         check_enum(body, "SyncType", SYNC_TYPES)?;
         check_enum(body, "PublishDeploymentStatus", &["ENABLED", "DISABLED"])?;
         check_enum(
@@ -1367,5 +1388,90 @@ mod tests {
         assert_eq!(out["Connections"], json!([]));
         // There is one connection, so a continuation token is offered.
         assert_eq!(out["NextToken"], json!("0"));
+    }
+
+    // ---- L3: a non-integer MaxResults is rejected, not silently defaulted ----
+
+    #[test]
+    fn list_connections_max_results_float_is_rejected() {
+        let s = svc();
+        connection_with_provider(&s);
+        // 50.0 is a JSON float, not an integer: as_i64 returns None. It must be
+        // rejected with a validation error, not fall back to the default page
+        // size (which would return the connection instead of validating).
+        let err = call_err(&s, "ListConnections", json!({ "MaxResults": 50.0 }));
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    // ---- L1 + L2: sync-configuration create/update enforce @length ----
+
+    /// A repository link backed by a provider-typed connection, ready to carry a
+    /// sync configuration.
+    fn link_for_sync(s: &CodeConnectionsService) -> String {
+        let conn = connection_with_provider(s);
+        make_link(s, &conn)
+    }
+
+    fn create_sync_body(link_id: &str, resource_name: &str) -> Value {
+        json!({
+            "Branch": "main",
+            "ConfigFile": "config.yaml",
+            "RepositoryLinkId": link_id,
+            "ResourceName": resource_name,
+            "RoleArn": "arn:aws:iam::000000000000:role/sync-role",
+            "SyncType": "CFN_STACK_SYNC"
+        })
+    }
+
+    #[test]
+    fn create_sync_configuration_over_length_resource_name_is_rejected() {
+        let s = svc();
+        let link = link_for_sync(&s);
+        // ResourceName @length max is 100; 101 chars must be rejected. Before
+        // this fix the create stored it, but DeleteSyncConfiguration rejects a
+        // >100-char ResourceName, so the record could never be deleted.
+        let over = "a".repeat(101);
+        let err = call_err(
+            &s,
+            "CreateSyncConfiguration",
+            create_sync_body(&link, &over),
+        );
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[test]
+    fn create_sync_configuration_happy_path_still_succeeds() {
+        let s = svc();
+        let link = link_for_sync(&s);
+        let out = call(
+            &s,
+            "CreateSyncConfiguration",
+            create_sync_body(&link, "MyStack"),
+        );
+        assert_eq!(out["SyncConfiguration"]["ResourceName"], json!("MyStack"));
+    }
+
+    #[test]
+    fn update_sync_configuration_over_length_branch_is_rejected() {
+        let s = svc();
+        let link = link_for_sync(&s);
+        call(
+            &s,
+            "CreateSyncConfiguration",
+            create_sync_body(&link, "MyStack"),
+        );
+        // Branch @length max is 255; an over-length Branch on update must be
+        // rejected symmetric with create.
+        let over_branch = "b".repeat(256);
+        let err = call_err(
+            &s,
+            "UpdateSyncConfiguration",
+            json!({
+                "ResourceName": "MyStack",
+                "SyncType": "CFN_STACK_SYNC",
+                "Branch": over_branch
+            }),
+        );
+        assert_eq!(err.code(), "ValidationException");
     }
 }
