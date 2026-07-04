@@ -14,6 +14,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 
 pub mod allowlist;
 
@@ -61,9 +62,22 @@ pub fn require_toolchain() {
 /// On Go ≥ 1.24 the upstream `go.mod` needs its `godebug tlskyber=0`
 /// directive stripped (the pragma was removed in 1.24). We apply the strip
 /// unconditionally — it's harmless on 1.23.
+/// Serializes the check-clone-strip below across the concurrent
+/// `#[tokio::test]` functions that share one test-binary process. Without it
+/// two tests in the same shard (e.g. `autoscaling` + `appautoscaling`) race:
+/// the first creates `target` and starts the clone, the second sees the dir
+/// already exists, skips the clone, and then reads a not-yet-cloned `go.mod`
+/// -> `NotFound` panic. A completion sentinel (`go.mod` present) plus a
+/// clone-to-temp + atomic rename make it robust even across processes that
+/// share the same `target/` dir on one runner.
+static SETUP_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn setup_provider_source() -> std::io::Result<PathBuf> {
     let target = provider_dir();
-    if !target.exists() {
+    let _guard = SETUP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // `go.mod` only exists once a clone finished, so it is the completion
+    // sentinel — a bare `target.exists()` can be true mid-clone.
+    if !target.join("go.mod").exists() {
         let parent = target.parent().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -71,6 +85,17 @@ pub fn setup_provider_source() -> std::io::Result<PathBuf> {
             )
         })?;
         std::fs::create_dir_all(parent)?;
+        // Drop any partial clone from a previously-crashed run.
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        // Clone into a temp sibling then atomically rename, so `target` never
+        // exists in a half-populated state that a concurrent process could
+        // mistake for a finished clone.
+        let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
+        if tmp.exists() {
+            std::fs::remove_dir_all(&tmp)?;
+        }
         let status = Command::new("git")
             .args([
                 "clone",
@@ -79,13 +104,22 @@ pub fn setup_provider_source() -> std::io::Result<PathBuf> {
                 "--branch",
                 PROVIDER_TAG,
                 PROVIDER_REPO,
-                &target.display().to_string(),
+                &tmp.display().to_string(),
             ])
             .status()?;
         if !status.success() {
+            let _ = std::fs::remove_dir_all(&tmp);
             return Err(std::io::Error::other(format!(
                 "failed to clone {PROVIDER_REPO}@{PROVIDER_TAG}"
             )));
+        }
+        // Another process may have won the race while we cloned; only rename
+        // if the destination is still absent, otherwise discard our copy.
+        if target.join("go.mod").exists() {
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            let _ = std::fs::remove_dir_all(&target);
+            std::fs::rename(&tmp, &target)?;
         }
     }
     strip_godebug(&target.join("go.mod"))?;
