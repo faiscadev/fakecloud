@@ -477,16 +477,34 @@ impl ApiGatewayService {
         params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = params.get("resourceArn").cloned().unwrap_or_default();
-        let body = req.json_body();
+        // `tagKeys` is an `@httpQuery` list: real SDK / terraform clients send
+        // it as repeated `?tagKeys=a&tagKeys=b` pairs. `query_params` collapses
+        // repeats to the last value, so parse every occurrence out of the raw
+        // query string, percent-decoding each. Fall back to a JSON body for
+        // clients that (incorrectly) send the keys there.
+        let mut keys: Vec<String> = req
+            .raw_query
+            .split('&')
+            .filter_map(|pair| pair.strip_prefix("tagKeys="))
+            .map(|v| {
+                percent_encoding::percent_decode_str(v)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+            .collect();
+        if keys.is_empty() {
+            if let Some(arr) = req.json_body().get("tagKeys").and_then(Value::as_array) {
+                keys = arr
+                    .iter()
+                    .filter_map(|k| k.as_str().map(str::to_string))
+                    .collect();
+            }
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
         if let Some(entry) = state.tags.get_mut(&arn) {
-            if let Some(arr) = body.get("tagKeys").and_then(Value::as_array) {
-                for k in arr {
-                    if let Some(s) = k.as_str() {
-                        entry.remove(s);
-                    }
-                }
+            for k in &keys {
+                entry.remove(k);
             }
         }
         ok_no_content()

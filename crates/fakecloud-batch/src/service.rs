@@ -1235,11 +1235,14 @@ impl BatchService {
             .get(2)
             .map(|s| percent_decode(s))
             .ok_or_else(|| client_error("ClientException", "resourceArn is required"))?;
+        // `tagKeys` is an `@httpQuery` list sent as repeated `tagKeys=a&tagKeys=b`
+        // pairs; `query_params` collapses repeats to the last value, so parse the
+        // raw query string for every occurrence, percent-decoding each.
         let keys: Vec<String> = req
-            .query_params
-            .iter()
-            .filter(|(k, _)| k.as_str() == "tagKeys" || k.starts_with("tagKeys"))
-            .map(|(_, v)| v.clone())
+            .raw_query
+            .split('&')
+            .filter_map(|pair| pair.strip_prefix("tagKeys="))
+            .map(percent_decode)
             .collect();
         let mut accounts = self.state.write();
         if let Some(entry) = accounts.get_or_create(&req.account_id).tags.get_mut(&arn) {

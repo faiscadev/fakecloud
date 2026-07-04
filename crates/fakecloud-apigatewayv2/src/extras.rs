@@ -965,22 +965,33 @@ impl ApiGatewayV2Service {
             }
             "UntagResource" => {
                 let arn = resource_id.ok_or_else(|| missing("ResourceArn"))?;
-                // TagKeys is a required @httpQuery param per Smithy — the
-                // SDK renders each entry as `tagKeys={key}`.
+                // TagKeys is a required @httpQuery list per Smithy — the SDK
+                // renders each entry as repeated `tagKeys={key}` pairs.
+                // `query_params` collapses repeats to the last value, so parse
+                // every occurrence out of the raw query string, percent-decoding
+                // each.
                 let has_tag_keys = req
-                    .query_params
-                    .iter()
-                    .any(|(k, _)| k == "tagKeys" || k.starts_with("tagKeys"));
+                    .raw_query
+                    .split('&')
+                    .any(|pair| pair == "tagKeys" || pair.starts_with("tagKeys="));
                 if !has_tag_keys {
                     return Err(missing("TagKeys"));
                 }
+                let keys: Vec<String> = req
+                    .raw_query
+                    .split('&')
+                    .filter_map(|pair| pair.strip_prefix("tagKeys="))
+                    .map(|v| {
+                        percent_encoding::percent_decode_str(v)
+                            .decode_utf8_lossy()
+                            .into_owned()
+                    })
+                    .collect();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 if let Some(tags) = state.tags.get_mut(arn) {
-                    for (key, val) in &req.query_params {
-                        if key.starts_with("tagKeys") {
-                            tags.remove(val);
-                        }
+                    for key in &keys {
+                        tags.remove(key);
                     }
                 }
                 no_content()
@@ -2045,11 +2056,19 @@ mod tests {
         for (k, v) in query {
             qp.insert((*k).to_string(), (*v).to_string());
         }
+        // Mirror real dispatch: the raw query string carries every pair
+        // (including repeated `@httpQuery` list keys), which handlers parse for
+        // list params. `query_params` alone collapses repeats.
+        let raw_query = query
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
         AwsRequest {
             service: "apigatewayv2".to_string(),
             method: Method::POST,
             raw_path: format!("/{}", segs.join("/")),
-            raw_query: String::new(),
+            raw_query,
             path_segments: segs.iter().map(|s| s.to_string()).collect(),
             query_params: qp,
             headers: http::HeaderMap::new(),

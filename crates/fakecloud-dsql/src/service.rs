@@ -608,11 +608,15 @@ impl DsqlService {
 
     fn untag_resource(&self, req: &AwsRequest, arn: &str) -> Result<AwsResponse, AwsServiceError> {
         require_resource_arn(arn)?;
+        // `tagKeys` is an `@httpQuery` list sent as repeated `tagKeys=a&tagKeys=b`
+        // pairs; `query_params` collapses repeats to the last value, so parse the
+        // raw query string for every occurrence, percent-decoding each.
         let keys: Vec<String> = req
-            .query_params
-            .get("tagKeys")
-            .map(|v| v.split(',').map(|s| s.to_string()).collect())
-            .unwrap_or_default();
+            .raw_query
+            .split('&')
+            .filter_map(|pair| pair.strip_prefix("tagKeys="))
+            .map(percent_decode)
+            .collect();
         let mut accounts = self.state.write();
         let st = accounts
             .get_mut(&req.account_id)
