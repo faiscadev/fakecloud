@@ -376,3 +376,8 @@ async fn ce_acceptance() {
 async fn s3tables_acceptance() {
     run_shard("s3tables").await;
 }
+
+#[tokio::test]
+async fn lakeformation_acceptance() {
+    run_shard("lakeformation").await;
+}

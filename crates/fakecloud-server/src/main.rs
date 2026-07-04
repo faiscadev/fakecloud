@@ -573,6 +573,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let lakeformation_state: fakecloud_lakeformation::SharedLakeFormationState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4532,6 +4539,39 @@ async fn main() {
         cfn_snapshot_hooks.insert("s3tables", h);
     }
     registry.register(Arc::new(s3tables_service));
+
+    // AWS Lake Formation governance control plane.
+    let lakeformation_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("lakeformation").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_lakeformation::persistence::load_into(&store, &lakeformation_state) {
+                Ok(fakecloud_lakeformation::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded lakeformation persistence snapshot");
+                }
+                Ok(fakecloud_lakeformation::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no lakeformation persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut lakeformation_service =
+        fakecloud_lakeformation::LakeFormationService::new(lakeformation_state.clone());
+    if let Some(store) = lakeformation_snapshot_store {
+        lakeformation_service = lakeformation_service.with_snapshot_store(store);
+    }
+    if let Some(h) = lakeformation_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("lakeformation", h);
+    }
+    registry.register(Arc::new(lakeformation_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

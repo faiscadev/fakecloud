@@ -6,7 +6,7 @@ template = "page.html"
 
 [ElasticMQ](https://github.com/softwaremill/elasticmq) is a message queue server with an Amazon SQS-compatible interface. Scala-based, focused, battle-tested. Good at what it does.
 
-fakecloud's SQS is one of 66 services and ties into the rest (SNS fan-out, Lambda event source mappings, DLQ to other services, IAM policy enforcement).
+fakecloud's SQS is one of 67 services and ties into the rest (SNS fan-out, Lambda event source mappings, DLQ to other services, IAM policy enforcement).
 
 ## When to pick ElasticMQ
 

@@ -81,6 +81,7 @@ SERVICES=(
     "resource-groups:resource-groups"
     "ce:cost-explorer"
     "tagging:resource-groups-tagging-api"
+    "lakeformation:lakeformation"
     "s3tables:s3tables"
     "ram:ram"
 )
