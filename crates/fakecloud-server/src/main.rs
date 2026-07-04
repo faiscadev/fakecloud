@@ -594,6 +594,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let codedeploy_state: fakecloud_codedeploy::SharedCodeDeployState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let opensearch_state: fakecloud_opensearch::SharedOpenSearchState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4653,6 +4660,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("codeconnections", h);
     }
     registry.register(Arc::new(codeconnections_service));
+
+    // AWS CodeDeploy: awsJson1.1 control plane (applications, revisions,
+    // deployment groups, deployment configurations, deployments).
+    let codedeploy_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("codedeploy").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_codedeploy::persistence::load_into(&store, &codedeploy_state) {
+                Ok(fakecloud_codedeploy::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded codedeploy persistence snapshot");
+                }
+                Ok(fakecloud_codedeploy::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no codedeploy persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut codedeploy_service =
+        fakecloud_codedeploy::CodeDeployService::new(codedeploy_state.clone());
+    if let Some(store) = codedeploy_snapshot_store {
+        codedeploy_service = codedeploy_service.with_snapshot_store(store);
+    }
+    if let Some(h) = codedeploy_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("codedeploy", h);
+    }
+    registry.register(Arc::new(codedeploy_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

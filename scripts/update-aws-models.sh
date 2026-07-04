@@ -86,6 +86,7 @@ SERVICES=(
     "s3tables:s3tables"
     "ram:ram"
     "codeconnections:codeconnections"
+    "codedeploy:codedeploy"
 )
 
 # Sparse checkout only the models we need
