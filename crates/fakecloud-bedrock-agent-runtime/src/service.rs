@@ -2294,31 +2294,53 @@ async fn handle_untag_resource(
         Some(1011),
         true,
     )?;
-    let tag_keys = req.query_params.get("tagKeys").cloned().or_else(|| {
-        body.get("tagKeys").and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-            } else {
-                v.as_str().map(|s| s.to_string())
-            }
+    // `tagKeys` is an `@httpQuery` list sent as repeated `tagKeys=a&tagKeys=b`
+    // pairs; `query_params` collapses repeats to the last value, so parse every
+    // occurrence out of the raw query string, percent-decoding each. Fall back
+    // to a JSON body (list or comma-joined string) for clients that send it
+    // there.
+    let query_present = req
+        .raw_query
+        .split('&')
+        .any(|pair| pair == "tagKeys" || pair.starts_with("tagKeys="));
+    let mut keys: Vec<String> = req
+        .raw_query
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("tagKeys="))
+        .map(|v| {
+            percent_encoding::percent_decode_str(v)
+                .decode_utf8_lossy()
+                .into_owned()
         })
-    });
-    if tag_keys.is_none() {
+        .filter(|s| !s.is_empty())
+        .collect();
+    let body_present = body.get("tagKeys").is_some();
+    if !query_present {
+        if let Some(v) = body.get("tagKeys") {
+            if let Some(arr) = v.as_array() {
+                keys = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            } else if let Some(s) = v.as_str() {
+                keys = s
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+        }
+    }
+    if !query_present && !body_present {
         return Err(validation("tagKeys is required"));
     }
-    let tag_keys = tag_keys.unwrap();
-    let keys: Vec<&str> = tag_keys.split(',').filter(|s| !s.is_empty()).collect();
 
     let arn = resource_arn.unwrap();
     let mut accts = svc.state.write();
     let s = accts.get_or_create(&req.account_id);
     if let Some(entry) = s.tags.get_mut(&arn) {
-        for k in keys {
+        for k in &keys {
             entry.remove(k);
         }
     }

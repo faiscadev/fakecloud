@@ -24,15 +24,24 @@ impl BedrockAgentService {
     pub(super) fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let arn = req_str(&body, "resourceArn")?;
+        // `tagKeys` is an `@httpQuery` list sent as repeated `tagKeys=a&tagKeys=b`
+        // pairs; `query_params` collapses repeats to the last value, so parse
+        // every occurrence out of the raw query string, percent-decoding each.
+        // Fall back to a JSON body for clients that send the keys there.
         let keys: Vec<String> = if let Some(v) = body.get("tagKeys").and_then(|v| v.as_array()) {
             v.iter()
                 .filter_map(|x| x.as_str().map(|s| s.to_string()))
                 .collect()
         } else {
-            req.query_params
-                .get("tagKeys")
-                .map(|s| vec![s.clone()])
-                .unwrap_or_default()
+            req.raw_query
+                .split('&')
+                .filter_map(|pair| pair.strip_prefix("tagKeys="))
+                .map(|v| {
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned()
+                })
+                .collect()
         };
         let mut accts = self.state.write();
         let state = accts.get_or_create(&req.account_id, &req.region);
