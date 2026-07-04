@@ -1,6 +1,6 @@
 {
-  "variants_passed": 152159,
-  "total_variants": 152159,
+  "variants_passed": 154915,
+  "total_variants": 154915,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -241,6 +241,10 @@
     "dms": {
       "passed": 3344,
       "total": 3344
+    },
+    "transfer": {
+      "passed": 2756,
+      "total": 2756
     }
   }
 }

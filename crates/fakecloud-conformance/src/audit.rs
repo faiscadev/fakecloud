@@ -186,6 +186,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         // mappings (same pattern as the bedrock control/data-plane crate).
         ("backup", "backup", &["service.rs"], &["backup"]),
         ("glacier", "glacier", &["service.rs"], &["glacier"]),
+        ("transfer", "transfer", &["service.rs"], &["transfer"]),
         ("es", "opensearch", &["service.rs"], &["es", "opensearch"]),
         (
             "opensearch",

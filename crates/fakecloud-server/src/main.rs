@@ -495,6 +495,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let transfer_state: fakecloud_transfer::SharedTransferState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let verifiedpermissions_state: fakecloud_verifiedpermissions::SharedVerifiedPermissionsState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -4137,6 +4144,35 @@ async fn main() {
         dms_service = dms_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(dms_service));
+
+    // Transfer Family control plane.
+    let transfer_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("transfer").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_transfer::persistence::load_into(&store, &transfer_state) {
+                Ok(fakecloud_transfer::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded transfer persistence snapshot");
+                }
+                Ok(fakecloud_transfer::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no transfer persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut transfer_service = fakecloud_transfer::TransferService::new(transfer_state.clone());
+    if let Some(store) = transfer_snapshot_store {
+        transfer_service = transfer_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(transfer_service));
 
     // Verified Permissions control plane + Cedar authorization.
     let verifiedpermissions_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

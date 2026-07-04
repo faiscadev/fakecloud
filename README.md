@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 152,159 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 154,915 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-60 services, 4,625 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+61 services, 4,696 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
@@ -74,6 +74,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 | RDS Data API              | 6   | Real SQL on the backing Postgres/MySQL container, typed params/results incl. `bytea`/`BLOB`, transactions, batch |
 | Redshift                  | 141 | Full control plane: clusters, snapshots, parameter/subnet groups, snapshot schedules, endpoint access, logging, cross-region snapshot-copy config, tagging |
 | Database Migration Service | 119 | Full control plane: replication instances/tasks/endpoints, subnet groups, event subscriptions, certificates, serverless replication configs, data providers, instance profiles, migration projects, schema conversion, Fleet Advisor, tagging; persisted. No data-migration engine |
+| Transfer Family           | 71  | Full control plane: SFTP/FTPS/FTP/AS2 servers (start/stop settle state), users + SSH keys, host keys, accesses, workflows + executions, agreements, connectors (`TestConnection`, file transfer, directory listing, remote delete/move), profiles, certificates, security policies, web apps, `TestIdentityProvider`, tagging; persisted. No SFTP/AS2 transport engine |
 | Aurora DSQL               | 16  | Serverless distributed Postgres control plane: clusters, resource policies, change streams to Kinesis, multi-region, tagging |
 | Resource Groups           | 23  | Groups by tag/CloudFormation-stack query, explicit membership, group configuration, tagging, account settings, tag-sync tasks |
 | Resource Groups Tagging API | 9 | Cross-service tag reads/writes, compliance summary, tag reports, backed by a real cross-service tag index |
@@ -126,6 +127,7 @@ Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fak
 | RDS Data API              | 6 ops, real SQL + typed results + transactions on the RDS container  | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Redshift                  | 141 ops, full control plane free (clusters, snapshots, endpoint access, logging) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Database Migration Service | 119 ops, full control plane free (replication instances/tasks/endpoints, subnet groups, serverless configs, schema conversion) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
+| Transfer Family           | 71 ops, full control plane free (servers, users, SSH/host keys, accesses, workflows, agreements, connectors, profiles, certificates, web apps) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Aurora DSQL               | 16 ops, full control plane free (clusters, policies, streams, tagging) | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Resource Groups           | 23 ops, groups + queries + membership + tag-sync, free | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Resource Groups Tagging API | 9 ops, cross-service tag reads/writes + reports, free | [Paid only](https://docs.localstack.cloud/references/licensing/) |
