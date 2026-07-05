@@ -405,6 +405,7 @@ pub struct CloudFormationDeps {
     pub ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
+    pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
 }
 
 pub struct CloudFormationService {
@@ -467,6 +468,8 @@ pub(crate) struct ContainerBackingHandles {
     elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     ecs_state: fakecloud_ecs::SharedEcsState,
     ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    mq_state: fakecloud_mq::SharedMqState,
+    mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
 }
 
 impl ContainerBackingHandles {
@@ -483,6 +486,8 @@ impl ContainerBackingHandles {
             elasticache_runtime: p.elasticache_runtime.clone(),
             ecs_state: p.ecs_state.clone(),
             ecs_runtime: p.ecs_runtime.clone(),
+            mq_state: p.mq_state.clone(),
+            mq_runtime: p.mq_runtime.clone(),
         }
     }
 
@@ -592,6 +597,18 @@ impl ContainerBackingHandles {
                         });
                     }
                 }
+                ContainerSpawnIntent::MqBroker { broker_id } => {
+                    if let Some(runtime) = self.mq_runtime.clone() {
+                        let mq_state = self.mq_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_mq::cfn_provision::cfn_ensure_broker_container(
+                                mq_state, runtime, broker_id, account,
+                            )
+                            .await;
+                        });
+                    }
+                }
             }
         }
     }
@@ -694,6 +711,16 @@ impl ContainerBackingHandles {
                         )
                         .await;
                     });
+                }
+                ContainerTeardownIntent::MqBroker { broker_id } => {
+                    if let Some(runtime) = self.mq_runtime.clone() {
+                        tokio::spawn(async move {
+                            fakecloud_mq::cfn_provision::cfn_teardown_broker_container(
+                                runtime, broker_id,
+                            )
+                            .await;
+                        });
+                    }
                 }
             }
         }
@@ -846,6 +873,7 @@ impl CloudFormationService {
             ec2_runtime: self.deps.ec2_runtime.clone(),
             ecs_runtime: self.deps.ecs_runtime.clone(),
             elasticache_runtime: self.deps.elasticache_runtime.clone(),
+            mq_runtime: self.deps.mq_runtime.clone(),
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -3123,6 +3151,7 @@ mod tests {
             ec2_runtime: None,
             ecs_runtime: None,
             elasticache_runtime: None,
+            mq_runtime: None,
         };
         CloudFormationService::new(cf_state, deps)
     }

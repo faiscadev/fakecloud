@@ -1205,6 +1205,7 @@ async fn main() {
             ec2_runtime: ec2_runtime.clone(),
             ecs_runtime: ecs_runtime.clone(),
             elasticache_runtime: elasticache_runtime.clone(),
+            mq_runtime: mq_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {

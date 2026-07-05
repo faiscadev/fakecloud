@@ -63,13 +63,26 @@ impl ResourceProvisioner {
         }
 
         let (id, arn) = mq_shared::create_broker_record(acct, &account, &region, &body);
-        // CloudFormation blocks CREATE_COMPLETE until the broker is RUNNING, so
-        // settle the freshly-created broker through the in-memory lifecycle
-        // (auto_settle = true); the CFN provisioner is synchronous and does not
-        // spawn a backing container.
-        acct.reconcile_brokers(true);
+        // With an MQ container runtime configured, the broker is left
+        // CREATION_IN_PROGRESS and backed by a REAL ActiveMQ/RabbitMQ container
+        // in the background (drained after provisioning), settling to RUNNING
+        // once it accepts connections -- the same container the direct
+        // `CreateBroker` path spawns. Without a runtime (CI / metadata-only),
+        // settle it through the in-memory lifecycle so the stack still reaches
+        // CREATE_COMPLETE.
+        let back_with_container = self.mq_runtime.is_some();
+        if !back_with_container {
+            acct.reconcile_brokers(true);
+        }
 
         let (config_id, config_rev) = broker_current_config(acct.brokers.get(&id));
+        if back_with_container {
+            self.pending_container_spawns
+                .lock()
+                .push(super::ContainerSpawnIntent::MqBroker {
+                    broker_id: id.clone(),
+                });
+        }
         Ok(broker_attributes(
             id,
             arn,
@@ -238,14 +251,25 @@ impl ResourceProvisioner {
     }
 
     pub(super) fn delete_mq_broker(&self, physical_id: &str) {
-        let mut guard = self.mq_state.write();
-        let acct = guard.get_or_create(&self.account_id);
-        if let Some(b) = acct.brokers.remove(physical_id) {
-            if let Some(arn) = b.get("brokerArn").and_then(Value::as_str) {
-                acct.tags.remove(arn);
+        {
+            let mut guard = self.mq_state.write();
+            let acct = guard.get_or_create(&self.account_id);
+            if let Some(b) = acct.brokers.remove(physical_id) {
+                if let Some(arn) = b.get("brokerArn").and_then(Value::as_str) {
+                    acct.tags.remove(arn);
+                }
             }
+            acct.users.remove(physical_id);
+            acct.data_plane.remove(physical_id);
         }
-        acct.users.remove(physical_id);
+        // Reap the REAL backing container (if any) off the request path.
+        if self.mq_runtime.is_some() {
+            self.pending_container_teardowns.lock().push(
+                super::ContainerTeardownIntent::MqBroker {
+                    broker_id: physical_id.to_string(),
+                },
+            );
+        }
     }
 
     // -------------------------------------------------------- Configuration

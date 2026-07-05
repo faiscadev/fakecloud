@@ -146,12 +146,6 @@ impl MqRuntime {
         &self.cli
     }
 
-    /// Address fakecloud advertises for clients to reach a spawned broker and
-    /// uses for readiness probes.
-    pub fn endpoint_host(&self) -> &str {
-        &self.net.sibling_host
-    }
-
     /// Spawn (or, if one is already tracked, return) the backing container for
     /// a broker and block until its primary wire port accepts connections.
     /// `user_config` is the decoded configuration revision data (the
@@ -195,6 +189,74 @@ impl MqRuntime {
             .write()
             .insert(broker_id.to_string(), running.clone());
         Ok(running)
+    }
+
+    /// Re-attach to a broker's PERSISTED backing container after a fakecloud
+    /// restart, preserving its message data (KahaDB / Mnesia), rather than
+    /// spawning a fresh empty one. Returns `Ok(None)` when the container is
+    /// truly gone (the caller then creates fresh), `Err` on a transient daemon
+    /// failure (the caller retries), and `Ok(Some(..))` once it is running and
+    /// its (possibly re-assigned) published host ports have been re-read.
+    pub async fn reattach_broker(
+        &self,
+        broker_id: &str,
+        engine: MqEngine,
+        container_id: &str,
+    ) -> Result<Option<RunningBroker>, RuntimeError> {
+        // Does the container still exist? `inspect` exits non-zero (no such
+        // object) when it is gone -- distinct from a daemon error, which we
+        // can't observe separately here, so a gone-or-broken container falls to
+        // a fresh create. A truly transient daemon outage surfaces on `start`.
+        let inspect = tokio::process::Command::new(&self.cli)
+            .args(["inspect", "--format", "{{.State.Status}}", container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !inspect.status.success() {
+            return Ok(None);
+        }
+        // `start` is idempotent for an already-running container.
+        let start = tokio::process::Command::new(&self.cli)
+            .args(["start", container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !start.status.success() {
+            let stderr = String::from_utf8_lossy(&start.stderr);
+            // The container vanished between inspect and start -> create fresh.
+            if stderr.contains("No such container") || stderr.contains("no such container") {
+                return Ok(None);
+            }
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "reattach start failed: {}",
+                stderr.trim()
+            )));
+        }
+        // Re-read the host->container port mapping: a restarted container with
+        // ephemeral publishing may be assigned different host ports.
+        let mut ports = BTreeMap::new();
+        for (label, cport) in engine.published_ports() {
+            let hp = self.lookup_port(container_id, *cport).await?;
+            ports.insert((*label).to_string(), hp);
+        }
+        let ready_port = ports.get(engine.ready_label()).copied().ok_or_else(|| {
+            RuntimeError::ContainerStartFailed("primary wire port was not published".to_string())
+        })?;
+        self.wait_for_ready(ready_port).await?;
+        let running = RunningBroker {
+            container_id: container_id.to_string(),
+            host: self.net.sibling_host.clone(),
+            ports,
+        };
+        self.containers
+            .write()
+            .insert(broker_id.to_string(), running.clone());
+        tracing::info!(
+            broker_id = %broker_id,
+            container_id = %container_id,
+            "re-attached persisted MQ broker container",
+        );
+        Ok(Some(running))
     }
 
     /// Stop + remove a broker's backing container and drop its tracking entry.
@@ -304,10 +366,12 @@ impl MqRuntime {
             return Err(e);
         }
 
-        // RabbitMQ users beyond the create-time env user are applied live.
+        // RabbitMQ users beyond the create-time env user are applied live,
+        // straight against the just-created container id (its tracking entry
+        // does not exist yet).
         if engine == MqEngine::RabbitMq {
             for u in users.iter().skip(1) {
-                let _ = self.rabbit_apply_user(&container_id, u).await;
+                let _ = self.rabbit_apply_user_to_container(&container_id, u).await;
             }
         }
 
@@ -383,38 +447,65 @@ impl MqRuntime {
         Ok(())
     }
 
-    /// Apply a single RabbitMQ user live via `rabbitmqctl` (add-or-update,
-    /// permissions, and tags). Used for the extra create-time users and for
-    /// the immediate `CreateUser`/`UpdateUser` path.
+    /// Apply a single RabbitMQ user live via `rabbitmqctl`, resolving the
+    /// broker's tracked container. Returns `Err(Unavailable)` when no live
+    /// container is tracked for the broker (the caller retries -- e.g. a
+    /// `CreateUser` that raced the broker still booting), and `Err` if any
+    /// `rabbitmqctl` step fails, so the caller can retry until the user really
+    /// exists on the broker (a user the API claims exists MUST be able to log
+    /// in).
     pub async fn rabbit_apply_user(
         &self,
-        broker_id_or_container: &str,
+        broker_id: &str,
         user: &BrokerUser,
     ) -> Result<(), RuntimeError> {
-        let container = self.resolve_container(broker_id_or_container)?;
-        // add_user fails if the user exists; fall back to change_password.
+        let container = self.resolve_container(broker_id)?;
+        self.rabbit_apply_user_to_container(&container, user).await
+    }
+
+    /// The low-level `rabbitmqctl` apply against a known container id. Used both
+    /// by the create-time extra-user loop (container id known, not yet tracked)
+    /// and by `rabbit_apply_user` after resolving the tracked container.
+    async fn rabbit_apply_user_to_container(
+        &self,
+        container_id: &str,
+        user: &BrokerUser,
+    ) -> Result<(), RuntimeError> {
+        // add_user fails if the user already exists; fall back to
+        // change_password so an UpdateUser is deterministic.
         let added = self
-            .rabbitmqctl(&container, &["add_user", &user.username, &user.password])
+            .rabbitmqctl(container_id, &["add_user", &user.username, &user.password])
             .await;
-        if !added {
-            let _ = self
+        if !added
+            && !self
                 .rabbitmqctl(
-                    &container,
+                    container_id,
                     &["change_password", &user.username, &user.password],
                 )
-                .await;
+                .await
+        {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "rabbitmqctl could not create or update user {}",
+                user.username
+            )));
         }
         let tag = if user.console_access {
             "administrator"
         } else {
             "management"
         };
-        let _ = self
-            .rabbitmqctl(&container, &["set_user_tags", &user.username, tag])
-            .await;
-        let _ = self
+        if !self
+            .rabbitmqctl(container_id, &["set_user_tags", &user.username, tag])
+            .await
+        {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "rabbitmqctl set_user_tags failed for {}",
+                user.username
+            )));
+        }
+        if !self
             .rabbitmqctl(
-                &container,
+                container_id,
                 &[
                     "set_permissions",
                     "-p",
@@ -425,35 +516,44 @@ impl MqRuntime {
                     ".*",
                 ],
             )
-            .await;
+            .await
+        {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "rabbitmqctl set_permissions failed for {}",
+                user.username
+            )));
+        }
         Ok(())
     }
 
-    /// Delete a RabbitMQ user live via `rabbitmqctl`.
+    /// Delete a RabbitMQ user live via `rabbitmqctl`. `Err(Unavailable)` when no
+    /// live container is tracked (the caller retries best-effort).
     pub async fn rabbit_delete_user(
         &self,
         broker_id: &str,
         username: &str,
     ) -> Result<(), RuntimeError> {
         let container = self.resolve_container(broker_id)?;
-        let _ = self
+        if !self
             .rabbitmqctl(&container, &["delete_user", username])
-            .await;
+            .await
+        {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "rabbitmqctl delete_user failed for {username}"
+            )));
+        }
         Ok(())
     }
 
-    /// True if the broker currently has a tracked live container.
-    pub fn is_running(&self, broker_id: &str) -> bool {
-        self.containers.read().contains_key(broker_id)
-    }
-
-    fn resolve_container(&self, broker_id_or_container: &str) -> Result<String, RuntimeError> {
-        if let Some(c) = self.containers.read().get(broker_id_or_container) {
-            return Ok(c.container_id.clone());
-        }
-        // Allow passing a container id directly (create path, before the
-        // tracking entry exists).
-        Ok(broker_id_or_container.to_string())
+    /// Resolve a broker id to its tracked container id, or `Err(Unavailable)`
+    /// when no live container is tracked (never fabricates a bogus id from the
+    /// broker id -- that would exec against a nonexistent container).
+    fn resolve_container(&self, broker_id: &str) -> Result<String, RuntimeError> {
+        self.containers
+            .read()
+            .get(broker_id)
+            .map(|c| c.container_id.clone())
+            .ok_or(RuntimeError::Unavailable)
     }
 
     async fn rabbitmqctl(&self, container_id: &str, ctl_args: &[&str]) -> bool {

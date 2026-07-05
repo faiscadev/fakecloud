@@ -96,18 +96,29 @@ survive. The SigV4 signing name is `mq`.
 State is account-partitioned and, in persistent mode, snapshotted to disk and
 restored on startup. Any broker left mid-transition (`CREATION_IN_PROGRESS`,
 `REBOOT_IN_PROGRESS`, `DELETION_IN_PROGRESS`) is reconciled on load so an
-interrupted lifecycle never wedges.
+interrupted lifecycle never wedges. When a container runtime is configured, a
+broker persisted as `RUNNING` is re-driven through its backing container on
+restart: the persisted container is **re-attached** (preserving its message
+data) if it still exists, or a fresh one is spawned if it is gone, with bounded
+retries so a transient bring-up hiccup never terminally fails a healthy broker.
 
 ## CloudFormation
 
 `AWS::AmazonMQ::Broker`, `AWS::AmazonMQ::Configuration`, and
 `AWS::AmazonMQ::ConfigurationAssociation` are provisioned as real records in the
 mq service state (they read back through `DescribeBroker` /
-`DescribeConfiguration`). `Ref` resolves to the broker / configuration id, and
-`Fn::GetAtt` exposes the broker's `Arn`, `IpAddresses`, `OpenWireEndpoints`,
-`AmqpEndpoints`, `StompEndpoints`, `MqttEndpoints`, `WssEndpoints`,
-`ConfigurationId`, and `ConfigurationRevision`, and the configuration's `Arn`,
-`Id`, and `Revision`.
+`DescribeConfiguration`). When a container runtime is configured, an
+`AWS::AmazonMQ::Broker` is backed by a REAL ActiveMQ/RabbitMQ container the same
+way the direct `CreateBroker` API is: the stack inserts the record
+`CREATION_IN_PROGRESS` and the broker settles to `RUNNING` once its container
+accepts connections (a stack delete stops + removes the container). `Ref`
+resolves to the broker / configuration id, and `Fn::GetAtt` exposes the broker's
+`Arn`, `IpAddresses`, `OpenWireEndpoints`, `AmqpEndpoints`, `StompEndpoints`,
+`MqttEndpoints`, `WssEndpoints`, `ConfigurationId`, and `ConfigurationRevision`,
+and the configuration's `Arn`, `Id`, and `Revision`. (The `Fn::GetAtt` endpoint
+lists are resolved synchronously at provision time and so carry the cosmetic
+forms; `DescribeBroker` returns the real connectable endpoints once the broker is
+`RUNNING`.)
 
 ## Known limitations
 
@@ -117,5 +128,4 @@ via the in-memory lifecycle, but no real broker is spawned and the endpoints are
 the cosmetic `*.amazonaws.com` forms). `ACTIVE_STANDBY_MULTI_AZ` ActiveMQ brokers
 are backed by a single container (the endpoint list reflects it) rather than two
 independent instances. TLS transport variants are served over the mapped
-plaintext ports. CloudFormation-provisioned brokers are records in the mq state
-and do not spawn a backing container (the direct `CreateBroker` API does).
+plaintext ports.

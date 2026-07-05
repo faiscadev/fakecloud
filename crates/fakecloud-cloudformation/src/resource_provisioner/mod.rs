@@ -921,6 +921,7 @@ pub struct ResourceProvisioner {
     pub ec2_runtime: Option<Arc<fakecloud_ec2::runtime::Ec2Runtime>>,
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
+    pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     /// Intents queued by container-backed provisioners during the synchronous
     /// provisioning pass. After provisioning, `CreateStack` drains these and
     /// backs each freshly-inserted record with a real container in the
@@ -1006,6 +1007,10 @@ pub enum ContainerSpawnIntent {
         cluster_name: String,
         service_name: String,
     },
+    /// `AWS::AmazonMQ::Broker` — back the inserted broker with a real
+    /// ActiveMQ/RabbitMQ container via the MQ runtime, matching the direct
+    /// `CreateBroker` path.
+    MqBroker { broker_id: String },
 }
 
 /// A container-backed resource the synchronous delete pass removed from memory
@@ -1036,6 +1041,8 @@ pub enum ContainerTeardownIntent {
     /// `AWS::EC2::Instance` -- terminate the REAL EC2 instance + reap its
     /// backing container when the stack is deleted.
     Ec2Instance { instance_id: String },
+    /// `AWS::AmazonMQ::Broker` -- stop + remove the ActiveMQ/RabbitMQ container.
+    MqBroker { broker_id: String },
 }
 
 /// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
@@ -6566,6 +6573,7 @@ mod tests {
             ec2_runtime: None,
             ecs_runtime: None,
             elasticache_runtime: None,
+            mq_runtime: None,
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),

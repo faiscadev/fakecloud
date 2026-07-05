@@ -18,6 +18,7 @@
 //! transient state and settling on the next describe (with in-flight
 //! transitions reconciled on restart).
 
+pub mod cfn_provision;
 pub mod persistence;
 pub mod runtime;
 pub mod service;
