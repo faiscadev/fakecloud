@@ -608,6 +608,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let codecommit_state: fakecloud_codecommit::SharedCodeCommitState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4864,6 +4871,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("codeartifact", h);
     }
     registry.register(Arc::new(codeartifact_service));
+
+    // Amazon EFS: restJson1 control plane (file systems, mount targets, access
+    // points, lifecycle/backup/policy configuration, replication, tagging).
+    let efs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("efs").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_efs::persistence::load_into(&store, &efs_state) {
+                Ok(fakecloud_efs::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded efs persistence snapshot");
+                }
+                Ok(fakecloud_efs::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no efs persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut efs_service =
+        fakecloud_efs::EfsService::new(efs_state.clone()).with_ec2_state(ec2_state.clone());
+    if let Some(store) = efs_snapshot_store {
+        efs_service = efs_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(efs_service));
 
     // AWS CodeCommit: awsJson1.1 git-repository control plane (repositories,
     // branches, commits/files/blobs, pull requests, approval-rule templates,

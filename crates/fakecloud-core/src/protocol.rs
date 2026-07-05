@@ -60,6 +60,10 @@ const REST_JSON_SERVICES: &[&str] = &[
     // AWS CodeArtifact: restJson1 control plane (`@http` method + path routing,
     // multi-value query params, JSON bodies).
     "codeartifact",
+    // Amazon EFS: restJson1 control plane (path-labelled `@http` URIs over file
+    // systems, mount targets, access points; JSON bodies). Signs as
+    // `elasticfilesystem`.
+    "elasticfilesystem",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

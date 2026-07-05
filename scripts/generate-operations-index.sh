@@ -66,6 +66,7 @@ SERVICES=(
     "elasticbeanstalk|Elastic Beanstalk|elasticbeanstalk"
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
+    "efs|Amazon EFS|efs"
     "glacier|Amazon S3 Glacier|glacier"
     "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"

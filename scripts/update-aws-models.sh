@@ -91,6 +91,7 @@ SERVICES=(
     "codedeploy:codedeploy"
     "codepipeline:codepipeline"
     "codeartifact:codeartifact"
+    "efs:efs"
 )
 
 # Sparse checkout only the models we need

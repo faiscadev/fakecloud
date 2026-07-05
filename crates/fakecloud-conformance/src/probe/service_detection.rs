@@ -191,6 +191,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // AWS CodeArtifact: restJson1 control plane (`@http` method + path
         // routing over domains, repositories, packages, and package groups).
         "codeartifact" => Protocol::Rest,
+        // Amazon EFS: restJson1 control plane (path-labelled `@http` URIs over
+        // file systems, mount targets, and access points). Signs as
+        // `elasticfilesystem`.
+        "elasticfilesystem" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

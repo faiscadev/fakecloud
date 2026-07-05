@@ -694,6 +694,31 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "efs",
+        // Amazon EFS is a real, persisted control plane. The provider's core
+        // resources round-trip through create/read/update/delete: a file system
+        // (settling `creating` -> `available` on the next describe so the create
+        // waiter completes, reporting its size breakdown, performance/throughput
+        // modes, and replication-overwrite protection), a mount target (its
+        // Availability Zone, VPC, network interface, and IP resolved from the
+        // real Terraform-created subnet in EC2 state), an access point (POSIX
+        // user + root directory), and the backup-policy and file-system-policy
+        // sub-resources (which persist and read back).
+        //
+        // The replication-configuration resource is deferred: it stands up a
+        // destination file system in a second Region via an aliased provider,
+        // modelling a cross-Region data-movement lifecycle (and an AWS-managed
+        // destination file system) a single-endpoint control plane can't
+        // reproduce faithfully. The mount-target / access-point data sources are
+        // deferred alongside their read-only assertions on that deep networking.
+        run_regex: concat!(
+            "^TestAccEFS(",
+            "FileSystem|MountTarget|AccessPoint|BackupPolicy|FileSystemPolicy",
+            ")_basic$",
+        ),
+        deny: &[],
+    },
+    Service {
         name: "glacier",
         // Amazon S3 Glacier stores real archive bytes and computes a real
         // SHA-256 tree hash, so the standalone vault resource round-trips
@@ -1572,6 +1597,16 @@ pub const SHARDS: &[Shard] = &[
             "Cluster|ClusterDataSource|ClustersDataSource|ClusterVersionsDataSource",
             "|AccessEntry|AccessEntryDataSource|AccessPolicyAssociation",
             "|IdentityProviderConfig|PodIdentityAssociation",
+            ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "efs",
+        service: "efs",
+        run_regex: concat!(
+            "^TestAccEFS(",
+            "FileSystem|MountTarget|AccessPoint|BackupPolicy|FileSystemPolicy",
             ")_basic$",
         ),
         extra_deny: &[],
