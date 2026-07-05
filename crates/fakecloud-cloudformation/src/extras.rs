@@ -2732,6 +2732,7 @@ mod tests {
             eks: shared::<fakecloud_eks::state::EksState>(),
             servicediscovery: shared::<fakecloud_servicediscovery::state::ServiceDiscoveryState>(),
             codeartifact: shared::<fakecloud_codeartifact::CodeArtifactState>(),
+            codecommit: shared::<fakecloud_codecommit::CodeCommitState>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
