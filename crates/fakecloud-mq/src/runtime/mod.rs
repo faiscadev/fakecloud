@@ -297,10 +297,28 @@ impl MqRuntime {
         args.push(format!("fakecloud-instance={}", self.instance_id));
         self.net.push_add_host_args(&mut args);
 
-        // RabbitMQ provisions its create-time user via env (the env-created
-        // user is tagged `administrator` with full `/` permissions), which is
-        // available the instant the broker boots -- no post-start exec race.
         if engine == MqEngine::RabbitMq {
+            // Pin a STABLE container hostname: RabbitMQ derives its Erlang node
+            // name (rabbit@<hostname>) and its mnesia data directory from the
+            // hostname. Docker otherwise assigns a fresh random hostname, so a
+            // restarted/reattached container gets a different node name and its
+            // mnesia dir no longer matches -- the node never finishes starting.
+            // A hostname fixed at create time survives `docker start` (reattach)
+            // and reboot, keeping the node name and data dir stable. (We set
+            // only --hostname, not RABBITMQ_NODENAME, so RabbitMQ derives a
+            // consistent short node name and we avoid the long-vs-short-name
+            // resolution trap.)
+            args.push("--hostname".to_string());
+            args.push(rabbit_hostname(broker_id));
+            // Cap the memory high-watermark at an absolute value so a
+            // constrained CI runner (where the default 0.4 * detected-RAM can be
+            // miscomputed under a cgroup memory limit) doesn't trip a memory
+            // alarm that refuses connections.
+            args.push("-e".to_string());
+            args.push("RABBITMQ_VM_MEMORY_HIGH_WATERMARK_ABSOLUTE=384MiB".to_string());
+            // Provision the create-time user via env (the env-created user is
+            // tagged `administrator` with full `/` permissions), available the
+            // instant the broker boots -- no post-start exec race.
             if let Some(first) = users.first() {
                 args.push("-e".to_string());
                 args.push(format!("RABBITMQ_DEFAULT_USER={}", first.username));
@@ -605,46 +623,76 @@ impl MqRuntime {
     /// - **ActiveMQ**: poll the web console (Jetty on 8161), which starts LAST
     ///   in the ActiveMQ boot sequence -- once it answers HTTP, every transport
     ///   connector (OpenWire/AMQP/STOMP/MQTT/WS) is bound and accepting.
-    /// - **RabbitMQ**: `rabbitmqctl await_startup`, which returns only once the
-    ///   broker application (and its AMQP listener) is fully started.
+    /// - **RabbitMQ**: require BOTH `rabbitmq-diagnostics check_running` (the
+    ///   broker application has finished booting) AND a real AMQP protocol
+    ///   handshake on the mapped port (the AMQP listener actually accepts) --
+    ///   the app can report running a beat before the listener accepts, and a
+    ///   listener can accept before the app is ready.
+    ///
+    /// The window is generous (~180s): a constrained CI runner boots Erlang +
+    /// the management plugin slowly. On timeout the container's recent
+    /// `docker logs` and which check failed are logged so a CI failure is
+    /// diagnosable rather than a black box.
     async fn wait_for_broker_ready(
         &self,
         engine: MqEngine,
         container_id: &str,
         ports: &BTreeMap<String, u16>,
     ) -> Result<(), RuntimeError> {
-        // Up to ~90s: a cold JVM/Erlang broker boot (plus first-run image work)
-        // is materially slower than a cache.
+        // 360 * 500ms = ~180s (plus per-probe time).
+        const ATTEMPTS: u32 = 360;
+        let start = std::time::Instant::now();
         match engine {
             MqEngine::ActiveMq => {
                 let console = ports.get("console").copied().ok_or_else(|| {
                     RuntimeError::ContainerStartFailed("console port was not published".to_string())
                 })?;
-                for _ in 0..180 {
+                for _ in 0..ATTEMPTS {
                     if self.http_responds(console).await {
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+                self.log_readiness_timeout(
+                    container_id,
+                    "ActiveMQ web console never answered HTTP",
+                    start,
+                )
+                .await;
                 Err(RuntimeError::ContainerStartFailed(
-                    "ActiveMQ broker did not become protocol-ready within 90 seconds".to_string(),
+                    "ActiveMQ broker did not become protocol-ready within 180 seconds".to_string(),
                 ))
             }
             MqEngine::RabbitMq => {
-                for _ in 0..180 {
-                    // `await_startup` errors fast while the Erlang node is still
-                    // coming up, then blocks briefly and returns 0 once the app
-                    // (and AMQP listener) is running.
-                    if self
-                        .rabbitmqctl(container_id, &["await_startup", "--timeout", "10"])
-                        .await
-                    {
+                let amqp = ports.get("amqp").copied().ok_or_else(|| {
+                    RuntimeError::ContainerStartFailed("amqp port was not published".to_string())
+                })?;
+                let mut app_ok = false;
+                for _ in 0..ATTEMPTS {
+                    // `check_running` exits 0 once the RabbitMQ application has
+                    // finished booting; no fragile flags (unlike await_startup,
+                    // whose --timeout handling differs across CLI versions).
+                    if !app_ok {
+                        app_ok = self
+                            .exec_ok(
+                                container_id,
+                                &["rabbitmq-diagnostics", "-q", "check_running"],
+                            )
+                            .await;
+                    }
+                    if app_ok && self.amqp_accepts(amqp).await {
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+                let why = if app_ok {
+                    "RabbitMQ app is running but the AMQP listener never accepted a handshake"
+                } else {
+                    "RabbitMQ application never reported running (check_running)"
+                };
+                self.log_readiness_timeout(container_id, why, start).await;
                 Err(RuntimeError::ContainerStartFailed(
-                    "RabbitMQ broker did not become protocol-ready within 90 seconds".to_string(),
+                    "RabbitMQ broker did not become protocol-ready within 180 seconds".to_string(),
                 ))
             }
         }
@@ -673,12 +721,100 @@ impl MqRuntime {
         }
     }
 
+    /// True when the mapped AMQP port completes the AMQP 0-9-1 protocol header
+    /// handshake: after we send the protocol header a live RabbitMQ listener
+    /// replies with a `Connection.Start` method frame (type `0x01`), or its own
+    /// protocol header on a version mismatch. A not-yet-ready listener resets or
+    /// stays silent.
+    async fn amqp_accepts(&self, host_port: u16) -> bool {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let host = &self.net.sibling_host;
+        let Ok(mut stream) = tokio::net::TcpStream::connect(format!("{host}:{host_port}")).await
+        else {
+            return false;
+        };
+        if stream.write_all(b"AMQP\x00\x00\x09\x01").await.is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 8];
+        match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n >= 1 => buf[0] == 0x01 || buf.starts_with(b"AMQP"),
+            _ => false,
+        }
+    }
+
+    /// Run `docker exec <id> <argv...>` and report whether it exited 0.
+    async fn exec_ok(&self, container_id: &str, argv: &[&str]) -> bool {
+        let mut args = vec!["exec", container_id];
+        args.extend_from_slice(argv);
+        tokio::process::Command::new(&self.cli)
+            .args(&args)
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Log a readiness timeout with the failing check, elapsed time, and the
+    /// container's recent `docker logs`, so a CI failure is diagnosable instead
+    /// of a black box.
+    async fn log_readiness_timeout(
+        &self,
+        container_id: &str,
+        reason: &str,
+        started: std::time::Instant,
+    ) {
+        let logs = tokio::process::Command::new(&self.cli)
+            .args(["logs", "--tail", "60", container_id])
+            .output()
+            .await
+            .map(|o| {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+                s
+            })
+            .unwrap_or_else(|e| format!("<docker logs failed: {e}>"));
+        tracing::error!(
+            container_id = %container_id,
+            elapsed_secs = started.elapsed().as_secs(),
+            reason = %reason,
+            container_logs = %logs,
+            "MQ broker readiness timed out",
+        );
+    }
+
     async fn remove_container(&self, container_id: &str) {
         let _ = tokio::process::Command::new(&self.cli)
             .args(["rm", "-f", container_id])
             .output()
             .await;
     }
+}
+
+/// A STABLE, valid DNS-label container hostname for a RabbitMQ broker.
+///
+/// RabbitMQ derives its Erlang node name (`rabbit@<hostname>`) from the
+/// container hostname. If the hostname changes across restarts (Docker assigns
+/// a random one by default), the node cannot find its old Mnesia data directory
+/// (`/var/lib/rabbitmq/mnesia/rabbit@<hostname>`) and boot can stall or fail.
+/// Pinning a deterministic hostname derived from the broker id keeps the node
+/// name stable across reattach/reboot. The result is lowercased and reduced to
+/// `[a-z0-9-]`, truncated to a safe length, and prefixed so it always starts
+/// with a letter.
+fn rabbit_hostname(broker_id: &str) -> String {
+    let mut label = String::from("mq-");
+    for c in broker_id.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            label.push(c);
+        } else if c == '-' || c == '_' {
+            label.push('-');
+        }
+    }
+    label.truncate(60);
+    while label.ends_with('-') {
+        label.pop();
+    }
+    label
 }
 
 /// XML-escape a value for an attribute.
