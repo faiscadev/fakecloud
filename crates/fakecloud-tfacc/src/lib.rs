@@ -159,7 +159,21 @@ pub struct TestServer(fakecloud_testkit::TestServer);
 
 impl TestServer {
     pub async fn start() -> Self {
-        Self(fakecloud_testkit::TestServer::start().await)
+        // tfacc asserts the terraform provider's AWS response *contract*
+        // (attribute formats), not data-plane behaviour. For Amazon MQ that
+        // means the cosmetic `*.amazonaws.com` broker endpoints (e.g. the
+        // provider's `^https://…\.mq\.<region>\.amazonaws.com:8162$`
+        // console-URL regex). Disable ONLY MQ's real broker backend here so it
+        // returns those AWS-format endpoints instead of a real
+        // `http://127.0.0.1:<port>` from a spawned container -- the MQ data
+        // plane is proven separately by the Docker E2E suite. This is scoped to
+        // MQ (not a global container-CLI disable) because other container-backed
+        // services -- e.g. RDS, whose `CreateDBInstance` errors without a
+        // runtime -- must keep their real backends for their tfacc format tests.
+        Self(
+            fakecloud_testkit::TestServer::start_with_env(&[("FAKECLOUD_MQ_DISABLE_BACKEND", "1")])
+                .await,
+        )
     }
 
     pub fn port(&self) -> u16 {

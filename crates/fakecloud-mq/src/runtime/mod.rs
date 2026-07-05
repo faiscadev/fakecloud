@@ -78,15 +78,6 @@ impl MqEngine {
             MqEngine::RabbitMq => &[("amqp", 5672), ("console", 15672)],
         }
     }
-
-    /// The label whose mapped port readiness is probed before the broker is
-    /// reported `RUNNING` (the primary wire protocol).
-    fn ready_label(self) -> &'static str {
-        match self {
-            MqEngine::ActiveMq => "openwire",
-            MqEngine::RabbitMq => "amqp",
-        }
-    }
 }
 
 /// A broker user to provision into the running broker.
@@ -129,8 +120,20 @@ pub struct MqRuntime {
 
 impl MqRuntime {
     /// Construct the Docker/Podman runtime. Returns `None` when no container
-    /// CLI is available (fakecloud then degrades to control-plane-only MQ).
+    /// CLI is available (fakecloud then degrades to control-plane-only MQ), or
+    /// when the real backend is explicitly disabled via
+    /// `FAKECLOUD_MQ_DISABLE_BACKEND` (the terraform-provider acceptance
+    /// harness sets this: tfacc asserts the AWS response *format* -- the
+    /// cosmetic `*.amazonaws.com` endpoints -- and the data plane is proven
+    /// separately by the E2E suite, so spawning a real broker there would make
+    /// MQ return real `127.0.0.1:<port>` endpoints that fail the provider's
+    /// AWS-format assertions).
     pub fn new() -> Option<Self> {
+        if std::env::var("FAKECLOUD_MQ_DISABLE_BACKEND")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            return None;
+        }
         let cli = fakecloud_core::container_net::detect_container_cli()?;
         let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         Some(Self {
@@ -239,10 +242,8 @@ impl MqRuntime {
             let hp = self.lookup_port(container_id, *cport).await?;
             ports.insert((*label).to_string(), hp);
         }
-        let ready_port = ports.get(engine.ready_label()).copied().ok_or_else(|| {
-            RuntimeError::ContainerStartFailed("primary wire port was not published".to_string())
-        })?;
-        self.wait_for_ready(ready_port).await?;
+        self.wait_for_broker_ready(engine, container_id, &ports)
+            .await?;
         let running = RunningBroker {
             container_id: container_id.to_string(),
             host: self.net.sibling_host.clone(),
@@ -358,10 +359,10 @@ impl MqRuntime {
             }
         }
 
-        let ready_port = ports.get(engine.ready_label()).copied().ok_or_else(|| {
-            RuntimeError::ContainerStartFailed("primary wire port was not published".to_string())
-        })?;
-        if let Err(e) = self.wait_for_ready(ready_port).await {
+        if let Err(e) = self
+            .wait_for_broker_ready(engine, &container_id, &ports)
+            .await
+        {
             self.remove_container(&container_id).await;
             return Err(e);
         }
@@ -596,22 +597,80 @@ impl MqRuntime {
             })
     }
 
-    async fn wait_for_ready(&self, host_port: u16) -> Result<(), RuntimeError> {
-        let host = &self.net.sibling_host;
-        // Brokers (JVM ActiveMQ, Erlang RabbitMQ) take longer to boot than a
-        // cache, so allow up to ~60s.
-        for _ in 0..120 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::net::TcpStream::connect(format!("{host}:{host_port}"))
-                .await
-                .is_ok()
-            {
-                return Ok(());
+    /// Block until the broker is PROTOCOL-ready, not merely TCP-open. A bare
+    /// TCP connect races the broker's JVM/Erlang startup: the ServerSocket
+    /// binds early but the broker resets connections until it is fully
+    /// initialized (the "Connection reset by peer" the E2E hit). So:
+    ///
+    /// - **ActiveMQ**: poll the web console (Jetty on 8161), which starts LAST
+    ///   in the ActiveMQ boot sequence -- once it answers HTTP, every transport
+    ///   connector (OpenWire/AMQP/STOMP/MQTT/WS) is bound and accepting.
+    /// - **RabbitMQ**: `rabbitmqctl await_startup`, which returns only once the
+    ///   broker application (and its AMQP listener) is fully started.
+    async fn wait_for_broker_ready(
+        &self,
+        engine: MqEngine,
+        container_id: &str,
+        ports: &BTreeMap<String, u16>,
+    ) -> Result<(), RuntimeError> {
+        // Up to ~90s: a cold JVM/Erlang broker boot (plus first-run image work)
+        // is materially slower than a cache.
+        match engine {
+            MqEngine::ActiveMq => {
+                let console = ports.get("console").copied().ok_or_else(|| {
+                    RuntimeError::ContainerStartFailed("console port was not published".to_string())
+                })?;
+                for _ in 0..180 {
+                    if self.http_responds(console).await {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(RuntimeError::ContainerStartFailed(
+                    "ActiveMQ broker did not become protocol-ready within 90 seconds".to_string(),
+                ))
+            }
+            MqEngine::RabbitMq => {
+                for _ in 0..180 {
+                    // `await_startup` errors fast while the Erlang node is still
+                    // coming up, then blocks briefly and returns 0 once the app
+                    // (and AMQP listener) is running.
+                    if self
+                        .rabbitmqctl(container_id, &["await_startup", "--timeout", "10"])
+                        .await
+                    {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(RuntimeError::ContainerStartFailed(
+                    "RabbitMQ broker did not become protocol-ready within 90 seconds".to_string(),
+                ))
             }
         }
-        Err(RuntimeError::ContainerStartFailed(
-            "broker container did not become ready within 60 seconds".to_string(),
-        ))
+    }
+
+    /// True when an HTTP server answers on `host_port` (the response begins with
+    /// an `HTTP/` status line -- a `401` from the auth-protected console counts).
+    async fn http_responds(&self, host_port: u16) -> bool {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let host = &self.net.sibling_host;
+        let Ok(mut stream) = tokio::net::TcpStream::connect(format!("{host}:{host_port}")).await
+        else {
+            return false;
+        };
+        if stream
+            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        let mut buf = [0u8; 16];
+        match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n >= 5 => buf.starts_with(b"HTTP/"),
+            _ => false,
+        }
     }
 
     async fn remove_container(&self, container_id: &str) {
@@ -717,11 +776,11 @@ pub fn activemq_config(users: &[BrokerUser], user_config: Option<&str>) -> Strin
         </persistenceAdapter>
 
         <transportConnectors>
-            <transportConnector name="openwire" uri="tcp://0.0.0.0:61616?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600"/>
-            <transportConnector name="amqp" uri="amqp://0.0.0.0:5672?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600"/>
-            <transportConnector name="stomp" uri="stomp://0.0.0.0:61613?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600"/>
-            <transportConnector name="mqtt" uri="mqtt://0.0.0.0:1883?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600"/>
-            <transportConnector name="ws" uri="ws://0.0.0.0:61614?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600"/>
+            <transportConnector name="openwire" uri="tcp://0.0.0.0:61616"/>
+            <transportConnector name="amqp" uri="amqp://0.0.0.0:5672"/>
+            <transportConnector name="stomp" uri="stomp://0.0.0.0:61613"/>
+            <transportConnector name="mqtt" uri="mqtt://0.0.0.0:1883"/>
+            <transportConnector name="ws" uri="ws://0.0.0.0:61614"/>
         </transportConnectors>
 
         <shutdownHooks>
@@ -807,7 +866,13 @@ mod tests {
         for expected in ["openwire", "amqp", "stomp", "mqtt", "ws", "console"] {
             assert!(labels.contains(&expected), "missing {expected}");
         }
-        assert_eq!(MqEngine::ActiveMq.ready_label(), "openwire");
-        assert_eq!(MqEngine::RabbitMq.ready_label(), "amqp");
+        // ActiveMQ readiness is gated on the web console; it must be published.
+        assert!(labels.contains(&"console"));
+        let rabbit: Vec<&str> = MqEngine::RabbitMq
+            .published_ports()
+            .iter()
+            .map(|(l, _)| *l)
+            .collect();
+        assert!(rabbit.contains(&"amqp"));
     }
 }

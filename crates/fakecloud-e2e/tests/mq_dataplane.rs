@@ -144,23 +144,11 @@ async fn activemq_broker_delivers_a_message_over_stomp() {
     let addr = host_port(stomp);
 
     // Open a raw STOMP session and round-trip a message through the live broker,
-    // authenticating as the injected user (proves user injection too).
-    let mut stream = tokio::net::TcpStream::connect(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("connect to real broker at {addr}: {e}"));
-
-    let connect = format!(
-        "CONNECT\naccept-version:1.0,1.1,1.2\nhost:localhost\nlogin:{username}\npasscode:{password}\n\n\0"
-    );
-    stream
-        .write_all(connect.as_bytes())
-        .await
-        .expect("send CONNECT");
-    let connected = read_frame(&mut stream).await;
-    assert!(
-        connected.starts_with("CONNECTED"),
-        "broker must authenticate the injected user; got frame: {connected}"
-    );
+    // authenticating as the injected user (proves user injection too). The
+    // broker is protocol-ready by the time it is RUNNING, but a freshly-bound
+    // connector can still reset the very first connection a beat after startup,
+    // so retry the authenticated handshake within a bounded window.
+    let mut stream = stomp_authenticate(&addr, username, password).await;
 
     let dest = "/queue/fakecloud.dataplane";
     let subscribe = format!("SUBSCRIBE\nid:sub-0\ndestination:{dest}\nack:auto\n\n\0");
@@ -243,19 +231,9 @@ async fn rabbitmq_broker_speaks_amqp() {
     // responds to the protocol header with a `Connection.Start` method frame
     // (frame type 0x01) or, on a version mismatch, echoes its own protocol
     // header (`AMQP…`). Either way a genuine broker answers -- a dead endpoint
-    // would refuse the connection.
-    let mut stream = tokio::net::TcpStream::connect(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("connect to real RabbitMQ at {addr}: {e}"));
-    stream
-        .write_all(b"AMQP\x00\x00\x09\x01")
-        .await
-        .expect("send AMQP header");
-    let mut buf = [0u8; 16];
-    let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
-        .await
-        .expect("timed out awaiting AMQP response")
-        .expect("read AMQP response");
+    // would refuse or reset the connection. Retry within a bounded window to
+    // tolerate a first-connection reset just after the listener binds.
+    let (buf, n) = amqp_handshake(&addr).await;
     assert!(n > 0, "RabbitMQ must answer the AMQP handshake");
     assert!(
         buf[0] == 0x01 || &buf[0..4] == b"AMQP",
@@ -269,6 +247,106 @@ async fn rabbitmq_broker_speaks_amqp() {
         .send()
         .await
         .expect("delete broker");
+}
+
+/// Establish an authenticated STOMP session, retrying within a bounded window
+/// on a first-connection reset (the connector may reset the very first
+/// connection a beat after it binds). Returns the connected stream.
+async fn stomp_authenticate(addr: &str, username: &str, password: &str) -> tokio::net::TcpStream {
+    let connect = format!(
+        "CONNECT\naccept-version:1.0,1.1,1.2\nhost:localhost\nlogin:{username}\npasscode:{password}\n\n\0"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match try_stomp_connect(addr, &connect).await {
+            Ok(stream) => return stream,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "could not establish an authenticated STOMP session at {addr}: {e}"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+/// One STOMP connect attempt: TCP connect, send CONNECT, read a frame, and
+/// require a `CONNECTED` reply (proving the injected user authenticated).
+async fn try_stomp_connect(
+    addr: &str,
+    connect_frame: &str,
+) -> Result<tokio::net::TcpStream, String> {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .write_all(connect_frame.as_bytes())
+        .await
+        .map_err(|e| format!("send CONNECT: {e}"))?;
+    let frame = read_frame_fallible(&mut stream)
+        .await
+        .map_err(|e| format!("read CONNECTED: {e}"))?;
+    if frame.starts_with("CONNECTED") {
+        Ok(stream)
+    } else {
+        Err(format!("expected CONNECTED, got: {frame}"))
+    }
+}
+
+/// Perform the AMQP 0-9-1 protocol header handshake, retrying on a
+/// first-connection reset. Returns the response bytes and their length.
+async fn amqp_handshake(addr: &str) -> ([u8; 16], usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match try_amqp_handshake(addr).await {
+            Ok(v) => return v,
+            Err(e) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "RabbitMQ did not answer the AMQP handshake at {addr}: {e}"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn try_amqp_handshake(addr: &str) -> Result<([u8; 16], usize), String> {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .write_all(b"AMQP\x00\x00\x09\x01")
+        .await
+        .map_err(|e| format!("send AMQP header: {e}"))?;
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
+        .await
+        .map_err(|_| "timed out awaiting AMQP response".to_string())?
+        .map_err(|e| format!("read AMQP response: {e}"))?;
+    if n == 0 {
+        return Err("broker closed the connection without answering".to_string());
+    }
+    Ok((buf, n))
+}
+
+/// Like `read_frame` but returns an error instead of panicking, so the
+/// connect-retry helpers can treat a reset as retryable.
+async fn read_frame_fallible(stream: &mut tokio::net::TcpStream) -> Result<String, String> {
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut byte))
+            .await
+            .map_err(|_| "timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        if n == 0 || byte[0] == 0 {
+            break;
+        }
+        out.push(byte[0]);
+    }
+    Ok(String::from_utf8_lossy(&out).trim_start().to_string())
 }
 
 /// Read one STOMP frame (terminated by a NUL byte) and return it as a string,
