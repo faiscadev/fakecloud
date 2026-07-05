@@ -34,25 +34,44 @@ pub(crate) fn invoke_model(
     let response_body = crate::prompt::resolve_override(state, req, model_id, body)
         .unwrap_or_else(|| generate_canned_response(model_id, &input));
 
-    // Record invocation for introspection
-    {
-        let mut accts = state.write();
-        let s = accts.get_or_create(&req.account_id);
-        s.invocations.push(crate::state::ModelInvocation {
-            model_id: model_id.to_string(),
-            input: String::from_utf8_lossy(body).to_string(),
-            output: response_body.clone(),
-            timestamp: Utc::now(),
-            error: None,
-        });
-    }
+    Ok(respond_with_body(
+        state,
+        req,
+        model_id,
+        body,
+        &input,
+        response_body,
+    ))
+}
 
-    // Real Bedrock returns dynamic input/output token counts. Approximate
-    // each by whitespace-splitting the relevant text — close enough for
-    // SDKs that gate on usage.input_tokens / usage.output_tokens metering.
-    let input_tokens = crate::prompt::count_tokens(&extract_input_text(&input));
-    let output_tokens = crate::prompt::count_tokens(&extract_output_text(model_id, &response_body));
+/// Record an InvokeModel invocation for introspection.
+pub(crate) fn record_invocation(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+    output: &str,
+    error: Option<String>,
+) {
+    let mut accts = state.write();
+    let s = accts.get_or_create(&req.account_id);
+    s.invocations.push(crate::state::ModelInvocation {
+        model_id: model_id.to_string(),
+        input: String::from_utf8_lossy(body).to_string(),
+        output: output.to_string(),
+        timestamp: Utc::now(),
+        error,
+    });
+}
 
+/// Build the runtime `AwsResponse` for a completed InvokeModel call,
+/// surfacing the supplied token counts through the standard Bedrock
+/// `x-amzn-bedrock-*-token-count` headers.
+pub(crate) fn runtime_response_with_tokens(
+    response_body: String,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> AwsResponse {
     let mut headers = http::HeaderMap::new();
     headers.insert(
         "x-amzn-bedrock-input-token-count",
@@ -69,12 +88,35 @@ pub(crate) fn invoke_model(
         http::HeaderValue::from_static("standard"),
     );
 
-    Ok(AwsResponse {
+    AwsResponse {
         status: StatusCode::OK,
         content_type: "application/json".to_string(),
         body: bytes::Bytes::from(response_body).into(),
         headers,
-    })
+    }
+}
+
+/// Record the invocation and build the runtime response, deriving token
+/// counts from the request prompt and generated text. Used by the
+/// deterministic (canned/override/echo) path where no real upstream usage
+/// figures are available.
+pub(crate) fn respond_with_body(
+    state: &SharedBedrockState,
+    req: &AwsRequest,
+    model_id: &str,
+    body: &[u8],
+    input: &Value,
+    response_body: String,
+) -> AwsResponse {
+    record_invocation(state, req, model_id, body, &response_body, None);
+
+    // Real Bedrock returns dynamic input/output token counts. Approximate
+    // each by whitespace-splitting the relevant text — close enough for
+    // SDKs that gate on usage.input_tokens / usage.output_tokens metering.
+    let input_tokens = crate::prompt::count_tokens(&extract_input_text(input));
+    let output_tokens = crate::prompt::count_tokens(&extract_output_text(model_id, &response_body));
+
+    runtime_response_with_tokens(response_body, input_tokens, output_tokens)
 }
 
 /// Pull the user-supplied prompt out of an InvokeModel request body.

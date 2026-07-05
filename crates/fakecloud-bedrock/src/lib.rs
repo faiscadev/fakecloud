@@ -30,6 +30,7 @@ pub(crate) mod service;
 pub(crate) mod state;
 pub mod streaming;
 pub mod throughput;
+pub mod upstream;
 pub(crate) mod validation;
 
 /// Eight-character lowercase hex suffix derived from a fresh UUID.

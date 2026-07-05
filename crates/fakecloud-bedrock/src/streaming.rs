@@ -195,6 +195,227 @@ pub(crate) fn build_converse_stream_response(
     body
 }
 
+/// Re-encode a sequence of real upstream token deltas as a Bedrock
+/// `InvokeModelWithResponseStream` event stream. Each `deltas` entry becomes
+/// its own frame, so the caller streams genuine incremental tokens rather
+/// than a single canned block.
+///
+/// Every provider is re-encoded into *its own* provider-native streaming
+/// shape (matching the non-streaming `build_provider_response`) so the
+/// aws-sdk decoder for each provider finds the field it expects: Anthropic
+/// `content_block_delta.text`, Titan/Amazon `outputText`, Llama
+/// `generation`, Cohere `text`, Mistral `outputs[].text`.
+pub(crate) fn build_invoke_stream_from_deltas(
+    model_id: &str,
+    deltas: &[String],
+    stop: crate::upstream::StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<u8> {
+    use crate::upstream::{stop_anthropic, stop_cohere, stop_meta_mistral, stop_titan};
+    let mut body = Vec::new();
+    let family = crate::upstream::strip_region_prefix(model_id);
+
+    if family.starts_with("anthropic.") {
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_fakecloudstream01",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model_id,
+                    "content": [],
+                    "stop_reason": null,
+                    "usage": { "input_tokens": input_tokens, "output_tokens": 0 }
+                }
+            }),
+        );
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        );
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": delta }
+                }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({ "type": "content_block_stop", "index": 0 }),
+        );
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": stop_anthropic(stop), "stop_sequence": null },
+                "usage": { "output_tokens": output_tokens }
+            }),
+        );
+        push_bytes_chunk(&mut body, &json!({ "type": "message_stop" }));
+    } else if family.starts_with("amazon.") {
+        for (i, delta) in deltas.iter().enumerate() {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "outputText": delta,
+                    "index": 0,
+                    "completionReason": Value::Null,
+                    "inputTextTokenCount": if i == 0 { json!(input_tokens) } else { Value::Null }
+                }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "outputText": "",
+                "index": 0,
+                "totalOutputTextTokenCount": output_tokens,
+                "completionReason": stop_titan(stop),
+                "inputTextTokenCount": input_tokens
+            }),
+        );
+    } else if family.starts_with("meta.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "generation": delta,
+                    "prompt_token_count": Value::Null,
+                    "generation_token_count": Value::Null,
+                    "stop_reason": Value::Null
+                }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "generation": "",
+                "prompt_token_count": input_tokens,
+                "generation_token_count": output_tokens,
+                "stop_reason": stop_meta_mistral(stop)
+            }),
+        );
+    } else if family.starts_with("cohere.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "text": delta, "is_finished": false, "index": 0 }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({ "is_finished": true, "finish_reason": stop_cohere(stop) }),
+        );
+    } else if family.starts_with("mistral.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "outputs": [{ "text": delta, "stop_reason": Value::Null }] }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({ "outputs": [{ "text": "", "stop_reason": stop_meta_mistral(stop) }] }),
+        );
+    } else {
+        for delta in deltas {
+            push_bytes_chunk(&mut body, &json!({ "outputText": delta }));
+        }
+    }
+
+    body
+}
+
+/// Encode a single `chunk` event whose payload is the base64-wrapped JSON
+/// value, matching how Bedrock frames provider-native streaming bodies.
+fn push_bytes_chunk(body: &mut Vec<u8>, chunk: &Value) {
+    let payload = serde_json::to_vec(&json!({
+        "bytes": base64_encode(&serde_json::to_vec(chunk)
+            .expect("serde_json::Value serialization is infallible"))
+    }))
+    .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("chunk", "application/json", &payload));
+}
+
+/// Re-encode a sequence of real upstream token deltas as a Bedrock
+/// `ConverseStream` event stream: one `contentBlockDelta` event per token,
+/// terminated with real usage figures in the `metadata` event.
+pub(crate) fn build_converse_stream_from_deltas(
+    deltas: &[String],
+    stop: crate::upstream::StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    let start = json!({ "role": "assistant" });
+    let payload = serde_json::to_vec(&json!({ "messageStart": start }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("messageStart", "application/json", &payload));
+
+    let block_start = json!({ "contentBlockIndex": 0, "start": {} });
+    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event(
+        "contentBlockStart",
+        "application/json",
+        &payload,
+    ));
+
+    for delta in deltas {
+        let block_delta = json!({
+            "contentBlockIndex": 0,
+            "delta": { "text": delta }
+        });
+        let payload = serde_json::to_vec(&json!({ "contentBlockDelta": block_delta }))
+            .expect("serde_json::Value serialization is infallible");
+        body.extend(encode_event(
+            "contentBlockDelta",
+            "application/json",
+            &payload,
+        ));
+    }
+
+    let block_stop = json!({ "contentBlockIndex": 0 });
+    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event(
+        "contentBlockStop",
+        "application/json",
+        &payload,
+    ));
+
+    let stop_event = json!({ "stopReason": crate::upstream::stop_converse(stop) });
+    let payload = serde_json::to_vec(&json!({ "messageStop": stop_event }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("messageStop", "application/json", &payload));
+
+    let metadata = json!({
+        "usage": {
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens
+        },
+        "metrics": { "latencyMs": 100 }
+    });
+    let payload = serde_json::to_vec(&json!({ "metadata": metadata }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("metadata", "application/json", &payload));
+
+    body
+}
+
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -226,13 +447,19 @@ pub(crate) fn get_response_text(
         }
         return default_stream_text().to_string();
     };
-    // Try to extract text from a JSON response body.
+    override_text(model_id, custom)
+}
+
+/// Extract the assistant text from a configured simulation override. The
+/// override may be a provider-native JSON body (Anthropic `content[].text`
+/// or Converse `output.message.content[].text`) or an opaque raw string, in
+/// which case it is returned verbatim. `model_id` is currently unused but
+/// kept for symmetry with the provider-shaped extractors.
+pub(crate) fn override_text(_model_id: &str, custom: String) -> String {
     if let Ok(parsed) = serde_json::from_str::<Value>(&custom) {
-        // Anthropic format
         if let Some(text) = parsed["content"][0]["text"].as_str() {
             return text.to_string();
         }
-        // Converse format
         if let Some(text) = parsed["output"]["message"]["content"][0]["text"].as_str() {
             return text.to_string();
         }
