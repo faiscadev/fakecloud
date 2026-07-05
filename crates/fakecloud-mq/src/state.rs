@@ -81,6 +81,10 @@ impl MqData {
                 "DELETION_IN_PROGRESS" => {
                     self.brokers.remove(&id);
                     self.users.remove(&id);
+                    // Drop the idempotency mapping so reusing the same
+                    // creatorRequestId after a delete creates a fresh broker
+                    // rather than returning the deleted id with an empty ARN.
+                    self.broker_creator_ids.retain(|_, v| v != &id);
                     changed = true;
                 }
                 _ => {}

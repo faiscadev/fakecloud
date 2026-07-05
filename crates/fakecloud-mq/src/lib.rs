@@ -20,6 +20,7 @@
 
 pub mod persistence;
 pub mod service;
+pub mod shared;
 pub mod state;
 mod validate;
 

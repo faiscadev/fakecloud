@@ -12,7 +12,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use http::{Method, StatusCode};
 use percent_encoding::percent_decode_str;
 use serde_json::{json, Map, Value};
@@ -23,6 +22,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
+use crate::shared;
 use crate::state::{MqData, SharedMqState};
 
 /// Every operation name in the Amazon MQ Smithy model (25 operations).
@@ -69,8 +69,11 @@ const MUTATING: &[&str] = &[
     "UpdateBroker",
     "UpdateConfiguration",
     "UpdateUser",
-    // DescribeBroker settles in-flight lifecycle transitions, so persist too.
-    "DescribeBroker",
+    // NB: DescribeBroker is intentionally NOT here. It can settle an in-flight
+    // lifecycle transition, but a pure read that settles nothing must not write
+    // a snapshot (avoiding per-read disk amplification). When a describe DOES
+    // fire a transition, `dispatch` reports it via the `settled` flag and the
+    // handler persists then.
 ];
 
 pub struct MqService {
@@ -197,10 +200,11 @@ impl AwsService for MqService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
-        let result = self.dispatch(action, &labels, &req);
-        if MUTATING.contains(&action)
-            && matches!(result.as_ref(), Ok(resp) if resp.status.is_success())
-        {
+        let (result, settled) = self.dispatch(action, &labels, &req);
+        let success = matches!(result.as_ref(), Ok(resp) if resp.status.is_success());
+        // Persist when a mutating op succeeded, or when a read settled a real
+        // lifecycle transition (a describe that changed nothing does not write).
+        if settled || (MUTATING.contains(&action) && success) {
             self.save().await;
         }
         result
@@ -218,26 +222,37 @@ struct Ctx {
 }
 
 impl MqService {
+    /// Returns the operation result plus a `settled` flag: `true` when a read
+    /// (`DescribeBroker`) fired a real broker lifecycle transition and the
+    /// change must be persisted.
     #[allow(clippy::too_many_lines)]
     fn dispatch(
         &self,
         action: &str,
         labels: &[String],
         req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let body = parse_body(req)?;
-        crate::validate::validate_input(action, &body)?;
+    ) -> (Result<AwsResponse, AwsServiceError>, bool) {
+        let body = match parse_body(req) {
+            Ok(b) => b,
+            Err(e) => return (Err(e), false),
+        };
+        if let Err(e) = crate::validate::validate_input(action, &body) {
+            return (Err(e), false);
+        }
         let ctx = Ctx {
             account: req.account_id.clone(),
             region: req.region.clone(),
         };
         let q = parse_query(&req.raw_query);
-        crate::validate::validate_query(&q)?;
+        if let Err(e) = crate::validate::validate_query(&q) {
+            return (Err(e), false);
+        }
         let a0 = labels.first().map(String::as_str).unwrap_or_default();
         let a1 = labels.get(1).map(String::as_str).unwrap_or_default();
-        match action {
+        let mut settled = false;
+        let result = match action {
             "CreateBroker" => self.create_broker(&ctx, &body),
-            "DescribeBroker" => self.describe_broker(&ctx, a0),
+            "DescribeBroker" => self.describe_broker(&ctx, a0, &mut settled),
             "UpdateBroker" => self.update_broker(&ctx, a0, &body),
             "DeleteBroker" => self.delete_broker(&ctx, a0),
             "RebootBroker" => self.reboot_broker(&ctx, a0),
@@ -262,7 +277,8 @@ impl MqService {
             "DescribeBrokerEngineTypes" => self.describe_broker_engine_types(&q),
             "DescribeBrokerInstanceOptions" => self.describe_broker_instance_options(&q),
             _ => Err(AwsServiceError::action_not_implemented("mq", action)),
-        }
+        };
+        (result, settled)
     }
 }
 
@@ -298,23 +314,11 @@ fn conflict(msg: &str) -> AwsServiceError {
 }
 
 fn now_iso() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
-}
-
-fn broker_arn(ctx: &Ctx, name: &str, id: &str) -> String {
-    format!(
-        "arn:aws:mq:{}:{}:broker:{}:{}",
-        ctx.region, ctx.account, name, id
-    )
+    shared::now_iso()
 }
 
 fn config_arn(ctx: &Ctx, id: &str) -> String {
-    format!(
-        "arn:aws:mq:{}:{}:configuration:{}",
-        ctx.region, ctx.account, id
-    )
+    shared::config_arn(&ctx.region, &ctx.account, id)
 }
 
 fn parse_query(raw: &str) -> Vec<(String, String)> {
@@ -344,43 +348,20 @@ fn query_all(q: &[(String, String)], key: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether an engine string names RabbitMQ, case-insensitively. Amazon MQ
-/// echoes back the engine type in the display case the caller sent
-/// (`ActiveMQ` / `RabbitMQ`), so all internal branching is case-insensitive.
-fn is_rabbit(engine: &str) -> bool {
-    engine.eq_ignore_ascii_case("RABBITMQ")
-}
-
-/// FNV-1a hash for deterministic synthesis of a broker instance IP.
-fn hash_str(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// Convert a `Tags` map member of a request body into a `BTreeMap`.
-fn tags_from_body(b: &Value) -> std::collections::BTreeMap<String, String> {
-    let mut out = std::collections::BTreeMap::new();
-    if let Some(obj) = b.get("tags").and_then(Value::as_object) {
-        for (k, v) in obj {
-            if let Some(s) = v.as_str() {
-                out.insert(k.clone(), s.to_string());
-            }
-        }
-    }
-    out
+/// The effective page size for a list operation: the caller's `maxResults`
+/// (validated to 1..=100 upstream) or AWS's default of 100. Echoed verbatim in
+/// the responses whose wire shape carries a `maxResults` member.
+fn page_size(q: &[(String, String)]) -> usize {
+    query_one(q, "maxResults")
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(100)
 }
 
 /// Paginate a slice by `maxResults` (default 100) + numeric `nextToken` offset.
 /// Returns the page plus the next token (an offset), if more remain.
 fn paginate(items: &[Value], q: &[(String, String)]) -> (Vec<Value>, Option<String>) {
-    let max = query_one(q, "maxResults")
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(100);
+    let max = page_size(q);
     let start = query_one(q, "nextToken")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
@@ -394,67 +375,37 @@ fn paginate(items: &[Value], q: &[(String, String)]) -> (Vec<Value>, Option<Stri
     (page, next)
 }
 
-/// Derive a broker's `brokerInstances` (per-engine wire endpoints + console URL
-/// + IP) from live state. Only present once the broker is `RUNNING`.
+/// Derive a broker's `brokerInstances` (per-engine wire endpoints, console URL,
+/// and IP) from live state. Only present once the broker is `RUNNING`.
+/// Projected from the single `shared::broker_endpoints` source so the describe
+/// view and the CFN `Fn::GetAtt` list attributes stay in lock-step.
 fn broker_instances(id: &str, engine: &str, region: &str, deployment_mode: &str) -> Value {
-    let count = if !is_rabbit(engine) && deployment_mode == "ACTIVE_STANDBY_MULTI_AZ" {
-        2
-    } else {
-        1
-    };
+    let e = shared::broker_endpoints(id, engine, region, deployment_mode);
     let mut out = Vec::new();
-    for i in 1..=count {
-        let ip = {
-            let h = hash_str(&format!("{id}-{i}"));
-            format!("10.{}.{}.{}", (h >> 16) & 0xff, (h >> 8) & 0xff, h & 0xff)
-        };
-        if is_rabbit(engine) {
-            let host = format!("{id}.mq.{region}.amazonaws.com");
-            out.push(json!({
-                "consoleURL": format!("https://{host}"),
-                "endpoints": [format!("amqps://{host}:5671")],
-                "ipAddress": ip,
-            }));
-        } else {
-            let host = format!("{id}-{i}.mq.{region}.amazonaws.com");
-            out.push(json!({
-                "consoleURL": format!("https://{host}:8162"),
-                "endpoints": [
-                    format!("ssl://{host}:61617"),
-                    format!("amqp+ssl://{host}:5671"),
-                    format!("stomp+ssl://{host}:61614"),
-                    format!("mqtt+ssl://{host}:8883"),
-                    format!("wss://{host}:61619"),
-                ],
-                "ipAddress": ip,
-            }));
+    for i in 0..e.ips.len() {
+        let mut endpoints = Vec::new();
+        if let Some(v) = e.open_wire.get(i) {
+            endpoints.push(json!(v));
         }
+        if let Some(v) = e.amqp.get(i) {
+            endpoints.push(json!(v));
+        }
+        if let Some(v) = e.stomp.get(i) {
+            endpoints.push(json!(v));
+        }
+        if let Some(v) = e.mqtt.get(i) {
+            endpoints.push(json!(v));
+        }
+        if let Some(v) = e.wss.get(i) {
+            endpoints.push(json!(v));
+        }
+        out.push(json!({
+            "consoleURL": e.console_urls.get(i).cloned().unwrap_or_default(),
+            "endpoints": endpoints,
+            "ipAddress": e.ips.get(i).cloned().unwrap_or_default(),
+        }));
     }
     Value::Array(out)
-}
-
-/// The default configuration `Data` for an engine, base64-encoded (matching
-/// AWS's auto-generated broker configuration).
-fn default_config_data(engine: &str) -> String {
-    let xml = if is_rabbit(engine) {
-        "consumer_timeout = 1800000\n".to_string()
-    } else {
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
-         <broker xmlns=\"http://activemq.apache.org/schema/core\" start=\"false\">\n\
-         </broker>\n"
-            .to_string()
-    };
-    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
-}
-
-impl MqService {
-    /// Look up a broker, first settling any in-flight lifecycle transition.
-    /// Returns the (possibly reconciled) live broker object, or `None` if it
-    /// does not exist / finished deleting.
-    fn broker_snapshot(data: &mut MqData, id: &str) -> Option<Value> {
-        data.reconcile_brokers();
-        data.brokers.get(id).cloned()
-    }
 }
 
 // ===================== brokers =====================
@@ -465,16 +416,6 @@ impl MqService {
             .get("brokerName")
             .and_then(Value::as_str)
             .unwrap_or_default()
-            .to_string();
-        let engine = b
-            .get("engineType")
-            .and_then(Value::as_str)
-            .unwrap_or("ACTIVEMQ")
-            .to_string();
-        let deployment = b
-            .get("deploymentMode")
-            .and_then(Value::as_str)
-            .unwrap_or("SINGLE_INSTANCE")
             .to_string();
         let creator = b
             .get("creatorRequestId")
@@ -497,205 +438,41 @@ impl MqService {
                 return ok(json!({ "brokerId": existing, "brokerArn": arn }));
             }
         }
-        // Broker names are unique within an account+region.
-        if data
-            .brokers
-            .values()
-            .any(|x| x.get("brokerName").and_then(Value::as_str) == Some(name.as_str()))
-        {
+        // Broker names are unique within an account+REGION (a same-named broker
+        // in a different region is fine, and does not conflict here).
+        if data.brokers.values().any(|x| {
+            x.get("brokerName").and_then(Value::as_str) == Some(name.as_str())
+                && shared::broker_region(x) == Some(ctx.region.as_str())
+        }) {
             return Err(conflict(&format!(
                 "Broker name {name} already exists. Please choose a different name."
             )));
         }
 
-        let id = format!("b-{}", Uuid::new_v4());
-        let arn = broker_arn(ctx, &name, &id);
-        let engine_version = b
-            .get("engineVersion")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| default_engine_version(&engine).to_string());
-        // AWS returns the authentication strategy lower-cased (`simple`); the
-        // default when the caller omits it is `simple`.
-        let auth = b
-            .get("authenticationStrategy")
-            .and_then(Value::as_str)
-            .unwrap_or("simple")
-            .to_string();
-
-        let mut broker = Map::new();
-        broker.insert("brokerId".into(), json!(id));
-        broker.insert("brokerArn".into(), json!(arn));
-        broker.insert("brokerName".into(), json!(name));
-        broker.insert("brokerState".into(), json!("CREATION_IN_PROGRESS"));
-        broker.insert("engineType".into(), json!(engine));
-        broker.insert("engineVersion".into(), json!(engine_version));
-        broker.insert("authenticationStrategy".into(), json!(auth));
-        broker.insert("created".into(), json!(now_iso()));
-        broker.insert("deploymentMode".into(), json!(deployment));
-        broker.insert(
-            "hostInstanceType".into(),
-            b.get("hostInstanceType")
-                .cloned()
-                .unwrap_or(json!("mq.m5.large")),
-        );
-        broker.insert(
-            "publiclyAccessible".into(),
-            b.get("publiclyAccessible").cloned().unwrap_or(json!(false)),
-        );
-        broker.insert(
-            "autoMinorVersionUpgrade".into(),
-            b.get("autoMinorVersionUpgrade")
-                .cloned()
-                .unwrap_or(json!(false)),
-        );
-        // AWS returns the storage type lower-cased (`ebs` / `efs`).
-        broker.insert(
-            "storageType".into(),
-            b.get("storageType").cloned().unwrap_or(json!("ebs")),
-        );
-        broker.insert(
-            "securityGroups".into(),
-            b.get("securityGroups").cloned().unwrap_or(json!([])),
-        );
-        // When no subnets are supplied, AWS places the broker in subnets of the
-        // account's default VPC: one for SINGLE_INSTANCE, two for the multi-AZ
-        // deployment modes. Synthesize deterministic ids so DescribeBroker
-        // returns a stable, non-empty list (Terraform's `subnet_ids` is
-        // Computed and must round-trip through import).
-        let subnets = match b.get("subnetIds").and_then(Value::as_array) {
-            Some(a) if !a.is_empty() => Value::Array(a.clone()),
-            _ => {
-                let n = if deployment == "SINGLE_INSTANCE" {
-                    1
-                } else {
-                    2
-                };
-                Value::Array(
-                    (0..n)
-                        .map(|i| {
-                            let h = hash_str(&format!("{id}-subnet-{i}"));
-                            json!(format!("subnet-{h:017x}"))
-                        })
-                        .collect(),
-                )
-            }
-        };
-        broker.insert("subnetIds".into(), subnets);
-        if let Some(m) = b.get("maintenanceWindowStartTime") {
-            broker.insert("maintenanceWindowStartTime".into(), m.clone());
-        } else {
-            broker.insert(
-                "maintenanceWindowStartTime".into(),
-                json!({ "dayOfWeek": "SUNDAY", "timeOfDay": "00:00", "timeZone": "UTC" }),
-            );
-        }
-        // EncryptionOptions is always present in DescribeBroker; the default is
-        // an AWS-owned key.
-        broker.insert(
-            "encryptionOptions".into(),
-            b.get("encryptionOptions")
-                .cloned()
-                .unwrap_or_else(|| json!({ "useAwsOwnedKey": true })),
-        );
-        let audit = b
-            .get("logs")
-            .and_then(|l| l.get("audit"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let general = b
-            .get("logs")
-            .and_then(|l| l.get("general"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let mut logs = json!({
-            "audit": audit,
-            "general": general,
-            "generalLogGroup": format!("/aws/amazonmq/broker/{id}/general"),
-        });
-        if audit {
-            logs["auditLogGroup"] = json!(format!("/aws/amazonmq/broker/{id}/audit"));
-        }
-        broker.insert("logs".into(), logs);
-        let tags = tags_from_body(b);
-        if !tags.is_empty() {
-            broker.insert(
-                "tags".into(),
-                Value::Object(tags.iter().map(|(k, v)| (k.clone(), json!(v))).collect()),
-            );
-        }
-        broker.insert(
-            "dataReplicationMode".into(),
-            b.get("dataReplicationMode")
-                .cloned()
-                .unwrap_or(json!("NONE")),
-        );
-
-        // Users supplied inline at create time become the broker's current users.
-        let mut user_map = std::collections::BTreeMap::new();
-        if let Some(arr) = b.get("users").and_then(Value::as_array) {
-            for u in arr {
-                if let Some(username) = u.get("username").and_then(Value::as_str) {
-                    user_map.insert(username.to_string(), normalize_user(u));
-                }
-            }
-        }
-
-        // ActiveMQ brokers are backed by a configuration; RabbitMQ has none.
-        if !is_rabbit(&engine) {
-            let cfg = if let Some(c) = b.get("configuration") {
-                json!({ "id": c.get("id").cloned().unwrap_or(json!("")), "revision": c.get("revision").cloned().unwrap_or(json!(1)) })
-            } else {
-                let cid = format!("c-{}", Uuid::new_v4());
-                let created = now_iso();
-                let rev = json!({ "revision": 1, "created": created, "description": "Auto-generated default for RabbitMQ" });
-                data.configurations.insert(
-                    cid.clone(),
-                    json!({
-                        "arn": config_arn(ctx, &cid),
-                        "authenticationStrategy": auth,
-                        "created": created,
-                        "description": "Auto-generated default for ActiveMQ",
-                        "engineType": engine,
-                        "engineVersion": engine_version,
-                        "id": cid,
-                        "latestRevision": rev,
-                        "name": format!("{name}-configuration"),
-                    }),
-                );
-                data.configuration_revisions.insert(
-                    cid.clone(),
-                    vec![json!({
-                        "revision": 1,
-                        "created": created,
-                        "description": "Auto-generated default for ActiveMQ",
-                        "data": default_config_data(&engine),
-                    })],
-                );
-                json!({ "id": cid, "revision": 1 })
-            };
-            broker.insert(
-                "configurations".into(),
-                json!({ "current": cfg, "history": [] }),
-            );
-        }
-
-        data.brokers.insert(id.clone(), Value::Object(broker));
-        data.users.insert(id.clone(), user_map);
+        // Single shared create path (same one the CFN provisioner reuses).
+        let (id, arn) = shared::create_broker_record(data, &ctx.account, &ctx.region, b);
         if let Some(cr) = creator {
             data.broker_creator_ids.insert(cr, id.clone());
-        }
-        if !tags.is_empty() {
-            data.tags.insert(arn.clone(), tags);
         }
 
         ok(json!({ "brokerId": id, "brokerArn": arn }))
     }
 
-    fn describe_broker(&self, ctx: &Ctx, id: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn describe_broker(
+        &self,
+        ctx: &Ctx,
+        id: &str,
+        settled: &mut bool,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        let mut broker = Self::broker_snapshot(data, id)
+        // Settle any in-flight lifecycle transition; report whether one fired so
+        // the handler persists only when the read actually changed state.
+        *settled = data.reconcile_brokers();
+        let mut broker = data
+            .brokers
+            .get(id)
+            .cloned()
             .ok_or_else(|| not_found(&format!("Can't find requested broker [{id}].")))?;
         let obj = broker.as_object_mut().expect("broker is an object");
         let engine = obj
@@ -723,6 +500,17 @@ impl MqService {
         // users summary is derived from live per-broker user state.
         obj.insert("users".into(), users_summary(data, id));
         obj.insert("actionsRequired".into(), json!([]));
+        // Tags are rendered from the single ARN-keyed tag map at read time, so
+        // CreateTags/DeleteTags made after create are always reflected here
+        // (no frozen create-time copy that drifts).
+        let arn = obj
+            .get("brokerArn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(t) = data.tags.get(&arn).filter(|m| !m.is_empty()) {
+            obj.insert("tags".into(), render_tags(t));
+        }
         ok(Value::Object(obj.clone()))
     }
 
@@ -844,9 +632,12 @@ impl MqService {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         data.reconcile_brokers();
+        // ListBrokers is scoped to the request's region (a broker created in
+        // another region must not leak into this region's listing).
         let summaries: Vec<Value> = data
             .brokers
             .values()
+            .filter(|b| shared::broker_region(b) == Some(ctx.region.as_str()))
             .map(|b| {
                 json!({
                     "brokerArn": b.get("brokerArn").cloned().unwrap_or(json!("")),
@@ -883,6 +674,11 @@ impl MqService {
     }
 }
 
+/// Render an ARN-keyed tag map into its wire `tags` object.
+fn render_tags(tags: &std::collections::BTreeMap<String, String>) -> Value {
+    Value::Object(tags.iter().map(|(k, v)| (k.clone(), json!(v))).collect())
+}
+
 /// Render a broker's per-user summary (`[{username, pendingChange?}]`).
 fn users_summary(data: &MqData, broker_id: &str) -> Value {
     let arr: Vec<Value> = data
@@ -903,25 +699,6 @@ fn users_summary(data: &MqData, broker_id: &str) -> Value {
     Value::Array(arr)
 }
 
-/// Normalize a create-broker inline user into the stored user object.
-fn normalize_user(u: &Value) -> Value {
-    json!({
-        "username": u.get("username").cloned().unwrap_or(json!("")),
-        "password": u.get("password").cloned().unwrap_or(json!("")),
-        "consoleAccess": u.get("consoleAccess").cloned().unwrap_or(json!(false)),
-        "groups": u.get("groups").cloned().unwrap_or(json!([])),
-        "replicationUser": u.get("replicationUser").cloned().unwrap_or(json!(false)),
-    })
-}
-
-fn default_engine_version(engine: &str) -> &'static str {
-    if is_rabbit(engine) {
-        "3.13"
-    } else {
-        "5.18"
-    }
-}
-
 // ===================== configurations =====================
 
 impl MqService {
@@ -940,7 +717,7 @@ impl MqService {
             .get("engineVersion")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| default_engine_version(&engine).to_string());
+            .unwrap_or_else(|| shared::default_engine_version(&engine).to_string());
         let auth = b
             .get("authenticationStrategy")
             .and_then(Value::as_str)
@@ -973,20 +750,15 @@ impl MqService {
                 "revision": 1,
                 "created": created,
                 "description": "Auto-generated default for Configuration",
-                "data": default_config_data(&engine),
+                "data": shared::default_config_data(&engine),
             })],
         );
-        let tags = tags_from_body(b);
+        // Tags live only in the ARN-keyed tag map (the single source of truth);
+        // DescribeConfiguration renders them at read time so later
+        // CreateTags/DeleteTags are always reflected.
+        let tags = shared::tags_from_body(b);
         if !tags.is_empty() {
             data.tags.insert(arn.clone(), tags);
-            if let Some(c) = data.configurations.get_mut(&id) {
-                c["tags"] = Value::Object(
-                    tags_from_body(b)
-                        .iter()
-                        .map(|(k, v)| (k.clone(), json!(v)))
-                        .collect(),
-                );
-            }
         }
         ok(json!({
             "arn": arn,
@@ -1001,11 +773,27 @@ impl MqService {
     fn describe_configuration(&self, ctx: &Ctx, id: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        let cfg = data
+        let mut cfg = data
             .configurations
             .get(id)
             .cloned()
             .ok_or_else(|| not_found(&format!("Can't find requested configuration [{id}].")))?;
+        // Render tags from the ARN-keyed tag map at read time (no frozen copy).
+        if let Some(obj) = cfg.as_object_mut() {
+            let arn = obj
+                .get("arn")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            match data.tags.get(&arn).filter(|m| !m.is_empty()) {
+                Some(t) => {
+                    obj.insert("tags".into(), render_tags(t));
+                }
+                None => {
+                    obj.remove("tags");
+                }
+            }
+        }
         ok(cfg)
     }
 
@@ -1098,10 +886,23 @@ impl MqService {
     fn delete_configuration(&self, ctx: &Ctx, id: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
+        if !data.configurations.contains_key(id) {
+            return Err(not_found(&format!(
+                "Can't find requested configuration [{id}]."
+            )));
+        }
+        // A configuration that any broker currently references (its `current` or
+        // staged `pending` configuration) cannot be deleted -- AWS rejects it
+        // with ConflictException until the association is removed.
+        if config_in_use(data, id) {
+            return Err(conflict(&format!(
+                "Configuration [{id}] is in use by one or more brokers and cannot be deleted."
+            )));
+        }
         let cfg = data
             .configurations
             .remove(id)
-            .ok_or_else(|| not_found(&format!("Can't find requested configuration [{id}].")))?;
+            .expect("configuration presence checked above");
         data.configuration_revisions.remove(id);
         if let Some(arn) = cfg.get("arn").and_then(Value::as_str) {
             data.tags.remove(arn);
@@ -1116,9 +917,15 @@ impl MqService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        let items: Vec<Value> = data.configurations.values().cloned().collect();
+        // ListConfigurations is region-scoped (its ARN embeds the region).
+        let items: Vec<Value> = data
+            .configurations
+            .values()
+            .filter(|c| shared::config_region(c) == Some(ctx.region.as_str()))
+            .cloned()
+            .collect();
         let (page, next) = paginate(&items, q);
-        let mut out = json!({ "configurations": page, "maxResults": 100 });
+        let mut out = json!({ "configurations": page, "maxResults": page_size(q) });
         if let Some(n) = next {
             out["nextToken"] = json!(n);
         }
@@ -1149,7 +956,8 @@ impl MqService {
             })
             .collect();
         let (page, next) = paginate(&items, q);
-        let mut out = json!({ "configurationId": id, "maxResults": 100, "revisions": page });
+        let mut out =
+            json!({ "configurationId": id, "maxResults": page_size(q), "revisions": page });
         if let Some(n) = next {
             out["nextToken"] = json!(n);
         }
@@ -1304,7 +1112,7 @@ impl MqService {
         let all = users_summary(data, broker_id);
         let items = all.as_array().cloned().unwrap_or_default();
         let (page, next) = paginate(&items, q);
-        let mut out = json!({ "brokerId": broker_id, "maxResults": 100, "users": page });
+        let mut out = json!({ "brokerId": broker_id, "maxResults": page_size(q), "users": page });
         if let Some(n) = next {
             out["nextToken"] = json!(n);
         }
@@ -1324,7 +1132,7 @@ impl MqService {
             )));
         }
         let entry = data.tags.entry(arn.to_string()).or_default();
-        for (k, v) in tags_from_body(b) {
+        for (k, v) in shared::tags_from_body(b) {
             entry.insert(k, v);
         }
         no_content()
@@ -1368,6 +1176,23 @@ impl MqService {
     }
 }
 
+/// Whether any broker currently references configuration `config_id` (as its
+/// `current` or staged `pending` configuration). AWS blocks deleting an in-use
+/// configuration.
+fn config_in_use(data: &MqData, config_id: &str) -> bool {
+    data.brokers.values().any(|b| {
+        let configs = b.get("configurations");
+        let matches = |slot: &str| {
+            configs
+                .and_then(|c| c.get(slot))
+                .and_then(|c| c.get("id"))
+                .and_then(Value::as_str)
+                == Some(config_id)
+        };
+        matches("current") || matches("pending")
+    })
+}
+
 /// Whether an ARN refers to an existing broker or configuration in this account.
 fn resource_exists(data: &MqData, arn: &str) -> bool {
     data.brokers
@@ -1400,7 +1225,12 @@ impl MqService {
                 "engineVersions": versions.iter().map(|v| json!({ "name": v })).collect::<Vec<_>>(),
             }));
         }
-        ok(json!({ "brokerEngineTypes": types, "maxResults": 100 }))
+        let (page, next) = paginate(&types, q);
+        let mut out = json!({ "brokerEngineTypes": page, "maxResults": page_size(q) });
+        if let Some(n) = next {
+            out["nextToken"] = json!(n);
+        }
+        ok(out)
     }
 
     fn describe_broker_instance_options(
@@ -1448,6 +1278,197 @@ impl MqService {
                 }
             }
         }
-        ok(json!({ "brokerInstanceOptions": options, "maxResults": 100 }))
+        let (page, next) = paginate(&options, q);
+        let mut out = json!({ "brokerInstanceOptions": page, "maxResults": page_size(q) });
+        if let Some(n) = next {
+            out["nextToken"] = json!(n);
+        }
+        ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+
+    fn svc() -> MqService {
+        let state = Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "",
+        )));
+        MqService::new(state)
+    }
+
+    fn ctx(region: &str) -> Ctx {
+        Ctx {
+            account: "123456789012".to_string(),
+            region: region.to_string(),
+        }
+    }
+
+    fn json_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).expect("json response body")
+    }
+
+    fn active_body(name: &str) -> Value {
+        json!({
+            "brokerName": name,
+            "engineType": "ACTIVEMQ",
+            "deploymentMode": "SINGLE_INSTANCE",
+            "hostInstanceType": "mq.m5.large",
+            "publiclyAccessible": false
+        })
+    }
+
+    #[test]
+    fn same_broker_name_in_two_regions_both_succeed_and_list_is_region_scoped() {
+        let s = svc();
+        let east = ctx("us-east-1");
+        let west = ctx("us-west-2");
+
+        let e = json_of(
+            s.create_broker(&east, &active_body("dup"))
+                .expect("east create"),
+        );
+        let w = json_of(
+            s.create_broker(&west, &active_body("dup"))
+                .expect("west create"),
+        );
+        let e_id = e["brokerId"].as_str().unwrap().to_string();
+        let w_id = w["brokerId"].as_str().unwrap().to_string();
+        assert_ne!(e_id, w_id, "distinct brokers across regions");
+        assert!(e["brokerArn"].as_str().unwrap().contains(":us-east-1:"));
+        assert!(w["brokerArn"].as_str().unwrap().contains(":us-west-2:"));
+
+        // A same-named create in the same region DOES conflict.
+        assert!(s.create_broker(&east, &active_body("dup")).is_err());
+
+        // ListBrokers only shows the current region's broker.
+        let listed = json_of(s.list_brokers(&east, &[]).unwrap());
+        let ids: Vec<&str> = listed["brokerSummaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["brokerId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![e_id.as_str()], "east list is region-scoped");
+    }
+
+    #[test]
+    fn create_tags_then_describe_broker_shows_the_tag() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("tagged")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        let arn = created["brokerArn"].as_str().unwrap().to_string();
+
+        s.create_tags(&c, &arn, &json!({ "tags": { "team": "mq" } }))
+            .expect("create tags");
+
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        assert_eq!(described["tags"]["team"].as_str(), Some("mq"));
+    }
+
+    #[test]
+    fn delete_configuration_in_use_by_broker_is_rejected() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("withcfg")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        let cid = described["configurations"]["current"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        match s.delete_configuration(&c, &cid) {
+            Err(AwsServiceError::AwsError { status, code, .. }) => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(code, "ConflictException");
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("deleting an in-use configuration must be rejected"),
+        }
+    }
+
+    #[test]
+    fn creator_request_id_reused_after_delete_creates_fresh_broker() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let mut body = active_body("idem");
+        body["creatorRequestId"] = json!("token-1");
+
+        let first = json_of(s.create_broker(&c, &body).unwrap());
+        let first_id = first["brokerId"].as_str().unwrap().to_string();
+
+        // A repeat before delete is idempotent (same id).
+        let repeat = json_of(s.create_broker(&c, &body).unwrap());
+        assert_eq!(repeat["brokerId"].as_str().unwrap(), first_id);
+
+        s.delete_broker(&c, &first_id).expect("delete");
+        // A describe settles the deletion (removing the broker + creator entry).
+        let mut settled = false;
+        assert!(s.describe_broker(&c, &first_id, &mut settled).is_err());
+        assert!(settled, "delete settle should report a state change");
+
+        // Reusing the same creatorRequestId now creates a brand-new broker with
+        // a populated ARN (not the stale deleted id + empty ARN).
+        let second = json_of(s.create_broker(&c, &body).unwrap());
+        let second_id = second["brokerId"].as_str().unwrap();
+        assert_ne!(second_id, first_id, "fresh broker after delete");
+        assert!(second["brokerArn"]
+            .as_str()
+            .unwrap()
+            .contains(":broker:idem:"));
+    }
+
+    #[test]
+    fn activemq_auto_config_description_says_activemq() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("descr")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        let cid = described["configurations"]["current"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let cfg = json_of(s.describe_configuration(&c, &cid).unwrap());
+        assert_eq!(
+            cfg["latestRevision"]["description"].as_str(),
+            Some("Auto-generated default for ActiveMQ")
+        );
+        let rev = json_of(s.describe_configuration_revision(&c, &cid, "1").unwrap());
+        assert_eq!(
+            rev["description"].as_str(),
+            Some("Auto-generated default for ActiveMQ")
+        );
+    }
+
+    #[test]
+    fn describe_broker_without_transition_does_not_report_settled() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("stable")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+
+        // First describe settles CREATION_IN_PROGRESS -> RUNNING.
+        let mut settled = false;
+        let _ = s.describe_broker(&c, &id, &mut settled).unwrap();
+        assert!(settled, "creation settle fires on first describe");
+
+        // A subsequent describe of a stable broker changes nothing.
+        let mut settled2 = true;
+        let _ = s.describe_broker(&c, &id, &mut settled2).unwrap();
+        assert!(!settled2, "stable read must not report a settle");
     }
 }

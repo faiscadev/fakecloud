@@ -16,9 +16,10 @@
 //!                    ConfigurationId, ConfigurationRevision
 //!   Configuration -> Arn, Id, Revision
 
-use base64::Engine as _;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use uuid::Uuid;
+
+use fakecloud_mq::shared as mq_shared;
 
 use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
@@ -31,129 +32,44 @@ impl ResourceProvisioner {
     ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let name = mq_str(props, "BrokerName").unwrap_or_else(|| resource.logical_id.clone());
-        let engine = mq_str(props, "EngineType")
-            .unwrap_or_else(|| "ACTIVEMQ".to_string())
-            .to_uppercase();
-        let deployment =
-            mq_str(props, "DeploymentMode").unwrap_or_else(|| "SINGLE_INSTANCE".to_string());
         let region = self.region.clone();
         let account = self.account_id.clone();
-        let id = format!("b-{}", Uuid::new_v4());
-        let arn = format!("arn:aws:mq:{region}:{account}:broker:{name}:{id}");
-        let engine_version = mq_str(props, "EngineVersion")
-            .unwrap_or_else(|| default_engine_version(&engine).to_string());
-        let auth = mq_str(props, "AuthenticationStrategy").unwrap_or_else(|| "SIMPLE".to_string());
+
+        // Translate the CFN PascalCase properties into a restJson1 `CreateBroker`
+        // body and go through the exact same shared create path the direct API
+        // uses, so a CFN-created broker is byte-for-byte identical (users,
+        // synthesized subnets, auto-configuration, logs, encryption, tags) --
+        // the two paths cannot diverge (#1766).
+        let body = cfn_broker_body(props, &name);
+        let engine = body
+            .get("engineType")
+            .and_then(Value::as_str)
+            .unwrap_or("ACTIVEMQ")
+            .to_string();
+        let deployment = body
+            .get("deploymentMode")
+            .and_then(Value::as_str)
+            .unwrap_or("SINGLE_INSTANCE")
+            .to_string();
 
         let mut guard = self.mq_state.write();
         let acct = guard.get_or_create(&self.account_id);
-        if acct
-            .brokers
-            .values()
-            .any(|b| b.get("brokerName").and_then(Value::as_str) == Some(name.as_str()))
-        {
+        // Broker names are unique per account+region (matching the API handler).
+        if acct.brokers.values().any(|b| {
+            b.get("brokerName").and_then(Value::as_str) == Some(name.as_str())
+                && mq_shared::broker_region(b) == Some(region.as_str())
+        }) {
             return Err(format!("Broker name {name} already exists"));
         }
 
-        let mut broker = Map::new();
-        broker.insert("brokerId".into(), json!(id));
-        broker.insert("brokerArn".into(), json!(arn));
-        broker.insert("brokerName".into(), json!(name));
-        // CloudFormation waits for the broker to be RUNNING before CREATE_COMPLETE,
-        // so provision it already running.
-        broker.insert("brokerState".into(), json!("RUNNING"));
-        broker.insert("engineType".into(), json!(engine));
-        broker.insert("engineVersion".into(), json!(engine_version));
-        broker.insert("authenticationStrategy".into(), json!(auth));
-        broker.insert("created".into(), json!(now_iso()));
-        broker.insert("deploymentMode".into(), json!(deployment.clone()));
-        broker.insert(
-            "hostInstanceType".into(),
-            json!(mq_str(props, "HostInstanceType").unwrap_or_else(|| "mq.m5.large".to_string())),
-        );
-        broker.insert(
-            "publiclyAccessible".into(),
-            json!(mq_bool(props, "PubliclyAccessible")),
-        );
-        broker.insert(
-            "autoMinorVersionUpgrade".into(),
-            json!(mq_bool(props, "AutoMinorVersionUpgrade")),
-        );
-        broker.insert(
-            "storageType".into(),
-            json!(mq_str(props, "StorageType").unwrap_or_else(|| "EBS".to_string())),
-        );
-        broker.insert(
-            "securityGroups".into(),
-            mq_string_list(props, "SecurityGroups"),
-        );
-        broker.insert("subnetIds".into(), mq_string_list(props, "SubnetIds"));
-        broker.insert(
-            "logs".into(),
-            json!({
-                "audit": false,
-                "general": false,
-                "generalLogGroup": format!("/aws/amazonmq/broker/{id}/general"),
-            }),
-        );
+        let (id, arn) = mq_shared::create_broker_record(acct, &account, &region, &body);
+        // CloudFormation blocks CREATE_COMPLETE until the broker is RUNNING, so
+        // settle the freshly-created broker through the real lifecycle.
+        acct.reconcile_brokers();
 
-        // A referenced configuration becomes the broker's current configuration.
-        let (config_id, config_rev) = if let Some(cfg) = props.get("Configuration") {
-            let cid = cfg
-                .get("Id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let rev = cfg.get("Revision").and_then(Value::as_i64).unwrap_or(1);
-            broker.insert(
-                "configurations".into(),
-                json!({ "current": { "id": cid, "revision": rev }, "history": [] }),
-            );
-            (cid, rev)
-        } else if engine == "ACTIVEMQ" {
-            let cid = format!("c-{}", Uuid::new_v4());
-            let created = now_iso();
-            acct.configurations.insert(
-                cid.clone(),
-                json!({
-                    "arn": format!("arn:aws:mq:{region}:{account}:configuration:{cid}"),
-                    "authenticationStrategy": auth,
-                    "created": created,
-                    "description": "",
-                    "engineType": engine,
-                    "engineVersion": engine_version,
-                    "id": cid,
-                    "latestRevision": { "revision": 1, "created": created, "description": "Auto-generated default for ActiveMQ" },
-                    "name": format!("{name}-configuration"),
-                }),
-            );
-            acct.configuration_revisions.insert(
-                cid.clone(),
-                vec![json!({
-                    "revision": 1,
-                    "created": created,
-                    "description": "Auto-generated default for ActiveMQ",
-                    "data": default_config_data(&engine),
-                })],
-            );
-            broker.insert(
-                "configurations".into(),
-                json!({ "current": { "id": cid, "revision": 1 }, "history": [] }),
-            );
-            (cid, 1)
-        } else {
-            (String::new(), 0)
-        };
-
-        acct.brokers.insert(id.clone(), Value::Object(broker));
-        acct.users
-            .insert(id.clone(), std::collections::BTreeMap::new());
-        let tags = mq_tags(props);
-        if !tags.is_empty() {
-            acct.tags.insert(arn.clone(), tags);
-        }
-
+        let (config_id, config_rev) = broker_current_config(acct.brokers.get(&id));
         Ok(broker_attributes(
-            id.clone(),
+            id,
             arn,
             &engine,
             &region,
@@ -240,10 +156,9 @@ impl ResourceProvisioner {
                     .unwrap_or_default()
                     .to_string();
                 let rev = cfg.get("Revision").and_then(Value::as_i64).unwrap_or(1);
-                obj.insert(
-                    "configurations".into(),
-                    json!({ "current": { "id": cid, "revision": rev }, "history": [] }),
-                );
+                // Preserve configuration history: push the prior current onto
+                // history rather than discarding it.
+                mq_shared::set_broker_configuration(obj, &cid, rev);
             }
             let configs = obj.get("configurations");
             (
@@ -343,15 +258,15 @@ impl ResourceProvisioner {
             .unwrap_or_else(|| "ACTIVEMQ".to_string())
             .to_uppercase();
         let engine_version = mq_str(props, "EngineVersion")
-            .unwrap_or_else(|| default_engine_version(&engine).to_string());
+            .unwrap_or_else(|| mq_shared::default_engine_version(&engine).to_string());
         let auth = mq_str(props, "AuthenticationStrategy").unwrap_or_else(|| "SIMPLE".to_string());
         let description = mq_str(props, "Description").unwrap_or_default();
-        let data = mq_str(props, "Data").unwrap_or_else(|| default_config_data(&engine));
+        let data = mq_str(props, "Data").unwrap_or_else(|| mq_shared::default_config_data(&engine));
         let region = self.region.clone();
         let account = self.account_id.clone();
         let id = format!("c-{}", Uuid::new_v4());
-        let arn = format!("arn:aws:mq:{region}:{account}:configuration:{id}");
-        let created = now_iso();
+        let arn = mq_shared::config_arn(&region, &account, &id);
+        let created = mq_shared::now_iso();
 
         let mut guard = self.mq_state.write();
         let acct = guard.get_or_create(&self.account_id);
@@ -412,7 +327,7 @@ impl ResourceProvisioner {
 
         let description = mq_str(props, "Description").unwrap_or_default();
         let data = mq_str(props, "Data");
-        let created = now_iso();
+        let created = mq_shared::now_iso();
         let mut guard = self.mq_state.write();
         let acct = guard.get_or_create(&self.account_id);
         let arn = {
@@ -427,7 +342,7 @@ impl ResourceProvisioner {
                 "revision": next,
                 "created": created,
                 "description": description,
-                "data": data.clone().unwrap_or_else(|| default_config_data(&old_engine)),
+                "data": data.clone().unwrap_or_else(|| mq_shared::default_config_data(&old_engine)),
             }));
             let cfg = acct
                 .configurations
@@ -440,8 +355,6 @@ impl ResourceProvisioner {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let rev_str = next.to_string();
-            let _ = rev_str;
             (arn, next)
         };
         let tags = mq_tags(props);
@@ -515,17 +428,20 @@ impl ResourceProvisioner {
             .get_mut(&broker_id)
             .ok_or_else(|| format!("MQ broker {broker_id} does not exist"))?;
         if let Some(obj) = broker.as_object_mut() {
-            obj.insert(
-                "configurations".into(),
-                json!({ "current": { "id": cid, "revision": rev }, "history": [] }),
-            );
+            // Preserve the broker's configuration history: the prior current
+            // configuration is pushed onto history, not discarded.
+            mq_shared::set_broker_configuration(obj, &cid, rev);
         }
         // The association has no independent identity; Ref resolves to the broker.
         Ok(ProvisionResult::new(broker_id.clone()).with("Id", broker_id))
     }
 }
 
-/// Assemble a broker's `Fn::GetAtt` attribute set from its live wire endpoints.
+/// Assemble a broker's `Fn::GetAtt` attribute set from its live wire endpoints
+/// (projected from the single `mq_shared::broker_endpoints` source). The
+/// list-valued attributes (`IpAddresses`, `*Endpoints`) are stored as JSON
+/// arrays so `Fn::Select` / list-typed `Fn::GetAtt` resolve them as real lists
+/// rather than collapsing to a scalar.
 fn broker_attributes(
     id: String,
     arn: String,
@@ -535,63 +451,136 @@ fn broker_attributes(
     config_id: &str,
     config_revision: i64,
 ) -> ProvisionResult {
-    let count = match (engine, deployment_mode) {
-        ("ACTIVEMQ", "ACTIVE_STANDBY_MULTI_AZ") => 2,
-        _ => 1,
-    };
-    let mut ips = Vec::new();
-    let mut open_wire = Vec::new();
-    let mut amqp = Vec::new();
-    let mut stomp = Vec::new();
-    let mut mqtt = Vec::new();
-    let mut wss = Vec::new();
-    for i in 1..=count {
-        let h = fnv1a(&format!("{id}-{i}"));
-        ips.push(format!(
-            "10.{}.{}.{}",
-            (h >> 16) & 0xff,
-            (h >> 8) & 0xff,
-            h & 0xff
-        ));
-        if engine == "RABBITMQ" {
-            let host = format!("{id}.mq.{region}.amazonaws.com");
-            amqp.push(format!("amqps://{host}:5671"));
-        } else {
-            let host = format!("{id}-{i}.mq.{region}.amazonaws.com");
-            open_wire.push(format!("ssl://{host}:61617"));
-            amqp.push(format!("amqp+ssl://{host}:5671"));
-            stomp.push(format!("stomp+ssl://{host}:61614"));
-            mqtt.push(format!("mqtt+ssl://{host}:8883"));
-            wss.push(format!("wss://{host}:61619"));
-        }
-    }
-    // `attributes` is String->String; list attributes resolve to their first
-    // element (the value a bare `Fn::GetAtt` without an `Fn::Select` needs).
-    let mut res = ProvisionResult::new(id).with("Arn", arn);
-    if let Some(v) = ips.first() {
-        res = res.with("IpAddresses", v.clone());
-    }
-    if let Some(v) = open_wire.first() {
-        res = res.with("OpenWireEndpoints", v.clone());
-    }
-    if let Some(v) = amqp.first() {
-        res = res.with("AmqpEndpoints", v.clone());
-    }
-    if let Some(v) = stomp.first() {
-        res = res.with("StompEndpoints", v.clone());
-    }
-    if let Some(v) = mqtt.first() {
-        res = res.with("MqttEndpoints", v.clone());
-    }
-    if let Some(v) = wss.first() {
-        res = res.with("WssEndpoints", v.clone());
-    }
+    let e = mq_shared::broker_endpoints(&id, engine, region, deployment_mode);
+    let mut res = ProvisionResult::new(id)
+        .with("Arn", arn)
+        .with("IpAddresses", json_list(&e.ips))
+        .with("OpenWireEndpoints", json_list(&e.open_wire))
+        .with("AmqpEndpoints", json_list(&e.amqp))
+        .with("StompEndpoints", json_list(&e.stomp))
+        .with("MqttEndpoints", json_list(&e.mqtt))
+        .with("WssEndpoints", json_list(&e.wss));
     if !config_id.is_empty() {
         res = res
             .with("ConfigurationId", config_id.to_string())
             .with("ConfigurationRevision", config_revision.to_string());
     }
     res
+}
+
+/// A list-valued `Fn::GetAtt` attribute, encoded as a JSON array string so the
+/// intrinsic-function resolver can hand it back as a real list.
+fn json_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// The `{id, revision}` of a broker's current configuration (empty id / 0 when
+/// the broker has none, e.g. RabbitMQ).
+fn broker_current_config(broker: Option<&Value>) -> (String, i64) {
+    let cur = broker
+        .and_then(|b| b.get("configurations"))
+        .and_then(|c| c.get("current"));
+    let id = cur
+        .and_then(|c| c.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let rev = cur
+        .and_then(|c| c.get("revision"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    (id, rev)
+}
+
+/// Translate an `AWS::AmazonMQ::Broker` resource's PascalCase properties into a
+/// restJson1 `CreateBroker` request body (camelCase members) so the CFN path
+/// can reuse the exact shared service create logic.
+fn cfn_broker_body(props: &Value, name: &str) -> Value {
+    let mut b = serde_json::Map::new();
+    b.insert("brokerName".into(), json!(name));
+    b.insert(
+        "engineType".into(),
+        json!(mq_str(props, "EngineType")
+            .unwrap_or_else(|| "ACTIVEMQ".to_string())
+            .to_uppercase()),
+    );
+    if let Some(v) = mq_str(props, "EngineVersion") {
+        b.insert("engineVersion".into(), json!(v));
+    }
+    b.insert(
+        "deploymentMode".into(),
+        json!(mq_str(props, "DeploymentMode").unwrap_or_else(|| "SINGLE_INSTANCE".to_string())),
+    );
+    if let Some(v) = mq_str(props, "HostInstanceType") {
+        b.insert("hostInstanceType".into(), json!(v));
+    }
+    b.insert(
+        "publiclyAccessible".into(),
+        json!(mq_bool(props, "PubliclyAccessible")),
+    );
+    b.insert(
+        "autoMinorVersionUpgrade".into(),
+        json!(mq_bool(props, "AutoMinorVersionUpgrade")),
+    );
+    if let Some(v) = mq_str(props, "StorageType") {
+        b.insert("storageType".into(), json!(v));
+    }
+    if let Some(v) = mq_str(props, "AuthenticationStrategy") {
+        b.insert("authenticationStrategy".into(), json!(v));
+    }
+    if props.get("SecurityGroups").is_some() {
+        b.insert(
+            "securityGroups".into(),
+            mq_string_list(props, "SecurityGroups"),
+        );
+    }
+    // Only forward explicit subnets; when omitted, the shared path synthesizes
+    // default-VPC subnet ids exactly as the direct API does.
+    if props
+        .get("SubnetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        b.insert("subnetIds".into(), mq_string_list(props, "SubnetIds"));
+    }
+    if let Some(logs) = props.get("Logs") {
+        b.insert(
+            "logs".into(),
+            json!({
+                "audit": logs.get("Audit").and_then(Value::as_bool).unwrap_or(false),
+                "general": logs.get("General").and_then(Value::as_bool).unwrap_or(false),
+            }),
+        );
+    }
+    if let Some(cfg) = props.get("Configuration") {
+        b.insert(
+            "configuration".into(),
+            json!({
+                "id": cfg.get("Id").and_then(Value::as_str).unwrap_or_default(),
+                "revision": cfg.get("Revision").and_then(Value::as_i64).unwrap_or(1),
+            }),
+        );
+    }
+    if let Some(arr) = props.get("Users").and_then(Value::as_array) {
+        let users: Vec<Value> = arr
+            .iter()
+            .map(|u| {
+                json!({
+                    "username": u.get("Username").and_then(Value::as_str).unwrap_or_default(),
+                    "password": u.get("Password").cloned().unwrap_or(json!("")),
+                    "consoleAccess": u.get("ConsoleAccess").and_then(Value::as_bool).unwrap_or(false),
+                    "groups": u.get("Groups").cloned().unwrap_or(json!([])),
+                    "replicationUser": u.get("ReplicationUser").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect();
+        b.insert("users".into(), Value::Array(users));
+    }
+    let tags = mq_tags(props);
+    if !tags.is_empty() {
+        b.insert("tags".into(), json!(tags));
+    }
+    Value::Object(b)
 }
 
 fn mq_str(props: &Value, key: &str) -> Option<String> {
@@ -635,36 +624,4 @@ fn mq_tags(props: &Value) -> std::collections::BTreeMap<String, String> {
         }
     }
     out
-}
-
-fn default_engine_version(engine: &str) -> &'static str {
-    if engine == "RABBITMQ" {
-        "3.13"
-    } else {
-        "5.18"
-    }
-}
-
-fn default_config_data(engine: &str) -> String {
-    let xml = if engine == "RABBITMQ" {
-        "consumer_timeout = 1800000\n".to_string()
-    } else {
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<broker xmlns=\"http://activemq.apache.org/schema/core\" start=\"false\">\n</broker>\n".to_string()
-    };
-    base64::engine::general_purpose::STANDARD.encode(xml.as_bytes())
-}
-
-fn now_iso() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
-}
-
-fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
 }

@@ -39,8 +39,8 @@ const TEMPLATE: &str = r#"{
   "Outputs": {
     "BrokerRef":     { "Value": { "Ref": "MyBroker" } },
     "BrokerArn":     { "Value": { "Fn::GetAtt": ["MyBroker", "Arn"] } },
-    "BrokerAmqp":    { "Value": { "Fn::GetAtt": ["MyBroker", "AmqpEndpoints"] } },
-    "BrokerIp":      { "Value": { "Fn::GetAtt": ["MyBroker", "IpAddresses"] } },
+    "BrokerAmqp":    { "Value": { "Fn::Select": [0, { "Fn::GetAtt": ["MyBroker", "AmqpEndpoints"] }] } },
+    "BrokerIp":      { "Value": { "Fn::Select": [0, { "Fn::GetAtt": ["MyBroker", "IpAddresses"] }] } },
     "ConfigRef":     { "Value": { "Ref": "MyConfig" } },
     "ConfigArn":     { "Value": { "Fn::GetAtt": ["MyConfig", "Arn"] } },
     "ConfigId":      { "Value": { "Fn::GetAtt": ["MyConfig", "Id"] } },
@@ -124,6 +124,24 @@ async fn cfn_provisions_mq_broker_and_configuration() {
     assert_eq!(broker.engine_type().map(|e| e.as_str()), Some("RABBITMQ"));
     // CloudFormation provisions the broker already RUNNING.
     assert_eq!(broker.broker_state().map(|s| s.as_str()), Some("RUNNING"));
+    // Subnets are synthesized (not empty) just like the direct API, so the
+    // resource reads back without import drift.
+    assert!(
+        !broker.subnet_ids().is_empty(),
+        "CFN broker should have synthesized subnet ids"
+    );
+
+    // The stack-declared `Users` are actually created on the broker.
+    let users = mq
+        .list_users()
+        .broker_id(broker_ref)
+        .send()
+        .await
+        .expect("ListUsers");
+    assert!(
+        users.users().iter().any(|u| u.username() == Some("admin")),
+        "CFN-declared user should be present"
+    );
 
     let config = mq
         .describe_configuration()
