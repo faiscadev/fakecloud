@@ -10,7 +10,7 @@ account-partitioned state that persists across restarts in persistent mode.
 
 Amazon MQ on fakecloud is a faithful control plane **and a real data plane**:
 `CreateBroker` spawns a genuine message-broker container - `apache/activemq-classic`
-for ActiveMQ, `rabbitmq:3-management` for RabbitMQ - and the broker settles to
+for ActiveMQ, `rabbitmq:3.13-alpine` for RabbitMQ - and the broker settles to
 `RUNNING` only once that container actually accepts connections. `DescribeBroker`
 then returns the broker's REAL reachable host and mapped ports, so a client
 application genuinely connects and exchanges messages over OpenWire / AMQP /
@@ -38,8 +38,10 @@ lifecycle, but no real broker container is spawned.
   - **ActiveMQ**: OpenWire (`tcp://<host>:<port>`), AMQP, STOMP, MQTT, WS, and
     the web console (`http://<host>:<port>`) - each pointing at a genuinely
     listening socket on the `apache/activemq-classic` container.
-  - **RabbitMQ**: `amqp://<host>:<port>` plus the management console, backed by
-    the `rabbitmq:3-management` container.
+  - **RabbitMQ**: `amqp://<host>:<port>`, backed by the lightweight
+    `rabbitmq:3.13-alpine` container (the default image omits the management-UI
+    plugin so it boots fast and reliably; pin `FAKECLOUD_MQ_RABBITMQ_IMAGE=rabbitmq:3.13-management-alpine`
+    to also get the management console).
 
   (In the control-plane-only fallback with no container runtime, these fall back
   to the well-formed cosmetic `*.amazonaws.com` forms - identical response shape,

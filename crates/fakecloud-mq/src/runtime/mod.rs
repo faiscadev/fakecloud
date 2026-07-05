@@ -15,11 +15,14 @@
 //!   config (carries its own `<transportConnector>`) is applied verbatim
 //!   instead -- the highest-fidelity win where the uploaded config actually
 //!   configures the live broker.
-//! - `RABBITMQ` -> `rabbitmq:3-management`, publishing AMQP + the management
-//!   console. The create-time user is provisioned via
-//!   `RABBITMQ_DEFAULT_USER`/`_PASS`; further `CreateUser`/`UpdateUser`/
-//!   `DeleteUser` take effect immediately via `rabbitmqctl` (matching AWS,
-//!   which applies RabbitMQ user changes without a reboot).
+//! - `RABBITMQ` -> `rabbitmq:3.13-alpine` (the lightweight image WITHOUT the
+//!   heavy management-UI plugin bundle, which boots fast enough to settle
+//!   reliably on a constrained CI runner), publishing AMQP. The create-time
+//!   user is provisioned via `RABBITMQ_DEFAULT_USER`/`_PASS`; further
+//!   `CreateUser`/`UpdateUser`/`DeleteUser` take effect immediately via
+//!   `rabbitmqctl` (matching AWS, which applies RabbitMQ user changes without
+//!   a reboot). The image is overridable via `FAKECLOUD_MQ_RABBITMQ_IMAGE`
+//!   (e.g. pin `rabbitmq:3.13-management-alpine` to get the console back).
 //!
 //! Container-to-host networking (CLI detection, host alias, `--add-host`
 //! injection, and the in-container sibling address) all come from the shared
@@ -55,16 +58,33 @@ impl MqEngine {
     }
 
     /// Container image for this engine.
-    fn image(self) -> &'static str {
-        match self {
-            MqEngine::ActiveMq => "apache/activemq-classic",
-            MqEngine::RabbitMq => "rabbitmq:3-management",
-        }
+    ///
+    /// The RabbitMQ default is the `-alpine` (NOT `-management`) image: the
+    /// management-UI plugin bundle is heavy and materially slows the Erlang boot
+    /// on a constrained CI runner, which is exactly what pushed brokers past the
+    /// readiness window. The alpine image boots fast and only serves AMQP, which
+    /// is all the data plane needs. Each image is overridable via env
+    /// (`FAKECLOUD_MQ_ACTIVEMQ_IMAGE` / `FAKECLOUD_MQ_RABBITMQ_IMAGE`) so a
+    /// different tag can be pinned without a code change.
+    fn image(self) -> String {
+        let (var, default) = match self {
+            MqEngine::ActiveMq => ("FAKECLOUD_MQ_ACTIVEMQ_IMAGE", "apache/activemq-classic"),
+            MqEngine::RabbitMq => ("FAKECLOUD_MQ_RABBITMQ_IMAGE", "rabbitmq:3.13-alpine"),
+        };
+        std::env::var(var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| default.to_string())
     }
 
     /// The `(label, container_port)` pairs published to ephemeral host ports.
     /// The label is what `BrokerDataPlane::ports` is keyed by and what the
     /// describe endpoints project from.
+    ///
+    /// RabbitMQ publishes only AMQP: the default image omits the management
+    /// plugin, so there is no console listener on 15672 to publish (the describe
+    /// endpoints project a console URL only when the port is actually mapped, so
+    /// dropping it here simply means no dead console endpoint is advertised).
     fn published_ports(self) -> &'static [(&'static str, u16)] {
         match self {
             MqEngine::ActiveMq => &[
@@ -75,7 +95,7 @@ impl MqEngine {
                 ("ws", 61614),
                 ("console", 8161),
             ],
-            MqEngine::RabbitMq => &[("amqp", 5672), ("console", 15672)],
+            MqEngine::RabbitMq => &[("amqp", 5672)],
         }
     }
 }
@@ -326,7 +346,7 @@ impl MqRuntime {
                 args.push(format!("RABBITMQ_DEFAULT_PASS={}", first.password));
             }
         }
-        args.push(engine.image().to_string());
+        args.push(engine.image());
 
         let output = tokio::process::Command::new(&self.cli)
             .args(&args)

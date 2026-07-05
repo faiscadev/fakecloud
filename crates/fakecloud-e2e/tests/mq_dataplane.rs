@@ -77,11 +77,12 @@ async fn wait_for_running(
             );
             return endpoints;
         }
-        assert_ne!(
-            state, "CREATION_FAILED",
-            "broker container failed to start (data plane could not come up)"
-        );
+        if state == "CREATION_FAILED" {
+            helpers::dump_mq_broker_diagnostics(broker_id);
+            panic!("broker container failed to start (data plane could not come up)");
+        }
         if std::time::Instant::now() >= deadline {
+            helpers::dump_mq_broker_diagnostics(broker_id);
             panic!("broker {broker_id} did not reach RUNNING within {timeout_secs}s (last state: {state})");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;

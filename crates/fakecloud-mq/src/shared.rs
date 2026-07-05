@@ -187,8 +187,12 @@ fn real_broker_endpoints(engine: &str, dp: &BrokerDataPlane) -> BrokerEndpoints 
     let mut e = BrokerEndpoints::default();
     e.ips.push(host.to_string());
     if is_rabbit(engine) {
+        // A console URL is projected only when a management console port is
+        // actually mapped. The default RabbitMQ image omits the management
+        // plugin (nothing listens on 15672), so no console port is published
+        // and no dead console endpoint is advertised; a management image pinned
+        // via env would map it and this would surface it over plain HTTP.
         if let Some(p) = port("console") {
-            // rabbitmq:3-management serves the console over plain HTTP on 15672.
             e.console_urls.push(format!("http://{host}:{p}"));
         }
         if let Some(p) = port("amqp") {
@@ -512,7 +516,8 @@ mod tests {
             e.amqp,
             vec!["amqp://host.docker.internal:55672".to_string()]
         );
-        // rabbitmq:3-management serves the console over plain HTTP, not HTTPS.
+        // When a management console port IS mapped (e.g. a management image
+        // pinned via env), the console URL is plain HTTP, not HTTPS.
         assert_eq!(
             e.console_urls,
             vec!["http://host.docker.internal:55673".to_string()]

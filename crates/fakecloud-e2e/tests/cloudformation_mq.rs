@@ -128,11 +128,14 @@ async fn cfn_provisions_mq_broker_and_configuration() {
         if state == "RUNNING" {
             break broker;
         }
-        assert_ne!(state, "CREATION_FAILED", "broker container failed to start");
-        assert!(
-            std::time::Instant::now() < deadline,
-            "CFN broker did not reach RUNNING (last state: {state})"
-        );
+        if state == "CREATION_FAILED" {
+            helpers::dump_mq_broker_diagnostics(broker_ref);
+            panic!("broker container failed to start");
+        }
+        if std::time::Instant::now() >= deadline {
+            helpers::dump_mq_broker_diagnostics(broker_ref);
+            panic!("CFN broker did not reach RUNNING (last state: {state})");
+        }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     };
     assert_eq!(broker.broker_arn(), Some(broker_arn));

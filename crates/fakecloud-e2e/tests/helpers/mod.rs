@@ -184,3 +184,61 @@ pub async fn wait_for_serverless_cache_available(
     }
     panic!("serverless cache {serverless_cache_name} did not reach 'available' within {max_secs}s");
 }
+
+/// Print Docker diagnostics for an MQ broker's backing container to the TEST's
+/// stdout (which nextest captures and shows on failure). fakecloud tags each
+/// broker container `fakecloud-mq=<broker_id>`, so we can find it by label even
+/// though the runtime's own `tracing` logs go to the server's stderr (which CI
+/// does not surface).
+///
+/// This exists so a broker that fails to become ready in CI is DIAGNOSABLE: the
+/// container's recent logs reveal the real reason (OOM kill, Erlang node/cookie
+/// error, slow boot, crash loop) instead of a bare "CREATION_FAILED".
+pub fn dump_mq_broker_diagnostics(broker_id: &str) {
+    fn docker(args: &[&str]) -> String {
+        match std::process::Command::new("docker").args(args).output() {
+            Ok(o) => {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    s.push_str("\n[stderr] ");
+                    s.push_str(err.trim());
+                }
+                s
+            }
+            Err(e) => format!("<`docker {}` failed: {e}>", args.join(" ")),
+        }
+    }
+
+    println!("\n===== MQ broker diagnostics for {broker_id} =====");
+    let label = format!("label=fakecloud-mq={broker_id}");
+    let ids_raw = docker(&["ps", "-aq", "--filter", &label]);
+    let ids: Vec<&str> = ids_raw.split_whitespace().collect();
+    println!(
+        "container ids (filter {label}): {}",
+        if ids.is_empty() {
+            "<none found>".to_string()
+        } else {
+            ids.join(", ")
+        }
+    );
+    // Broad `docker ps -a` too, in case the label filter misses (e.g. the
+    // container was removed) -- it shows exit status / restart state at a glance.
+    println!("--- docker ps -a ---\n{}", docker(&["ps", "-a"]));
+    for id in ids {
+        println!(
+            "--- docker inspect {id} (state) ---\n{}",
+            docker(&[
+                "inspect",
+                "--format",
+                "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}",
+                id,
+            ])
+        );
+        println!(
+            "--- docker logs --tail 120 {id} ---\n{}",
+            docker(&["logs", "--tail", "120", id])
+        );
+    }
+    println!("===== end MQ broker diagnostics for {broker_id} =====\n");
+}
