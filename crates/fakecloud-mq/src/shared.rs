@@ -11,7 +11,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::state::MqData;
+use crate::state::{BrokerDataPlane, MqData};
 
 /// Whether an engine string names RabbitMQ, case-insensitively. Amazon MQ
 /// echoes back the engine type in the display case the caller sent
@@ -133,7 +133,16 @@ pub fn broker_endpoints(
     engine: &str,
     region: &str,
     deployment_mode: &str,
+    data_plane: Option<&BrokerDataPlane>,
 ) -> BrokerEndpoints {
+    // When a real backing container is bound, project its REAL reachable host
+    // + mapped ports so a client actually connects (the RDS `Address`
+    // pattern). The response SHAPE is identical to the cosmetic path -- only
+    // the host/port VALUES become real -- so conformance (which never spawns a
+    // container) still passes.
+    if let Some(dp) = data_plane {
+        return real_broker_endpoints(engine, dp);
+    }
     let count = if !is_rabbit(engine) && deployment_mode == "ACTIVE_STANDBY_MULTI_AZ" {
         2
     } else {
@@ -160,6 +169,48 @@ pub fn broker_endpoints(
             e.stomp.push(format!("stomp+ssl://{host}:61614"));
             e.mqtt.push(format!("mqtt+ssl://{host}:8883"));
             e.wss.push(format!("wss://{host}:61619"));
+        }
+    }
+    e
+}
+
+/// Endpoints projected from a live backing container's real host + mapped
+/// ports. The URLs use the plaintext scheme forms the real broker actually
+/// speaks on the mapped ports (`tcp://`/`amqp://`/`stomp://`/`mqtt://`/`ws://`)
+/// so a client can connect verbatim -- unlike the cosmetic `ssl://…amazonaws`
+/// forms, these point at a socket that is genuinely listening. The IP is the
+/// reachable host (`127.0.0.1` or the sibling alias), matching what the ports
+/// are published on.
+fn real_broker_endpoints(engine: &str, dp: &BrokerDataPlane) -> BrokerEndpoints {
+    let host = dp.host.as_str();
+    let port = |label: &str| dp.ports.get(label).copied();
+    let mut e = BrokerEndpoints::default();
+    e.ips.push(host.to_string());
+    if is_rabbit(engine) {
+        if let Some(p) = port("console") {
+            e.console_urls.push(format!("https://{host}:{p}"));
+        }
+        if let Some(p) = port("amqp") {
+            e.amqp.push(format!("amqp://{host}:{p}"));
+        }
+    } else {
+        if let Some(p) = port("console") {
+            e.console_urls.push(format!("http://{host}:{p}"));
+        }
+        if let Some(p) = port("openwire") {
+            e.open_wire.push(format!("tcp://{host}:{p}"));
+        }
+        if let Some(p) = port("amqp") {
+            e.amqp.push(format!("amqp://{host}:{p}"));
+        }
+        if let Some(p) = port("stomp") {
+            e.stomp.push(format!("stomp://{host}:{p}"));
+        }
+        if let Some(p) = port("mqtt") {
+            e.mqtt.push(format!("mqtt://{host}:{p}"));
+        }
+        if let Some(p) = port("ws") {
+            e.wss.push(format!("ws://{host}:{p}"));
         }
     }
     e
@@ -405,4 +456,61 @@ pub fn create_broker_record(
     }
 
     (id, arn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::BrokerDataPlane;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn cosmetic_endpoints_used_without_a_data_plane() {
+        // No backing container -> the well-formed synthetic endpoints (identical
+        // response shape, so conformance is unaffected).
+        let e = broker_endpoints("b-1", "ACTIVEMQ", "us-east-1", "SINGLE_INSTANCE", None);
+        assert_eq!(e.open_wire.len(), 1);
+        assert!(e.open_wire[0].contains("amazonaws.com"));
+        assert!(e.open_wire[0].starts_with("ssl://"));
+    }
+
+    #[test]
+    fn real_endpoints_projected_from_data_plane() {
+        // A live container's real host + mapped ports are projected verbatim, so
+        // a client connects to a genuinely listening socket.
+        let mut ports = BTreeMap::new();
+        ports.insert("openwire".to_string(), 51616u16);
+        ports.insert("stomp".to_string(), 51613u16);
+        ports.insert("console".to_string(), 58161u16);
+        let dp = BrokerDataPlane {
+            container_id: "c1".to_string(),
+            host: "127.0.0.1".to_string(),
+            ports,
+        };
+        let e = broker_endpoints("b-1", "ACTIVEMQ", "us-east-1", "SINGLE_INSTANCE", Some(&dp));
+        assert_eq!(e.open_wire, vec!["tcp://127.0.0.1:51616".to_string()]);
+        assert_eq!(e.stomp, vec!["stomp://127.0.0.1:51613".to_string()]);
+        assert_eq!(e.console_urls, vec!["http://127.0.0.1:58161".to_string()]);
+        assert_eq!(e.ips, vec!["127.0.0.1".to_string()]);
+        // No amazonaws host anywhere.
+        assert!(!e.open_wire[0].contains("amazonaws.com"));
+    }
+
+    #[test]
+    fn real_rabbitmq_endpoints_use_amqp_scheme() {
+        let mut ports = BTreeMap::new();
+        ports.insert("amqp".to_string(), 55672u16);
+        ports.insert("console".to_string(), 55673u16);
+        let dp = BrokerDataPlane {
+            container_id: "c1".to_string(),
+            host: "host.docker.internal".to_string(),
+            ports,
+        };
+        let e = broker_endpoints("b-1", "RABBITMQ", "us-east-1", "SINGLE_INSTANCE", Some(&dp));
+        assert_eq!(
+            e.amqp,
+            vec!["amqp://host.docker.internal:55672".to_string()]
+        );
+        assert!(e.open_wire.is_empty());
+    }
 }

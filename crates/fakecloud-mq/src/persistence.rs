@@ -43,8 +43,14 @@ pub fn load_into(
     // Reconcile any broker lifecycle transition that was in flight when the
     // process stopped: creating/rebooting brokers settle to RUNNING, deleting
     // brokers are removed (there is no timer to resume).
+    // The in-memory lifecycle is settled here (auto_settle = true) so an
+    // interrupted transition never wedges. When a container runtime is
+    // attached, the server calls `MqService::recover_persisted_containers`
+    // right after load, which re-drives every RUNNING broker back through a
+    // real container (respawning if it's gone, #1338) -- so a broker settled
+    // to RUNNING here is immediately backed by a live container again.
     for (_account_id, account) in snapshot.accounts.iter_mut() {
-        account.reconcile_brokers();
+        account.reconcile_brokers(true);
     }
     let accounts = snapshot.accounts.account_count();
     *state.write() = snapshot.accounts;

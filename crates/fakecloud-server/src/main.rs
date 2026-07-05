@@ -728,6 +728,18 @@ async fn main() {
     } else {
         degraded_runtimes.push("ElastiCache (metadata-only clusters, no cache data plane)");
     }
+    // Amazon MQ backing-broker runtime (Docker/Podman). Constructed here so the
+    // degraded-runtimes banner reports it; attached to the MqService further
+    // down where the service is built.
+    let mq_runtime = fakecloud_mq::MqRuntime::new().map(Arc::new);
+    if let Some(ref rt) = mq_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "MQ broker execution enabled via container runtime"
+        );
+    } else {
+        degraded_runtimes.push("MQ (control-plane-only brokers, no connectable broker data plane)");
+    }
     // ECS runtime is constructed below, after the EventBridge + CloudWatch
     // Logs wiring is in place. Placeholder kept here so downstream blocks
     // that reference `ecs_runtime` don't need reordering — see the
@@ -4942,6 +4954,18 @@ async fn main() {
     if let Some(store) = mq_snapshot_store {
         mq_service = mq_service.with_snapshot_store(store);
     }
+    // Amazon MQ brokers are backed by REAL ActiveMQ/RabbitMQ containers so a
+    // client actually connects and exchanges messages (the RDS/ElastiCache
+    // bar). The runtime is constructed earlier alongside the other backing
+    // runtimes (so the degraded-runtimes banner reports it); attach it here.
+    if let Some(ref rt) = mq_runtime {
+        mq_service = mq_service.with_runtime(rt.clone());
+    }
+    // Recreate backing containers for persisted brokers the snapshot claims
+    // should be running (same restart-recovery contract as RDS #1338).
+    // Fire-and-forget: one task per broker, so a slow broker bring-up doesn't
+    // block startup.
+    mq_service.recover_persisted_containers().await;
     if let Some(h) = mq_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("mq", h);
     }
@@ -10146,6 +10170,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = elasticache_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = mq_runtime {
         rt.stop_all().await;
     }
     if let Some(rt) = ec2_runtime {

@@ -22,6 +22,27 @@ use fakecloud_core::multi_account::{AccountState, MultiAccountState};
 
 pub const MQ_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
+/// The live data-plane binding for a broker whose backing engine container
+/// (ActiveMQ/RabbitMQ) is running. Recorded when the container becomes
+/// reachable and used to project the REAL, connectable host + mapped ports
+/// into `DescribeBroker`'s `brokerInstances` (replacing the cosmetic
+/// `*.amazonaws.com` synthesis). Persisted so a restart can tell which
+/// brokers had a backing container and reconcile them (respawn if the
+/// container is gone, #1338), and so the mapped ports survive a snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrokerDataPlane {
+    /// The backing container id.
+    pub container_id: String,
+    /// Host clients reach the published ports at: `127.0.0.1` on the host,
+    /// or `host.docker.internal` / `host.containers.internal` when fakecloud
+    /// is itself containerized (issue #1539).
+    pub host: String,
+    /// Wire-protocol label (`openwire`/`amqp`/`stomp`/`mqtt`/`ws`/`console`)
+    /// -> the host port the container's corresponding port is published on.
+    #[serde(default)]
+    pub ports: BTreeMap<String, u16>,
+}
+
 /// Per-account Amazon MQ state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MqData {
@@ -48,6 +69,13 @@ pub struct MqData {
     /// Resource tags keyed by resource ARN (broker or configuration) -> tag map.
     #[serde(default)]
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// Live data-plane binding keyed by `BrokerId`, present only while a
+    /// backing engine container is running. Kept OUT of the broker wire
+    /// object so `DescribeBroker` never leaks a non-AWS field; the describe
+    /// path reads it to render REAL endpoints and the restart path reads it
+    /// to reconcile the backing container.
+    #[serde(default)]
+    pub data_plane: BTreeMap<String, BrokerDataPlane>,
 }
 
 impl MqData {
@@ -56,7 +84,19 @@ impl MqData {
     /// becomes `RUNNING` (applying any staged pending change), and one left
     /// `DELETION_IN_PROGRESS` is removed. Used both on the next describe and on
     /// restart. Returns `true` if anything changed.
-    pub fn reconcile_brokers(&mut self) -> bool {
+    ///
+    /// `auto_settle` controls who owns the transitions. It is `true` in the
+    /// in-memory / degraded path (no container runtime): the lifecycle is a
+    /// pure state-machine that settles here on the next describe, exactly as
+    /// the control-plane-only broker always did. It is `false` when a real
+    /// engine-container runtime is attached: the runtime's background tasks
+    /// own CREATION/REBOOT/DELETION (a broker is only `RUNNING` once its
+    /// container actually accepts connections), so this becomes a no-op and
+    /// never races those tasks by prematurely flipping state.
+    pub fn reconcile_brokers(&mut self, auto_settle: bool) -> bool {
+        if !auto_settle {
+            return false;
+        }
         let mut changed = false;
         let ids: Vec<String> = self.brokers.keys().cloned().collect();
         for id in ids {
@@ -81,6 +121,7 @@ impl MqData {
                 "DELETION_IN_PROGRESS" => {
                     self.brokers.remove(&id);
                     self.users.remove(&id);
+                    self.data_plane.remove(&id);
                     // Drop the idempotency mapping so reusing the same
                     // creatorRequestId after a delete creates a fresh broker
                     // rather than returning the deleted id with an empty ARN.
@@ -176,4 +217,58 @@ pub type SharedMqState = Arc<RwLock<MultiAccountState<MqData>>>;
 pub struct MqSnapshot {
     pub schema_version: u32,
     pub accounts: MultiAccountState<MqData>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn data_with_broker(state: &str) -> MqData {
+        let mut d = MqData::default();
+        d.brokers.insert(
+            "b-1".to_string(),
+            json!({ "brokerId": "b-1", "brokerState": state }),
+        );
+        d
+    }
+
+    #[test]
+    fn reconcile_auto_settle_false_is_a_noop() {
+        // With a container runtime attached, the runtime's background tasks own
+        // the transitions; reconcile must never flip state itself.
+        let mut d = data_with_broker("CREATION_IN_PROGRESS");
+        assert!(!d.reconcile_brokers(false));
+        assert_eq!(
+            d.brokers["b-1"]["brokerState"],
+            json!("CREATION_IN_PROGRESS"),
+            "runtime-managed brokers are not settled by reconcile",
+        );
+    }
+
+    #[test]
+    fn reconcile_auto_settle_true_settles_creation() {
+        let mut d = data_with_broker("CREATION_IN_PROGRESS");
+        assert!(d.reconcile_brokers(true));
+        assert_eq!(d.brokers["b-1"]["brokerState"], json!("RUNNING"));
+    }
+
+    #[test]
+    fn reconcile_deletion_clears_data_plane_binding() {
+        let mut d = data_with_broker("DELETION_IN_PROGRESS");
+        d.data_plane.insert(
+            "b-1".to_string(),
+            BrokerDataPlane {
+                container_id: "c1".to_string(),
+                host: "127.0.0.1".to_string(),
+                ports: BTreeMap::new(),
+            },
+        );
+        assert!(d.reconcile_brokers(true));
+        assert!(d.brokers.is_empty());
+        assert!(
+            d.data_plane.is_empty(),
+            "the data-plane binding must be freed with the broker",
+        );
+    }
 }

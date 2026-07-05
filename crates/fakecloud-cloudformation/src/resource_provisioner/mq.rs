@@ -64,8 +64,10 @@ impl ResourceProvisioner {
 
         let (id, arn) = mq_shared::create_broker_record(acct, &account, &region, &body);
         // CloudFormation blocks CREATE_COMPLETE until the broker is RUNNING, so
-        // settle the freshly-created broker through the real lifecycle.
-        acct.reconcile_brokers();
+        // settle the freshly-created broker through the in-memory lifecycle
+        // (auto_settle = true); the CFN provisioner is synchronous and does not
+        // spawn a backing container.
+        acct.reconcile_brokers(true);
 
         let (config_id, config_rev) = broker_current_config(acct.brokers.get(&id));
         Ok(broker_attributes(
@@ -451,7 +453,7 @@ fn broker_attributes(
     config_id: &str,
     config_revision: i64,
 ) -> ProvisionResult {
-    let e = mq_shared::broker_endpoints(&id, engine, region, deployment_mode);
+    let e = mq_shared::broker_endpoints(&id, engine, region, deployment_mode, None);
     let mut res = ProvisionResult::new(id)
         .with("Arn", arn)
         .with("IpAddresses", json_list(&e.ips))
