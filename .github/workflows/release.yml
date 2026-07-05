@@ -199,6 +199,7 @@ jobs:
           publish fakecloud-resource-groups  # only core/persistence/aws deps
           publish fakecloud-resource-groups-tagging  # only core/persistence/aws deps
           publish fakecloud-elasticache
+          publish fakecloud-elasticbeanstalk # only core/persistence/aws deps
           publish fakecloud-memorydb         # only core/persistence/aws deps
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps

@@ -103,6 +103,11 @@ async fn elasticache_acceptance() {
 }
 
 #[tokio::test]
+async fn elasticbeanstalk_acceptance() {
+    run_shard("elasticbeanstalk").await;
+}
+
+#[tokio::test]
 async fn memorydb_acceptance() {
     run_shard("memorydb").await;
 }

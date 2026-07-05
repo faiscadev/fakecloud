@@ -4488,6 +4488,78 @@ async fn main() {
     }
     registry.register(Arc::new(glacier_service));
 
+    // AWS Elastic Beanstalk: applications, application versions, environments
+    // (with an async Launching->Ready lifecycle), configuration templates,
+    // configuration option settings, events, platforms. Orchestration facade;
+    // control-plane-complete with the app-execution data-plane deferred.
+    let beanstalk_state: fakecloud_elasticbeanstalk::SharedEbState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_elasticbeanstalk::EbAccounts::new()),
+    );
+    let beanstalk_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("elasticbeanstalk").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<
+                        fakecloud_elasticbeanstalk::ElasticBeanstalkSnapshot,
+                    >(&bytes)
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_elasticbeanstalk::ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "elasticbeanstalk persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_elasticbeanstalk::ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *beanstalk_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded elasticbeanstalk persistence snapshot (multi-account)"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse elasticbeanstalk persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "no elasticbeanstalk persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read elasticbeanstalk persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut beanstalk_service =
+        fakecloud_elasticbeanstalk::ElasticBeanstalkService::new(beanstalk_state.clone());
+    if let Some(store) = beanstalk_snapshot_store {
+        beanstalk_service = beanstalk_service.with_snapshot_store(store);
+    }
+    // Re-drive any environment left mid-transition by a restart, mirroring the
+    // RDS / ElastiCache container recovery contract.
+    beanstalk_service.recover_pending_environments();
+    if let Some(h) = beanstalk_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("elasticbeanstalk", h);
+    }
+    registry.register(Arc::new(beanstalk_service));
+
     // AWS Backup control plane.
     let backup_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

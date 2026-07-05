@@ -321,6 +321,7 @@ mod tests {
             ("rds", Protocol::Query),
             ("ec2", Protocol::Query),
             ("elasticache", Protocol::Query),
+            ("elasticbeanstalk", Protocol::Query),
             ("elasticloadbalancing", Protocol::Query),
             (
                 "ssm",

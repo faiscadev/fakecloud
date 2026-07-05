@@ -28,6 +28,7 @@ sdk-clients = [
     "dep:aws-sdk-kinesis",
     "dep:aws-sdk-rds",
     "dep:aws-sdk-elasticache",
+    "dep:aws-sdk-elasticbeanstalk",
     "dep:aws-sdk-cloudformation",
     "dep:aws-sdk-ses",
     "dep:aws-sdk-sesv2",
@@ -90,6 +91,7 @@ aws-sdk-kinesis = { version = "1", optional = true }
 aws-sdk-rds = { version = "1", optional = true }
 aws-sdk-ec2 = { version = "1", optional = true }
 aws-sdk-elasticache = { version = "1", optional = true }
+aws-sdk-elasticbeanstalk = { version = "1", optional = true }
 aws-sdk-cloudformation = { version = "1", optional = true }
 aws-sdk-ses = { version = "1", optional = true }
 aws-sdk-sesv2 = { version = "1", optional = true }

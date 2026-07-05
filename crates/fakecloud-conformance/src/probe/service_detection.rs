@@ -200,6 +200,7 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // for clarity instead of relying on the default fall-through.
         "rds" => Protocol::Query,
         "elasticache" => Protocol::Query,
+        "elasticbeanstalk" => Protocol::Query,
         "elasticloadbalancing" => Protocol::Query,
         // EC2 speaks the `ec2Query` protocol: form-encoded `Action=` requests
         // and flattened-XML responses. Wire-compatible with the Query probe
