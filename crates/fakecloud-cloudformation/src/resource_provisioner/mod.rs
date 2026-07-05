@@ -907,6 +907,7 @@ pub struct ResourceProvisioner {
     pub codecommit_state: fakecloud_codecommit::SharedCodeCommitState,
     pub efs_state: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
+    pub mq_state: fakecloud_mq::SharedMqState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1073,6 +1074,7 @@ mod kinesis;
 mod kms;
 mod lambda;
 mod logs;
+mod mq;
 mod pipes;
 mod rds;
 mod route;
@@ -1202,6 +1204,11 @@ impl ResourceProvisioner {
             "AWS::Pipes::Pipe" => self.create_pipes_pipe(resource),
             "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
             "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
+            "AWS::AmazonMQ::Broker" => self.create_mq_broker(resource),
+            "AWS::AmazonMQ::Configuration" => self.create_mq_configuration(resource),
+            "AWS::AmazonMQ::ConfigurationAssociation" => {
+                self.create_mq_configuration_association(resource)
+            }
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
             "AWS::EFS::MountTarget" => self.create_efs_mount_target(resource),
@@ -1544,6 +1551,13 @@ impl ResourceProvisioner {
             "AWS::CodeArtifact::Repository" => {
                 Some(self.update_codeartifact_repository(existing, new_def)?)
             }
+            "AWS::AmazonMQ::Broker" => Some(self.update_mq_broker(existing, new_def)?),
+            "AWS::AmazonMQ::Configuration" => {
+                Some(self.update_mq_configuration(existing, new_def)?)
+            }
+            "AWS::AmazonMQ::ConfigurationAssociation" => {
+                Some(self.create_mq_configuration_association(new_def)?)
+            }
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
@@ -1681,6 +1695,10 @@ impl ResourceProvisioner {
             }
             "AWS::CodeArtifact::Repository" => {
                 self.get_att_codeartifact_repository(&resource.physical_id, attribute)
+            }
+            "AWS::AmazonMQ::Broker" => self.get_att_mq_broker(&resource.physical_id, attribute),
+            "AWS::AmazonMQ::Configuration" => {
+                self.get_att_mq_configuration(&resource.physical_id, attribute)
             }
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
@@ -1924,6 +1942,15 @@ impl ResourceProvisioner {
                 self.delete_codeartifact_repository(&resource.physical_id);
                 Ok(())
             }
+            "AWS::AmazonMQ::Broker" => {
+                self.delete_mq_broker(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::AmazonMQ::Configuration" => {
+                self.delete_mq_configuration(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::AmazonMQ::ConfigurationAssociation" => Ok(()),
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
                 Ok(())
@@ -6529,6 +6556,9 @@ mod tests {
             )),
             elasticbeanstalk_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
+            )),
+            mq_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,

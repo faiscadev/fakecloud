@@ -54,6 +54,7 @@ fakecloud-codeartifact = { workspace = true }
 fakecloud-codecommit = { workspace = true }
 fakecloud-efs = { workspace = true }
 fakecloud-elasticbeanstalk = { workspace = true }
+fakecloud-mq = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

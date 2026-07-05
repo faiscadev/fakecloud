@@ -719,6 +719,19 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "mq",
+        // Amazon MQ is a real, persisted control plane. The provider's core
+        // resources round-trip through create/read/update/delete: a broker
+        // (settling `CREATION_IN_PROGRESS` -> `RUNNING` on the next describe so
+        // the create waiter completes, reporting its per-engine wire endpoints,
+        // console URLs, IP addresses, deployment mode, and current
+        // configuration) and a configuration (base64 `Data` revisions with an
+        // engine type + authentication strategy that persist and read back).
+        // The broker's inline `user` blocks and ARN-keyed tags round-trip too.
+        run_regex: "^TestAccMQ(Broker|Configuration)_basic$",
+        deny: &[],
+    },
+    Service {
         name: "glacier",
         // Amazon S3 Glacier stores real archive bytes and computes a real
         // SHA-256 tree hash, so the standalone vault resource round-trips
@@ -1609,6 +1622,12 @@ pub const SHARDS: &[Shard] = &[
             "FileSystem|MountTarget|AccessPoint|BackupPolicy|FileSystemPolicy",
             ")_basic$",
         ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "mq",
+        service: "mq",
+        run_regex: "^TestAccMQ(Broker|Configuration)_basic$",
         extra_deny: &[],
     },
     Shard {

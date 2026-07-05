@@ -203,6 +203,7 @@ jobs:
           publish fakecloud-memorydb         # only core/persistence/aws deps
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
+          publish fakecloud-mq               # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
           publish fakecloud-identitystore    # only core/persistence/aws deps

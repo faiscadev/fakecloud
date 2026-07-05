@@ -146,6 +146,10 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         // (Application / ApplicationVersion / Environment / ConfigurationTemplate)
         // since the mapping keys on the service segment.
         "ElasticBeanstalk" => "elasticbeanstalk",
+        // A single entry covers AWS::AmazonMQ::Broker and
+        // AWS::AmazonMQ::Configuration since the mapping keys on the service
+        // segment.
+        "AmazonMQ" => "mq",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
         _ => return None,
@@ -381,6 +385,7 @@ pub struct CloudFormationDeps {
     pub codecommit: fakecloud_codecommit::SharedCodeCommitState,
     pub efs: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk: fakecloud_elasticbeanstalk::SharedEbState,
+    pub mq: fakecloud_mq::SharedMqState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -833,6 +838,7 @@ impl CloudFormationService {
             codecommit_state: self.deps.codecommit.clone(),
             efs_state: self.deps.efs.clone(),
             elasticbeanstalk_state: self.deps.elasticbeanstalk.clone(),
+            mq_state: self.deps.mq.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3103,6 +3109,13 @@ mod tests {
             )),
             elasticbeanstalk: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
+            )),
+            mq: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,

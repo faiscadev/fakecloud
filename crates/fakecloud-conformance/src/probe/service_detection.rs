@@ -195,6 +195,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // file systems, mount targets, and access points). Signs as
         // `elasticfilesystem`.
         "elasticfilesystem" => Protocol::Rest,
+        // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
+        // brokers, configurations, users, and tags). Signs as `mq`.
+        "mq" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

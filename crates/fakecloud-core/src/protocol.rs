@@ -64,6 +64,9 @@ const REST_JSON_SERVICES: &[&str] = &[
     // systems, mount targets, access points; JSON bodies). Signs as
     // `elasticfilesystem`.
     "elasticfilesystem",
+    // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
+    // brokers, configurations, users, and tags; JSON bodies). Signs as `mq`.
+    "mq",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
