@@ -1281,15 +1281,13 @@
         "NextToken": {
           "target": "com.amazonaws.efs#Token",
           "traits": {
-            "smithy.api#documentation": "<p>(Optional) You can use <code>NextToken</code> in a subsequent request to fetch the next page of \n      Amazon Web Services account preferences if the response payload was paginated.</p>",
-            "smithy.api#httpQuery": "NextToken"
+            "smithy.api#documentation": "<p>(Optional) You can use <code>NextToken</code> in a subsequent request to fetch the next page of \n      Amazon Web Services account preferences if the response payload was paginated.</p>"
           }
         },
         "MaxResults": {
           "target": "com.amazonaws.efs#MaxResults",
           "traits": {
-            "smithy.api#documentation": "<p>(Optional) When retrieving account preferences,\n      you can optionally specify the <code>MaxItems</code> parameter to limit the number of objects returned in a response.  \n      The default value is 100. </p>",
-            "smithy.api#httpQuery": "MaxResults"
+            "smithy.api#documentation": "<p>(Optional) When retrieving account preferences,\n      you can optionally specify the <code>MaxItems</code> parameter to limit the number of objects returned in a response.  \n      The default value is 100. </p>"
           }
         }
       },

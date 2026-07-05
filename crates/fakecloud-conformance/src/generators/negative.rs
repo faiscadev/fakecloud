@@ -38,12 +38,42 @@ fn omission_is_wire_observable(model: &ServiceModel, member_target: &str) -> boo
     }
 }
 
+/// Whether an input member carries an HTTP wire binding (`@httpQuery`,
+/// `@httpLabel`, `@httpHeader`, or `@httpPayload`) on either the member or its
+/// target shape. Constraint-violation negatives on a member with no binding are
+/// only reachable when the operation serialises a request body; on a bodyless
+/// method (`GET`/`HEAD`/`DELETE`) neither an AWS SDK nor the probe can place the
+/// value on the wire, so the negative is unobservable by construction.
+fn member_is_wire_bound(model: &ServiceModel, member: &crate::smithy::Member) -> bool {
+    let mt = &member.traits;
+    if mt.http_label || mt.http_query.is_some() || mt.http_header.is_some() || mt.http_payload {
+        return true;
+    }
+    match model.shapes.get(&member.target).map(|s| &s.traits) {
+        Some(tt) => {
+            tt.http_label || tt.http_query.is_some() || tt.http_header.is_some() || tt.http_payload
+        }
+        None => false,
+    }
+}
+
 pub fn generate(
     model: &ServiceModel,
     input_shape_id: &str,
     overrides: &HashMap<String, Value>,
+    http_method: Option<&str>,
 ) -> Vec<TestVariant> {
     let mut variants = Vec::new();
+
+    // A `GET`/`HEAD`/`DELETE` operation carries no request body, so an unbound
+    // constrained member (no `@httpQuery`/`@httpLabel`/`@httpHeader`/
+    // `@httpPayload`) has nowhere to travel — its constraint-violation negatives
+    // are unreachable and must not be emitted (mirroring the
+    // `omission_is_wire_observable` skip above).
+    let bodyless_method = matches!(
+        http_method.map(str::to_ascii_uppercase).as_deref(),
+        Some("GET") | Some("HEAD") | Some("DELETE")
+    );
 
     let members = super::get_members(model, input_shape_id);
 
@@ -81,6 +111,12 @@ pub fn generate(
             Some(s) => s,
             None => continue,
         };
+
+        // On a bodyless method, an unbound member's constraint negatives are
+        // unreachable (see `bodyless_method` above) — skip them.
+        if bodyless_method && !member_is_wire_bound(model, member) {
+            continue;
+        }
 
         let traits = &shape.traits;
 

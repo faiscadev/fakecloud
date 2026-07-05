@@ -1,6 +1,6 @@
 {
-  "variants_passed": 179313,
-  "total_variants": 179313,
+  "variants_passed": 179310,
+  "total_variants": 179310,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -103,8 +103,8 @@
       "total": 3089
     },
     "elasticfilesystem": {
-      "passed": 1094,
-      "total": 1094
+      "passed": 1091,
+      "total": 1091
     },
     "es": {
       "passed": 1463,

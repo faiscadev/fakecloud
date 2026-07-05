@@ -405,7 +405,12 @@ pub fn generate_all_variants(
     }
 
     // Strategy 6: Negative testing
-    variants.extend(negative::generate(model, input_shape_id, overrides));
+    variants.extend(negative::generate(
+        model,
+        input_shape_id,
+        overrides,
+        op.http_method.as_deref(),
+    ));
 
     // Strategy 8: auto-discovered Create/Put/Update -> Get/Describe round-trip echo
     variants.extend(round_trip::generate(model, operation_name, overrides));

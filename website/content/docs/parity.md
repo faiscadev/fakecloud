@@ -4,7 +4,7 @@ description = "Service-by-service behavior parity: what is real, what is synthes
 weight = 1
 +++
 
-fakecloud implements **75 AWS services** with **5,388 operations**. **179,313/179,313 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
+fakecloud implements **75 AWS services** with **5,388 operations**. **179,310/179,310 generated Smithy conformance variants pass** on every commit — true 100% across every implemented service, no flake margin and no skipped services. Conformance checks request/response shapes, field names, and error codes against [AWS's own Smithy models](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json). Behavior parity varies by service — some run real infrastructure (Postgres, Redis, Docker containers), some run a real control plane but return synthesized data for complex queries, and a few have control-plane-only coverage with no data-plane enforcement.
 
 | Service | Ops | Protocol | Control plane | Data plane | Known limitations |
 | --- | --- | --- | --- | --- | --- |
@@ -92,7 +92,7 @@ fakecloud implements **75 AWS services** with **5,388 operations**. **179,313/17
 
 ## What "100% conformance" means
 
-fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **179,313 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
+fakecloud validates every implemented operation against AWS's own Smithy models using a generated test suite with **179,310 variants**, **all of which pass** on every commit. This guarantees that field names, types, required/optional flags, error codes, and HTTP signatures are identical to AWS. It does *not* guarantee that every operation behaves exactly like AWS in all edge cases — that is what the **Data plane** and **Known limitations** columns describe.
 
 If you need a service that is not listed above, the issue tracker and [roadmap](https://github.com/faiscadev/fakecloud#roadmap) are the best places to request it.
 
