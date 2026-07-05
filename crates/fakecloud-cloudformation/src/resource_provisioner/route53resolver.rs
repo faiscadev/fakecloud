@@ -20,6 +20,137 @@ use fakecloud_route53resolver::state::{
 use fakecloud_route53resolver::validate::{arn as r53r_arn, hex17, now_rfc3339};
 
 impl ResourceProvisioner {
+    /// Live-state `Fn::GetAtt` fallback for `AWS::Route53Resolver::*`. Captured
+    /// create-time attributes are the primary source (see `get_att`); this
+    /// resolves attributes that change after creation (e.g. an endpoint's
+    /// `IpAddressCount` after an IP is associated in a stack update) by reading
+    /// the current route53resolver state by physical id.
+    pub(super) fn get_att_route53resolver(
+        &self,
+        resource: &StackResource,
+        attribute: &str,
+    ) -> Option<String> {
+        let st = self.route53resolver_state.read();
+        let acc = st.accounts.get(&self.account_id)?;
+        let pid = resource.physical_id.as_str();
+        match resource.resource_type.as_str() {
+            "AWS::Route53Resolver::ResolverEndpoint" => {
+                let e = &acc.endpoints.get(pid)?.endpoint;
+                match attribute {
+                    "Arn" => Some(e.arn.clone()),
+                    "ResolverEndpointId" => Some(e.id.clone()),
+                    "IpAddressCount" => Some(e.ip_address_count.to_string()),
+                    "Direction" => Some(e.direction.clone()),
+                    "HostVPCId" => Some(e.host_vpc_id.clone()),
+                    "Name" => e.name.clone(),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverRule" => {
+                let r = acc.rules.get(pid)?;
+                match attribute {
+                    "Arn" => Some(r.arn.clone()),
+                    "ResolverRuleId" => Some(r.id.clone()),
+                    "Name" => r.name.clone(),
+                    "DomainName" => r.domain_name.clone(),
+                    "ResolverEndpointId" => r.resolver_endpoint_id.clone(),
+                    "TargetIps" => serde_json::to_string(&r.target_ips).ok(),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverRuleAssociation" => {
+                let a = acc.rule_associations.get(pid)?;
+                match attribute {
+                    "ResolverRuleAssociationId" => Some(a.id.clone()),
+                    "Name" => a.name.clone(),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfig" => {
+                let c = acc.query_log_configs.get(pid)?;
+                match attribute {
+                    "Arn" => Some(c.arn.clone()),
+                    "Id" => Some(c.id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation" => {
+                let a = acc.query_log_associations.get(pid)?;
+                match attribute {
+                    "Id" => Some(a.id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::FirewallDomainList" => {
+                let l = acc.firewall_domain_lists.get(pid)?;
+                match attribute {
+                    "Arn" => Some(l.arn.clone()),
+                    "Id" => Some(l.id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::FirewallRuleGroup" => {
+                let g = acc.firewall_rule_groups.get(pid)?;
+                match attribute {
+                    "Arn" => Some(g.arn.clone()),
+                    "Id" => Some(g.id.clone()),
+                    "RuleCount" => Some(g.rule_count.to_string()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::FirewallRuleGroupAssociation" => {
+                let a = acc.firewall_rule_group_associations.get(pid)?;
+                match attribute {
+                    "Arn" => Some(a.arn.clone()),
+                    "Id" => Some(a.id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::FirewallConfig" => {
+                let c = acc.firewall_configs.values().find(|c| c.id == pid)?;
+                match attribute {
+                    "Id" => Some(c.id.clone()),
+                    "OwnerId" => Some(c.owner_id.clone()),
+                    "ResourceId" => Some(c.resource_id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverConfig" => {
+                let c = acc.resolver_configs.values().find(|c| c.id == pid)?;
+                match attribute {
+                    "Id" => Some(c.id.clone()),
+                    "OwnerId" => Some(c.owner_id.clone()),
+                    "ResourceId" => Some(c.resource_id.clone()),
+                    _ => None,
+                }
+            }
+            "AWS::Route53Resolver::ResolverDNSSECConfig" => {
+                let c = acc.dnssec_configs.get(pid)?;
+                match attribute {
+                    "Id" => Some(c.id.clone()),
+                    "OwnerId" => Some(c.owner_id.clone()),
+                    "ResourceId" => Some(c.resource_id.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a subnet's VPC id from EC2 state (same lookup the service's
+    /// `resolve_subnet_vpc` uses), or `None` when the subnet is not present.
+    fn r53r_subnet_vpc(&self, subnet_id: &str) -> Option<String> {
+        let guard = self.ec2_state.read();
+        Some(
+            guard
+                .get(&self.account_id)?
+                .subnets
+                .get(subnet_id)?
+                .vpc_id
+                .clone(),
+        )
+    }
+
     fn r53r_tags(&self, props: &serde_json::Value) -> Vec<Tag> {
         props
             .get("Tags")
@@ -77,14 +208,14 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            // Resolve the endpoint's HostVPCId from the subnet's real VPC in EC2
+            // state (the same source the direct-API path uses), so a
+            // CFN-provisioned endpoint carries the real VPC id — not an empty
+            // string — and `Fn::GetAtt HostVPCId` resolves correctly.
             if host_vpc.is_empty() {
-                host_vpc = self
-                    .route53resolver_state
-                    .read()
-                    .accounts
-                    .get(&self.account_id)
-                    .map(|_| String::new())
-                    .unwrap_or_default();
+                if let Some(vpc) = self.r53r_subnet_vpc(&subnet_id) {
+                    host_vpc = vpc;
+                }
             }
             let ip = ipr
                 .get("Ip")
@@ -138,6 +269,9 @@ impl ResourceProvisioner {
                 .unwrap_or_default(),
         };
         let ip_count = endpoint.ip_address_count;
+        let direction_att = endpoint.direction.clone();
+        let name_att = endpoint.name.clone().unwrap_or_default();
+        let host_vpc_att = endpoint.host_vpc_id.clone();
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
@@ -156,7 +290,10 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone())
             .with("Arn", arn)
             .with("ResolverEndpointId", id)
-            .with("IpAddressCount", ip_count.to_string()))
+            .with("IpAddressCount", ip_count.to_string())
+            .with("Direction", direction_att)
+            .with("HostVPCId", host_vpc_att)
+            .with("Name", name_att))
     }
 
     pub(super) fn delete_r53r_resolver_endpoint(&self, physical_id: &str) -> Result<(), String> {
@@ -203,6 +340,13 @@ impl ResourceProvisioner {
             .get("DomainName")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let name = props.get("Name").and_then(|v| v.as_str()).map(String::from);
+        let resolver_endpoint_id = props
+            .get("ResolverEndpointId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let target_ips_att =
+            serde_json::to_string(&target_ips).unwrap_or_else(|_| "[]".to_string());
         let rule = ResolverRule {
             id: id.clone(),
             creator_request_id: id.clone(),
@@ -211,12 +355,9 @@ impl ResourceProvisioner {
             status: "COMPLETE".to_string(),
             status_message: "[Trace id: 1] Successfully created Resolver Rule".to_string(),
             rule_type,
-            name: props.get("Name").and_then(|v| v.as_str()).map(String::from),
+            name: name.clone(),
             target_ips,
-            resolver_endpoint_id: props
-                .get("ResolverEndpointId")
-                .and_then(|v| v.as_str())
-                .map(String::from),
+            resolver_endpoint_id: resolver_endpoint_id.clone(),
             owner_id: self.account_id.clone(),
             share_status: "NOT_SHARED".to_string(),
             creation_time: now_rfc3339(),
@@ -233,9 +374,12 @@ impl ResourceProvisioner {
         }
         let mut out = ProvisionResult::new(id.clone())
             .with("Arn", arn)
-            .with("ResolverRuleId", id);
-        if let Some(dn) = domain_name {
-            out = out.with("DomainName", dn);
+            .with("ResolverRuleId", id)
+            .with("Name", name.unwrap_or_default())
+            .with("DomainName", domain_name.unwrap_or_default())
+            .with("TargetIps", target_ips_att);
+        if let Some(ep) = resolver_endpoint_id {
+            out = out.with("ResolverEndpointId", ep);
         }
         Ok(out)
     }
@@ -266,10 +410,11 @@ impl ResourceProvisioner {
             .ok_or_else(|| "VPCId is required".to_string())?
             .to_string();
         let id = format!("rslvr-rrassoc-{}", hex17());
+        let name = props.get("Name").and_then(|v| v.as_str()).map(String::from);
         let assoc = ResolverRuleAssociation {
             id: id.clone(),
             resolver_rule_id,
-            name: props.get("Name").and_then(|v| v.as_str()).map(String::from),
+            name: name.clone(),
             vpc_id,
             status: "COMPLETE".to_string(),
             status_message: String::new(),
@@ -279,7 +424,9 @@ impl ResourceProvisioner {
             .account_mut(&self.account_id)
             .rule_associations
             .insert(id.clone(), assoc);
-        Ok(ProvisionResult::new(id.clone()).with("ResolverRuleAssociationId", id))
+        Ok(ProvisionResult::new(id.clone())
+            .with("ResolverRuleAssociationId", id)
+            .with("Name", name.unwrap_or_default()))
     }
 
     pub(super) fn delete_r53r_rule_association(&self, physical_id: &str) -> Result<(), String> {
@@ -655,8 +802,11 @@ impl ResourceProvisioner {
             .write()
             .account_mut(&self.account_id)
             .firewall_configs
-            .insert(resource_id, cfg);
-        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+            .insert(resource_id.clone(), cfg);
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("OwnerId", self.account_id.clone())
+            .with("ResourceId", resource_id))
     }
 
     pub(super) fn delete_r53r_firewall_config(&self, _physical_id: &str) -> Result<(), String> {
@@ -695,8 +845,11 @@ impl ResourceProvisioner {
             .write()
             .account_mut(&self.account_id)
             .resolver_configs
-            .insert(resource_id, cfg);
-        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+            .insert(resource_id.clone(), cfg);
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("OwnerId", self.account_id.clone())
+            .with("ResourceId", resource_id))
     }
 
     pub(super) fn delete_r53r_resolver_config(&self, _physical_id: &str) -> Result<(), String> {
@@ -719,7 +872,7 @@ impl ResourceProvisioner {
         let cfg = ResolverDnssecConfig {
             id: id.clone(),
             owner_id: self.account_id.clone(),
-            resource_id,
+            resource_id: resource_id.clone(),
             validation_status: "ENABLED".to_string(),
         };
         self.route53resolver_state
@@ -727,7 +880,10 @@ impl ResourceProvisioner {
             .account_mut(&self.account_id)
             .dnssec_configs
             .insert(id.clone(), cfg);
-        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("OwnerId", self.account_id.clone())
+            .with("ResourceId", resource_id))
     }
 
     pub(super) fn delete_r53r_dnssec_config(&self, physical_id: &str) -> Result<(), String> {

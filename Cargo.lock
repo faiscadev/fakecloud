@@ -5415,6 +5415,7 @@ name = "fakecloud-route53resolver"
 version = "0.39.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",

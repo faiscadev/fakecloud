@@ -207,6 +207,20 @@ impl Route53ResolverService {
                         pending.push((account.clone(), Settle::Outpost, id.clone()));
                     }
                 }
+                // DNSSEC + resolver configs snapshotted mid-transition
+                // (ENABLING/DISABLING/UPDATING_...) must resume settling to their
+                // terminal status; otherwise a restart within the settle window
+                // wedges them in the transient state forever.
+                for (id, c) in acc.dnssec_configs.iter() {
+                    if let Some(target) = transient_terminal(&c.validation_status) {
+                        pending.push((account.clone(), Settle::Dnssec(target), id.clone()));
+                    }
+                }
+                for (id, c) in acc.resolver_configs.iter() {
+                    if let Some(target) = transient_terminal(&c.autodefined_reverse) {
+                        pending.push((account.clone(), Settle::ResolverConfig(target), id.clone()));
+                    }
+                }
             }
         }
         for (account, kind, id) in pending {
@@ -494,6 +508,12 @@ impl Route53ResolverService {
             .filter(|a| !a.is_empty())
             .ok_or_else(|| invalid_parameter("At least one IpAddress is required"))?;
 
+        // When EC2 state is wired, every subnet must exist and share one VPC.
+        // In standalone mode (no EC2 state) there are no real subnets, so a
+        // valid multi-subnet endpoint (AWS requires two) must still succeed: all
+        // its subnets map to a single synthesized VPC derived from the first
+        // subnet rather than a distinct VPC per subnet.
+        let ec2_wired = self.ec2_state.is_some();
         let now = now_rfc3339();
         let mut ip_addresses = Vec::new();
         let mut host_vpc: Option<String> = None;
@@ -503,16 +523,20 @@ impl Route53ResolverService {
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid_parameter("Each IpAddress requires a SubnetId"))?
                 .to_string();
-            let vpc = self
-                .resolve_subnet_vpc(&account, &subnet_id)?
-                .unwrap_or_else(|| synth_vpc(&subnet_id));
-            match &host_vpc {
-                Some(existing) if existing != &vpc => {
-                    return Err(invalid_parameter(
-                        "All subnets for a Resolver endpoint must be in the same VPC",
-                    ));
+            if ec2_wired {
+                let vpc = self
+                    .resolve_subnet_vpc(&account, &subnet_id)?
+                    .unwrap_or_else(|| synth_vpc(&subnet_id));
+                match &host_vpc {
+                    Some(existing) if existing != &vpc => {
+                        return Err(invalid_parameter(
+                            "All subnets for a Resolver endpoint must be in the same VPC",
+                        ));
+                    }
+                    _ => host_vpc = Some(vpc),
                 }
-                _ => host_vpc = Some(vpc),
+            } else if host_vpc.is_none() {
+                host_vpc = Some(synth_vpc(&subnet_id));
             }
             let ip = ipr.get("Ip").and_then(Value::as_str).map(str::to_string);
             let ipv6 = ipr.get("Ipv6").and_then(Value::as_str).map(str::to_string);
@@ -644,16 +668,19 @@ impl Route53ResolverService {
     }
 
     fn list_resolver_endpoints(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.endpoints.values().map(|r| to_val(&r.endpoint)).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "MaxResults": list.len(),
-            "ResolverEndpoints": list,
-        })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverEndpoints": page }),
+            next,
+        ))
     }
 
     fn list_resolver_endpoint_ip_addresses(
@@ -669,10 +696,11 @@ impl Route53ResolverService {
             .and_then(|a| a.endpoints.get(&id))
             .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
         let ips: Vec<Value> = rec.ip_addresses.iter().map(to_val).collect();
-        Ok(AwsResponse::ok_json(json!({
-            "MaxResults": ips.len(),
-            "IpAddresses": ips,
-        })))
+        let (page, next) = paginate(&body, ips);
+        Ok(list_response(
+            json!({ "MaxResults": echoed_max(&body, page.len()), "IpAddresses": page }),
+            next,
+        ))
     }
 
     fn associate_endpoint_ip(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -916,16 +944,19 @@ impl Route53ResolverService {
     }
 
     fn list_resolver_rules(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.rules.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "MaxResults": list.len(),
-            "ResolverRules": list,
-        })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverRules": page }),
+            next,
+        ))
     }
 
     fn associate_resolver_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1022,16 +1053,19 @@ impl Route53ResolverService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.rule_associations.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "MaxResults": list.len(),
-            "ResolverRuleAssociations": list,
-        })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverRuleAssociations": page }),
+            next,
+        ))
     }
 }
 
@@ -1114,18 +1148,24 @@ impl Route53ResolverService {
     }
 
     fn list_query_log_configs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.query_log_configs.values().map(to_val).collect())
             .unwrap_or_default();
-        let n = list.len();
-        Ok(AwsResponse::ok_json(json!({
-            "TotalCount": n,
-            "TotalFilteredCount": n,
-            "ResolverQueryLogConfigs": list,
-        })))
+        let n = all.len();
+        let (list, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({
+                "TotalCount": n,
+                "TotalFilteredCount": n,
+                "ResolverQueryLogConfigs": list,
+            }),
+            next,
+        ))
     }
 
     fn associate_query_log_config(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1140,13 +1180,27 @@ impl Route53ResolverService {
         }
         {
             let st = self.state.read();
-            if st
-                .accounts
-                .get(&account)
+            let acc = st.accounts.get(&account);
+            if acc
                 .map(|a| !a.query_log_configs.contains_key(&cfg_id))
                 .unwrap_or(true)
             {
                 return Err(not_found(format!("Query log config '{cfg_id}' not found")));
+            }
+            // A query-log config can be associated with a given resource only
+            // once; a duplicate is rejected (matching AWS + the rule-association
+            // path) so the AssociationCount is not double-counted.
+            if acc
+                .map(|a| {
+                    a.query_log_associations.values().any(|x| {
+                        x.resolver_query_log_config_id == cfg_id && x.resource_id == resource_id
+                    })
+                })
+                .unwrap_or(false)
+            {
+                return Err(crate::validate::resource_exists(
+                    "The query logging configuration is already associated with this resource",
+                ));
             }
         }
         let id = format!("rslvr-qlcassoc-{}", hex17());
@@ -1220,18 +1274,24 @@ impl Route53ResolverService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.query_log_associations.values().map(to_val).collect())
             .unwrap_or_default();
-        let n = list.len();
-        Ok(AwsResponse::ok_json(json!({
-            "TotalCount": n,
-            "TotalFilteredCount": n,
-            "ResolverQueryLogConfigAssociations": list,
-        })))
+        let n = all.len();
+        let (list, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({
+                "TotalCount": n,
+                "TotalFilteredCount": n,
+                "ResolverQueryLogConfigAssociations": list,
+            }),
+            next,
+        ))
     }
 }
 
@@ -1290,13 +1350,16 @@ impl Route53ResolverService {
     }
 
     fn list_resolver_configs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.resolver_configs.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "ResolverConfigs": list })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(json!({ "ResolverConfigs": page }), next))
     }
 
     fn resolver_config_or_default(&self, account: &str, resource_id: &str) -> ResolverConfig {
@@ -1310,7 +1373,7 @@ impl Route53ResolverService {
             return cfg.clone();
         }
         ResolverConfig {
-            id: format!("rslvr-rc-{}", hex17()),
+            id: format!("rslvr-rc-{}", deterministic_suffix(resource_id)),
             resource_id: resource_id.to_string(),
             owner_id: account.to_string(),
             autodefined_reverse: "ENABLED".to_string(),
@@ -1372,14 +1435,18 @@ impl Route53ResolverService {
     }
 
     fn list_dnssec_configs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.dnssec_configs.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "ResolverDnssecConfigs": list }),
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({ "ResolverDnssecConfigs": page }),
+            next,
         ))
     }
 
@@ -1392,7 +1459,7 @@ impl Route53ResolverService {
             return cfg.clone();
         }
         ResolverDnssecConfig {
-            id: format!("rslvr-ds-{}", hex17()),
+            id: format!("rslvr-ds-{}", deterministic_suffix(resource_id)),
             owner_id: account.to_string(),
             resource_id: resource_id.to_string(),
             validation_status: "DISABLED".to_string(),
@@ -1491,8 +1558,10 @@ impl Route53ResolverService {
     }
 
     fn list_firewall_rule_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| {
@@ -1511,7 +1580,8 @@ impl Route53ResolverService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "FirewallRuleGroups": list })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(json!({ "FirewallRuleGroups": page }), next))
     }
 }
 
@@ -1602,8 +1672,10 @@ impl Route53ResolverService {
     }
 
     fn list_firewall_domain_lists(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| {
@@ -1620,7 +1692,8 @@ impl Route53ResolverService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "FirewallDomainLists": list })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(json!({ "FirewallDomainLists": page }), next))
     }
 
     fn import_firewall_domains(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1714,8 +1787,16 @@ impl Route53ResolverService {
         if !acc.firewall_domain_lists.contains_key(&id) {
             return Err(not_found(format!("Firewall domain list '{id}' not found")));
         }
-        let domains = acc.firewall_domains.get(&id).cloned().unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "Domains": domains })))
+        let domains: Vec<Value> = acc
+            .firewall_domains
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Value::String)
+            .collect();
+        let (page, next) = paginate(&body, domains);
+        Ok(list_response(json!({ "Domains": page }), next))
     }
 }
 
@@ -1943,26 +2024,29 @@ impl Route53ResolverService {
             .get(&group_id)
             .map(|r| r.iter().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "FirewallRules": rules })))
+        let (page, next) = paginate(&body, rules);
+        Ok(list_response(json!({ "FirewallRules": page }), next))
     }
 
-    fn list_firewall_rule_types(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn list_firewall_rule_types(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
         // The static catalog of DNS Firewall rule types.
-        let types = json!([
-            {
+        let types = vec![
+            json!({
                 "RuleType": "STANDARD",
                 "Value": "STANDARD",
                 "DisplayName": "Standard",
                 "Description": "A standard DNS Firewall rule that matches queries against a domain list.",
-            },
-            {
+            }),
+            json!({
                 "RuleType": "DNS_THREAT_PROTECTION",
                 "Value": "DNS_THREAT_PROTECTION",
                 "DisplayName": "Advanced DNS threat protection",
                 "Description": "A rule that detects DNS tunneling and domain generation algorithm threats.",
-            }
-        ]);
-        Ok(AwsResponse::ok_json(json!({ "FirewallRuleTypes": types })))
+            }),
+        ];
+        let (page, next) = paginate(&body, types);
+        Ok(list_response(json!({ "FirewallRuleTypes": page }), next))
     }
 
     fn batch_create_firewall_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -2213,8 +2297,10 @@ impl Route53ResolverService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| {
@@ -2224,8 +2310,10 @@ impl Route53ResolverService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "FirewallRuleGroupAssociations": list }),
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(
+            json!({ "FirewallRuleGroupAssociations": page }),
+            next,
         ))
     }
 
@@ -2266,13 +2354,16 @@ impl Route53ResolverService {
     }
 
     fn list_firewall_configs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.firewall_configs.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "FirewallConfigs": list })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(json!({ "FirewallConfigs": page }), next))
     }
 
     fn firewall_config_or_default(&self, account: &str, resource_id: &str) -> FirewallConfig {
@@ -2286,7 +2377,7 @@ impl Route53ResolverService {
             return cfg.clone();
         }
         FirewallConfig {
-            id: format!("rslvr-fc-{}", hex17()),
+            id: format!("rslvr-fc-{}", deterministic_suffix(resource_id)),
             resource_id: resource_id.to_string(),
             owner_id: account.to_string(),
             firewall_fail_open: "DISABLED".to_string(),
@@ -2397,13 +2488,16 @@ impl Route53ResolverService {
     }
 
     fn list_outpost_resolvers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let st = self.state.read();
-        let list: Vec<Value> = st
+        let body = req.json_body();
+        let all: Vec<Value> = self
+            .state
+            .read()
             .accounts
             .get(&account_id(req))
             .map(|a| a.outpost_resolvers.values().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "OutpostResolvers": list })))
+        let (page, next) = paginate(&body, all);
+        Ok(list_response(json!({ "OutpostResolvers": page }), next))
     }
 }
 
@@ -2546,7 +2640,9 @@ impl Route53ResolverService {
             .and_then(|a| a.tags.get(&arn))
             .map(|t| t.iter().map(to_val).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "Tags": tags })))
+        drop(st);
+        let (page, next) = paginate(&body, tags);
+        Ok(list_response(json!({ "Tags": page }), next))
     }
 }
 
@@ -2713,6 +2809,47 @@ fn required_str_v(body: &Value, field: &str) -> Result<String, AwsServiceError> 
         .ok_or_else(|| validation(format!("{field} is required")))
 }
 
+/// Apply the request's `MaxResults` page size + `NextToken` offset to a full
+/// result set. The token is a plain start offset (opaque to callers) that
+/// round-trips: the returned `Some(token)` fed back as `NextToken` yields the
+/// next page, and `None` marks the last page. Returns `(page, next_token)`.
+fn paginate(body: &Value, items: Vec<Value>) -> (Vec<Value>, Option<String>) {
+    let total = items.len();
+    let start = body
+        .get("NextToken")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(total);
+    let end = match body.get("MaxResults").and_then(Value::as_i64) {
+        Some(m) if m > 0 => (start + m as usize).min(total),
+        _ => total,
+    };
+    let page: Vec<Value> = items.into_iter().skip(start).take(end - start).collect();
+    let next = if end < total {
+        Some(end.to_string())
+    } else {
+        None
+    };
+    (page, next)
+}
+
+/// The `MaxResults` value a paginated list echoes back: the request's page size
+/// when supplied, otherwise the number of items returned in this page.
+fn echoed_max(body: &Value, page_len: usize) -> i64 {
+    body.get("MaxResults")
+        .and_then(Value::as_i64)
+        .unwrap_or(page_len as i64)
+}
+
+/// Attach a `NextToken` to a list response object when there is a next page.
+fn list_response(mut obj: Value, next: Option<String>) -> AwsResponse {
+    if let Some(t) = next {
+        obj["NextToken"] = Value::String(t);
+    }
+    AwsResponse::ok_json(obj)
+}
+
 /// Serialize a typed wire struct (PascalCase, `None` skipped) to a JSON value.
 fn to_val<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
@@ -2731,15 +2868,233 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
 /// Deterministically synthesize a VPC id for a subnet when EC2 state is not
 /// wired, so `HostVPCId` is stable across calls for the same subnet.
 fn synth_vpc(subnet_id: &str) -> String {
+    format!("vpc-{:017x}", fnv1a(subnet_id) & 0x000f_ffff_ffff_ffff)
+}
+
+/// FNV-1a hash of a string, used to derive stable deterministic ids/suffixes.
+fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 1469598103934665603;
-    for b in subnet_id.bytes() {
+    for b in s.bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(1099511628211);
     }
-    format!("vpc-{:017x}", h & 0x000f_ffff_ffff_ffff)
+    h
+}
+
+/// A stable 17-hex-character id suffix derived from a seed (e.g. a VPC id), so
+/// the config singletons (`rslvr-rc-*`/`rslvr-ds-*`/`rslvr-fc-*`) synthesized
+/// for an unconfigured resource return the same id on every `Get`, matching AWS.
+fn deterministic_suffix(seed: &str) -> String {
+    format!("{:017x}", fnv1a(seed) & 0x000f_ffff_ffff_ffff)
+}
+
+/// Map a config's transient status to the terminal status it settles into, or
+/// `None` when the status is already terminal.
+fn transient_terminal(status: &str) -> Option<String> {
+    match status {
+        "ENABLING" => Some("ENABLED"),
+        "DISABLING" => Some("DISABLED"),
+        "UPDATING_TO_USE_LOCAL_RESOURCE_SETTING" => Some("USE_LOCAL_RESOURCE_SETTING"),
+        _ => None,
+    }
+    .map(str::to_string)
 }
 
 /// Synthesize a private IP for an endpoint IP address when the caller omits one.
 fn synth_ip(existing: &[IpAddressResponse]) -> String {
     format!("10.0.0.{}", 10 + existing.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::{HeaderMap, Method};
+    use std::collections::HashMap;
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "route53resolver".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "r".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn call(svc: &Route53ResolverService, action: &str, body: Value) -> (u16, Value) {
+        let resp = match svc.handle(req(action, body)).await {
+            Ok(r) => r,
+            Err(e) => panic!("handle {action} failed: {}", e.code()),
+        };
+        let status = resp.status.as_u16();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        (status, v)
+    }
+
+    // Finding 7: a valid multi-subnet endpoint (AWS minimum is two) must succeed
+    // in standalone mode where no EC2 state is wired.
+    #[tokio::test]
+    async fn multi_subnet_endpoint_succeeds_without_ec2() {
+        let svc = Route53ResolverService::default();
+        let (status, body) = call(
+            &svc,
+            "CreateResolverEndpoint",
+            json!({
+                "CreatorRequestId": "c1",
+                "Direction": "OUTBOUND",
+                "SecurityGroupIds": ["sg-1"],
+                "IpAddresses": [
+                    { "SubnetId": "subnet-a" },
+                    { "SubnetId": "subnet-b" },
+                ],
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body["ResolverEndpoint"]["Id"]
+            .as_str()
+            .unwrap()
+            .starts_with("rslvr-out-"));
+        // Both subnets map to one synthesized VPC.
+        assert!(!body["ResolverEndpoint"]["HostVPCId"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        assert_eq!(body["ResolverEndpoint"]["IpAddressCount"], 2);
+    }
+
+    // Finding 2: associating the same query-log config with the same resource
+    // twice is rejected instead of double-counting.
+    #[tokio::test]
+    async fn duplicate_query_log_association_rejected() {
+        let svc = Route53ResolverService::default();
+        let (_, cfg) = call(
+            &svc,
+            "CreateResolverQueryLogConfig",
+            json!({ "Name": "n", "DestinationArn": "arn:aws:logs:us-east-1:123456789012:log-group:/g", "CreatorRequestId": "c" }),
+        )
+        .await;
+        let id = cfg["ResolverQueryLogConfig"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (s1, _) = call(
+            &svc,
+            "AssociateResolverQueryLogConfig",
+            json!({ "ResolverQueryLogConfigId": id, "ResourceId": "vpc-1" }),
+        )
+        .await;
+        assert_eq!(s1, 200);
+        let err = match svc
+            .handle(req(
+                "AssociateResolverQueryLogConfig",
+                json!({ "ResolverQueryLogConfigId": id, "ResourceId": "vpc-1" }),
+            ))
+            .await
+        {
+            Ok(_) => panic!("duplicate association should have been rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "ResourceExistsException");
+    }
+
+    // Finding 6: an unconfigured resolver config returns a stable Id on repeated
+    // Gets (deterministic, derived from the resource id).
+    #[tokio::test]
+    async fn stable_config_id_across_gets() {
+        let svc = Route53ResolverService::default();
+        let (_, a) = call(
+            &svc,
+            "GetResolverConfig",
+            json!({ "ResourceId": "vpc-xyz" }),
+        )
+        .await;
+        let (_, b) = call(
+            &svc,
+            "GetResolverConfig",
+            json!({ "ResourceId": "vpc-xyz" }),
+        )
+        .await;
+        assert_eq!(a["ResolverConfig"]["Id"], b["ResolverConfig"]["Id"]);
+        // Different resources get different ids.
+        let (_, c) = call(
+            &svc,
+            "GetResolverConfig",
+            json!({ "ResourceId": "vpc-other" }),
+        )
+        .await;
+        assert_ne!(a["ResolverConfig"]["Id"], c["ResolverConfig"]["Id"]);
+    }
+
+    // Finding 5: list operations apply the request MaxResults page size and emit
+    // a NextToken that round-trips to the next page.
+    #[tokio::test]
+    async fn pagination_round_trips() {
+        let svc = Route53ResolverService::default();
+        for i in 0..3 {
+            call(
+                &svc,
+                "CreateResolverEndpoint",
+                json!({
+                    "CreatorRequestId": format!("c{i}"),
+                    "Direction": "INBOUND",
+                    "SecurityGroupIds": ["sg-1"],
+                    "IpAddresses": [ { "SubnetId": "subnet-a" }, { "SubnetId": "subnet-b" } ],
+                }),
+            )
+            .await;
+        }
+        let (_, p1) = call(&svc, "ListResolverEndpoints", json!({ "MaxResults": 2 })).await;
+        assert_eq!(p1["ResolverEndpoints"].as_array().unwrap().len(), 2);
+        let token = p1["NextToken"]
+            .as_str()
+            .expect("first page has a NextToken")
+            .to_string();
+        let (_, p2) = call(
+            &svc,
+            "ListResolverEndpoints",
+            json!({ "MaxResults": 2, "NextToken": token }),
+        )
+        .await;
+        assert_eq!(p2["ResolverEndpoints"].as_array().unwrap().len(), 1);
+        assert!(p2.get("NextToken").is_none(), "last page has no NextToken");
+    }
+
+    // Finding 1: a DNSSEC config snapshotted mid-transition settles to its
+    // terminal status after a restart (rearm_pending).
+    #[tokio::test]
+    async fn dnssec_config_settles_after_restart() {
+        let svc = Route53ResolverService::default();
+        let state = svc.shared_state();
+        {
+            let mut st = state.write();
+            let acc = st.account_mut("123456789012");
+            acc.dnssec_configs.insert(
+                "rslvr-ds-abc".to_string(),
+                crate::state::ResolverDnssecConfig {
+                    id: "rslvr-ds-abc".to_string(),
+                    owner_id: "123456789012".to_string(),
+                    resource_id: "vpc-1".to_string(),
+                    validation_status: "ENABLING".to_string(),
+                },
+            );
+        }
+        svc.rearm_pending();
+        tokio::time::sleep(SETTLE_DELAY + Duration::from_millis(300)).await;
+        let st = state.read();
+        let c = st.accounts["123456789012"].dnssec_configs["rslvr-ds-abc"].clone();
+        assert_eq!(c.validation_status, "ENABLED");
+    }
 }
