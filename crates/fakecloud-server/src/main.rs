@@ -615,6 +615,12 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    // Elastic Beanstalk state is created here (ahead of its full service wiring
+    // further below) so the CloudFormation provisioner can share it: an
+    // AWS::ElasticBeanstalk::* resource writes through to this state.
+    let beanstalk_state: fakecloud_elasticbeanstalk::SharedEbState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_elasticbeanstalk::EbAccounts::new()),
+    );
     let codedeploy_state: fakecloud_codedeploy::SharedCodeDeployState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1164,6 +1170,7 @@ async fn main() {
             servicediscovery: servicediscovery_state.clone(),
             codeartifact: codeartifact_state.clone(),
             codecommit: codecommit_state.clone(),
+            elasticbeanstalk: beanstalk_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -4492,9 +4499,9 @@ async fn main() {
     // (with an async Launching->Ready lifecycle), configuration templates,
     // configuration option settings, events, platforms. Orchestration facade;
     // control-plane-complete with the app-execution data-plane deferred.
-    let beanstalk_state: fakecloud_elasticbeanstalk::SharedEbState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_elasticbeanstalk::EbAccounts::new()),
-    );
+    // `beanstalk_state` is created earlier (near the CodeCommit state) so the
+    // CloudFormation provisioner can share it; this block loads persistence and
+    // wires the full service on top of that same state.
     let beanstalk_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

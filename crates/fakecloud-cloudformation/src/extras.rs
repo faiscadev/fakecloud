@@ -2733,6 +2733,9 @@ mod tests {
             servicediscovery: shared::<fakecloud_servicediscovery::state::ServiceDiscoveryState>(),
             codeartifact: shared::<fakecloud_codeartifact::CodeArtifactState>(),
             codecommit: shared::<fakecloud_codecommit::CodeCommitState>(),
+            elasticbeanstalk: Arc::new(parking_lot::RwLock::new(
+                fakecloud_elasticbeanstalk::EbAccounts::new(),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

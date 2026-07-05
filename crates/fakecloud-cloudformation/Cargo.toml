@@ -52,6 +52,7 @@ fakecloud-eks = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
 fakecloud-codeartifact = { workspace = true }
 fakecloud-codecommit = { workspace = true }
+fakecloud-elasticbeanstalk = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
