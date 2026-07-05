@@ -2738,6 +2738,7 @@ mod tests {
             elasticbeanstalk: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
+            mq: shared::<fakecloud_mq::MqData>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

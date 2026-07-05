@@ -67,6 +67,7 @@ SERVICES=(
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
     "efs|Amazon EFS|efs"
+    "mq|Amazon MQ|mq"
     "glacier|Amazon S3 Glacier|glacier"
     "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"

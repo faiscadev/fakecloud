@@ -306,5 +306,9 @@
   "efs": {
     "repo_dir": "efs",
     "service_name": "elasticfilesystem"
+  },
+  "mq": {
+    "repo_dir": "mq",
+    "service_name": "mq"
   }
 }

@@ -374,7 +374,24 @@ pub(super) fn resolve_refs_full(
                             Value::String(s) => s.parse().unwrap_or(0),
                             _ => 0,
                         };
-                        if let Some(list) = list_val.as_array() {
+                        // The list argument is normally a real array (an
+                        // Fn::Split / list Ref). A list-valued `Fn::GetAtt`
+                        // resolves to a JSON-array *string* (attributes are
+                        // String-keyed), so parse that back into an array here
+                        // before indexing.
+                        let owned;
+                        let list = match &list_val {
+                            Value::Array(a) => Some(a.as_slice()),
+                            Value::String(s) => match serde_json::from_str::<Value>(s) {
+                                Ok(Value::Array(a)) => {
+                                    owned = a;
+                                    Some(owned.as_slice())
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(list) = list {
                             if let Some(elt) = list.get(idx) {
                                 return elt.clone();
                             }

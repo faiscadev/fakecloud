@@ -909,6 +909,7 @@ pub struct ResourceProvisioner {
     pub codecommit_state: fakecloud_codecommit::SharedCodeCommitState,
     pub efs_state: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
+    pub mq_state: fakecloud_mq::SharedMqState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1076,6 +1077,7 @@ mod kinesis;
 mod kms;
 mod lambda;
 mod logs;
+mod mq;
 mod pipes;
 mod rds;
 mod route;
@@ -1205,6 +1207,11 @@ impl ResourceProvisioner {
             "AWS::Pipes::Pipe" => self.create_pipes_pipe(resource),
             "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
             "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
+            "AWS::AmazonMQ::Broker" => self.create_mq_broker(resource),
+            "AWS::AmazonMQ::Configuration" => self.create_mq_configuration(resource),
+            "AWS::AmazonMQ::ConfigurationAssociation" => {
+                self.create_mq_configuration_association(resource)
+            }
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
             "AWS::EFS::MountTarget" => self.create_efs_mount_target(resource),
@@ -1555,6 +1562,13 @@ impl ResourceProvisioner {
             "AWS::CodeArtifact::Repository" => {
                 Some(self.update_codeartifact_repository(existing, new_def)?)
             }
+            "AWS::AmazonMQ::Broker" => Some(self.update_mq_broker(existing, new_def)?),
+            "AWS::AmazonMQ::Configuration" => {
+                Some(self.update_mq_configuration(existing, new_def)?)
+            }
+            "AWS::AmazonMQ::ConfigurationAssociation" => {
+                Some(self.create_mq_configuration_association(new_def)?)
+            }
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
@@ -1692,6 +1706,10 @@ impl ResourceProvisioner {
             }
             "AWS::CodeArtifact::Repository" => {
                 self.get_att_codeartifact_repository(&resource.physical_id, attribute)
+            }
+            "AWS::AmazonMQ::Broker" => self.get_att_mq_broker(&resource.physical_id, attribute),
+            "AWS::AmazonMQ::Configuration" => {
+                self.get_att_mq_configuration(&resource.physical_id, attribute)
             }
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
@@ -1935,6 +1953,15 @@ impl ResourceProvisioner {
                 self.delete_codeartifact_repository(&resource.physical_id);
                 Ok(())
             }
+            "AWS::AmazonMQ::Broker" => {
+                self.delete_mq_broker(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::AmazonMQ::Configuration" => {
+                self.delete_mq_configuration(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::AmazonMQ::ConfigurationAssociation" => Ok(()),
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
                 Ok(())
@@ -6548,6 +6575,9 @@ mod tests {
             elasticbeanstalk_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
+            mq_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -8510,5 +8540,126 @@ mod tests {
         );
         // Legacy bare `name:alias` physical id is returned unchanged.
         assert_eq!(alias_state_key("my-func:live"), "my-func:live");
+    }
+
+    // ----------------------------------------------------------------- MQ
+
+    #[test]
+    fn cfn_mq_broker_creates_declared_users() {
+        // The required `Users` property must actually create users on the
+        // broker (previously the CFN path inserted an empty map).
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::AmazonMQ::Broker",
+                "B",
+                serde_json::json!({
+                    "BrokerName": "cfn-users",
+                    "EngineType": "ACTIVEMQ",
+                    "DeploymentMode": "SINGLE_INSTANCE",
+                    "HostInstanceType": "mq.m5.large",
+                    "PubliclyAccessible": false,
+                    "Users": [ { "Username": "admin", "Password": "SuperSecret1234" } ]
+                }),
+            ))
+            .expect("broker provisions");
+
+        let guard = prov.mq_state.read();
+        let acct = guard.get("123456789012").unwrap();
+        let users = acct
+            .users
+            .get(&created.physical_id)
+            .expect("broker has a users map");
+        assert!(users.contains_key("admin"), "declared user was created");
+    }
+
+    #[test]
+    fn cfn_mq_broker_synthesizes_subnets_matching_api_path() {
+        // Omitting SubnetIds must synthesize the same default-VPC subnet ids the
+        // direct CreateBroker path produces (no import drift).
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::AmazonMQ::Broker",
+                "B",
+                serde_json::json!({
+                    "BrokerName": "cfn-subnets",
+                    "EngineType": "ACTIVEMQ",
+                    "DeploymentMode": "SINGLE_INSTANCE",
+                    "HostInstanceType": "mq.m5.large",
+                    "PubliclyAccessible": false
+                }),
+            ))
+            .expect("broker provisions");
+
+        let guard = prov.mq_state.read();
+        let acct = guard.get("123456789012").unwrap();
+        let broker = acct.brokers.get(&created.physical_id).unwrap();
+        let subnets: Vec<String> = broker["subnetIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        let expected: Vec<String> =
+            fakecloud_mq::shared::synthesize_subnets(&created.physical_id, "SINGLE_INSTANCE")
+                .into_iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+        assert!(!subnets.is_empty(), "subnets are synthesized, not empty");
+        assert_eq!(subnets, expected, "CFN subnets match the shared API path");
+    }
+
+    #[test]
+    fn cfn_mq_configuration_association_preserves_history() {
+        // Associating a new configuration must push the broker's prior current
+        // configuration onto history rather than wiping it.
+        let prov = make_provisioner();
+        let broker = prov
+            .create_resource(&make_resource(
+                "AWS::AmazonMQ::Broker",
+                "B",
+                serde_json::json!({
+                    "BrokerName": "cfn-hist",
+                    "EngineType": "ACTIVEMQ",
+                    "DeploymentMode": "SINGLE_INSTANCE",
+                    "HostInstanceType": "mq.m5.large",
+                    "PubliclyAccessible": false
+                }),
+            ))
+            .expect("broker provisions");
+
+        // The auto-generated current configuration id (pushed to history next).
+        let prior_id = {
+            let guard = prov.mq_state.read();
+            let acct = guard.get("123456789012").unwrap();
+            acct.brokers.get(&broker.physical_id).unwrap()["configurations"]["current"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        prov.create_resource(&make_resource(
+            "AWS::AmazonMQ::ConfigurationAssociation",
+            "A",
+            serde_json::json!({
+                "Broker": broker.physical_id,
+                "Configuration": { "Id": "c-new-config", "Revision": 2 }
+            }),
+        ))
+        .expect("association provisions");
+
+        let guard = prov.mq_state.read();
+        let acct = guard.get("123456789012").unwrap();
+        let configs = &acct.brokers.get(&broker.physical_id).unwrap()["configurations"];
+        assert_eq!(configs["current"]["id"].as_str(), Some("c-new-config"));
+        assert_eq!(configs["current"]["revision"].as_i64(), Some(2));
+        let history = configs["history"].as_array().unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|h| h["id"].as_str() == Some(prior_id.as_str())),
+            "prior current configuration is preserved in history"
+        );
     }
 }
