@@ -1628,7 +1628,19 @@ impl AwsService for BedrockService {
                 crate::runtime_validation::validate_invoke_model_id(&model_id)?;
                 crate::runtime_validation::validate_runtime_headers(&req)?;
                 crate::runtime_validation::validate_invoke_body_size(&req.body)?;
-                crate::invoke::invoke_model(&self.state, &req, &model_id, &req.body)
+                match crate::upstream::UpstreamConfig::from_env() {
+                    Some(cfg) => {
+                        crate::upstream::invoke_model_upstream(
+                            &self.state,
+                            &req,
+                            &model_id,
+                            &req.body,
+                            &cfg,
+                        )
+                        .await
+                    }
+                    None => crate::invoke::invoke_model(&self.state, &req, &model_id, &req.body),
+                }
             }
             "CountTokens" => {
                 let model_id = resource_id.unwrap_or_default();
@@ -1638,7 +1650,19 @@ impl AwsService for BedrockService {
             "Converse" => {
                 let model_id = resource_id.unwrap_or_default();
                 crate::runtime_validation::validate_invoke_model_id(&model_id)?;
-                crate::converse::converse(&self.state, &req, &model_id, &req.body)
+                match crate::upstream::UpstreamConfig::from_env() {
+                    Some(cfg) => {
+                        crate::upstream::converse_upstream(
+                            &self.state,
+                            &req,
+                            &model_id,
+                            &req.body,
+                            &cfg,
+                        )
+                        .await
+                    }
+                    None => crate::converse::converse(&self.state, &req, &model_id, &req.body),
+                }
             }
             "InvokeModelWithResponseStream" | "InvokeModelWithBidirectionalStream" => {
                 let model_id = resource_id.unwrap_or_default();
@@ -1672,6 +1696,20 @@ impl AwsService for BedrockService {
                         &fault,
                     );
                     return Err(crate::faults::fault_to_error(&fault));
+                }
+                // Real streaming inference when an upstream is configured
+                // (not applicable to the bidirectional variant).
+                if action == "InvokeModelWithResponseStream" {
+                    if let Some(cfg) = crate::upstream::UpstreamConfig::from_env() {
+                        return crate::upstream::invoke_stream_upstream(
+                            &self.state,
+                            &req,
+                            &model_id,
+                            &req.body,
+                            &cfg,
+                        )
+                        .await;
+                    }
                 }
                 let response_text =
                     crate::streaming::get_response_text(&self.state, &req, &model_id, &req.body);
@@ -1715,6 +1753,17 @@ impl AwsService for BedrockService {
                         &fault,
                     );
                     return Err(crate::faults::fault_to_error(&fault));
+                }
+                // Real streaming inference when an upstream is configured.
+                if let Some(cfg) = crate::upstream::UpstreamConfig::from_env() {
+                    return crate::upstream::converse_stream_upstream(
+                        &self.state,
+                        &req,
+                        &model_id,
+                        &req.body,
+                        &cfg,
+                    )
+                    .await;
                 }
                 let response_text =
                     crate::streaming::get_response_text(&self.state, &req, &model_id, &req.body);

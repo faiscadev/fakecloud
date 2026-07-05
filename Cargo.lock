@@ -3899,6 +3899,7 @@ name = "fakecloud-bedrock"
 version = "0.39.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -3909,6 +3910,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

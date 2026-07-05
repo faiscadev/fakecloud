@@ -195,6 +195,157 @@ pub(crate) fn build_converse_stream_response(
     body
 }
 
+/// Re-encode a sequence of real upstream token deltas as a Bedrock
+/// `InvokeModelWithResponseStream` event stream. Each `deltas` entry
+/// becomes its own frame, so the caller streams genuine incremental tokens
+/// rather than a single canned block.
+///
+/// For `anthropic.*` models the frames follow the Anthropic Messages
+/// streaming envelope (`message_start` / `content_block_delta` per token /
+/// `message_stop`); every other provider emits Titan-style `outputText`
+/// chunks, matching `build_invoke_stream_response`'s generic branch.
+pub(crate) fn build_invoke_stream_from_deltas(
+    model_id: &str,
+    deltas: &[String],
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    if model_id.starts_with("anthropic.") {
+        push_anthropic_chunk(
+            &mut body,
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_fakecloudstream01",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model_id,
+                    "content": [],
+                    "stop_reason": null,
+                    "usage": { "input_tokens": input_tokens, "output_tokens": 0 }
+                }
+            }),
+        );
+        push_anthropic_chunk(
+            &mut body,
+            &json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        );
+        for delta in deltas {
+            push_anthropic_chunk(
+                &mut body,
+                &json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": delta }
+                }),
+            );
+        }
+        push_anthropic_chunk(
+            &mut body,
+            &json!({ "type": "content_block_stop", "index": 0 }),
+        );
+        push_anthropic_chunk(
+            &mut body,
+            &json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                "usage": { "output_tokens": output_tokens }
+            }),
+        );
+        push_anthropic_chunk(&mut body, &json!({ "type": "message_stop" }));
+    } else {
+        for delta in deltas {
+            push_anthropic_chunk(&mut body, &json!({ "outputText": delta }));
+        }
+    }
+
+    body
+}
+
+/// Encode a single `chunk` event whose payload is the base64-wrapped JSON
+/// value, matching how Bedrock frames provider-native streaming bodies.
+fn push_anthropic_chunk(body: &mut Vec<u8>, chunk: &Value) {
+    let payload = serde_json::to_vec(&json!({
+        "bytes": base64_encode(&serde_json::to_vec(chunk)
+            .expect("serde_json::Value serialization is infallible"))
+    }))
+    .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("chunk", "application/json", &payload));
+}
+
+/// Re-encode a sequence of real upstream token deltas as a Bedrock
+/// `ConverseStream` event stream — one `contentBlockDelta` event per token,
+/// terminated with real usage figures in the `metadata` event.
+pub(crate) fn build_converse_stream_from_deltas(
+    deltas: &[String],
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    let start = json!({ "role": "assistant" });
+    let payload = serde_json::to_vec(&json!({ "messageStart": start }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("messageStart", "application/json", &payload));
+
+    let block_start = json!({ "contentBlockIndex": 0, "start": {} });
+    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event(
+        "contentBlockStart",
+        "application/json",
+        &payload,
+    ));
+
+    for delta in deltas {
+        let block_delta = json!({
+            "contentBlockIndex": 0,
+            "delta": { "text": delta }
+        });
+        let payload = serde_json::to_vec(&json!({ "contentBlockDelta": block_delta }))
+            .expect("serde_json::Value serialization is infallible");
+        body.extend(encode_event(
+            "contentBlockDelta",
+            "application/json",
+            &payload,
+        ));
+    }
+
+    let block_stop = json!({ "contentBlockIndex": 0 });
+    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event(
+        "contentBlockStop",
+        "application/json",
+        &payload,
+    ));
+
+    let stop = json!({ "stopReason": "end_turn" });
+    let payload = serde_json::to_vec(&json!({ "messageStop": stop }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("messageStop", "application/json", &payload));
+
+    let metadata = json!({
+        "usage": {
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens
+        },
+        "metrics": { "latencyMs": 100 }
+    });
+    let payload = serde_json::to_vec(&json!({ "metadata": metadata }))
+        .expect("serde_json::Value serialization is infallible");
+    body.extend(encode_event("metadata", "application/json", &payload));
+
+    body
+}
+
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
