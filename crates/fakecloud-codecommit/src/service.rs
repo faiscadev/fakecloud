@@ -1561,13 +1561,19 @@ impl CodeCommitService {
         })?;
         let tree_id = tree_id_for(&merged);
         let commit_id = fresh_object_id();
-        let commit = build_commit(&commit_id, &tree_id, &[dest, source], &b, req);
+        // A squash merge collapses the source into a single-parent commit on the
+        // destination; a three-way merge records both tips as parents.
+        let parents: Vec<String> = if merge_option == "SQUASH_MERGE" {
+            vec![dest]
+        } else {
+            vec![dest, source]
+        };
+        let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), merged);
         if let Some(target) = str_field(&b, "targetBranch") {
             repo.branches.insert(target, commit_id.clone());
         }
-        let _ = merge_option;
         ok(json!({ "commitId": commit_id, "treeId": tree_id }))
     }
 
@@ -1677,12 +1683,13 @@ impl CodeCommitService {
             .ok_or_else(|| repo_not_found(&name))?;
         let source = resolve_commit(repo, &b, "sourceCommitSpecifier")?;
         let dest = resolve_commit(repo, &b, "destinationCommitSpecifier")?;
-        let base = merge_base(repo, &source, &dest);
+        let empty = std::collections::BTreeMap::new();
+        let (base, base_tree, src_tree, dst_tree) = merge_inputs(repo, &source, &dest, &empty);
         let conflicts = conflicting_paths(repo, &source, &dest);
         let mergeable = conflicts.is_empty();
         let metadata: Vec<Value> = conflicts
             .iter()
-            .map(|p| json!({ "filePath": p, "numberOfConflicts": 1 }))
+            .map(|p| conflict_metadata(repo, &source, &dest, base_tree, src_tree, dst_tree, p).0)
             .collect();
         ok(json!({
             "mergeable": mergeable,
@@ -1714,14 +1721,22 @@ impl CodeCommitService {
             .ok_or_else(|| repo_not_found(&name))?;
         let source = resolve_commit(repo, &b, "sourceCommitSpecifier")?;
         let dest = resolve_commit(repo, &b, "destinationCommitSpecifier")?;
-        let base = merge_base(repo, &source, &dest);
+        let empty = std::collections::BTreeMap::new();
+        let (base, base_tree, src_tree, dst_tree) = merge_inputs(repo, &source, &dest, &empty);
+        if base_tree.get(&path).is_none()
+            && src_tree.get(&path).is_none()
+            && dst_tree.get(&path).is_none()
+        {
+            return Err(err(
+                "FileDoesNotExistException",
+                "The specified file does not exist.",
+            ));
+        }
+        let (metadata, hunks) =
+            conflict_metadata(repo, &source, &dest, base_tree, src_tree, dst_tree, &path);
         ok(json!({
-            "conflictMetadata": {
-                "filePath": path,
-                "numberOfConflicts": 0,
-                "mergeOperations": {},
-            },
-            "mergeHunks": [],
+            "conflictMetadata": metadata,
+            "mergeHunks": hunks,
             "destinationCommitId": dest,
             "sourceCommitId": source,
             "baseCommitId": base,
@@ -1751,9 +1766,33 @@ impl CodeCommitService {
             .ok_or_else(|| repo_not_found(&name))?;
         let source = resolve_commit(repo, &b, "sourceCommitSpecifier")?;
         let dest = resolve_commit(repo, &b, "destinationCommitSpecifier")?;
-        let base = merge_base(repo, &source, &dest);
+        let max_files = b
+            .get("maxConflictFiles")
+            .and_then(Value::as_i64)
+            .filter(|n| *n >= 0)
+            .map_or(usize::MAX, |n| n as usize);
+        let max_hunks = b
+            .get("maxMergeHunks")
+            .and_then(Value::as_i64)
+            .filter(|n| *n >= 0)
+            .map_or(usize::MAX, |n| n as usize);
+        let empty = std::collections::BTreeMap::new();
+        let (base, base_tree, src_tree, dst_tree) = merge_inputs(repo, &source, &dest, &empty);
+        let mut conflicts = Vec::new();
+        for path in conflicting_paths(repo, &source, &dest) {
+            if conflicts.len() >= max_files {
+                break;
+            }
+            let (metadata, mut hunks) =
+                conflict_metadata(repo, &source, &dest, base_tree, src_tree, dst_tree, &path);
+            hunks.truncate(max_hunks);
+            conflicts.push(json!({
+                "conflictMetadata": metadata,
+                "mergeHunks": hunks,
+            }));
+        }
         ok(json!({
-            "conflicts": [],
+            "conflicts": conflicts,
             "errors": [],
             "destinationCommitId": dest,
             "sourceCommitId": source,
@@ -1797,10 +1836,12 @@ impl CodeCommitService {
             }
         }
         let account = self.account(req);
+        let author = caller_arn(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         let now = Utc::now();
         let mut pr_targets = Vec::new();
+        let mut approval_rules = Vec::new();
         for t in &targets {
             let repo_name = t
                 .get("repositoryName")
@@ -1835,13 +1876,25 @@ impl CodeCommitService {
                         .map(str::to_string)
                 })
                 .unwrap_or_else(|| "main".to_string());
+            if source_ref == dest_ref {
+                return Err(err(
+                    "SourceAndDestinationAreSameException",
+                    "The source reference and destination reference are the same. You must specify different references for the source and destination.",
+                ));
+            }
             let source_commit = repo.branches.get(source_ref).cloned().ok_or_else(|| {
                 err(
                     "ReferenceDoesNotExistException",
                     "The specified reference does not exist.",
                 )
             })?;
-            let dest_commit = repo.branches.get(&dest_ref).cloned().unwrap_or_default();
+            // The destination reference must also resolve to a real branch.
+            let dest_commit = repo.branches.get(&dest_ref).cloned().ok_or_else(|| {
+                err(
+                    "ReferenceDoesNotExistException",
+                    "The specified reference does not exist.",
+                )
+            })?;
             let base = merge_base(repo, &source_commit, &dest_commit);
             pr_targets.push(json!({
                 "repositoryName": repo_name,
@@ -1852,11 +1905,42 @@ impl CodeCommitService {
                 "mergeBase": base,
                 "mergeMetadata": { "isMerged": false },
             }));
+            // Auto-populate approval rules from every approval-rule template
+            // associated with the target repository (exactly as CodeCommit does).
+            for tmpl_name in &repo.associated_templates {
+                if approval_rules.iter().any(|r: &Value| {
+                    r.get("approvalRuleName").and_then(Value::as_str) == Some(tmpl_name.as_str())
+                }) {
+                    continue;
+                }
+                if let Some(tmpl) = st.templates.get(tmpl_name) {
+                    let content = tmpl
+                        .get("approvalRuleTemplateContent")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    approval_rules.push(json!({
+                        "approvalRuleId": new_uuid(),
+                        "approvalRuleName": tmpl_name,
+                        "approvalRuleContent": content,
+                        "ruleContentSha256": sha256_hex(content.as_bytes()),
+                        "lastModifiedDate": ts(now),
+                        "creationDate": ts(now),
+                        "lastModifiedUser": author,
+                        "originApprovalRuleTemplate": {
+                            "approvalRuleTemplateId": tmpl
+                                .get("approvalRuleTemplateId")
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                            "approvalRuleTemplateName": tmpl_name,
+                        },
+                    }));
+                }
+            }
         }
         st.pull_request_counter += 1;
         let pr_id = st.pull_request_counter.to_string();
         let revision_id = fresh_object_id();
-        let author = caller_arn(req);
         let pr = json!({
             "pullRequestId": pr_id,
             "title": title,
@@ -1868,7 +1952,7 @@ impl CodeCommitService {
             "pullRequestTargets": pr_targets,
             "clientRequestToken": str_field(&b, "clientRequestToken").unwrap_or_default(),
             "revisionId": revision_id,
-            "approvalRules": [],
+            "approvalRules": approval_rules,
         });
         st.pull_requests.insert(pr_id.clone(), pr.clone());
         st.pull_request_order.push(pr_id.clone());
@@ -2005,7 +2089,9 @@ impl CodeCommitService {
         }
         self.mutate_pr(req, &id, |pr| {
             let current = pr.get("pullRequestStatus").and_then(Value::as_str).unwrap_or("OPEN");
-            if current == "CLOSED" && status == "CLOSED" {
+            // A closed pull request is terminal: it cannot be reopened, nor
+            // re-closed. The only valid transition is OPEN -> CLOSED.
+            if current == "CLOSED" {
                 return Err(err(
                     "InvalidPullRequestStatusUpdateException",
                     "The pull request status update is not valid. The only valid update is from OPEN to CLOSED.",
@@ -2074,16 +2160,151 @@ impl CodeCommitService {
             return Err(repo_not_found(&name));
         }
         let now = Utc::now();
-        let pr = st.pull_requests.get_mut(&id).ok_or_else(pr_not_found)?;
-        if pr.get("pullRequestStatus").and_then(Value::as_str) == Some("CLOSED") {
-            return Err(err(
-                "PullRequestAlreadyClosedException",
-                "The pull request status cannot be updated because it is already closed.",
-            ));
+
+        // Read the pull request's target and rules without holding a mutable
+        // borrow across the object-store mutation below.
+        let (source_ref, dest_ref, revision, rules) = {
+            let pr = st.pull_requests.get(&id).ok_or_else(pr_not_found)?;
+            if pr.get("pullRequestStatus").and_then(Value::as_str) == Some("CLOSED") {
+                return Err(err(
+                    "PullRequestAlreadyClosedException",
+                    "The pull request status cannot be updated because it is already closed.",
+                ));
+            }
+            let target = pr
+                .get("pullRequestTargets")
+                .and_then(Value::as_array)
+                .and_then(|ts| {
+                    ts.iter().find(|t| {
+                        t.get("repositoryName").and_then(Value::as_str) == Some(name.as_str())
+                    })
+                })
+                .ok_or_else(|| {
+                    err(
+                        "RepositoryNotAssociatedWithPullRequestException",
+                        "The repository is not associated with the pull request.",
+                    )
+                })?;
+            let source_ref = target
+                .get("sourceReference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let dest_ref = target
+                .get("destinationReference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let revision = pr
+                .get("revisionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let rules = pr
+                .get("approvalRules")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            (source_ref, dest_ref, revision, rules)
+        };
+
+        // Enforce approval rules (unless overridden), exactly as AWS does before
+        // allowing a merge.
+        let overridden = st
+            .pull_request_overrides
+            .get(&id)
+            .and_then(|m| m.get(&revision))
+            .is_some();
+        if !overridden && !rules.is_empty() {
+            let approvers: std::collections::BTreeSet<String> = st
+                .pull_request_approvals
+                .get(&id)
+                .and_then(|m| m.get(&revision))
+                .map(|m| {
+                    m.iter()
+                        .filter(|(_, v)| v.as_str() == "APPROVE")
+                        .map(|(arn, _)| arn.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let all_satisfied = rules.iter().all(|r| {
+                let content = r
+                    .get("approvalRuleContent")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                rule_satisfied(content, &approvers)
+            });
+            if !all_satisfied {
+                return Err(err(
+                    "PullRequestApprovalRulesNotSatisfiedException",
+                    "The pull request cannot be merged because one or more approval rules have not been satisfied.",
+                ));
+            }
         }
+
+        // Resolve the current tips and perform the merge against the object
+        // store, advancing the destination branch to the resulting commit.
+        let strategy = str_field(&b, "conflictResolutionStrategy").unwrap_or_default();
+        let repo = st.repositories.get_mut(&name).expect("repo checked above");
+        let source_tip = repo.branches.get(&source_ref).cloned().ok_or_else(|| {
+            err(
+                "ReferenceDoesNotExistException",
+                "The specified reference does not exist.",
+            )
+        })?;
+        let dest_tip = repo.branches.get(&dest_ref).cloned().ok_or_else(|| {
+            err(
+                "ReferenceDoesNotExistException",
+                "The specified reference does not exist.",
+            )
+        })?;
+        // Concurrency check: if the caller pins a source tip it must still match.
+        if let Some(pinned) = str_field(&b, "sourceCommitId") {
+            if pinned != source_tip {
+                return Err(err(
+                    "TipOfSourceReferenceIsDifferentException",
+                    "The tip of the source reference is different from the specified commit ID.",
+                ));
+            }
+        }
+        let merge_commit_id = match merge_option {
+            "FAST_FORWARD_MERGE" => {
+                if !is_ancestor(repo, &dest_tip, &source_tip) {
+                    return Err(err(
+                        "ManualMergeRequiredException",
+                        "The fast-forward merge cannot be performed because the destination is not an ancestor of the source.",
+                    ));
+                }
+                repo.branches.insert(dest_ref.clone(), source_tip.clone());
+                source_tip.clone()
+            }
+            _ => {
+                let merged =
+                    merge_trees(repo, &source_tip, &dest_tip, &strategy).ok_or_else(|| {
+                        err(
+                            "ManualMergeRequiredException",
+                            "The merge cannot be completed because there are merge conflicts that must be resolved manually.",
+                        )
+                    })?;
+                let tree_id = tree_id_for(&merged);
+                let commit_id = fresh_object_id();
+                let parents: Vec<String> = if merge_option == "SQUASH_MERGE" {
+                    vec![dest_tip.clone()]
+                } else {
+                    vec![dest_tip.clone(), source_tip.clone()]
+                };
+                let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
+                repo.commits.insert(commit_id.clone(), commit);
+                repo.trees.insert(commit_id.clone(), merged);
+                repo.branches.insert(dest_ref.clone(), commit_id.clone());
+                commit_id
+            }
+        };
+
+        // Close the pull request and record the real merge metadata.
+        let pr = st.pull_requests.get_mut(&id).expect("pr checked above");
         pr["pullRequestStatus"] = json!("CLOSED");
         pr["lastActivityDate"] = ts(now);
-        let merge_commit = fresh_object_id();
         if let Some(targets) = pr
             .get_mut("pullRequestTargets")
             .and_then(Value::as_array_mut)
@@ -2093,7 +2314,7 @@ impl CodeCommitService {
                     t["mergeMetadata"] = json!({
                         "isMerged": true,
                         "mergedBy": author,
-                        "mergeCommitId": merge_commit,
+                        "mergeCommitId": merge_commit_id,
                         "mergeOption": merge_option,
                     });
                 }
@@ -2358,23 +2579,43 @@ impl CodeCommitService {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let names: Vec<Value> = rules
-            .iter()
-            .filter_map(|r| r.get("approvalRuleName").cloned())
-            .collect();
-        let approvals_present = s
+        // Distinct reviewers who approved the current revision.
+        let approvers: std::collections::BTreeSet<String> = s
             .pull_request_approvals
             .get(&id)
             .and_then(|m| m.get(&revision))
-            .map(|m| m.values().any(|v| v == "APPROVE"))
-            .unwrap_or(false);
-        let satisfied = overridden || rules.is_empty() || approvals_present;
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, v)| v.as_str() == "APPROVE")
+                    .map(|(arn, _)| arn.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut satisfied_names = Vec::new();
+        let mut not_satisfied_names = Vec::new();
+        for r in &rules {
+            let Some(name) = r.get("approvalRuleName").cloned() else {
+                continue;
+            };
+            let content = r
+                .get("approvalRuleContent")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // An override satisfies every rule; otherwise honor the rule's
+            // NumberOfApprovalsNeeded and approver pool.
+            if overridden || rule_satisfied(content, &approvers) {
+                satisfied_names.push(name);
+            } else {
+                not_satisfied_names.push(name);
+            }
+        }
+        let approved = not_satisfied_names.is_empty();
         ok(json!({
             "evaluation": {
-                "approved": satisfied,
+                "approved": approved,
                 "overridden": overridden,
-                "approvalRulesSatisfied": if satisfied { names.clone() } else { vec![] },
-                "approvalRulesNotSatisfied": if satisfied { vec![] } else { names },
+                "approvalRulesSatisfied": satisfied_names,
+                "approvalRulesNotSatisfied": not_satisfied_names,
             }
         }))
     }
@@ -3580,6 +3821,76 @@ fn sha256_hex(data: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Whether an approval-pool member pattern matches an approver ARN. Pool members
+/// may be exact ARNs or contain `*` wildcards (e.g. an assumed-role session
+/// glob), matching CodeCommit's pool semantics.
+fn pool_matches(pattern: &str, arn: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == arn;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !arn[pos..].starts_with(part) {
+                return false;
+            }
+            pos += part.len();
+        } else if i == parts.len() - 1 {
+            if !arn[pos..].ends_with(part) {
+                return false;
+            }
+        } else if let Some(idx) = arn[pos..].find(part) {
+            pos += idx + part.len();
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether an approval rule's content is satisfied by the given set of approving
+/// reviewer ARNs. Each `Approvers` statement requires `NumberOfApprovalsNeeded`
+/// distinct approvals drawn from its `ApprovalPoolMembers` (any approver when no
+/// pool is specified); the rule is satisfied only when every statement is.
+fn rule_satisfied(content: &str, approvers: &std::collections::BTreeSet<String>) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(content) else {
+        return !approvers.is_empty();
+    };
+    let Some(statements) = v.get("Statements").and_then(Value::as_array) else {
+        return !approvers.is_empty();
+    };
+    if statements.is_empty() {
+        return true;
+    }
+    for stmt in statements {
+        let needed = stmt
+            .get("NumberOfApprovalsNeeded")
+            .and_then(Value::as_i64)
+            .unwrap_or(1)
+            .max(0) as usize;
+        let pool = stmt.get("ApprovalPoolMembers").and_then(Value::as_array);
+        let count = match pool {
+            Some(pool) if !pool.is_empty() => approvers
+                .iter()
+                .filter(|a| {
+                    pool.iter()
+                        .filter_map(Value::as_str)
+                        .any(|pat| pool_matches(pat, a))
+                })
+                .count(),
+            _ => approvers.len(),
+        };
+        if count < needed {
+            return false;
+        }
+    }
+    true
+}
+
 /// Set the repository's default branch to its sole branch if none is set yet.
 fn set_default_if_absent(repo: &mut Repo) {
     let has_default = repo
@@ -3679,109 +3990,328 @@ fn is_ancestor(repo: &Repo, ancestor: &str, descendant: &str) -> bool {
     ancestors(repo, descendant).contains(ancestor)
 }
 
-/// The best common ancestor of two commits, if any.
+/// The merge base (lowest common ancestor) of two commits over the parent DAG,
+/// if any. Handles merge commits (multiple parents) correctly: the merge base is
+/// a common ancestor that is not itself an ancestor of any *other* common
+/// ancestor (i.e. the lowest such commit). When a criss-cross history yields
+/// several candidate bases, the one closest to `a` (fewest hops) is chosen so
+/// the result is deterministic.
 fn merge_base(repo: &Repo, a: &str, b: &str) -> Option<String> {
     let anc_a = ancestors(repo, a);
-    // Walk b's history breadth-first; the first commit also in anc_a is a base.
-    let mut stack = vec![b.to_string()];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(c) = stack.pop() {
-        if !seen.insert(c.clone()) {
-            continue;
-        }
-        if anc_a.contains(&c) {
-            return Some(c);
-        }
-        if let Some(commit) = repo.commits.get(&c) {
-            if let Some(parents) = commit.get("parents").and_then(Value::as_array) {
-                for p in parents {
-                    if let Some(pid) = p.as_str() {
-                        stack.push(pid.to_string());
+    let anc_b = ancestors(repo, b);
+    let common: Vec<String> = anc_a.intersection(&anc_b).cloned().collect();
+    if common.is_empty() {
+        return None;
+    }
+    // Keep only the lowest common ancestors: a candidate survives when no *other*
+    // common ancestor has it as an ancestor (i.e. it is not strictly above
+    // another candidate).
+    let lowest: Vec<String> = common
+        .iter()
+        .filter(|c| {
+            !common
+                .iter()
+                .any(|o| o.as_str() != c.as_str() && ancestors(repo, o).contains(*c))
+        })
+        .cloned()
+        .collect();
+    let candidates = if lowest.is_empty() { common } else { lowest };
+    // Tie-break by BFS distance from `a` (closest wins), then lexically for
+    // full determinism.
+    let depth = bfs_depths(repo, a);
+    candidates.into_iter().min_by(|x, y| {
+        let dx = depth.get(x).copied().unwrap_or(usize::MAX);
+        let dy = depth.get(y).copied().unwrap_or(usize::MAX);
+        dx.cmp(&dy).then_with(|| x.cmp(y))
+    })
+}
+
+/// Minimum hop distance from `start` to each of its ancestors over the parent
+/// DAG (breadth-first by generation).
+fn bfs_depths(repo: &Repo, start: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut depths = std::collections::BTreeMap::new();
+    let mut frontier = vec![start.to_string()];
+    let mut depth = 0usize;
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for c in frontier {
+            if depths.contains_key(&c) {
+                continue;
+            }
+            depths.insert(c.clone(), depth);
+            if let Some(commit) = repo.commits.get(&c) {
+                if let Some(parents) = commit.get("parents").and_then(Value::as_array) {
+                    for p in parents {
+                        if let Some(pid) = p.as_str() {
+                            if !depths.contains_key(pid) {
+                                next.push(pid.to_string());
+                            }
+                        }
                     }
                 }
             }
         }
+        frontier = next;
+        depth += 1;
     }
-    None
+    depths
 }
 
-/// Paths that conflict between source and destination relative to their base.
-fn conflicting_paths(repo: &Repo, source: &str, dest: &str) -> Vec<String> {
+/// Whether two optional tree entries are identical (same blob id and file mode).
+/// A missing entry (a deletion) is only equal to another missing entry.
+fn entries_equal(x: Option<&FileEntry>, y: Option<&FileEntry>) -> bool {
+    match (x, y) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.blob_id == b.blob_id && a.mode == b.mode,
+        _ => false,
+    }
+}
+
+/// The three-way resolution of a single path given its base, source, and
+/// destination entries. `Take(None)` means the path is deleted in the result.
+enum Resolved {
+    Take(Option<FileEntry>),
+    Conflict,
+}
+
+/// Real git/CodeCommit three-way resolution for one path. Additions,
+/// modifications, and deletions on either side all resolve when only one side
+/// changed relative to the base; a genuine two-sided divergence is a conflict.
+fn merge_entry(
+    base: Option<&FileEntry>,
+    source: Option<&FileEntry>,
+    dest: Option<&FileEntry>,
+) -> Resolved {
+    if entries_equal(source, dest) {
+        // Both sides agree (including both deleting the file).
+        Resolved::Take(source.cloned())
+    } else if entries_equal(source, base) {
+        // Source unchanged relative to base -> take destination's version
+        // (which may itself be a deletion).
+        Resolved::Take(dest.cloned())
+    } else if entries_equal(dest, base) {
+        // Destination unchanged relative to base -> take source's version
+        // (which may itself be a deletion).
+        Resolved::Take(source.cloned())
+    } else {
+        Resolved::Conflict
+    }
+}
+
+/// A materialized working tree: path -> entry.
+type Tree = std::collections::BTreeMap<String, FileEntry>;
+
+/// The base/source/destination trees for a merge (empty maps when a commit has
+/// no materialized tree), along with the computed base commit id.
+fn merge_inputs<'a>(
+    repo: &'a Repo,
+    source: &str,
+    dest: &str,
+    empty: &'a Tree,
+) -> (Option<String>, &'a Tree, &'a Tree, &'a Tree) {
     let base = merge_base(repo, source, dest);
-    let empty = std::collections::BTreeMap::new();
     let base_tree = base
         .as_ref()
         .and_then(|b| repo.trees.get(b))
-        .unwrap_or(&empty);
-    let src_tree = repo.trees.get(source).unwrap_or(&empty);
-    let dst_tree = repo.trees.get(dest).unwrap_or(&empty);
+        .unwrap_or(empty);
+    let src_tree = repo.trees.get(source).unwrap_or(empty);
+    let dst_tree = repo.trees.get(dest).unwrap_or(empty);
+    (base, base_tree, src_tree, dst_tree)
+}
+
+/// The union of all paths appearing in the base, source, and destination trees.
+fn all_merge_paths(
+    base_tree: &std::collections::BTreeMap<String, FileEntry>,
+    src_tree: &std::collections::BTreeMap<String, FileEntry>,
+    dst_tree: &std::collections::BTreeMap<String, FileEntry>,
+) -> std::collections::BTreeSet<String> {
+    let mut all: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    all.extend(base_tree.keys().cloned());
+    all.extend(src_tree.keys().cloned());
+    all.extend(dst_tree.keys().cloned());
+    all
+}
+
+/// Paths that genuinely conflict between source and destination relative to
+/// their merge base (both sides changed the same path differently).
+fn conflicting_paths(repo: &Repo, source: &str, dest: &str) -> Vec<String> {
+    let empty = std::collections::BTreeMap::new();
+    let (_, base_tree, src_tree, dst_tree) = merge_inputs(repo, source, dest, &empty);
     let mut conflicts = Vec::new();
-    for (path, s) in src_tree {
-        if let Some(d) = dst_tree.get(path) {
-            let base_blob = base_tree.get(path).map(|e| &e.blob_id);
-            if s.blob_id != d.blob_id
-                && base_blob != Some(&s.blob_id)
-                && base_blob != Some(&d.blob_id)
-            {
-                conflicts.push(path.clone());
-            }
+    for path in all_merge_paths(base_tree, src_tree, dst_tree) {
+        if let Resolved::Conflict = merge_entry(
+            base_tree.get(&path),
+            src_tree.get(&path),
+            dst_tree.get(&path),
+        ) {
+            conflicts.push(path);
         }
     }
     conflicts
 }
 
-/// Produce a merged working tree for source into destination using a simple
-/// three-way merge. Returns `None` when there are unresolved content conflicts
-/// (and no accept-source/accept-destination strategy is chosen).
+/// Produce a merged working tree for merging source into destination using a
+/// real three-way merge (per-path, relative to the merge base). Returns `None`
+/// when there is an unresolved content conflict and no accept-source /
+/// accept-destination strategy is chosen.
 fn merge_trees(
     repo: &Repo,
     source: &str,
     dest: &str,
     strategy: &str,
 ) -> Option<std::collections::BTreeMap<String, FileEntry>> {
-    let base = merge_base(repo, source, dest);
     let empty = std::collections::BTreeMap::new();
-    let base_tree = base
-        .as_ref()
-        .and_then(|b| repo.trees.get(b))
-        .unwrap_or(&empty);
-    let src_tree = repo.trees.get(source).cloned().unwrap_or_default();
-    let dst_tree = repo.trees.get(dest).cloned().unwrap_or_default();
-    let mut merged = dst_tree.clone();
-    let mut all_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    all_paths.extend(src_tree.keys().cloned());
-    all_paths.extend(dst_tree.keys().cloned());
-    for path in all_paths {
+    let (_, base_tree, src_tree, dst_tree) = merge_inputs(repo, source, dest, &empty);
+    let mut merged: std::collections::BTreeMap<String, FileEntry> =
+        std::collections::BTreeMap::new();
+    for path in all_merge_paths(base_tree, src_tree, dst_tree) {
         let s = src_tree.get(&path);
         let d = dst_tree.get(&path);
-        let base_blob = base_tree.get(&path).map(|e| &e.blob_id);
-        match (s, d) {
-            (Some(se), Some(de)) => {
-                if se.blob_id == de.blob_id {
-                    continue;
-                }
-                if base_blob == Some(&de.blob_id) {
-                    merged.insert(path, se.clone()); // only source changed
-                } else if base_blob == Some(&se.blob_id) {
-                    // only destination changed; keep destination
-                } else {
-                    match strategy {
-                        "ACCEPT_SOURCE" => {
-                            merged.insert(path, se.clone());
-                        }
-                        "ACCEPT_DESTINATION" => {}
-                        _ => return None,
-                    }
-                }
-            }
-            (Some(se), None) => {
-                merged.insert(path, se.clone());
-            }
-            (None, Some(_)) => {}
-            (None, None) => {}
+        let entry = match merge_entry(base_tree.get(&path), s, d) {
+            Resolved::Take(e) => e,
+            Resolved::Conflict => match strategy {
+                "ACCEPT_SOURCE" => s.cloned(),
+                "ACCEPT_DESTINATION" => d.cloned(),
+                _ => return None,
+            },
+        };
+        if let Some(e) = entry {
+            merged.insert(path, e);
         }
     }
     Some(merged)
+}
+
+/// The number of lines in a byte buffer (for merge-hunk line ranges).
+fn line_count(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut n = bytes.iter().filter(|&&b| b == b'\n').count();
+    if *bytes.last().unwrap() != b'\n' {
+        n += 1;
+    }
+    n
+}
+
+/// Decode a tree entry's stored (base64) blob content to raw bytes.
+fn entry_bytes(repo: &Repo, entry: Option<&FileEntry>) -> Vec<u8> {
+    let Some(e) = entry else { return Vec::new() };
+    let Some(b64) = repo.blobs.get(&e.blob_id) else {
+        return Vec::new();
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .unwrap_or_else(|_| b64.clone().into_bytes())
+}
+
+/// One side of a merge hunk (`source`/`destination`/`base`), carrying the line
+/// range and the base64 content for that side.
+fn hunk_side(repo: &Repo, entry: Option<&FileEntry>) -> Value {
+    let bytes = entry_bytes(repo, entry);
+    let lines = line_count(&bytes);
+    json!({
+        "startLine": if lines == 0 { 0 } else { 1 },
+        "endLine": lines,
+        "hunkContent": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
+/// The change kind of one side relative to the base: `A`dded, `M`odified,
+/// `D`eleted, or none when unchanged.
+fn merge_operation(base: Option<&FileEntry>, side: Option<&FileEntry>) -> Option<&'static str> {
+    match (base, side) {
+        (None, Some(_)) => Some("A"),
+        (Some(_), None) => Some("D"),
+        (Some(_), Some(_)) if !entries_equal(base, side) => Some("M"),
+        _ => None,
+    }
+}
+
+/// Build the real `ConflictMetadata` + `mergeHunks` for one path between source
+/// and destination relative to their base. Used by `DescribeMergeConflicts`,
+/// `BatchDescribeMergeConflicts`, and (for the list form) `GetMergeConflicts`,
+/// so every conflict-reporting operation agrees.
+fn conflict_metadata(
+    repo: &Repo,
+    source: &str,
+    dest: &str,
+    base_tree: &std::collections::BTreeMap<String, FileEntry>,
+    src_tree: &std::collections::BTreeMap<String, FileEntry>,
+    dst_tree: &std::collections::BTreeMap<String, FileEntry>,
+    path: &str,
+) -> (Value, Vec<Value>) {
+    let _ = (source, dest);
+    let b = base_tree.get(path);
+    let s = src_tree.get(path);
+    let d = dst_tree.get(path);
+    let is_conflict = matches!(merge_entry(b, s, d), Resolved::Conflict);
+    let content_conflict = is_conflict;
+    let file_mode_conflict = match (b, s, d) {
+        (base, Some(se), Some(de)) => {
+            se.mode != de.mode
+                && base.map(|e| e.mode.as_str()) != Some(se.mode.as_str())
+                && base.map(|e| e.mode.as_str()) != Some(de.mode.as_str())
+        }
+        _ => false,
+    };
+    let mode_of = |e: Option<&FileEntry>| e.map(|x| git_mode_to_file(&x.mode)).unwrap_or("NORMAL");
+    let size_of = |e: Option<&FileEntry>| entry_bytes(repo, e).len();
+    let src_op = merge_operation(b, s);
+    let dst_op = merge_operation(b, d);
+    let mut merge_operations = Map::new();
+    if let Some(o) = src_op {
+        merge_operations.insert("source".into(), json!(o));
+    }
+    if let Some(o) = dst_op {
+        merge_operations.insert("destination".into(), json!(o));
+    }
+    let number_of_conflicts = i64::from(is_conflict);
+    let metadata = json!({
+        "filePath": path,
+        "fileSizes": {
+            "source": size_of(s),
+            "destination": size_of(d),
+            "base": size_of(b),
+        },
+        "fileModes": {
+            "source": mode_of(s),
+            "destination": mode_of(d),
+            "base": mode_of(b),
+        },
+        "objectTypes": {
+            "source": if s.is_some() { "FILE" } else { "" },
+            "destination": if d.is_some() { "FILE" } else { "" },
+            "base": if b.is_some() { "FILE" } else { "" },
+        },
+        "numberOfConflicts": number_of_conflicts,
+        "isBinaryFile": {
+            "source": is_binary(&entry_bytes(repo, s)),
+            "destination": is_binary(&entry_bytes(repo, d)),
+            "base": is_binary(&entry_bytes(repo, b)),
+        },
+        "contentConflict": content_conflict,
+        "fileModeConflict": file_mode_conflict,
+        "objectTypeConflict": false,
+        "mergeOperations": Value::Object(merge_operations),
+    });
+    // Emit a merge hunk whenever the three sides are not all identical, marking
+    // the hunk as a conflict only for a genuine two-sided divergence.
+    let mut hunks = Vec::new();
+    if !(entries_equal(s, d) && entries_equal(s, b)) {
+        hunks.push(json!({
+            "isConflict": is_conflict,
+            "source": hunk_side(repo, s),
+            "destination": hunk_side(repo, d),
+            "base": hunk_side(repo, b),
+        }));
+    }
+    (metadata, hunks)
+}
+
+/// Whether a blob looks binary (contains a NUL byte), as CodeCommit reports.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
 }
 
 /// Build a `PullRequestEvent`-shaped JSON value.
@@ -3840,5 +4370,489 @@ mod normalize_tests {
             out,
             "{\"Version\":\"2018-11-08\",\"DestinationReferences\":[\"refs/heads/master\"],\"Statements\":[]}"
         );
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    fn entry(id: &str) -> FileEntry {
+        FileEntry {
+            blob_id: id.to_string(),
+            mode: "100644".to_string(),
+        }
+    }
+
+    fn commit(parents: &[&str]) -> Value {
+        json!({ "parents": parents, "treeId": "t" })
+    }
+
+    // Defect 3: merge_base is the lowest common ancestor, not any ancestor.
+    #[test]
+    fn merge_base_is_lowest_common_ancestor() {
+        // root <- X <- A ; and B is a merge commit whose parents are [X, root].
+        // The common ancestors of A and B are {X, root}; the LCA is X. A
+        // depth-first walk that returns the first common ancestor would wrongly
+        // report root.
+        let mut repo = Repo::default();
+        repo.commits.insert("root".into(), commit(&[]));
+        repo.commits.insert("X".into(), commit(&["root"]));
+        repo.commits.insert("A".into(), commit(&["X"]));
+        repo.commits.insert("B".into(), commit(&["X", "root"]));
+        assert_eq!(merge_base(&repo, "A", "B"), Some("X".to_string()));
+        assert_eq!(merge_base(&repo, "B", "A"), Some("X".to_string()));
+    }
+
+    #[test]
+    fn merge_base_of_a_diamond_is_the_fork_point() {
+        // root <- L <- A ; root <- R <- B. LCA(A, B) == root.
+        let mut repo = Repo::default();
+        repo.commits.insert("root".into(), commit(&[]));
+        repo.commits.insert("L".into(), commit(&["root"]));
+        repo.commits.insert("R".into(), commit(&["root"]));
+        repo.commits.insert("A".into(), commit(&["L"]));
+        repo.commits.insert("B".into(), commit(&["R"]));
+        assert_eq!(merge_base(&repo, "A", "B"), Some("root".to_string()));
+    }
+
+    // Defect 2: a file deleted on the source branch is removed by the merge.
+    #[test]
+    fn three_way_merge_propagates_source_deletion() {
+        let mut repo = Repo::default();
+        repo.commits.insert("base".into(), commit(&[]));
+        repo.commits.insert("src".into(), commit(&["base"]));
+        repo.commits.insert("dst".into(), commit(&["base"]));
+        // base has a.txt + b.txt.
+        let mut base = Tree::new();
+        base.insert("a.txt".into(), entry("a1"));
+        base.insert("b.txt".into(), entry("b1"));
+        repo.trees.insert("base".into(), base);
+        // source deletes b.txt.
+        let mut src = Tree::new();
+        src.insert("a.txt".into(), entry("a1"));
+        repo.trees.insert("src".into(), src);
+        // destination is unchanged w.r.t. b.txt but adds c.txt.
+        let mut dst = Tree::new();
+        dst.insert("a.txt".into(), entry("a1"));
+        dst.insert("b.txt".into(), entry("b1"));
+        dst.insert("c.txt".into(), entry("c1"));
+        repo.trees.insert("dst".into(), dst);
+
+        let merged = merge_trees(&repo, "src", "dst", "").expect("mergeable");
+        assert!(!merged.contains_key("b.txt"), "source deletion must win");
+        assert!(merged.contains_key("a.txt"));
+        assert!(merged.contains_key("c.txt"));
+    }
+
+    #[test]
+    fn three_way_merge_flags_true_conflict() {
+        let mut repo = Repo::default();
+        repo.commits.insert("base".into(), commit(&[]));
+        repo.commits.insert("src".into(), commit(&["base"]));
+        repo.commits.insert("dst".into(), commit(&["base"]));
+        let mut base = Tree::new();
+        base.insert("a.txt".into(), entry("a1"));
+        repo.trees.insert("base".into(), base);
+        let mut src = Tree::new();
+        src.insert("a.txt".into(), entry("a-src"));
+        repo.trees.insert("src".into(), src);
+        let mut dst = Tree::new();
+        dst.insert("a.txt".into(), entry("a-dst"));
+        repo.trees.insert("dst".into(), dst);
+        // Both sides changed a.txt differently -> unresolved conflict.
+        assert!(merge_trees(&repo, "src", "dst", "").is_none());
+        assert_eq!(conflicting_paths(&repo, "src", "dst"), vec!["a.txt"]);
+        // A strategy resolves it deterministically.
+        let merged = merge_trees(&repo, "src", "dst", "ACCEPT_SOURCE").expect("resolved");
+        assert_eq!(merged.get("a.txt").unwrap().blob_id, "a-src");
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use bytes::Bytes;
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+
+    fn svc() -> CodeCommitService {
+        CodeCommitService::new(Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn req_as(action: &str, body: Value, arn: Option<&str>) -> AwsRequest {
+        let principal = arn.map(|a| Principal {
+            arn: a.to_string(),
+            user_id: "AIDATEST".to_string(),
+            account_id: "000000000000".to_string(),
+            principal_type: PrincipalType::User,
+            source_identity: None,
+            tags: None,
+        });
+        AwsRequest {
+            service: "codecommit".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "req".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: String::new(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal,
+        }
+    }
+
+    fn call(s: &CodeCommitService, action: &str, body: Value) -> Value {
+        let resp = s
+            .dispatch(action, &req_as(action, body, None))
+            .expect("op ok");
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn call_as(s: &CodeCommitService, action: &str, body: Value, arn: &str) -> Value {
+        let resp = s
+            .dispatch(action, &req_as(action, body, Some(arn)))
+            .expect("op ok");
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn call_err(s: &CodeCommitService, action: &str, body: Value) -> AwsServiceError {
+        s.dispatch(action, &req_as(action, body, None))
+            .err()
+            .expect("op err")
+    }
+
+    fn b64(s: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+    }
+
+    /// Create a repository and return nothing; the caller uses "repo".
+    fn make_repo(s: &CodeCommitService) {
+        call(s, "CreateRepository", json!({ "repositoryName": "repo" }));
+    }
+
+    /// Put a file on a branch, returning the new commit id.
+    fn put(
+        s: &CodeCommitService,
+        branch: &str,
+        path: &str,
+        content: &str,
+        parent: Option<&str>,
+    ) -> String {
+        let mut body = json!({
+            "repositoryName": "repo",
+            "branchName": branch,
+            "filePath": path,
+            "fileContent": b64(content),
+        });
+        if let Some(p) = parent {
+            body["parentCommitId"] = json!(p);
+        }
+        call(s, "PutFile", body)["commitId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// A repo with `main` and `feature` diverging non-conflictingly from a
+    /// shared base commit. Returns (source_tip, dest_tip).
+    fn diverged_repo(s: &CodeCommitService) -> (String, String) {
+        make_repo(s);
+        let c1 = put(s, "main", "a.txt", "base", None);
+        call(
+            s,
+            "CreateBranch",
+            json!({ "repositoryName": "repo", "branchName": "feature", "commitId": c1 }),
+        );
+        let feature_tip = put(s, "feature", "b.txt", "from-feature", Some(&c1));
+        let main_tip = put(s, "main", "c.txt", "from-main", Some(&c1));
+        (feature_tip, main_tip)
+    }
+
+    fn create_pr(s: &CodeCommitService, dest: &str) -> Value {
+        call(
+            s,
+            "CreatePullRequest",
+            json!({
+                "title": "PR",
+                "targets": [{
+                    "repositoryName": "repo",
+                    "sourceReference": "feature",
+                    "destinationReference": dest,
+                }],
+            }),
+        )["pullRequest"]
+            .clone()
+    }
+
+    // Defect 1: MergePullRequestByThreeWay advances the destination branch and
+    // the returned mergeCommitId is a real, retrievable commit.
+    #[test]
+    fn merge_pr_three_way_advances_branch_and_writes_commit() {
+        let s = svc();
+        diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+
+        let out = call(
+            &s,
+            "MergePullRequestByThreeWay",
+            json!({ "pullRequestId": pr_id, "repositoryName": "repo" }),
+        );
+        let target = &out["pullRequest"]["pullRequestTargets"][0];
+        assert_eq!(target["mergeMetadata"]["isMerged"], json!(true));
+        let merge_commit = target["mergeMetadata"]["mergeCommitId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(is_object_id(&merge_commit));
+        assert_eq!(out["pullRequest"]["pullRequestStatus"], json!("CLOSED"));
+
+        // Destination branch now points at the merge commit.
+        let branch = call(
+            &s,
+            "GetBranch",
+            json!({ "repositoryName": "repo", "branchName": "main" }),
+        );
+        assert_eq!(branch["branch"]["commitId"], json!(merge_commit));
+
+        // GetCommit on the merge commit succeeds and it has two parents.
+        let got = call(
+            &s,
+            "GetCommit",
+            json!({ "repositoryName": "repo", "commitId": merge_commit }),
+        );
+        assert_eq!(got["commit"]["parents"].as_array().unwrap().len(), 2);
+    }
+
+    // Defect 1/2: a squash merge that deletes a file on source removes it from
+    // the merged destination tree, and the squash commit has a single parent.
+    #[test]
+    fn merge_pr_squash_deletes_file_and_has_one_parent() {
+        let s = svc();
+        make_repo(&s);
+        let c1 = put(&s, "main", "a.txt", "a", None);
+        let c2 = put(&s, "main", "b.txt", "b", Some(&c1));
+        call(
+            &s,
+            "CreateBranch",
+            json!({ "repositoryName": "repo", "branchName": "feature", "commitId": c2 }),
+        );
+        // feature deletes b.txt; main advances independently.
+        call(
+            &s,
+            "DeleteFile",
+            json!({ "repositoryName": "repo", "branchName": "feature", "filePath": "b.txt", "parentCommitId": c2 }),
+        );
+        put(&s, "main", "c.txt", "c", Some(&c2));
+
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let out = call(
+            &s,
+            "MergePullRequestBySquash",
+            json!({ "pullRequestId": pr_id, "repositoryName": "repo" }),
+        );
+        let merge_commit = out["pullRequest"]["pullRequestTargets"][0]["mergeMetadata"]
+            ["mergeCommitId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Squash => single parent.
+        let got = call(
+            &s,
+            "GetCommit",
+            json!({ "repositoryName": "repo", "commitId": merge_commit }),
+        );
+        assert_eq!(got["commit"]["parents"].as_array().unwrap().len(), 1);
+        // b.txt is gone on the destination branch after merge.
+        let err = call_err(
+            &s,
+            "GetFile",
+            json!({ "repositoryName": "repo", "commitSpecifier": "main", "filePath": "b.txt" }),
+        );
+        assert_eq!(err.code(), "FileDoesNotExistException");
+    }
+
+    // Defect 4: MergeBranchesBySquash yields a single-parent commit.
+    #[test]
+    fn merge_branches_squash_single_parent() {
+        let s = svc();
+        let (feature_tip, main_tip) = diverged_repo(&s);
+        let out = call(
+            &s,
+            "MergeBranchesBySquash",
+            json!({
+                "repositoryName": "repo",
+                "sourceCommitSpecifier": feature_tip,
+                "destinationCommitSpecifier": main_tip,
+                "targetBranch": "main",
+            }),
+        );
+        let cid = out["commitId"].as_str().unwrap().to_string();
+        let got = call(
+            &s,
+            "GetCommit",
+            json!({ "repositoryName": "repo", "commitId": cid }),
+        );
+        assert_eq!(got["commit"]["parents"].as_array().unwrap().len(), 1);
+    }
+
+    // Defect 5 + 6: an associated 2-approval template is auto-applied on PR
+    // create and is NOT satisfied by a single approval.
+    #[test]
+    fn template_applied_and_two_approvals_needed() {
+        let s = svc();
+        let content = "{\"Version\":\"2018-11-08\",\"Statements\":[{\"Type\":\"Approvers\",\"NumberOfApprovalsNeeded\":2,\"ApprovalPoolMembers\":[]}]}";
+        call(
+            &s,
+            "CreateApprovalRuleTemplate",
+            json!({ "approvalRuleTemplateName": "two", "approvalRuleTemplateContent": content }),
+        );
+        diverged_repo(&s);
+        call(
+            &s,
+            "AssociateApprovalRuleTemplateWithRepository",
+            json!({ "approvalRuleTemplateName": "two", "repositoryName": "repo" }),
+        );
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let revision = pr["revisionId"].as_str().unwrap().to_string();
+
+        // The template's rule is materialized on the PR with template origin.
+        let rules = pr["approvalRules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0]["approvalRuleName"], json!("two"));
+        assert!(rules[0]["originApprovalRuleTemplate"].is_object());
+
+        // One approval is not enough for a rule needing two.
+        call_as(
+            &s,
+            "UpdatePullRequestApprovalState",
+            json!({ "pullRequestId": pr_id, "revisionId": revision, "approvalState": "APPROVE" }),
+            "arn:aws:iam::000000000000:user/reviewer",
+        );
+        let eval = call(
+            &s,
+            "EvaluatePullRequestApprovalRules",
+            json!({ "pullRequestId": pr_id, "revisionId": revision }),
+        );
+        assert_eq!(eval["evaluation"]["approved"], json!(false));
+        assert_eq!(
+            eval["evaluation"]["approvalRulesNotSatisfied"],
+            json!(["two"])
+        );
+    }
+
+    // Defect 7: a closed pull request cannot be reopened.
+    #[test]
+    fn closed_pr_cannot_reopen() {
+        let s = svc();
+        diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        call(
+            &s,
+            "UpdatePullRequestStatus",
+            json!({ "pullRequestId": pr_id, "pullRequestStatus": "CLOSED" }),
+        );
+        let err = call_err(
+            &s,
+            "UpdatePullRequestStatus",
+            json!({ "pullRequestId": pr_id, "pullRequestStatus": "OPEN" }),
+        );
+        assert_eq!(err.code(), "InvalidPullRequestStatusUpdateException");
+    }
+
+    // Defect 8: a nonexistent destinationReference is rejected before create.
+    #[test]
+    fn create_pr_rejects_missing_destination() {
+        let s = svc();
+        diverged_repo(&s);
+        let err = call_err(
+            &s,
+            "CreatePullRequest",
+            json!({
+                "title": "PR",
+                "targets": [{
+                    "repositoryName": "repo",
+                    "sourceReference": "feature",
+                    "destinationReference": "does-not-exist",
+                }],
+            }),
+        );
+        assert_eq!(err.code(), "ReferenceDoesNotExistException");
+    }
+
+    // Defect 9 + 10: Describe / BatchDescribe report a real content conflict.
+    #[test]
+    fn describe_and_batch_report_conflict() {
+        let s = svc();
+        make_repo(&s);
+        let c1 = put(&s, "main", "a.txt", "base-content", None);
+        call(
+            &s,
+            "CreateBranch",
+            json!({ "repositoryName": "repo", "branchName": "feature", "commitId": c1 }),
+        );
+        put(&s, "feature", "a.txt", "feature-side", Some(&c1));
+        put(&s, "main", "a.txt", "main-side", Some(&c1));
+
+        let base_body = json!({
+            "repositoryName": "repo",
+            "sourceCommitSpecifier": "feature",
+            "destinationCommitSpecifier": "main",
+            "mergeOption": "THREE_WAY_MERGE",
+        });
+
+        let mut d = base_body.clone();
+        d["filePath"] = json!("a.txt");
+        let desc = call(&s, "DescribeMergeConflicts", d);
+        assert_eq!(desc["conflictMetadata"]["numberOfConflicts"], json!(1));
+        assert_eq!(desc["conflictMetadata"]["contentConflict"], json!(true));
+        assert_eq!(desc["mergeHunks"][0]["isConflict"], json!(true));
+
+        let batch = call(&s, "BatchDescribeMergeConflicts", base_body.clone());
+        let conflicts = batch["conflicts"].as_array().unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0]["conflictMetadata"]["filePath"], json!("a.txt"));
+
+        // GetMergeConflicts agrees: not mergeable, a.txt listed.
+        let gmc = call(&s, "GetMergeConflicts", base_body);
+        assert_eq!(gmc["mergeable"], json!(false));
+        assert_eq!(gmc["conflictMetadataList"][0]["filePath"], json!("a.txt"));
+    }
+
+    // Defect 1: a fast-forward PR merge that is not fast-forwardable is rejected
+    // and leaves the PR open.
+    #[test]
+    fn merge_pr_fast_forward_non_ff_rejected() {
+        let s = svc();
+        diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let err = call_err(
+            &s,
+            "MergePullRequestByFastForward",
+            json!({ "pullRequestId": pr_id, "repositoryName": "repo" }),
+        );
+        assert_eq!(err.code(), "ManualMergeRequiredException");
+        // PR remains open.
+        let got = call(&s, "GetPullRequest", json!({ "pullRequestId": pr_id }));
+        assert_eq!(got["pullRequest"]["pullRequestStatus"], json!("OPEN"));
     }
 }
