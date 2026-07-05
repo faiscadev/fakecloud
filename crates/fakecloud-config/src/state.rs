@@ -141,6 +141,12 @@ pub struct ConfigurationItem {
     pub configuration: String,
     #[serde(default)]
     pub supplementary_configuration: BTreeMap<String, String>,
+    /// True when this item was recorded via the `PutResourceConfig` API rather
+    /// than discovered from a native fakecloud service. The cross-service
+    /// recorder never marks externally-recorded items as deleted (their
+    /// lifecycle is owned by the caller, not by native discovery).
+    #[serde(default)]
+    pub externally_recorded: bool,
 }
 
 // ─── Config rules + evaluations ──────────────────────────────────────────

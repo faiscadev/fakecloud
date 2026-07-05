@@ -8681,4 +8681,36 @@ mod tests {
             "prior current configuration is preserved in history"
         );
     }
+
+    #[test]
+    fn config_rule_getatt_config_rule_id_resolves() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Config::ConfigRule",
+                "MyRule",
+                serde_json::json!({
+                    "ConfigRuleName": "s3-versioning",
+                    "Source": { "Owner": "AWS", "SourceIdentifier": "S3_BUCKET_VERSIONING_ENABLED" },
+                }),
+            ))
+            .expect("provision config rule");
+        // The real rule id stored in Config state.
+        let stored_id = prov
+            .config_state
+            .read()
+            .account("123456789012")
+            .and_then(|a| a.rules.get("s3-versioning").map(|r| r.rule_id.clone()))
+            .expect("rule stored");
+        // `!GetAtt MyRule.ConfigRuleId` resolves to that real id, not a
+        // placeholder, and `.ComplianceType` / `.Arn` are populated too.
+        let got = created.attributes.get("ConfigRuleId").cloned();
+        assert_eq!(got.as_deref(), Some(stored_id.as_str()));
+        assert!(!stored_id.is_empty());
+        assert_eq!(
+            created.attributes.get("ComplianceType").map(String::as_str),
+            Some("INSUFFICIENT_DATA")
+        );
+        assert!(created.attributes.contains_key("Arn"));
+    }
 }

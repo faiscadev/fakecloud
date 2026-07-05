@@ -79,6 +79,22 @@ fn discover_s3(
     };
     for (name, bucket) in &st.buckets {
         let tags = bucket.tags.clone();
+        // A grant is public when it targets the AllUsers / AuthenticatedUsers
+        // groups, or when a public canned ACL is set.
+        let public_read = bucket.acl.as_deref().is_some_and(|a| {
+            matches!(
+                a,
+                "public-read" | "public-read-write" | "authenticated-read"
+            )
+        }) || bucket.acl_grants.iter().any(|g| {
+            is_public_grantee_uri(g.grantee_uri.as_deref())
+                && matches!(g.permission.as_str(), "READ" | "FULL_CONTROL")
+        });
+        let public_write = bucket.acl.as_deref() == Some("public-read-write")
+            || bucket.acl_grants.iter().any(|g| {
+                is_public_grantee_uri(g.grantee_uri.as_deref())
+                    && matches!(g.permission.as_str(), "WRITE" | "FULL_CONTROL")
+            });
         let config = json!({
             "name": name,
             "creationDate": bucket.creation_date.to_rfc3339(),
@@ -89,6 +105,8 @@ fn discover_s3(
             "serverSideEncryptionConfiguration": bucket.encryption_config,
             "publicAccessBlockConfiguration": bucket.public_access_block,
             "bucketPolicy": bucket.policy,
+            "grantsPublicRead": public_read,
+            "grantsPublicWrite": public_write,
             "region": bucket.region,
         });
         out.push(DiscoveredResource {
@@ -307,23 +325,73 @@ fn discover_iam(
     }
 }
 
-/// Fold newly-discovered cross-service resources into the account's recorded
+/// The `configuration` string of a discovered resource, keyed by its stable
+/// `resource_key`. Computed once so the read-only [`sync_would_change`] check
+/// and the mutating [`apply_recorded_items`] agree exactly.
+fn discovered_config(res: &DiscoveredResource) -> String {
+    serde_json::to_string(&res.configuration).unwrap_or_else(|_| "{}".into())
+}
+
+/// Read-only check: would folding `discovered` into `account`'s recorded
+/// history change anything? Lets the caller skip taking a write lock (and the
+/// full re-record) on a pure read when nothing has changed since last sync.
+pub fn sync_would_change(account: &AccountState, discovered: &[DiscoveredResource]) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    for res in discovered {
+        let key = resource_key(&res.resource_type, &res.resource_id);
+        seen.insert(key.clone());
+        let changed = account
+            .config_items
+            .get(&key)
+            .and_then(|h| h.last())
+            .map(|last| {
+                last.configuration != discovered_config(res)
+                    || last.configuration_item_status == "ResourceDeleted"
+            })
+            .unwrap_or(true);
+        if changed {
+            return true;
+        }
+    }
+    // A natively-recorded resource that vanished needs a delete marker.
+    for (key, history) in &account.config_items {
+        let Some((rtype, _)) = key.split_once('\u{1}') else {
+            continue;
+        };
+        if !SUPPORTED_RESOURCE_TYPES.contains(&rtype) || seen.contains(key) {
+            continue;
+        }
+        match history.last() {
+            Some(last)
+                if !last.externally_recorded
+                    && !last
+                        .configuration_item_status
+                        .starts_with("ResourceDeleted") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Fold discovered cross-service resources into the account's recorded
 /// configuration-item history. A new item is appended only when a resource is
 /// new or its configuration changed since the last recorded item, so history
 /// grows exactly like real Config (one item per configuration state).
-pub fn sync_recorded_items(
+/// Externally recorded items (`PutResourceConfig`) are never delete-marked here.
+pub fn apply_recorded_items(
     account: &mut AccountState,
-    states: &CrossServiceStates,
+    discovered: Vec<DiscoveredResource>,
     account_id: &str,
-    region: &str,
 ) {
-    let discovered = discover_all(states, account_id, region);
     let now = Utc::now();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for res in discovered {
         let key = resource_key(&res.resource_type, &res.resource_id);
         seen.insert(key.clone());
-        let config_str = serde_json::to_string(&res.configuration).unwrap_or_else(|_| "{}".into());
+        let config_str = discovered_config(&res);
         let history = account.config_items.entry(key).or_default();
         let changed = history
             .last()
@@ -354,37 +422,36 @@ pub fn sync_recorded_items(
                 tags: res.tags,
                 configuration: config_str,
                 supplementary_configuration: Default::default(),
+                externally_recorded: false,
             });
         }
     }
-    // Mark resources that vanished from the live services as deleted (only for
-    // the cross-service types; externally PutResourceConfig'd items are left
-    // untouched).
+    // Mark natively-recorded resources that vanished from the live services as
+    // deleted. Externally recorded items (`PutResourceConfig`) are owned by the
+    // caller and left untouched — never clobbered with a spurious delete.
     for (key, history) in account.config_items.iter_mut() {
         let Some((rtype, _)) = key.split_once('\u{1}') else {
             continue;
         };
-        if !SUPPORTED_RESOURCE_TYPES.contains(&rtype) {
+        if !SUPPORTED_RESOURCE_TYPES.contains(&rtype) || seen.contains(key) {
             continue;
         }
-        if seen.contains(key) {
+        let Some(last) = history.last() else { continue };
+        if last.externally_recorded
+            || last
+                .configuration_item_status
+                .starts_with("ResourceDeleted")
+        {
             continue;
         }
-        let already_deleted = history
-            .last()
-            .map(|l| l.configuration_item_status.starts_with("ResourceDeleted"))
-            .unwrap_or(true);
-        if !already_deleted {
-            if let Some(last) = history.last().cloned() {
-                let state_id = (history.len() as u64 + 1).to_string();
-                history.push(ConfigurationItem {
-                    configuration_item_capture_time: now,
-                    configuration_item_status: "ResourceDeleted".into(),
-                    configuration_state_id: state_id,
-                    ..last
-                });
-            }
-        }
+        let last = last.clone();
+        let state_id = (history.len() as u64 + 1).to_string();
+        history.push(ConfigurationItem {
+            configuration_item_capture_time: now,
+            configuration_item_status: "ResourceDeleted".into(),
+            configuration_state_id: state_id,
+            ..last
+        });
     }
 }
 
@@ -405,14 +472,18 @@ pub struct RuleOutcome {
 pub fn evaluate_managed_rule(
     source_identifier: &str,
     input_parameters: &Value,
+    scope: &Value,
     account: &AccountState,
 ) -> Vec<RuleOutcome> {
-    // Latest recorded item per resource (skip deleted).
+    // Latest recorded item per resource (skip deleted), restricted to the
+    // rule's Scope (ComplianceResourceTypes / ComplianceResourceId / TagKey)
+    // so a rule never evaluates resources outside its declared scope.
     let latest: Vec<&ConfigurationItem> = account
         .config_items
         .values()
         .filter_map(|h| h.last())
         .filter(|ci| !ci.configuration_item_status.starts_with("ResourceDeleted"))
+        .filter(|ci| item_in_scope(ci, scope))
         .collect();
 
     let by_type = |t: &str| -> Vec<&&ConfigurationItem> {
@@ -461,26 +532,41 @@ pub fn evaluate_managed_rule(
             }
         }
         "S3_BUCKET_PUBLIC_READ_PROHIBITED" | "S3_BUCKET_PUBLIC_WRITE_PROHIBITED" => {
+            let want_write = source_identifier == "S3_BUCKET_PUBLIC_WRITE_PROHIBITED";
             for ci in by_type("AWS::S3::Bucket") {
-                // COMPLIANT when a public access block exists (blocking public
-                // access) and there is no wildcard bucket policy.
-                let pab = cfg(ci)
+                let c = cfg(ci);
+                // A Public Access Block, when present, blocks public access, so
+                // the bucket is COMPLIANT regardless of grants/policy.
+                let pab = c
                     .get("publicAccessBlockConfiguration")
                     .map(|v| !v.is_null())
                     .unwrap_or(false);
-                let policy_public = cfg(ci)
+                // Otherwise the bucket is NON_COMPLIANT only if it ACTUALLY
+                // grants public access via a public ACL grant or a bucket policy
+                // that allows the `*` principal. A normal private bucket with no
+                // Public Access Block is COMPLIANT (matches AWS).
+                let public_acl = c
+                    .get(if want_write {
+                        "grantsPublicWrite"
+                    } else {
+                        "grantsPublicRead"
+                    })
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let policy_public = c
                     .get("bucketPolicy")
                     .and_then(Value::as_str)
-                    .map(|p| p.contains("\"Principal\":\"*\"") || p.contains("\"AWS\":\"*\""))
+                    .map(policy_allows_public_principal)
                     .unwrap_or(false);
-                let compliant = pab && !policy_public;
+                let actually_public = public_acl || policy_public;
+                let compliant = pab || !actually_public;
                 out.push(outcome(
                     ci,
                     compliant,
                     if compliant {
                         None
                     } else {
-                        Some("Bucket may allow public access".into())
+                        Some("Bucket grants public access".into())
                     },
                 ));
             }
@@ -643,15 +729,109 @@ fn outcome(ci: &ConfigurationItem, compliant: bool, annotation: Option<String>) 
 }
 
 fn rule_opens_port(rule: &Value, port: i64) -> bool {
+    let proto = rule.get("ipProtocol").and_then(Value::as_str).unwrap_or("");
     let from = rule.get("fromPort").and_then(Value::as_i64).unwrap_or(0);
     let to = rule.get("toPort").and_then(Value::as_i64).unwrap_or(65535);
-    let covers = from <= port && port <= to;
+    // An all-traffic rule (`IpProtocol "-1"`, or `-1` port sentinels) opens
+    // every port, so it must be treated as covering the blocked port. Without
+    // this, a security group opening ALL ports to 0.0.0.0/0 would be reported
+    // COMPLIANT — a false all-clear on the worst case.
+    let all_ports = proto == "-1" || from == -1 || to == -1;
+    let covers = all_ports || (from <= port && port <= to);
     let public = rule
         .get("ipRanges")
         .and_then(Value::as_array)
         .map(|a| a.iter().any(|c| c.as_str() == Some("0.0.0.0/0")))
         .unwrap_or(false);
     covers && public
+}
+
+/// Whether an S3 ACL grantee URI targets the public / authenticated-users
+/// groups (i.e. a public grant).
+fn is_public_grantee_uri(uri: Option<&str>) -> bool {
+    uri.map(|u| u.contains("AllUsers") || u.contains("AuthenticatedUsers"))
+        .unwrap_or(false)
+}
+
+/// Parse a bucket policy JSON document and report whether any `Allow` statement
+/// grants access to the `*` principal (`"*"`, `{"AWS":"*"}`, or an array
+/// containing `"*"`). Replaces the previous whitespace-sensitive substring
+/// match, which missed the standard `"Principal": "*"` form the console/SDK
+/// emit.
+fn policy_allows_public_principal(policy: &str) -> bool {
+    let Ok(doc) = serde_json::from_str::<Value>(policy) else {
+        return false;
+    };
+    let statements = match doc.get("Statement") {
+        Some(Value::Array(a)) => a.clone(),
+        Some(obj @ Value::Object(_)) => vec![obj.clone()],
+        _ => return false,
+    };
+    statements.iter().any(|stmt| {
+        let effect = stmt
+            .get("Effect")
+            .and_then(Value::as_str)
+            .unwrap_or("Allow");
+        if !effect.eq_ignore_ascii_case("Allow") {
+            return false;
+        }
+        principal_is_public(stmt.get("Principal"))
+    })
+}
+
+fn principal_is_public(principal: Option<&Value>) -> bool {
+    match principal {
+        Some(Value::String(s)) => s == "*",
+        Some(Value::Object(map)) => map.values().any(value_contains_star),
+        Some(Value::Array(a)) => a.iter().any(|v| v.as_str() == Some("*")),
+        _ => false,
+    }
+}
+
+fn value_contains_star(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s == "*",
+        Value::Array(a) => a.iter().any(|x| x.as_str() == Some("*")),
+        _ => false,
+    }
+}
+
+/// Whether a configuration item falls within a config rule's `Scope`. An empty
+/// or absent scope matches everything (the AWS default).
+fn item_in_scope(ci: &ConfigurationItem, scope: &Value) -> bool {
+    if scope.is_null() {
+        return true;
+    }
+    if let Some(types) = scope
+        .get("ComplianceResourceTypes")
+        .and_then(Value::as_array)
+    {
+        if !types.is_empty()
+            && !types
+                .iter()
+                .any(|t| t.as_str() == Some(ci.resource_type.as_str()))
+        {
+            return false;
+        }
+    }
+    if let Some(id) = scope.get("ComplianceResourceId").and_then(Value::as_str) {
+        if ci.resource_id != id {
+            return false;
+        }
+    }
+    if let Some(tag_key) = scope.get("TagKey").and_then(Value::as_str) {
+        match ci.tags.get(tag_key) {
+            None => return false,
+            Some(v) => {
+                if let Some(tag_value) = scope.get("TagValue").and_then(Value::as_str) {
+                    if v != tag_value {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 fn param_as_i64(v: &Value) -> Option<i64> {
@@ -846,4 +1026,191 @@ fn insert_dotted(row: &mut serde_json::Map<String, Value>, field: &str, value: V
     // Config returns dotted select fields as the leaf name.
     let leaf = field.rsplit('.').next().unwrap_or(field);
     row.insert(leaf.to_string(), value);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{resource_key, AccountState, ConfigurationItem};
+    use chrono::Utc;
+    use std::collections::BTreeMap;
+
+    fn item(rtype: &str, rid: &str, config: Value, tags: &[(&str, &str)]) -> ConfigurationItem {
+        ConfigurationItem {
+            version: "1.3".into(),
+            account_id: "123456789012".into(),
+            configuration_item_capture_time: Utc::now(),
+            configuration_item_status: "OK".into(),
+            configuration_state_id: "1".into(),
+            arn: format!("arn:aws:::{rid}"),
+            resource_type: rtype.into(),
+            resource_id: rid.into(),
+            resource_name: Some(rid.into()),
+            aws_region: "us-east-1".into(),
+            availability_zone: "Regional".into(),
+            resource_creation_time: Some(Utc::now()),
+            tags: tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            configuration: serde_json::to_string(&config).unwrap(),
+            supplementary_configuration: BTreeMap::new(),
+            externally_recorded: false,
+        }
+    }
+
+    fn account_with(items: Vec<ConfigurationItem>) -> AccountState {
+        let mut acc = AccountState::default();
+        for it in items {
+            let key = resource_key(&it.resource_type, &it.resource_id);
+            acc.config_items.entry(key).or_default().push(it);
+        }
+        acc
+    }
+
+    fn verdict(outcomes: &[RuleOutcome], rid: &str) -> Option<String> {
+        outcomes
+            .iter()
+            .find(|o| o.resource_id == rid)
+            .map(|o| o.compliance_type.clone())
+    }
+
+    #[test]
+    fn default_private_bucket_is_compliant() {
+        // No public grants, no bucket policy, no Public Access Block.
+        let acc = account_with(vec![item(
+            "AWS::S3::Bucket",
+            "priv",
+            json!({ "name": "priv", "grantsPublicRead": false, "grantsPublicWrite": false }),
+            &[],
+        )]);
+        let out = evaluate_managed_rule(
+            "S3_BUCKET_PUBLIC_READ_PROHIBITED",
+            &Value::Null,
+            &Value::Null,
+            &acc,
+        );
+        assert_eq!(verdict(&out, "priv").as_deref(), Some("COMPLIANT"));
+        let out = evaluate_managed_rule(
+            "S3_BUCKET_PUBLIC_WRITE_PROHIBITED",
+            &Value::Null,
+            &Value::Null,
+            &acc,
+        );
+        assert_eq!(verdict(&out, "priv").as_deref(), Some("COMPLIANT"));
+    }
+
+    #[test]
+    fn public_acl_bucket_is_noncompliant() {
+        let acc = account_with(vec![item(
+            "AWS::S3::Bucket",
+            "pub",
+            json!({ "name": "pub", "grantsPublicRead": true, "grantsPublicWrite": false }),
+            &[],
+        )]);
+        let out = evaluate_managed_rule(
+            "S3_BUCKET_PUBLIC_READ_PROHIBITED",
+            &Value::Null,
+            &Value::Null,
+            &acc,
+        );
+        assert_eq!(verdict(&out, "pub").as_deref(), Some("NON_COMPLIANT"));
+    }
+
+    #[test]
+    fn spaced_principal_policy_detected_public() {
+        // The console/SDK emit `"Principal": "*"` with a space; the old
+        // substring check missed it.
+        assert!(policy_allows_public_principal(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal": "*","Action":"s3:GetObject","Resource":"*"}]}"#
+        ));
+        assert!(policy_allows_public_principal(
+            r#"{"Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"s3:*"}]}"#
+        ));
+        assert!(!policy_allows_public_principal(
+            r#"{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123:root"},"Action":"s3:GetObject"}]}"#
+        ));
+        // And the rule flags a bucket whose policy uses the spaced form.
+        let acc = account_with(vec![item(
+            "AWS::S3::Bucket",
+            "polpub",
+            json!({ "name": "polpub", "bucketPolicy": "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\": \"*\",\"Action\":\"s3:GetObject\"}]}" }),
+            &[],
+        )]);
+        let out = evaluate_managed_rule(
+            "S3_BUCKET_PUBLIC_READ_PROHIBITED",
+            &Value::Null,
+            &Value::Null,
+            &acc,
+        );
+        assert_eq!(verdict(&out, "polpub").as_deref(), Some("NON_COMPLIANT"));
+    }
+
+    #[test]
+    fn all_ports_open_sg_is_noncompliant_for_ssh() {
+        // IpProtocol "-1" with -1 port sentinels = all traffic to the world.
+        let acc = account_with(vec![item(
+            "AWS::EC2::SecurityGroup",
+            "sg-all",
+            json!({
+                "groupName": "wide-open",
+                "ipPermissions": [{ "ipProtocol": "-1", "fromPort": -1, "toPort": -1, "ipRanges": ["0.0.0.0/0"] }],
+            }),
+            &[],
+        )]);
+        let out = evaluate_managed_rule("INCOMING_SSH_DISABLED", &Value::Null, &Value::Null, &acc);
+        assert_eq!(verdict(&out, "sg-all").as_deref(), Some("NON_COMPLIANT"));
+
+        // A narrow non-SSH rule stays compliant for SSH.
+        let acc2 = account_with(vec![item(
+            "AWS::EC2::SecurityGroup",
+            "sg-web",
+            json!({
+                "groupName": "web",
+                "ipPermissions": [{ "ipProtocol": "tcp", "fromPort": 443, "toPort": 443, "ipRanges": ["0.0.0.0/0"] }],
+            }),
+            &[],
+        )]);
+        let out2 =
+            evaluate_managed_rule("INCOMING_SSH_DISABLED", &Value::Null, &Value::Null, &acc2);
+        assert_eq!(verdict(&out2, "sg-web").as_deref(), Some("COMPLIANT"));
+    }
+
+    #[test]
+    fn required_tags_respects_scope() {
+        let acc = account_with(vec![
+            item("AWS::S3::Bucket", "b1", json!({ "name": "b1" }), &[]),
+            item(
+                "AWS::EC2::Instance",
+                "i-1",
+                json!({ "instanceId": "i-1" }),
+                &[("Env", "prod")],
+            ),
+        ]);
+        let params = json!({ "tag1Key": "Env" });
+        let scope = json!({ "ComplianceResourceTypes": ["AWS::S3::Bucket"] });
+        let out = evaluate_managed_rule("REQUIRED_TAGS", &params, &scope, &acc);
+        // Only the in-scope bucket is evaluated; the out-of-scope instance is not.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].resource_id, "b1");
+        assert_eq!(out[0].compliance_type, "NON_COMPLIANT"); // bucket lacks the Env tag
+    }
+
+    #[test]
+    fn externally_recorded_items_are_not_delete_marked() {
+        // A PutResourceConfig'd item of a native type must survive a sync that
+        // does not rediscover it (no live S3/EC2/IAM states wired here).
+        let mut ext = item(
+            "AWS::S3::Bucket",
+            "manual",
+            json!({ "name": "manual" }),
+            &[],
+        );
+        ext.externally_recorded = true;
+        let mut acc = account_with(vec![ext]);
+        apply_recorded_items(&mut acc, Vec::new(), "123456789012");
+        let key = resource_key("AWS::S3::Bucket", "manual");
+        let last = acc.config_items.get(&key).unwrap().last().unwrap();
+        assert_ne!(last.configuration_item_status, "ResourceDeleted");
+    }
 }

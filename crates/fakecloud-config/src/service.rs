@@ -3,6 +3,7 @@
 //! aggregators, remediation, retention, stored queries and resource
 //! evaluations.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -173,6 +174,12 @@ pub struct ConfigService {
     cross: CrossServiceStates,
     lambda_state: Option<SharedLambdaState>,
     container_runtime: Option<Arc<ContainerRuntime>>,
+    /// Monotonic counter bumped whenever recorded items or rules change. Lets
+    /// managed-rule evaluation skip recomputing when nothing changed since the
+    /// last evaluation (avoids re-running the full evaluation on every poll).
+    state_version: Arc<AtomicU64>,
+    /// The `state_version` at which managed-rule evaluation last ran.
+    last_eval_version: Arc<AtomicU64>,
 }
 
 impl ConfigService {
@@ -184,6 +191,8 @@ impl ConfigService {
             cross: CrossServiceStates::default(),
             lambda_state: None,
             container_runtime: None,
+            state_version: Arc::new(AtomicU64::new(1)),
+            last_eval_version: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -242,24 +251,52 @@ impl ConfigService {
             .unwrap_or(false)
     }
 
+    /// Bump the state version so cached managed-rule evaluation is recomputed.
+    fn bump_version(&self) {
+        self.state_version.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot the live cross-service resources into recorded config items
-    /// when a recorder is running.
+    /// when a recorder is running. Discovery runs under the other services'
+    /// read locks; the config write lock (which serializes config reads) is
+    /// taken only when discovery actually yields a change.
     fn sync_recording(&self, account_id: &str, region: &str) {
         if !self.is_recording(account_id) {
             return;
         }
-        let mut st = self.state.write();
-        let account = st.account_mut(account_id);
-        validate::sync_recorded_items(account, &self.cross, account_id, region);
+        // Discover under the cross-service read locks (no config lock held).
+        let discovered = validate::discover_all(&self.cross, account_id, region);
+        // Read-only check: skip the write lock entirely if nothing changed.
+        let needs = {
+            let st = self.state.read();
+            match st.account(account_id) {
+                Some(acc) => validate::sync_would_change(acc, &discovered),
+                None => !discovered.is_empty(),
+            }
+        };
+        if !needs {
+            return;
+        }
+        {
+            let mut st = self.state.write();
+            let account = st.account_mut(account_id);
+            validate::apply_recorded_items(account, discovered, account_id);
+        }
+        self.bump_version();
     }
 
     /// Run managed-rule evaluation for every AWS-managed rule and store the
-    /// results. Custom / policy rule results are left as recorded by
+    /// results — but only when recorded items or rules have changed since the
+    /// last evaluation. Custom / policy rule results are left as recorded by
     /// `PutEvaluations` / `PutExternalEvaluation`.
     fn ensure_evaluated(&self, account_id: &str) {
+        let version = self.state_version.load(Ordering::Relaxed);
+        if self.last_eval_version.load(Ordering::Relaxed) == version {
+            return;
+        }
         let mut st = self.state.write();
         let account = st.account_mut(account_id);
-        let rules: Vec<(String, String, Value)> = account
+        let rules: Vec<(String, String, Value, Value)> = account
             .rules
             .values()
             .filter_map(|r| {
@@ -277,11 +314,12 @@ impl ConfigService {
                     .as_deref()
                     .and_then(|p| serde_json::from_str(p).ok())
                     .unwrap_or(Value::Null);
-                Some((r.name.clone(), sid, params))
+                let scope = r.scope.clone().unwrap_or(Value::Null);
+                Some((r.name.clone(), sid, params, scope))
             })
             .collect();
-        for (rule_name, sid, params) in rules {
-            let outcomes = validate::evaluate_managed_rule(&sid, &params, account);
+        for (rule_name, sid, params, scope) in rules {
+            let outcomes = validate::evaluate_managed_rule(&sid, &params, &scope, account);
             let entry = account.evaluations.entry(rule_name.clone()).or_default();
             entry.clear();
             for o in &outcomes {
@@ -297,6 +335,8 @@ impl ConfigService {
                 }
             }
         }
+        drop(st);
+        self.last_eval_version.store(version, Ordering::Relaxed);
     }
 }
 
@@ -589,6 +629,9 @@ impl AwsService for ConfigService {
         };
 
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            // A successful mutation may change recorded items or rules, so
+            // managed-rule evaluation must recompute on the next read.
+            self.bump_version();
             self.save_snapshot().await;
         }
         result
@@ -1179,6 +1222,7 @@ impl ConfigService {
             tags,
             configuration,
             supplementary_configuration: Default::default(),
+            externally_recorded: true,
         });
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -1621,13 +1665,16 @@ impl ConfigService {
             "configRuleName": rule_name,
             "accountId": account,
         });
+        // Resolve the Lambda in the rule's own account (not just the default
+        // account) so a custom rule in a non-default account finds its function.
         let resolved = {
             let accounts = lambda_state.read();
-            let state = accounts.default_ref();
-            state.functions.get(&func_name).cloned()
+            accounts
+                .get(account)
+                .and_then(|state| state.functions.get(&func_name).cloned())
         };
         let Some(func) = resolved else {
-            tracing::warn!(function = %func_name, "Config custom rule Lambda not found");
+            tracing::warn!(function = %func_name, account = %account, "Config custom rule Lambda not found");
             return;
         };
         let payload = event.to_string().into_bytes();
