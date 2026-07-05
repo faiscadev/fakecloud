@@ -23,7 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
-use crate::state::{FileEntry, Repo, SharedCodeCommitState};
+use crate::state::{CodeCommitState, FileEntry, Repo, SharedCodeCommitState};
 use crate::validate;
 
 pub const CODECOMMIT_ACTIONS: &[&str] = &[
@@ -567,6 +567,9 @@ impl CodeCommitService {
         let arn = repo_arn(&req.region, &account, &name);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
+        // Removing the repository drops its `associated_templates`, which is the
+        // sole record of approval-rule-template associations, so no template
+        // association can outlive the repository.
         let repository_id = st.repositories.remove(&name).and_then(|r| {
             r.metadata
                 .get("repositoryId")
@@ -575,10 +578,6 @@ impl CodeCommitService {
         });
         st.repository_order.retain(|n| n != &name);
         st.tags.remove(&arn);
-        // Disassociate this repo from any template associations.
-        for repos in st.templates.keys().cloned().collect::<Vec<_>>() {
-            let _ = repos;
-        }
         match repository_id {
             Some(id) => ok(json!({ "repositoryId": id })),
             None => ok(json!({})),
@@ -1032,8 +1031,10 @@ impl CodeCommitService {
         let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), tree);
-        repo.branches.insert(branch, commit_id.clone());
+        repo.branches.insert(branch.clone(), commit_id.clone());
         set_default_if_absent(repo);
+        // Advancing this branch invalidates approvals on any open PR sourced from it.
+        refresh_source_revisions(st, &name, &branch);
         ok(json!({ "commitId": commit_id, "blobId": bid, "treeId": tree_id }))
     }
 
@@ -1080,7 +1081,8 @@ impl CodeCommitService {
         let commit = build_commit(&commit_id, &tree_id, &[tip], &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), tree);
-        repo.branches.insert(branch, commit_id.clone());
+        repo.branches.insert(branch.clone(), commit_id.clone());
+        refresh_source_revisions(st, &name, &branch);
         ok(json!({
             "commitId": commit_id,
             "blobId": blob_id_for(&[]),
@@ -1207,8 +1209,9 @@ impl CodeCommitService {
         let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), tree);
-        repo.branches.insert(branch, commit_id.clone());
+        repo.branches.insert(branch.clone(), commit_id.clone());
         set_default_if_absent(repo);
+        refresh_source_revisions(st, &name, &branch);
         ok(json!({
             "commitId": commit_id,
             "treeId": tree_id,
@@ -1509,7 +1512,8 @@ impl CodeCommitService {
             .unwrap_or_default()
             .to_string();
         if let Some(target) = str_field(&b, "targetBranch") {
-            repo.branches.insert(target, source.clone());
+            repo.branches.insert(target.clone(), source.clone());
+            refresh_source_revisions(st, &name, &target);
         }
         ok(json!({ "commitId": source, "treeId": tree_id }))
     }
@@ -1531,18 +1535,7 @@ impl CodeCommitService {
         let name = require_repository_name(&b)?;
         require(&b, "sourceCommitSpecifier", "CommitRequiredException")?;
         require(&b, "destinationCommitSpecifier", "CommitRequiredException")?;
-        check_enum(
-            &b,
-            "conflictDetailLevel",
-            validate::CONFLICT_DETAIL_LEVEL,
-            "InvalidConflictDetailLevelException",
-        )?;
-        check_enum(
-            &b,
-            "conflictResolutionStrategy",
-            validate::CONFLICT_RESOLUTION_STRATEGY,
-            "InvalidConflictResolutionStrategyException",
-        )?;
+        validate_merge_conflict_enums(&b)?;
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1561,18 +1554,13 @@ impl CodeCommitService {
         })?;
         let tree_id = tree_id_for(&merged);
         let commit_id = fresh_object_id();
-        // A squash merge collapses the source into a single-parent commit on the
-        // destination; a three-way merge records both tips as parents.
-        let parents: Vec<String> = if merge_option == "SQUASH_MERGE" {
-            vec![dest]
-        } else {
-            vec![dest, source]
-        };
+        let parents = merge_parents(merge_option, &dest, &source);
         let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), merged);
         if let Some(target) = str_field(&b, "targetBranch") {
-            repo.branches.insert(target, commit_id.clone());
+            repo.branches.insert(target.clone(), commit_id.clone());
+            refresh_source_revisions(st, &name, &target);
         }
         ok(json!({ "commitId": commit_id, "treeId": tree_id }))
     }
@@ -1592,6 +1580,7 @@ impl CodeCommitService {
                 "The merge option is not valid.",
             ));
         }
+        validate_merge_conflict_enums(&b)?;
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1610,7 +1599,8 @@ impl CodeCommitService {
         })?;
         let tree_id = tree_id_for(&merged);
         let commit_id = fresh_object_id();
-        let commit = build_commit(&commit_id, &tree_id, &[dest, source], &b, req);
+        let parents = merge_parents(&merge_option, &dest, &source);
+        let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
         repo.commits.insert(commit_id.clone(), commit);
         repo.trees.insert(commit_id.clone(), merged);
         ok(json!({ "commitId": commit_id, "treeId": tree_id }))
@@ -1685,7 +1675,7 @@ impl CodeCommitService {
         let dest = resolve_commit(repo, &b, "destinationCommitSpecifier")?;
         let empty = std::collections::BTreeMap::new();
         let (base, base_tree, src_tree, dst_tree) = merge_inputs(repo, &source, &dest, &empty);
-        let conflicts = conflicting_paths(repo, &source, &dest);
+        let conflicts = conflicting_paths_in(base_tree, src_tree, dst_tree);
         let mergeable = conflicts.is_empty();
         let metadata: Vec<Value> = conflicts
             .iter()
@@ -1779,7 +1769,7 @@ impl CodeCommitService {
         let empty = std::collections::BTreeMap::new();
         let (base, base_tree, src_tree, dst_tree) = merge_inputs(repo, &source, &dest, &empty);
         let mut conflicts = Vec::new();
-        for path in conflicting_paths(repo, &source, &dest) {
+        for path in conflicting_paths_in(base_tree, src_tree, dst_tree) {
             if conflicts.len() >= max_files {
                 break;
             }
@@ -1975,7 +1965,9 @@ impl CodeCommitService {
         let account = self.account(req);
         let guard = self.state.read();
         let st = guard.get(&account);
-        match st.and_then(|s| s.pull_requests.get(&id)) {
+        // An open PR's target commits/mergeBase are recomputed from live branch
+        // tips so a read always reflects what a merge would actually use.
+        match st.and_then(|s| s.pull_requests.get(&id).map(|pr| refresh_pr_targets(s, pr))) {
             Some(pr) => ok(json!({ "pullRequest": pr })),
             None => Err(pr_not_found()),
         }
@@ -2089,9 +2081,10 @@ impl CodeCommitService {
         }
         self.mutate_pr(req, &id, |pr| {
             let current = pr.get("pullRequestStatus").and_then(Value::as_str).unwrap_or("OPEN");
-            // A closed pull request is terminal: it cannot be reopened, nor
-            // re-closed. The only valid transition is OPEN -> CLOSED.
-            if current == "CLOSED" {
+            // The only valid transition is OPEN -> CLOSED. Reopening a closed PR
+            // (CLOSED -> *), re-closing (CLOSED -> CLOSED), and a no-op
+            // OPEN -> OPEN are all rejected, matching CodeCommit.
+            if !(current == "OPEN" && status == "CLOSED") {
                 return Err(err(
                     "InvalidPullRequestStatusUpdateException",
                     "The pull request status update is not valid. The only valid update is from OPEN to CLOSED.",
@@ -2152,6 +2145,7 @@ impl CodeCommitService {
         let b = body(req);
         let id = require(&b, "pullRequestId", "PullRequestIdRequiredException")?;
         let name = require_repository_name(&b)?;
+        validate_merge_conflict_enums(&b)?;
         let author = caller_arn(req);
         let account = self.account(req);
         let mut guard = self.state.write();
@@ -2288,11 +2282,7 @@ impl CodeCommitService {
                     })?;
                 let tree_id = tree_id_for(&merged);
                 let commit_id = fresh_object_id();
-                let parents: Vec<String> = if merge_option == "SQUASH_MERGE" {
-                    vec![dest_tip.clone()]
-                } else {
-                    vec![dest_tip.clone(), source_tip.clone()]
-                };
+                let parents = merge_parents(merge_option, &dest_tip, &source_tip);
                 let commit = build_commit(&commit_id, &tree_id, &parents, &b, req);
                 repo.commits.insert(commit_id.clone(), commit);
                 repo.trees.insert(commit_id.clone(), merged);
@@ -2300,6 +2290,10 @@ impl CodeCommitService {
                 commit_id
             }
         };
+
+        // Advancing the destination branch invalidates approvals on any other
+        // open PR sourced from it.
+        refresh_source_revisions(st, &name, &dest_ref);
 
         // Close the pull request and record the real merge metadata.
         let pr = st.pull_requests.get_mut(&id).expect("pr checked above");
@@ -3604,16 +3598,98 @@ impl CodeCommitService {
         let account = self.account(req);
         let guard = self.state.read();
         let st = guard.get(&account);
-        if st.and_then(|s| s.repositories.get(&name)).is_none() {
-            return Err(repo_not_found(&name));
+        let repo = st
+            .and_then(|s| s.repositories.get(&name))
+            .ok_or_else(|| repo_not_found(&name))?;
+        // Enforce the same structural requirements as PutRepositoryTriggers.
+        for t in &triggers {
+            if t.get("name")
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true)
+            {
+                return Err(err(
+                    "RepositoryTriggerNameRequiredException",
+                    "A name for the trigger is required.",
+                ));
+            }
+            if t.get("destinationArn")
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true)
+            {
+                return Err(err(
+                    "RepositoryTriggerDestinationArnRequiredException",
+                    "A destination ARN for the target service for the trigger is required.",
+                ));
+            }
+            if t.get("events")
+                .and_then(Value::as_array)
+                .map(|e| e.is_empty())
+                .unwrap_or(true)
+            {
+                return Err(err(
+                    "RepositoryTriggerEventsListRequiredException",
+                    "At least one event for the trigger is required.",
+                ));
+            }
         }
-        let successful: Vec<Value> = triggers
-            .iter()
-            .filter_map(|t| t.get("name").cloned())
-            .collect();
+        // A test "executes" each trigger: its destination must resolve to a
+        // supported delivery target (SNS topic / Lambda function in this account
+        // and region), its events must be valid, and any branch it is scoped to
+        // must exist. Triggers that cannot be delivered are reported as failures
+        // with a real message rather than a blanket success.
+        let mut successful = Vec::new();
+        let mut failed = Vec::new();
+        for t in &triggers {
+            let tname = t.get("name").and_then(Value::as_str).unwrap_or_default();
+            let dest = t
+                .get("destinationArn")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut failure: Option<String> = None;
+            if !trigger_destination_ok(dest, &account, &req.region) {
+                failure = Some(format!(
+                    "Unable to deliver to destination {dest}. A repository trigger destination must be an Amazon SNS topic or an AWS Lambda function in the same account ({account}) and region ({}).",
+                    req.region
+                ));
+            }
+            if failure.is_none() {
+                if let Some(evs) = t.get("events").and_then(Value::as_array) {
+                    for e in evs {
+                        if let Some(ev) = e.as_str() {
+                            if !validate::is_enum(validate::REPOSITORY_TRIGGER_EVENT, ev) {
+                                failure = Some(format!("The trigger event {ev} is not valid."));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if failure.is_none() {
+                if let Some(branches) = t.get("branches").and_then(Value::as_array) {
+                    for br in branches {
+                        if let Some(bn) = br.as_str() {
+                            if !repo.branches.contains_key(bn) {
+                                failure = Some(format!(
+                                    "The branch {bn} specified for the trigger does not exist in the repository."
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            match failure {
+                Some(msg) => {
+                    failed.push(json!({ "trigger": tname, "failureMessage": msg }));
+                }
+                None => successful.push(json!(tname)),
+            }
+        }
         ok(json!({
             "successfulExecutions": successful,
-            "failedExecutions": [],
+            "failedExecutions": failed,
         }))
     }
 
@@ -3934,6 +4010,142 @@ fn build_commit(
     })
 }
 
+/// The parent list for a merge commit given the merge option. `SQUASH_MERGE`
+/// collapses the source into a single-parent commit on the destination; every
+/// other option (`THREE_WAY_MERGE`) records both tips. Shared by
+/// `MergeBranchesBy*`, `MergePullRequestBy*`, and `CreateUnreferencedMergeCommit`
+/// so the commit shape can never drift between them.
+fn merge_parents(merge_option: &str, dest: &str, source: &str) -> Vec<String> {
+    if merge_option == "SQUASH_MERGE" {
+        vec![dest.to_string()]
+    } else {
+        vec![dest.to_string(), source.to_string()]
+    }
+}
+
+/// Validate the optional `conflictDetailLevel` and `conflictResolutionStrategy`
+/// members shared by every merge operation, returning the declared error when
+/// either is not a modeled enum value.
+fn validate_merge_conflict_enums(b: &Value) -> Result<(), AwsServiceError> {
+    check_enum(
+        b,
+        "conflictDetailLevel",
+        validate::CONFLICT_DETAIL_LEVEL,
+        "InvalidConflictDetailLevelException",
+    )?;
+    check_enum(
+        b,
+        "conflictResolutionStrategy",
+        validate::CONFLICT_RESOLUTION_STRATEGY,
+        "InvalidConflictResolutionStrategyException",
+    )?;
+    Ok(())
+}
+
+/// After a branch tip moves, every OPEN pull request that uses that branch as
+/// its source reference gets a fresh `revisionId`. Because approvals are stored
+/// per-revision and only the current revision is ever counted, this invalidates
+/// approvals cast against the prior source commit -- matching CodeCommit, where
+/// a new source commit resets the review so unreviewed code can never be merged
+/// on stale approvals.
+fn refresh_source_revisions(st: &mut CodeCommitState, repo_name: &str, branch: &str) {
+    let now = Utc::now();
+    for pr in st.pull_requests.values_mut() {
+        if pr.get("pullRequestStatus").and_then(Value::as_str) != Some("OPEN") {
+            continue;
+        }
+        let is_source = pr
+            .get("pullRequestTargets")
+            .and_then(Value::as_array)
+            .map(|ts| {
+                ts.iter().any(|t| {
+                    t.get("repositoryName").and_then(Value::as_str) == Some(repo_name)
+                        && t.get("sourceReference").and_then(Value::as_str) == Some(branch)
+                })
+            })
+            .unwrap_or(false);
+        if is_source {
+            pr["revisionId"] = json!(fresh_object_id());
+            pr["lastActivityDate"] = ts(now);
+        }
+    }
+}
+
+/// Return a copy of a pull request whose OPEN targets have their
+/// `sourceCommit`/`destinationCommit`/`mergeBase` recomputed from the current
+/// branch tips, so a read never reports commits that diverge from what a merge
+/// would actually use. Closed/merged pull requests are returned unchanged
+/// (their target commits are frozen at merge time).
+fn refresh_pr_targets(st: &CodeCommitState, pr: &Value) -> Value {
+    let mut pr = pr.clone();
+    if pr.get("pullRequestStatus").and_then(Value::as_str) != Some("OPEN") {
+        return pr;
+    }
+    if let Some(targets) = pr
+        .get_mut("pullRequestTargets")
+        .and_then(Value::as_array_mut)
+    {
+        for t in targets.iter_mut() {
+            let Some(repo_name) = t
+                .get("repositoryName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let src_ref = t
+                .get("sourceReference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let dst_ref = t
+                .get("destinationReference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let Some(repo) = st.repositories.get(&repo_name) else {
+                continue;
+            };
+            let src = repo.branches.get(&src_ref).cloned();
+            let dst = repo.branches.get(&dst_ref).cloned();
+            if let Some(s) = &src {
+                t["sourceCommit"] = json!(s);
+            }
+            if let Some(d) = &dst {
+                t["destinationCommit"] = json!(d);
+            }
+            if let (Some(s), Some(d)) = (&src, &dst) {
+                t["mergeBase"] = match merge_base(repo, s, d) {
+                    Some(base) => json!(base),
+                    None => Value::Null,
+                };
+            }
+        }
+    }
+    pr
+}
+
+/// Whether a repository-trigger `destinationArn` resolves to a delivery target
+/// CodeCommit supports: an Amazon SNS topic or an AWS Lambda function in the
+/// caller's own account and region. (CodeCommit triggers publish only to SNS or
+/// Lambda; a cross-account, cross-region, or other-service ARN is undeliverable
+/// and is reported as a failed execution rather than a fake success.)
+fn trigger_destination_ok(arn: &str, account: &str, region: &str) -> bool {
+    // arn:aws:<service>:<region>:<account>:<resource...>
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    if parts.len() != 6 || parts[0] != "arn" {
+        return false;
+    }
+    let service = parts[2];
+    if service != "sns" && service != "lambda" {
+        return false;
+    }
+    if parts[3] != region || parts[4] != account {
+        return false;
+    }
+    !parts[5].is_empty()
+}
+
 /// Resolve a commit specifier member (branch name or 40-hex commit id) to a
 /// concrete commit id, defaulting to the repository's default-branch tip when
 /// the member is absent.
@@ -3991,39 +4203,22 @@ fn is_ancestor(repo: &Repo, ancestor: &str, descendant: &str) -> bool {
 }
 
 /// The merge base (lowest common ancestor) of two commits over the parent DAG,
-/// if any. Handles merge commits (multiple parents) correctly: the merge base is
-/// a common ancestor that is not itself an ancestor of any *other* common
-/// ancestor (i.e. the lowest such commit). When a criss-cross history yields
-/// several candidate bases, the one closest to `a` (fewest hops) is chosen so
-/// the result is deterministic.
+/// if any. Handles merge commits (multiple parents) correctly.
+///
+/// Linear in the size of the ancestor graph: an ancestor of `a` is a *lowest*
+/// common ancestor exactly when it is the common ancestor nearest `a` (fewest
+/// hops). Any deeper common ancestor is necessarily an ancestor of a nearer one,
+/// so the minimum-distance common ancestor is never above another candidate. A
+/// criss-cross history that admits several bases resolves deterministically via
+/// the lexical tie-break.
 fn merge_base(repo: &Repo, a: &str, b: &str) -> Option<String> {
-    let anc_a = ancestors(repo, a);
+    let depth_a = bfs_depths(repo, a);
     let anc_b = ancestors(repo, b);
-    let common: Vec<String> = anc_a.intersection(&anc_b).cloned().collect();
-    if common.is_empty() {
-        return None;
-    }
-    // Keep only the lowest common ancestors: a candidate survives when no *other*
-    // common ancestor has it as an ancestor (i.e. it is not strictly above
-    // another candidate).
-    let lowest: Vec<String> = common
+    depth_a
         .iter()
-        .filter(|c| {
-            !common
-                .iter()
-                .any(|o| o.as_str() != c.as_str() && ancestors(repo, o).contains(*c))
-        })
-        .cloned()
-        .collect();
-    let candidates = if lowest.is_empty() { common } else { lowest };
-    // Tie-break by BFS distance from `a` (closest wins), then lexically for
-    // full determinism.
-    let depth = bfs_depths(repo, a);
-    candidates.into_iter().min_by(|x, y| {
-        let dx = depth.get(x).copied().unwrap_or(usize::MAX);
-        let dy = depth.get(y).copied().unwrap_or(usize::MAX);
-        dx.cmp(&dy).then_with(|| x.cmp(y))
-    })
+        .filter(|(c, _)| anc_b.contains(*c))
+        .min_by(|(cx, dx), (cy, dy)| dx.cmp(dy).then_with(|| cx.cmp(cy)))
+        .map(|(c, _)| c.clone())
 }
 
 /// Minimum hop distance from `start` to each of its ancestors over the parent
@@ -4132,11 +4327,10 @@ fn all_merge_paths(
     all
 }
 
-/// Paths that genuinely conflict between source and destination relative to
-/// their merge base (both sides changed the same path differently).
-fn conflicting_paths(repo: &Repo, source: &str, dest: &str) -> Vec<String> {
-    let empty = std::collections::BTreeMap::new();
-    let (_, base_tree, src_tree, dst_tree) = merge_inputs(repo, source, dest, &empty);
+/// Paths that genuinely conflict between the given base/source/destination trees
+/// (both sides changed the same path differently). Callers that already hold the
+/// three trees pass them here to avoid recomputing the merge base.
+fn conflicting_paths_in(base_tree: &Tree, src_tree: &Tree, dst_tree: &Tree) -> Vec<String> {
     let mut conflicts = Vec::new();
     for path in all_merge_paths(base_tree, src_tree, dst_tree) {
         if let Resolved::Conflict = merge_entry(
@@ -4206,14 +4400,14 @@ fn entry_bytes(repo: &Repo, entry: Option<&FileEntry>) -> Vec<u8> {
 }
 
 /// One side of a merge hunk (`source`/`destination`/`base`), carrying the line
-/// range and the base64 content for that side.
-fn hunk_side(repo: &Repo, entry: Option<&FileEntry>) -> Value {
-    let bytes = entry_bytes(repo, entry);
-    let lines = line_count(&bytes);
+/// range and the base64 content for already-decoded bytes (decoded once by the
+/// caller so a side's blob is never re-decoded).
+fn hunk_side(bytes: &[u8]) -> Value {
+    let lines = line_count(bytes);
     json!({
         "startLine": if lines == 0 { 0 } else { 1 },
         "endLine": lines,
-        "hunkContent": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "hunkContent": base64::engine::general_purpose::STANDARD.encode(bytes),
     })
 }
 
@@ -4245,6 +4439,11 @@ fn conflict_metadata(
     let b = base_tree.get(path);
     let s = src_tree.get(path);
     let d = dst_tree.get(path);
+    // Decode each side's blob exactly once and reuse for sizes, binary
+    // detection, and hunk content.
+    let sb = entry_bytes(repo, s);
+    let db = entry_bytes(repo, d);
+    let bb = entry_bytes(repo, b);
     let is_conflict = matches!(merge_entry(b, s, d), Resolved::Conflict);
     let content_conflict = is_conflict;
     let file_mode_conflict = match (b, s, d) {
@@ -4256,23 +4455,20 @@ fn conflict_metadata(
         _ => false,
     };
     let mode_of = |e: Option<&FileEntry>| e.map(|x| git_mode_to_file(&x.mode)).unwrap_or("NORMAL");
-    let size_of = |e: Option<&FileEntry>| entry_bytes(repo, e).len();
-    let src_op = merge_operation(b, s);
-    let dst_op = merge_operation(b, d);
     let mut merge_operations = Map::new();
-    if let Some(o) = src_op {
+    if let Some(o) = merge_operation(b, s) {
         merge_operations.insert("source".into(), json!(o));
     }
-    if let Some(o) = dst_op {
+    if let Some(o) = merge_operation(b, d) {
         merge_operations.insert("destination".into(), json!(o));
     }
     let number_of_conflicts = i64::from(is_conflict);
     let metadata = json!({
         "filePath": path,
         "fileSizes": {
-            "source": size_of(s),
-            "destination": size_of(d),
-            "base": size_of(b),
+            "source": sb.len(),
+            "destination": db.len(),
+            "base": bb.len(),
         },
         "fileModes": {
             "source": mode_of(s),
@@ -4286,9 +4482,9 @@ fn conflict_metadata(
         },
         "numberOfConflicts": number_of_conflicts,
         "isBinaryFile": {
-            "source": is_binary(&entry_bytes(repo, s)),
-            "destination": is_binary(&entry_bytes(repo, d)),
-            "base": is_binary(&entry_bytes(repo, b)),
+            "source": is_binary(&sb),
+            "destination": is_binary(&db),
+            "base": is_binary(&bb),
         },
         "contentConflict": content_conflict,
         "fileModeConflict": file_mode_conflict,
@@ -4301,9 +4497,9 @@ fn conflict_metadata(
     if !(entries_equal(s, d) && entries_equal(s, b)) {
         hunks.push(json!({
             "isConflict": is_conflict,
-            "source": hunk_side(repo, s),
-            "destination": hunk_side(repo, d),
-            "base": hunk_side(repo, b),
+            "source": hunk_side(&sb),
+            "destination": hunk_side(&db),
+            "base": hunk_side(&bb),
         }));
     }
     (metadata, hunks)
@@ -4462,7 +4658,9 @@ mod engine_tests {
         repo.trees.insert("dst".into(), dst);
         // Both sides changed a.txt differently -> unresolved conflict.
         assert!(merge_trees(&repo, "src", "dst", "").is_none());
-        assert_eq!(conflicting_paths(&repo, "src", "dst"), vec!["a.txt"]);
+        let empty = Tree::new();
+        let (_, bt, st, dt) = merge_inputs(&repo, "src", "dst", &empty);
+        assert_eq!(conflicting_paths_in(bt, st, dt), vec!["a.txt"]);
         // A strategy resolves it deterministically.
         let merged = merge_trees(&repo, "src", "dst", "ACCEPT_SOURCE").expect("resolved");
         assert_eq!(merged.get("a.txt").unwrap().blob_id, "a-src");
@@ -4854,5 +5052,226 @@ mod handler_tests {
         // PR remains open.
         let got = call(&s, "GetPullRequest", json!({ "pullRequestId": pr_id }));
         assert_eq!(got["pullRequest"]["pullRequestStatus"], json!("OPEN"));
+    }
+
+    fn branch_tip(s: &CodeCommitService, branch: &str) -> String {
+        call(
+            s,
+            "GetBranch",
+            json!({ "repositoryName": "repo", "branchName": branch }),
+        )["branch"]["commitId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn one_approval_rule() -> &'static str {
+        "{\"Version\":\"2018-11-08\",\"Statements\":[{\"Type\":\"Approvers\",\"NumberOfApprovalsNeeded\":1,\"ApprovalPoolMembers\":[]}]}"
+    }
+
+    // Round-2 defect 1: a new commit on the PR's source branch mints a new
+    // revisionId and invalidates approvals cast against the prior revision.
+    #[test]
+    fn new_source_commit_bumps_revision_and_invalidates_approvals() {
+        let s = svc();
+        let (feature_tip, _) = diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let rev1 = pr["revisionId"].as_str().unwrap().to_string();
+        call(
+            &s,
+            "CreatePullRequestApprovalRule",
+            json!({
+                "pullRequestId": pr_id,
+                "approvalRuleName": "r",
+                "approvalRuleContent": one_approval_rule(),
+            }),
+        );
+        // One approval at rev1 satisfies the 1-approval rule.
+        call_as(
+            &s,
+            "UpdatePullRequestApprovalState",
+            json!({ "pullRequestId": pr_id, "revisionId": rev1, "approvalState": "APPROVE" }),
+            "arn:aws:iam::000000000000:user/reviewer",
+        );
+        let eval1 = call(
+            &s,
+            "EvaluatePullRequestApprovalRules",
+            json!({ "pullRequestId": pr_id, "revisionId": rev1 }),
+        );
+        assert_eq!(eval1["evaluation"]["approved"], json!(true));
+
+        // A new commit on the source branch bumps the revisionId...
+        put(&s, "feature", "d.txt", "more", Some(&feature_tip));
+        let got = call(&s, "GetPullRequest", json!({ "pullRequestId": pr_id }));
+        let rev2 = got["pullRequest"]["revisionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(rev1, rev2, "source advance must re-mint the revisionId");
+
+        // ...and the old approval no longer counts against the new revision.
+        let eval2 = call(
+            &s,
+            "EvaluatePullRequestApprovalRules",
+            json!({ "pullRequestId": pr_id, "revisionId": rev2 }),
+        );
+        assert_eq!(eval2["evaluation"]["approved"], json!(false));
+    }
+
+    // Round-2 defect 4: GetPullRequest reflects the advanced source tip.
+    #[test]
+    fn get_pull_request_reflects_advanced_source_tip() {
+        let s = svc();
+        let (feature_tip, _) = diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        assert_eq!(
+            pr["pullRequestTargets"][0]["sourceCommit"],
+            json!(feature_tip)
+        );
+        put(&s, "feature", "e.txt", "x", Some(&feature_tip));
+        let new_tip = branch_tip(&s, "feature");
+        let got = call(&s, "GetPullRequest", json!({ "pullRequestId": pr_id }));
+        assert_eq!(
+            got["pullRequest"]["pullRequestTargets"][0]["sourceCommit"],
+            json!(new_tip)
+        );
+    }
+
+    // Round-2 defect 2: CreateUnreferencedMergeCommit SQUASH -> single parent.
+    #[test]
+    fn create_unreferenced_squash_single_parent() {
+        let s = svc();
+        diverged_repo(&s);
+        let out = call(
+            &s,
+            "CreateUnreferencedMergeCommit",
+            json!({
+                "repositoryName": "repo",
+                "sourceCommitSpecifier": "feature",
+                "destinationCommitSpecifier": "main",
+                "mergeOption": "SQUASH_MERGE",
+            }),
+        );
+        let cid = out["commitId"].as_str().unwrap().to_string();
+        let got = call(
+            &s,
+            "GetCommit",
+            json!({ "repositoryName": "repo", "commitId": cid }),
+        );
+        assert_eq!(got["commit"]["parents"].as_array().unwrap().len(), 1);
+    }
+
+    // Round-2 defect 3: an invalid conflictResolutionStrategy is rejected on both
+    // MergePullRequestBy* and CreateUnreferencedMergeCommit.
+    #[test]
+    fn invalid_conflict_strategy_rejected() {
+        let s = svc();
+        diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let e1 = call_err(
+            &s,
+            "MergePullRequestByThreeWay",
+            json!({
+                "pullRequestId": pr_id,
+                "repositoryName": "repo",
+                "conflictResolutionStrategy": "BOGUS",
+            }),
+        );
+        assert_eq!(e1.code(), "InvalidConflictResolutionStrategyException");
+        let e2 = call_err(
+            &s,
+            "CreateUnreferencedMergeCommit",
+            json!({
+                "repositoryName": "repo",
+                "sourceCommitSpecifier": "feature",
+                "destinationCommitSpecifier": "main",
+                "mergeOption": "THREE_WAY_MERGE",
+                "conflictResolutionStrategy": "BOGUS",
+            }),
+        );
+        assert_eq!(e2.code(), "InvalidConflictResolutionStrategyException");
+    }
+
+    // Round-2 defect 5: OPEN -> OPEN status update is rejected.
+    #[test]
+    fn open_to_open_status_rejected() {
+        let s = svc();
+        diverged_repo(&s);
+        let pr = create_pr(&s, "main");
+        let pr_id = pr["pullRequestId"].as_str().unwrap().to_string();
+        let err = call_err(
+            &s,
+            "UpdatePullRequestStatus",
+            json!({ "pullRequestId": pr_id, "pullRequestStatus": "OPEN" }),
+        );
+        assert_eq!(err.code(), "InvalidPullRequestStatusUpdateException");
+    }
+
+    // Round-2 defect 6: an unresolvable trigger destination is reported as a
+    // failed execution, while a valid SNS destination succeeds.
+    #[test]
+    fn test_triggers_reports_unresolvable_destination() {
+        let s = svc();
+        make_repo(&s);
+        let out = call(
+            &s,
+            "TestRepositoryTriggers",
+            json!({
+                "repositoryName": "repo",
+                "triggers": [
+                    {
+                        "name": "ok",
+                        "destinationArn": "arn:aws:sns:us-east-1:000000000000:topic",
+                        "events": ["all"],
+                    },
+                    {
+                        "name": "bad",
+                        "destinationArn": "arn:aws:s3:::some-bucket",
+                        "events": ["all"],
+                    },
+                ],
+            }),
+        );
+        assert_eq!(out["successfulExecutions"], json!(["ok"]));
+        let failed = out["failedExecutions"].as_array().unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["trigger"], json!("bad"));
+        assert!(failed[0]["failureMessage"].as_str().unwrap().contains("s3"));
+    }
+
+    // Round-2 defect 7: deleting a repository drops its template associations.
+    #[test]
+    fn delete_repository_clears_template_association() {
+        let s = svc();
+        make_repo(&s);
+        call(
+            &s,
+            "CreateApprovalRuleTemplate",
+            json!({
+                "approvalRuleTemplateName": "t",
+                "approvalRuleTemplateContent": one_approval_rule(),
+            }),
+        );
+        call(
+            &s,
+            "AssociateApprovalRuleTemplateWithRepository",
+            json!({ "approvalRuleTemplateName": "t", "repositoryName": "repo" }),
+        );
+        let before = call(
+            &s,
+            "ListRepositoriesForApprovalRuleTemplate",
+            json!({ "approvalRuleTemplateName": "t" }),
+        );
+        assert_eq!(before["repositoryNames"], json!(["repo"]));
+        call(&s, "DeleteRepository", json!({ "repositoryName": "repo" }));
+        let after = call(
+            &s,
+            "ListRepositoriesForApprovalRuleTemplate",
+            json!({ "approvalRuleTemplateName": "t" }),
+        );
+        assert_eq!(after["repositoryNames"], json!([]));
     }
 }
