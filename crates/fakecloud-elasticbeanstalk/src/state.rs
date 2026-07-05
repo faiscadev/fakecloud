@@ -45,15 +45,43 @@ pub struct ElasticBeanstalkSnapshot {
 
 pub const ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
+/// Serialize/deserialize `BTreeMap<(String, String), V>` as `Vec<(String, String, V)>`.
+///
+/// `serde_json` cannot serialize a map with a non-string key (a tuple key fails
+/// with `KeyMustBeAString`), so the tuple-keyed maps are stored as a list of
+/// triples on disk. Mirrors the sibling crates (bedrock/route53/athena/logs).
+mod tuple2_map_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub(crate) fn serialize<V: Serialize, S: Serializer>(
+        map: &BTreeMap<(String, String), V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let entries: Vec<(&String, &String, &V)> =
+            map.iter().map(|((a, b), v)| (a, b, v)).collect();
+        entries.serialize(s)
+    }
+
+    pub(crate) fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<(String, String), V>, D::Error> {
+        let entries: Vec<(String, String, V)> = Vec::deserialize(d)?;
+        Ok(entries.into_iter().map(|(a, b, v)| ((a, b), v)).collect())
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AccountState {
     /// Applications keyed by name.
     pub applications: BTreeMap<String, Application>,
     /// Application versions keyed by `(application_name, version_label)`.
+    #[serde(with = "tuple2_map_serde")]
     pub versions: BTreeMap<(String, String), ApplicationVersion>,
     /// Environments keyed by environment id (`e-xxxxxxxxxx`).
     pub environments: BTreeMap<String, Environment>,
     /// Configuration templates keyed by `(application_name, template_name)`.
+    #[serde(with = "tuple2_map_serde")]
     pub templates: BTreeMap<(String, String), ConfigurationTemplate>,
     /// Events, newest first.
     pub events: Vec<Event>,
@@ -178,6 +206,13 @@ pub struct Environment {
     /// Effective configuration option settings (namespace/name/value).
     #[serde(default)]
     pub option_settings: Vec<OptionSetting>,
+    /// Monotonic transition epoch. Every lifecycle-mutating operation bumps
+    /// this and captures the value; a spawned settle task applies its terminal
+    /// transition only if the generation still matches (else it is stale, e.g.
+    /// a Terminate landed on top of an in-flight Update). This makes
+    /// concurrent Terminate-vs-Update deterministic.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

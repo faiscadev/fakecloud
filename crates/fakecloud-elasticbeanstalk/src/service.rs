@@ -139,14 +139,11 @@ impl ElasticBeanstalkService {
             return;
         };
         let _guard = self.snapshot_lock.lock().await;
-        let bytes = {
-            let snap = ElasticBeanstalkSnapshot {
-                schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
-                accounts: Some(self.state.read().clone()),
-            };
-            serde_json::to_vec(&snap).unwrap_or_default()
+        let snap = ElasticBeanstalkSnapshot {
+            schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(self.state.read().clone()),
         };
-        let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+        persist_snapshot("elasticbeanstalk", snap, store).await;
     }
 
     pub fn snapshot_hook(&self) -> Option<SnapshotHook> {
@@ -159,14 +156,11 @@ impl ElasticBeanstalkService {
             let lock = lock.clone();
             Box::pin(async move {
                 let _guard = lock.lock().await;
-                let bytes = {
-                    let snap = ElasticBeanstalkSnapshot {
-                        schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
-                        accounts: Some(state.read().clone()),
-                    };
-                    serde_json::to_vec(&snap).unwrap_or_default()
+                let snap = ElasticBeanstalkSnapshot {
+                    schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+                    accounts: Some(state.read().clone()),
                 };
-                let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+                persist_snapshot("elasticbeanstalk", snap, store).await;
             })
         }))
     }
@@ -176,7 +170,7 @@ impl ElasticBeanstalkService {
     /// still in `Launching` / `Updating` / `Terminating` would be stuck
     /// forever without this. Mirrors RDS / ElastiCache container recovery.
     pub fn recover_pending_environments(&self) {
-        let pending: Vec<(String, String, String, String)> = {
+        let pending: Vec<(String, String, String, String, u64)> = {
             let guard = self.state.read();
             let mut out = Vec::new();
             for (account, acct) in &guard.accounts {
@@ -191,20 +185,34 @@ impl ElasticBeanstalkService {
                         env.id.clone(),
                         env.status.clone(),
                         target.to_string(),
+                        env.generation,
                     ));
                 }
             }
             out
         };
-        for (account, env_id, from, to) in pending {
-            self.spawn_settle(account, env_id, from, to);
+        for (account, env_id, from, to, generation) in pending {
+            self.spawn_settle(account, env_id, from, to, generation);
         }
     }
 
     /// Spawn the background task that settles an environment from a transient
     /// status (`Launching` / `Updating` / `Terminating`) into its terminal
     /// state, emitting the corresponding Event and persisting.
-    fn spawn_settle(&self, account: String, env_id: String, from: String, to: String) {
+    ///
+    /// `generation` is the environment epoch captured when this settle was
+    /// requested; the terminal transition is applied only if the environment's
+    /// generation is unchanged. A newer mutating operation (e.g. a Terminate
+    /// landing on top of an in-flight Update) bumps the generation, making this
+    /// task stale so it no-ops instead of resurrecting or clobbering the env.
+    fn spawn_settle(
+        &self,
+        account: String,
+        env_id: String,
+        from: String,
+        to: String,
+        generation: u64,
+    ) {
         let state = self.state.clone();
         let store = self.snapshot_store.clone();
         let lock = self.snapshot_lock.clone();
@@ -221,9 +229,11 @@ impl ElasticBeanstalkService {
                 let Some(env) = acct.environments.get_mut(&env_id) else {
                     return;
                 };
-                // Only settle if still in the transient state we were spawned
-                // for; a newer operation may have moved it on.
-                if env.status != from {
+                // Only settle if this task is still current: the generation we
+                // were spawned for must match, and the env must still be in the
+                // transient state we expected. A newer operation bumps the
+                // generation (and may change the status), which makes us stale.
+                if env.generation != generation || env.status != from {
                     return;
                 }
                 let now = Utc::now();
@@ -231,28 +241,27 @@ impl ElasticBeanstalkService {
                 env.date_updated = now;
                 env.abortable_operation_in_progress = false;
                 let (env_name, app_name) = (env.name.clone(), env.application_name.clone());
-                let (message, health, health_status) = match to.as_str() {
+                // The completion event depends on the operation that started
+                // the transition (the `from` status), not the terminal state:
+                // AWS emits "Successfully launched" only for an initial launch,
+                // and an update/rebuild completion for an in-place update.
+                let message = match to.as_str() {
                     est::READY => {
                         env.health = "Green".to_string();
                         env.health_status = "Ok".to_string();
-                        (
-                            format!("Successfully launched environment: {env_name}"),
-                            "Green",
-                            "Ok",
-                        )
+                        if from == est::LAUNCHING {
+                            format!("Successfully launched environment: {env_name}")
+                        } else {
+                            format!("Environment update completed successfully for {env_name}.")
+                        }
                     }
                     est::TERMINATED => {
                         env.health = "Grey".to_string();
                         env.health_status = "Suspended".to_string();
-                        (
-                            format!("Environment {env_name} successfully terminated."),
-                            "Grey",
-                            "Suspended",
-                        )
+                        format!("Environment {env_name} successfully terminated.")
                     }
-                    _ => (String::new(), "Grey", "Unknown"),
+                    _ => String::new(),
                 };
-                let _ = (health, health_status);
                 acct.events.insert(
                     0,
                     Event {
@@ -270,14 +279,11 @@ impl ElasticBeanstalkService {
             }
             if let Some(store) = store {
                 let _guard = lock.lock().await;
-                let bytes = {
-                    let snap = ElasticBeanstalkSnapshot {
-                        schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
-                        accounts: Some(state.read().clone()),
-                    };
-                    serde_json::to_vec(&snap).unwrap_or_default()
+                let snap = ElasticBeanstalkSnapshot {
+                    schema_version: ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+                    accounts: Some(state.read().clone()),
                 };
-                let _ = tokio::task::spawn_blocking(move || store.save(&bytes)).await;
+                persist_snapshot("elasticbeanstalk", snap, store).await;
             }
         });
     }
@@ -287,6 +293,27 @@ impl ElasticBeanstalkService {
             StatusCode::OK,
             query_response_xml(action, NS, &inner, &req.request_id),
         )
+    }
+}
+
+/// Serialize `snap` and persist it, skipping the write entirely if
+/// serialization fails so a serialization error never clobbers the prior good
+/// snapshot with a 0-byte file. Mirrors the sibling crates' hardened save path.
+async fn persist_snapshot(
+    service: &'static str,
+    snap: ElasticBeanstalkSnapshot,
+    store: Arc<dyn SnapshotStore>,
+) {
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snap)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%service, %err, "failed to write snapshot"),
+        Err(err) => tracing::error!(%service, %err, "snapshot task panicked"),
     }
 }
 
@@ -401,6 +428,21 @@ fn parse_tags(req: &AwsRequest, prefix: &str) -> Vec<ResourceTag> {
     out
 }
 
+/// Ordinal rank of an `EventSeverity` value (TRACE < DEBUG < INFO < WARN <
+/// ERROR < FATAL), used to implement the "given severity or higher" filter on
+/// `DescribeEvents`.
+fn severity_rank(s: &str) -> Option<u8> {
+    match s {
+        "TRACE" => Some(0),
+        "DEBUG" => Some(1),
+        "INFO" => Some(2),
+        "WARN" => Some(3),
+        "ERROR" => Some(4),
+        "FATAL" => Some(5),
+        _ => None,
+    }
+}
+
 fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterValue", msg.into())
 }
@@ -509,6 +551,10 @@ fn environment_arn(region: &str, account: &str, app: &str, env: &str) -> String 
     format!("arn:aws:elasticbeanstalk:{region}:{account}:environment/{app}/{env}")
 }
 
+fn configuration_template_arn(region: &str, account: &str, app: &str, template: &str) -> String {
+    format!("arn:aws:elasticbeanstalk:{region}:{account}:configurationtemplate/{app}/{template}")
+}
+
 fn gen_environment_id() -> String {
     let hex = Uuid::new_v4().simple().to_string();
     format!("e-{}", &hex[..10])
@@ -567,19 +613,21 @@ impl ElasticBeanstalkService {
 
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
-        let app = acct
-            .applications
-            .entry(name.clone())
-            .or_insert_with(|| Application {
-                name: name.clone(),
-                arn: arn.clone(),
-                description: description.clone(),
-                date_created: now,
-                date_updated: now,
-                resource_lifecycle_config: lifecycle.clone().unwrap_or_default(),
-            });
-        // Idempotent-ish: if the application already existed, echo it back.
-        let app = app.clone();
+        // AWS rejects a duplicate application name; it is not idempotent.
+        if acct.applications.contains_key(&name) {
+            return Err(invalid_parameter(format!(
+                "Application {name} already exists."
+            )));
+        }
+        let app = Application {
+            name: name.clone(),
+            arn: arn.clone(),
+            description: description.clone(),
+            date_created: now,
+            date_updated: now,
+            resource_lifecycle_config: lifecycle.clone().unwrap_or_default(),
+        };
+        acct.applications.insert(name.clone(), app.clone());
         if !tags.is_empty() {
             acct.tags.insert(arn.clone(), tags);
         }
@@ -648,29 +696,70 @@ impl ElasticBeanstalkService {
 
     fn delete_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "ApplicationName")?;
+        let force = optional_query_param(req, "TerminateEnvByForce")
+            .map(|v| v == "true")
+            .unwrap_or(false);
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
+        if !acct.applications.contains_key(&name) {
+            return Err(invalid_parameter(format!(
+                "No Application named '{name}' found."
+            )));
+        }
+        // If the application still has live environments, refuse unless the
+        // caller opted into force-terminating them. Nothing is deleted or
+        // terminated in the refusal path.
+        let has_live_envs = acct
+            .environments
+            .values()
+            .any(|e| e.application_name == name && e.status != est::TERMINATED);
+        if has_live_envs && !force {
+            return Err(invalid_parameter(format!(
+                "Cannot delete application '{name}' because it has running environments. Terminate the environments first, or set TerminateEnvByForce to true."
+            )));
+        }
+        // Collect the ARNs whose tags must be dropped (app, its versions,
+        // templates, and environments) so no orphaned tag entries remain.
+        let mut removed_arns: Vec<String> =
+            vec![application_arn(&req.region, &req.account_id, &name)];
+        removed_arns.extend(
+            acct.versions
+                .values()
+                .filter(|v| v.application_name == name)
+                .map(|v| v.arn.clone()),
+        );
+        removed_arns.extend(
+            acct.environments
+                .values()
+                .filter(|e| e.application_name == name)
+                .map(|e| e.arn.clone()),
+        );
         acct.applications.remove(&name);
         acct.versions.retain(|(app, _), _| app != &name);
         acct.templates.retain(|(app, _), _| app != &name);
-        // Environments of the application move to Terminating (settled async).
-        let to_settle: Vec<String> = acct
+        // Force-terminate the application's live environments (settled async).
+        let to_settle: Vec<(String, u64)> = acct
             .environments
             .values_mut()
             .filter(|e| e.application_name == name && e.status != est::TERMINATED)
             .map(|e| {
                 e.status = est::TERMINATING.to_string();
                 e.abortable_operation_in_progress = false;
-                e.id.clone()
+                e.generation += 1;
+                (e.id.clone(), e.generation)
             })
             .collect();
+        for arn in &removed_arns {
+            acct.tags.remove(arn);
+        }
         drop(guard);
-        for id in to_settle {
+        for (id, generation) in to_settle {
             self.spawn_settle(
                 req.account_id.clone(),
                 id,
                 est::TERMINATING.to_string(),
                 est::TERMINATED.to_string(),
+                generation,
             );
         }
         Ok(self.ok_empty("DeleteApplication", req))
@@ -716,6 +805,16 @@ impl ElasticBeanstalkService {
                     "No Application named '{app_name}' found."
                 )));
             }
+        }
+        // AWS rejects a duplicate version label for the same application rather
+        // than silently overwriting the existing version.
+        if acct
+            .versions
+            .contains_key(&(app_name.clone(), label.clone()))
+        {
+            return Err(invalid_parameter(format!(
+                "Application Version {label} already exists."
+            )));
         }
         let arn = application_version_arn(&req.region, &req.account_id, &app_name, &label);
         let version = ApplicationVersion {
@@ -789,9 +888,11 @@ impl ElasticBeanstalkService {
                 .collect(),
             None => Vec::new(),
         };
+        let (page, next_token) = paginate_members(versions, "MaxRecords", req);
         let inner = format!(
-            "<ApplicationVersions>{}</ApplicationVersions>",
-            wrap_members(&versions)
+            "<ApplicationVersions>{}</ApplicationVersions>{}",
+            wrap_members(&page),
+            next_token,
         );
         Ok(self.ok("DescribeApplicationVersions", inner, req))
     }
@@ -801,7 +902,10 @@ impl ElasticBeanstalkService {
         let label = required_query_param(req, "VersionLabel")?;
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
-        acct.versions.remove(&(app_name, label));
+        if let Some(removed) = acct.versions.remove(&(app_name, label)) {
+            // Drop the version's tags so no orphaned tag entry remains.
+            acct.tags.remove(&removed.arn);
+        }
         Ok(self.ok_empty("DeleteApplicationVersion", req))
     }
 }
@@ -813,37 +917,60 @@ impl ElasticBeanstalkService {
 impl ElasticBeanstalkService {
     async fn create_environment(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let app_name = required_query_param(req, "ApplicationName")?;
-        let env_name = optional_query_param(req, "EnvironmentName");
-        if let Some(ref n) = env_name {
+        let env_name_param = optional_query_param(req, "EnvironmentName");
+        if let Some(ref n) = env_name_param {
             check_len("EnvironmentName", n, 4, 40)?;
         }
         let group_name = optional_query_param(req, "GroupName");
-        // Either EnvironmentName or (GroupName+template) is required by AWS.
-        let env_name = match env_name {
-            Some(n) => n,
-            None => {
-                return Err(missing_parameter("EnvironmentName"));
-            }
-        };
         let solution_stack = optional_query_param(req, "SolutionStackName");
         let platform_arn = optional_query_param(req, "PlatformArn");
         let template_name = optional_query_param(req, "TemplateName");
         let version_label = optional_query_param(req, "VersionLabel");
         let description = optional_query_param(req, "Description");
         let operations_role = optional_query_param(req, "OperationsRole");
-        let cname_prefix =
-            optional_query_param(req, "CNAMEPrefix").unwrap_or_else(|| env_name.clone());
-        if let Some(prefix) = optional_query_param(req, "CNAMEPrefix") {
-            check_len("CNAMEPrefix", &prefix, 4, 63)?;
+        let cname_prefix_param = optional_query_param(req, "CNAMEPrefix");
+        if let Some(prefix) = &cname_prefix_param {
+            check_len("CNAMEPrefix", prefix, 4, 63)?;
         }
+        // Either an explicit EnvironmentName or the composed-environment form
+        // (GroupName together with a TemplateName/CNAMEPrefix base) is required.
+        // In the composed form the effective name is `<base>-<group>`, where the
+        // base is the CNAME prefix when given, otherwise the template name.
+        let env_name = match env_name_param {
+            Some(n) => n,
+            None => match &group_name {
+                Some(group) => {
+                    let base = cname_prefix_param
+                        .clone()
+                        .or_else(|| template_name.clone())
+                        .ok_or_else(|| missing_parameter("EnvironmentName"))?;
+                    let composed = format!("{base}-{group}");
+                    check_len("EnvironmentName", &composed, 4, 40)?;
+                    composed
+                }
+                None => return Err(missing_parameter("EnvironmentName")),
+            },
+        };
+        let cname_prefix = cname_prefix_param.unwrap_or_else(|| env_name.clone());
         let option_settings = parse_option_settings(req, "OptionSettings");
         let tags = parse_tags(req, "Tags");
         let (tier_name, tier_type, tier_version) = parse_tier(req);
+        // Worker-tier environments have no public load balancer, so no CNAME and
+        // no endpoint URL. Only web-server tier environments get one.
+        let is_worker = tier_name.eq_ignore_ascii_case("Worker");
 
         let now = Utc::now();
         let env_id = gen_environment_id();
-        let cname = build_cname(&cname_prefix, &req.region);
-        let endpoint_url = build_endpoint_url(&env_id, &req.region);
+        let cname = if is_worker {
+            String::new()
+        } else {
+            build_cname(&cname_prefix, &req.region)
+        };
+        let endpoint_url = if is_worker {
+            String::new()
+        } else {
+            build_endpoint_url(&env_id, &req.region)
+        };
         let arn = environment_arn(&req.region, &req.account_id, &app_name, &env_name);
 
         let rendered = {
@@ -887,6 +1014,7 @@ impl ElasticBeanstalkService {
                 operations_role,
                 group_name,
                 option_settings,
+                generation: 1,
             };
             let rendered = render_environment(&env);
             acct.environments.insert(env_id.clone(), env);
@@ -914,6 +1042,7 @@ impl ElasticBeanstalkService {
             env_id.clone(),
             est::LAUNCHING.to_string(),
             est::READY.to_string(),
+            1,
         );
         let resp = self.ok("CreateEnvironment", rendered, req);
         self.save_snapshot().await;
@@ -931,12 +1060,22 @@ impl ElasticBeanstalkService {
         let remove = parse_options_to_remove(req);
 
         let rendered;
+        let generation;
         {
             let mut guard = self.state.write();
             let acct = guard.get_or_create(&req.account_id);
             let Some(env) = acct.environments.get_mut(&env_id) else {
                 return Err(invalid_parameter("No Environment found.".to_string()));
             };
+            // A terminating (or already-terminated) environment cannot be
+            // updated; reject rather than reviving it. A concurrent Terminate
+            // that already flipped the status wins here.
+            if env.status == est::TERMINATING || env.status == est::TERMINATED {
+                return Err(invalid_parameter(format!(
+                    "Environment named {} is in an invalid state for this operation. Must be Ready.",
+                    env.name
+                )));
+            }
             if req.query_params.contains_key("VersionLabel") {
                 env.version_label = version_label;
             }
@@ -956,6 +1095,8 @@ impl ElasticBeanstalkService {
             env.status = est::UPDATING.to_string();
             env.abortable_operation_in_progress = true;
             env.date_updated = Utc::now();
+            env.generation += 1;
+            generation = env.generation;
             let (env_name, app_name) = (env.name.clone(), env.application_name.clone());
             rendered = render_environment(env);
             acct.events.insert(
@@ -978,6 +1119,7 @@ impl ElasticBeanstalkService {
             env_id,
             est::UPDATING.to_string(),
             est::READY.to_string(),
+            generation,
         );
         let resp = self.ok("UpdateEnvironment", rendered, req);
         self.save_snapshot().await;
@@ -990,6 +1132,7 @@ impl ElasticBeanstalkService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let env_id = self.resolve_environment_id(req)?;
         let rendered;
+        let generation;
         {
             let mut guard = self.state.write();
             let acct = guard.get_or_create(&req.account_id);
@@ -1001,6 +1144,10 @@ impl ElasticBeanstalkService {
             env.health = "Grey".to_string();
             env.health_status = "Info".to_string();
             env.date_updated = Utc::now();
+            // Bump the epoch so any in-flight Update settle for this env becomes
+            // stale: a Terminate always wins over a concurrent Update.
+            env.generation += 1;
+            generation = env.generation;
             let (env_name, app_name) = (env.name.clone(), env.application_name.clone());
             rendered = render_environment(env);
             acct.events.insert(
@@ -1023,6 +1170,7 @@ impl ElasticBeanstalkService {
             env_id,
             est::TERMINATING.to_string(),
             est::TERMINATED.to_string(),
+            generation,
         );
         let resp = self.ok("TerminateEnvironment", rendered, req);
         self.save_snapshot().await;
@@ -1061,7 +1209,12 @@ impl ElasticBeanstalkService {
                 .collect(),
             None => Vec::new(),
         };
-        let inner = format!("<Environments>{}</Environments>", wrap_members(&envs));
+        let (page, next_token) = paginate_members(envs, "MaxRecords", req);
+        let inner = format!(
+            "<Environments>{}</Environments>{}",
+            wrap_members(&page),
+            next_token,
+        );
         Ok(self.ok("DescribeEnvironments", inner, req))
     }
 
@@ -1129,12 +1282,21 @@ impl ElasticBeanstalkService {
             .environments
             .get(&env_id)
             .ok_or_else(|| invalid_parameter("No Environment found.".to_string()))?;
+        // `Status` here is the `EnvironmentHealth` color enum (Green|Yellow|Red|
+        // Grey), NOT the lifecycle status. A settled Ready env reports its
+        // modeled health color (Green, or Yellow/Red when degraded); any
+        // transient state (Launching/Updating/Terminating) reports Grey.
+        let color = if env.status == est::READY {
+            env.health.as_str()
+        } else {
+            "Grey"
+        };
         let inner = format!(
             "{}{}{}{}<Causes/>{}",
             el("EnvironmentName", &env.name),
             el("HealthStatus", &env.health_status),
-            el("Status", &env.status),
-            el("Color", &env.health),
+            el("Status", color),
+            el("Color", color),
             el("RefreshedAt", &iso(Utc::now())),
         );
         Ok(self.ok("DescribeEnvironmentHealth", inner, req))
@@ -1160,17 +1322,28 @@ impl ElasticBeanstalkService {
         rebuild: bool,
     ) -> Result<AwsResponse, AwsServiceError> {
         let env_id = self.resolve_environment_id(req)?;
+        let mut settle_generation = None;
         {
             let mut guard = self.state.write();
             let acct = guard.get_or_create(&req.account_id);
             let Some(env) = acct.environments.get_mut(&env_id) else {
                 return Err(invalid_parameter("No Environment found.".to_string()));
             };
+            // A terminating/terminated environment cannot be rebuilt or
+            // restarted.
+            if env.status == est::TERMINATING || env.status == est::TERMINATED {
+                return Err(invalid_parameter(format!(
+                    "Environment named {} is in an invalid state for this operation. Must be Ready.",
+                    env.name
+                )));
+            }
             let (env_name, app_name) = (env.name.clone(), env.application_name.clone());
             if rebuild {
                 env.status = est::UPDATING.to_string();
                 env.abortable_operation_in_progress = false;
                 env.date_updated = Utc::now();
+                env.generation += 1;
+                settle_generation = Some(env.generation);
             }
             acct.events.insert(
                 0,
@@ -1187,12 +1360,13 @@ impl ElasticBeanstalkService {
                 },
             );
         }
-        if rebuild {
+        if let Some(generation) = settle_generation {
             self.spawn_settle(
                 req.account_id.clone(),
                 env_id,
                 est::UPDATING.to_string(),
                 est::READY.to_string(),
+                generation,
             );
         }
         let resp = self.ok_empty(action, req);
@@ -1213,6 +1387,26 @@ impl ElasticBeanstalkService {
                     env.status = est::READY.to_string();
                     env.abortable_operation_in_progress = false;
                     env.date_updated = Utc::now();
+                    // Bump the epoch so the in-flight Update settle becomes stale
+                    // and does not flip the aborted env back through Ready.
+                    env.generation += 1;
+                    let (env_name, app_name) = (env.name.clone(), env.application_name.clone());
+                    acct.events.insert(
+                        0,
+                        Event {
+                            event_date: Utc::now(),
+                            message: format!(
+                                "The environment update for {env_name} was aborted by the user."
+                            ),
+                            application_name: Some(app_name),
+                            version_label: None,
+                            template_name: None,
+                            environment_name: Some(env_name),
+                            platform_arn: None,
+                            request_id: Some(req.request_id.clone()),
+                            severity: "WARN".to_string(),
+                        },
+                    );
                 }
             }
         }
@@ -1361,7 +1555,14 @@ impl ElasticBeanstalkService {
         if let Some(id) = optional_query_param(req, "EnvironmentId") {
             let guard = self.state.read();
             if let Some(acct) = guard.accounts.get(&req.account_id) {
-                if acct.environments.contains_key(&id) {
+                // Exclude terminated environments on the id path too, matching
+                // the name path: a dead env must not be revived or mutated when
+                // addressed by id.
+                if acct
+                    .environments
+                    .get(&id)
+                    .is_some_and(|e| e.status != est::TERMINATED)
+                {
                     return Ok(id);
                 }
             }
@@ -1400,11 +1601,18 @@ impl ElasticBeanstalkService {
         let app_name = required_query_param(req, "ApplicationName")?;
         let template_name = required_query_param(req, "TemplateName")?;
         check_len("TemplateName", &template_name, 1, 100)?;
-        let solution_stack = optional_query_param(req, "SolutionStackName");
-        let platform_arn = optional_query_param(req, "PlatformArn");
+        let mut solution_stack = optional_query_param(req, "SolutionStackName");
+        let mut platform_arn = optional_query_param(req, "PlatformArn");
         let description = optional_query_param(req, "Description");
         let environment_name = optional_query_param(req, "EnvironmentName");
-        let option_settings = parse_option_settings(req, "OptionSettings");
+        let explicit_settings = parse_option_settings(req, "OptionSettings");
+        // A template may be created from an existing configuration source:
+        // either another template (SourceConfiguration.ApplicationName +
+        // .TemplateName) or a live environment (EnvironmentId). Its option
+        // settings (and stack, when not overridden) seed the new template.
+        let source_app = optional_query_param(req, "SourceConfiguration.ApplicationName");
+        let source_template = optional_query_param(req, "SourceConfiguration.TemplateName");
+        let source_environment_id = optional_query_param(req, "EnvironmentId");
         let now = Utc::now();
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
@@ -1413,6 +1621,33 @@ impl ElasticBeanstalkService {
                 "No Application named '{app_name}' found."
             )));
         }
+        // Resolve the source's option settings + stack, if a source was given.
+        let mut option_settings: Vec<OptionSetting> = Vec::new();
+        if let (Some(sa), Some(st)) = (source_app.as_ref(), source_template.as_ref()) {
+            let Some(src) = acct.templates.get(&(sa.clone(), st.clone())) else {
+                return Err(invalid_parameter(format!(
+                    "No Configuration Template named '{st}' found."
+                )));
+            };
+            option_settings = src.option_settings.clone();
+            solution_stack = solution_stack.or_else(|| src.solution_stack_name.clone());
+            platform_arn = platform_arn.or_else(|| src.platform_arn.clone());
+        } else if let Some(eid) = source_environment_id.as_ref() {
+            let Some(src) = acct
+                .environments
+                .get(eid)
+                .filter(|e| e.status != est::TERMINATED)
+            else {
+                return Err(invalid_parameter(format!(
+                    "No Environment found for EnvironmentId = '{eid}'."
+                )));
+            };
+            option_settings = src.option_settings.clone();
+            solution_stack = solution_stack.or_else(|| src.solution_stack_name.clone());
+            platform_arn = platform_arn.or_else(|| src.platform_arn.clone());
+        }
+        // Explicit OptionSettings override / extend those copied from the source.
+        apply_option_changes(&mut option_settings, &explicit_settings, &[]);
         let template = ConfigurationTemplate {
             application_name: app_name.clone(),
             template_name: template_name.clone(),
@@ -1426,7 +1661,13 @@ impl ElasticBeanstalkService {
             option_settings,
         };
         acct.templates
-            .insert((app_name, template_name), template.clone());
+            .insert((app_name.clone(), template_name.clone()), template.clone());
+        let tags = parse_tags(req, "Tags");
+        if !tags.is_empty() {
+            let arn =
+                configuration_template_arn(&req.region, &req.account_id, &app_name, &template_name);
+            acct.tags.insert(arn, tags);
+        }
         let inner = render_configuration_settings(&template);
         Ok(self.ok("CreateConfigurationTemplate", inner, req))
     }
@@ -1466,9 +1707,13 @@ impl ElasticBeanstalkService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let app_name = required_query_param(req, "ApplicationName")?;
         let template_name = required_query_param(req, "TemplateName")?;
+        let arn =
+            configuration_template_arn(&req.region, &req.account_id, &app_name, &template_name);
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
         acct.templates.remove(&(app_name, template_name));
+        // Drop the template's tags so no orphaned tag entry remains.
+        acct.tags.remove(&arn);
         Ok(self.ok_empty("DeleteConfigurationTemplate", req))
     }
 
@@ -1480,21 +1725,37 @@ impl ElasticBeanstalkService {
         let template_name = optional_query_param(req, "TemplateName");
         let env_name = optional_query_param(req, "EnvironmentName");
         let guard = self.state.read();
+        let acct = guard.accounts.get(&req.account_id);
         let mut items: Vec<String> = Vec::new();
-        if let Some(acct) = guard.accounts.get(&req.account_id) {
-            if let Some(tn) = &template_name {
-                if let Some(t) = acct.templates.get(&(app_name.clone(), tn.clone())) {
-                    items.push(render_configuration_settings(t));
-                }
-            } else if let Some(en) = &env_name {
-                if let Some(env) = acct
-                    .environments
-                    .values()
-                    .find(|e| e.name == *en && e.application_name == app_name)
-                {
-                    items.push(render_environment_settings(env));
+        if let Some(tn) = &template_name {
+            // The addressed template must exist, else AWS errors rather than
+            // returning an empty success.
+            let template = acct.and_then(|a| a.templates.get(&(app_name.clone(), tn.clone())));
+            match template {
+                Some(t) => items.push(render_configuration_settings(t)),
+                None => {
+                    return Err(invalid_parameter(format!(
+                        "No Configuration Template named '{tn}' found."
+                    )))
                 }
             }
+        } else if let Some(en) = &env_name {
+            let env = acct.and_then(|a| {
+                a.environments
+                    .values()
+                    .find(|e| e.name == *en && e.application_name == app_name)
+            });
+            match env {
+                Some(env) => items.push(render_environment_settings(env)),
+                None => {
+                    return Err(invalid_parameter(format!(
+                        "No Environment named '{en}' found."
+                    )))
+                }
+            }
+        } else {
+            // Exactly one of TemplateName / EnvironmentName is required.
+            return Err(missing_parameter("EnvironmentName"));
         }
         let inner = format!(
             "<ConfigurationSettings>{}</ConfigurationSettings>",
@@ -1558,13 +1819,26 @@ impl ElasticBeanstalkService {
                         want.map(|n| e.environment_name.as_deref() == Some(n))
                             .unwrap_or(true)
                     })
-                    .filter(|e| severity.as_ref().map(|s| &e.severity == s).unwrap_or(true))
+                    .filter(|e| {
+                        // Severity is a floor: include events at the requested
+                        // level OR HIGHER (TRACE<DEBUG<INFO<WARN<ERROR<FATAL).
+                        severity
+                            .as_ref()
+                            .and_then(|s| severity_rank(s))
+                            .map(|floor| {
+                                severity_rank(&e.severity)
+                                    .map(|r| r >= floor)
+                                    .unwrap_or(true)
+                            })
+                            .unwrap_or(true)
+                    })
                     .map(render_event)
                     .collect()
             }
             None => Vec::new(),
         };
-        let inner = format!("<Events>{}</Events>", wrap_members(&events));
+        let (page, next_token) = paginate_members(events, "MaxRecords", req);
+        let inner = format!("<Events>{}</Events>{}", wrap_members(&page), next_token);
         Ok(self.ok("DescribeEvents", inner, req))
     }
 
@@ -1611,11 +1885,18 @@ impl ElasticBeanstalkService {
     }
 
     fn list_platform_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let items: String = SOLUTION_STACKS
+        // Each member is already fully wrapped (`<member>...</member>`), so
+        // paginate the raw fragments and join without re-wrapping.
+        let all: Vec<String> = SOLUTION_STACKS
             .iter()
             .map(|s| render_platform_summary(s, &req.region))
             .collect();
-        let inner = format!("<PlatformSummaryList>{}</PlatformSummaryList>", items);
+        let (page, next_token) = paginate_members(all, "MaxRecords", req);
+        let inner = format!(
+            "<PlatformSummaryList>{}</PlatformSummaryList>{}",
+            page.concat(),
+            next_token,
+        );
         Ok(self.ok("ListPlatformVersions", inner, req))
     }
 
@@ -1821,6 +2102,35 @@ fn wrap_members(items: &[String]) -> String {
         .collect()
 }
 
+/// Apply real offset-based pagination to a rendered member list. The
+/// `NextToken` is an opaque cursor (the next start offset) returned only when
+/// more items remain, matching the model's `input_token`/`output_token` +
+/// `limit_key` pagination on the Describe/List operations. Returns the page's
+/// members and the `<NextToken>` XML fragment (empty when this is the last
+/// page).
+fn paginate_members(
+    items: Vec<String>,
+    limit_key: &str,
+    req: &AwsRequest,
+) -> (Vec<String>, String) {
+    let len = items.len();
+    let start = optional_query_param(req, "NextToken")
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(len);
+    let end = match optional_query_param(req, limit_key).and_then(|v| v.parse::<usize>().ok()) {
+        Some(max) => start.saturating_add(max).min(len),
+        None => len,
+    };
+    let page = items[start..end].to_vec();
+    let next_token = if end < len {
+        el("NextToken", &end.to_string())
+    } else {
+        String::new()
+    };
+    (page, next_token)
+}
+
 fn render_application(app: &Application) -> String {
     format!(
         "{}{}{}{}{}{}",
@@ -1936,8 +2246,18 @@ fn render_environment(env: &Environment) -> String {
         opt_el("PlatformArn", &env.platform_arn),
         opt_el("TemplateName", &env.template_name),
         opt_el("Description", &env.description),
-        el("EndpointURL", &env.endpoint_url),
-        el("CNAME", &env.cname),
+        // Worker-tier environments have no public endpoint or CNAME; those
+        // fields are stored empty and omitted from the response.
+        if env.endpoint_url.is_empty() {
+            String::new()
+        } else {
+            el("EndpointURL", &env.endpoint_url)
+        },
+        if env.cname.is_empty() {
+            String::new()
+        } else {
+            el("CNAME", &env.cname)
+        },
         el("DateCreated", &iso(env.date_created)),
         el("DateUpdated", &iso(env.date_updated)),
         el("Status", &env.status),

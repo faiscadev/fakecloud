@@ -307,6 +307,7 @@ fn recover_pending_environments_settles_stuck_launching() {
                 operations_role: None,
                 group_name: None,
                 option_settings: vec![],
+                generation: 1,
             },
         );
     }
@@ -318,4 +319,348 @@ fn recover_pending_environments_settles_stuck_launching() {
     let g = state.read();
     let env = &g.accounts["123456789012"].environments["e-stuck00001"];
     assert_eq!(env.status, est::READY);
+}
+
+// ---------------------------------------------------------------------------
+// Review-defect regression tests
+// ---------------------------------------------------------------------------
+
+/// A `SnapshotStore` that records the last bytes handed to `save`, so a test
+/// can assert what `save_snapshot` actually persists.
+#[derive(Default)]
+struct CapturingStore {
+    last: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl SnapshotStore for CapturingStore {
+    fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.last.lock().unwrap().clone())
+    }
+    fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+        *self.last.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// Fix #1: tuple-keyed `versions` / `templates` must survive snapshot
+/// serialization. Before the tuple-key serde adapter, `serde_json::to_vec`
+/// fails with `KeyMustBeAString` and the old save path wrote a 0-byte file.
+#[test]
+fn persistence_round_trip_preserves_tuple_keyed_maps() {
+    let store = Arc::new(CapturingStore::default());
+    let s = ElasticBeanstalkService::new(Arc::new(parking_lot::RwLock::new(EbAccounts::new())))
+        .with_settle_ms(0)
+        .with_snapshot_store(store.clone());
+    body(&s, "CreateApplication", &[("ApplicationName", "papp")]);
+    body(
+        &s,
+        "CreateApplicationVersion",
+        &[("ApplicationName", "papp"), ("VersionLabel", "pv1")],
+    );
+    body(
+        &s,
+        "CreateConfigurationTemplate",
+        &[
+            ("ApplicationName", "papp"),
+            ("TemplateName", "ptmpl"),
+            ("OptionSettings.member.1.Namespace", "aws:autoscaling:asg"),
+            ("OptionSettings.member.1.OptionName", "MinSize"),
+            ("OptionSettings.member.1.Value", "3"),
+        ],
+    );
+
+    // save_snapshot must have produced non-empty bytes with a version present.
+    let bytes = store
+        .last
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("snapshot should have been saved");
+    assert!(!bytes.is_empty(), "snapshot must not be a 0-byte overwrite");
+
+    // Deserialize back and assert the tuple-keyed maps survived intact.
+    let snap: ElasticBeanstalkSnapshot =
+        serde_json::from_slice(&bytes).expect("snapshot must deserialize");
+    assert_eq!(
+        snap.schema_version,
+        ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION
+    );
+    let accounts = snap.accounts.expect("accounts present");
+    let acct = &accounts.accounts["123456789012"];
+    assert!(acct.applications.contains_key("papp"));
+    assert!(
+        acct.versions
+            .contains_key(&("papp".to_string(), "pv1".to_string())),
+        "tuple-keyed version must survive round-trip"
+    );
+    let tmpl = acct
+        .templates
+        .get(&("papp".to_string(), "ptmpl".to_string()))
+        .expect("tuple-keyed template must survive round-trip");
+    assert_eq!(tmpl.option_settings.len(), 1);
+    assert_eq!(tmpl.option_settings[0].option_name, "MinSize");
+}
+
+/// Fix #3: a terminated environment addressed by `EnvironmentId` must not be
+/// revived by `UpdateEnvironment`.
+#[test]
+fn terminated_env_by_id_update_rejected() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "tapp")]);
+    let out = body(
+        &s,
+        "CreateEnvironment",
+        &[("ApplicationName", "tapp"), ("EnvironmentName", "tapp-env")],
+    );
+    let env_id = out
+        .split("<EnvironmentId>")
+        .nth(1)
+        .and_then(|s| s.split("</EnvironmentId>").next())
+        .unwrap()
+        .to_string();
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
+    body(
+        &s,
+        "TerminateEnvironment",
+        &[("EnvironmentName", "tapp-env")],
+    );
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
+    // Now terminated. Update by id must be rejected, not resurrect the env.
+    let code = err_code(&s, "UpdateEnvironment", &[("EnvironmentId", &env_id)]);
+    assert_eq!(code, "InvalidParameterValue");
+    let g = s.state.read();
+    let env = &g.accounts["123456789012"].environments[&env_id];
+    assert_eq!(env.status, est::TERMINATED);
+}
+
+/// Fix #4: an in-flight `UpdateEnvironment` superseded by a `TerminateEnvironment`
+/// must end Terminated (the terminate's generation token wins), never Ready.
+#[test]
+fn terminate_supersedes_in_flight_update() {
+    let s = ElasticBeanstalkService::new(Arc::new(parking_lot::RwLock::new(EbAccounts::new())))
+        .with_settle_ms(80);
+    body(&s, "CreateApplication", &[("ApplicationName", "rapp")]);
+    let out = body(
+        &s,
+        "CreateEnvironment",
+        &[("ApplicationName", "rapp"), ("EnvironmentName", "rapp-env")],
+    );
+    let env_id = out
+        .split("<EnvironmentId>")
+        .nth(1)
+        .and_then(|s| s.split("</EnvironmentId>").next())
+        .unwrap()
+        .to_string();
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(120)).await });
+    // Env is Ready. Start an update (Updating, settle pending), then terminate
+    // before the update settle fires.
+    body(
+        &s,
+        "UpdateEnvironment",
+        &[("EnvironmentName", "rapp-env"), ("Description", "x")],
+    );
+    body(
+        &s,
+        "TerminateEnvironment",
+        &[("EnvironmentName", "rapp-env")],
+    );
+    // Let both settle tasks run; the stale update settle must no-op.
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
+    let g = s.state.read();
+    let env = &g.accounts["123456789012"].environments[&env_id];
+    assert_eq!(
+        env.status,
+        est::TERMINATED,
+        "terminate must win over update"
+    );
+}
+
+/// Fix #4 (other ordering): terminate first, then a racing update must be
+/// rejected and the env still ends Terminated.
+#[test]
+fn terminate_then_update_rejected() {
+    let s = ElasticBeanstalkService::new(Arc::new(parking_lot::RwLock::new(EbAccounts::new())))
+        .with_settle_ms(80);
+    body(&s, "CreateApplication", &[("ApplicationName", "r2app")]);
+    body(
+        &s,
+        "CreateEnvironment",
+        &[
+            ("ApplicationName", "r2app"),
+            ("EnvironmentName", "r2app-env"),
+        ],
+    );
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(120)).await });
+    body(
+        &s,
+        "TerminateEnvironment",
+        &[("EnvironmentName", "r2app-env")],
+    );
+    // Env is Terminating (80ms settle). Update must be rejected.
+    let code = err_code(
+        &s,
+        "UpdateEnvironment",
+        &[("EnvironmentName", "r2app-env"), ("Description", "x")],
+    );
+    assert_eq!(code, "InvalidParameterValue");
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
+    let desc = body(
+        &s,
+        "DescribeEnvironments",
+        &[("ApplicationName", "r2app"), ("IncludeDeleted", "true")],
+    );
+    assert!(desc.contains("<Status>Terminated</Status>"), "desc={desc}");
+}
+
+/// Fix #2: DeleteApplication without TerminateEnvByForce on an app with a live
+/// environment must error and leave the environment intact.
+#[test]
+fn delete_application_without_force_errors_and_keeps_env() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "dapp")]);
+    body(
+        &s,
+        "CreateEnvironment",
+        &[("ApplicationName", "dapp"), ("EnvironmentName", "dapp-env")],
+    );
+    block(async { tokio::time::sleep(std::time::Duration::from_millis(20)).await });
+    let code = err_code(&s, "DeleteApplication", &[("ApplicationName", "dapp")]);
+    assert_eq!(code, "InvalidParameterValue");
+    // Application and environment survive.
+    let apps = body(&s, "DescribeApplications", &[]);
+    assert!(apps.contains("<ApplicationName>dapp</ApplicationName>"));
+    let envs = body(&s, "DescribeEnvironments", &[("ApplicationName", "dapp")]);
+    assert!(envs.contains("<EnvironmentName>dapp-env</EnvironmentName>"));
+}
+
+/// Fix #7: DescribeConfigurationSettings on a missing template errors instead
+/// of returning an empty success.
+#[test]
+fn describe_configuration_settings_missing_template_errors() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "capp")]);
+    let code = err_code(
+        &s,
+        "DescribeConfigurationSettings",
+        &[("ApplicationName", "capp"), ("TemplateName", "nope")],
+    );
+    assert_eq!(code, "InvalidParameterValue");
+}
+
+/// Fix #8: CreateApplication rejects a duplicate name.
+#[test]
+fn create_application_duplicate_errors() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "dupapp")]);
+    let code = err_code(&s, "CreateApplication", &[("ApplicationName", "dupapp")]);
+    assert_eq!(code, "InvalidParameterValue");
+}
+
+/// Fix #6: DescribeEvents Severity is a floor -> TRACE returns INFO events.
+#[test]
+fn describe_events_severity_floor_returns_info() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "eapp")]);
+    body(
+        &s,
+        "CreateEnvironment",
+        &[("ApplicationName", "eapp"), ("EnvironmentName", "eapp-env")],
+    );
+    // The createEnvironment-is-starting event is INFO.
+    let out = body(
+        &s,
+        "DescribeEvents",
+        &[("ApplicationName", "eapp"), ("Severity", "TRACE")],
+    );
+    assert!(
+        out.contains("createEnvironment is starting"),
+        "TRACE floor must include INFO events; out={out}"
+    );
+    // A higher floor excludes the INFO event.
+    let out2 = body(
+        &s,
+        "DescribeEvents",
+        &[("ApplicationName", "eapp"), ("Severity", "ERROR")],
+    );
+    assert!(!out2.contains("createEnvironment is starting"));
+}
+
+/// Cap-dropped: duplicate application version label is rejected.
+#[test]
+fn create_application_version_duplicate_errors() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "vapp")]);
+    body(
+        &s,
+        "CreateApplicationVersion",
+        &[("ApplicationName", "vapp"), ("VersionLabel", "v1")],
+    );
+    let code = err_code(
+        &s,
+        "CreateApplicationVersion",
+        &[("ApplicationName", "vapp"), ("VersionLabel", "v1")],
+    );
+    assert_eq!(code, "InvalidParameterValue");
+}
+
+/// Fix #10: CreateConfigurationTemplate from a SourceConfiguration copies the
+/// source template's option settings.
+#[test]
+fn create_configuration_template_from_source_copies_settings() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "sapp")]);
+    body(
+        &s,
+        "CreateConfigurationTemplate",
+        &[
+            ("ApplicationName", "sapp"),
+            ("TemplateName", "src"),
+            ("OptionSettings.member.1.Namespace", "aws:autoscaling:asg"),
+            ("OptionSettings.member.1.OptionName", "MaxSize"),
+            ("OptionSettings.member.1.Value", "6"),
+        ],
+    );
+    // New template created from the source; no explicit OptionSettings.
+    body(
+        &s,
+        "CreateConfigurationTemplate",
+        &[
+            ("ApplicationName", "sapp"),
+            ("TemplateName", "derived"),
+            ("SourceConfiguration.ApplicationName", "sapp"),
+            ("SourceConfiguration.TemplateName", "src"),
+        ],
+    );
+    let desc = body(
+        &s,
+        "DescribeConfigurationSettings",
+        &[("ApplicationName", "sapp"), ("TemplateName", "derived")],
+    );
+    assert!(
+        desc.contains("<OptionName>MaxSize</OptionName>"),
+        "desc={desc}"
+    );
+    assert!(desc.contains("<Value>6</Value>"));
+}
+
+/// Cap-dropped: a worker-tier environment has no public CNAME / endpoint URL.
+#[test]
+fn worker_tier_environment_has_no_endpoint() {
+    let s = svc();
+    body(&s, "CreateApplication", &[("ApplicationName", "wapp")]);
+    let out = body(
+        &s,
+        "CreateEnvironment",
+        &[
+            ("ApplicationName", "wapp"),
+            ("EnvironmentName", "wapp-env"),
+            ("Tier.Name", "Worker"),
+            ("Tier.Type", "SQS/HTTP"),
+        ],
+    );
+    assert!(
+        !out.contains("<EndpointURL>"),
+        "worker has no endpoint; out={out}"
+    );
+    assert!(!out.contains("<CNAME>"), "worker has no CNAME; out={out}");
 }
