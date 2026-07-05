@@ -57,6 +57,9 @@ const REST_JSON_SERVICES: &[&str] = &[
     // `appconfig` and speak restJson1; one service handles both, splitting on
     // the URL path (control `/applications/...` vs data `/configuration...`).
     "appconfig",
+    // AWS CodeArtifact: restJson1 control plane (`@http` method + path routing,
+    // multi-value query params, JSON bodies).
+    "codeartifact",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

@@ -4041,6 +4041,57 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateActionType`
 - `UpdatePipeline`
 
+## [AWS CodeArtifact](@/docs/services/codeartifact.md)
+
+- `AssociateExternalConnection`
+- `CopyPackageVersions`
+- `CreateDomain`
+- `CreatePackageGroup`
+- `CreateRepository`
+- `DeleteDomain`
+- `DeleteDomainPermissionsPolicy`
+- `DeletePackage`
+- `DeletePackageGroup`
+- `DeletePackageVersions`
+- `DeleteRepository`
+- `DeleteRepositoryPermissionsPolicy`
+- `DescribeDomain`
+- `DescribePackage`
+- `DescribePackageGroup`
+- `DescribePackageVersion`
+- `DescribeRepository`
+- `DisassociateExternalConnection`
+- `DisposePackageVersions`
+- `GetAssociatedPackageGroup`
+- `GetAuthorizationToken`
+- `GetDomainPermissionsPolicy`
+- `GetPackageVersionAsset`
+- `GetPackageVersionReadme`
+- `GetRepositoryEndpoint`
+- `GetRepositoryPermissionsPolicy`
+- `ListAllowedRepositoriesForGroup`
+- `ListAssociatedPackages`
+- `ListDomains`
+- `ListPackageGroups`
+- `ListPackageVersionAssets`
+- `ListPackageVersionDependencies`
+- `ListPackageVersions`
+- `ListPackages`
+- `ListRepositories`
+- `ListRepositoriesInDomain`
+- `ListSubPackageGroups`
+- `ListTagsForResource`
+- `PublishPackageVersion`
+- `PutDomainPermissionsPolicy`
+- `PutPackageOriginConfiguration`
+- `PutRepositoryPermissionsPolicy`
+- `TagResource`
+- `UntagResource`
+- `UpdatePackageGroup`
+- `UpdatePackageGroupOriginConfiguration`
+- `UpdatePackageVersionsStatus`
+- `UpdateRepository`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

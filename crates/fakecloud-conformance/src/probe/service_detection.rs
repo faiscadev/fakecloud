@@ -184,6 +184,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // `appconfigdata` credential scope to `appconfig`.
         "appconfig" => Protocol::Rest,
         "appconfigdata" => Protocol::Rest,
+        // AWS CodeArtifact: restJson1 control plane (`@http` method + path
+        // routing over domains, repositories, packages, and package groups).
+        "codeartifact" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
