@@ -1143,6 +1143,20 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccCodePipeline(_basic|Webhook_basic|CustomActionType_basic)$",
         deny: &[],
     },
+    Service {
+        // AWS CodeArtifact control plane. The upstream package drives every
+        // resource through one serial umbrella test
+        // (`TestAccCodeArtifact_serial`) whose two-level subtest map groups the
+        // `basic` cases per resource; the `-run` path scopes to the `basic`
+        // subtest of the four control-plane resources: `aws_codeartifact_domain`,
+        // `aws_codeartifact_repository`, `aws_codeartifact_domain_permissions_policy`,
+        // and `aws_codeartifact_repository_permissions_policy`. A domain requires
+        // a KMS key, which the upstream test provisions against fakecloud's KMS.
+        name: "codeartifact",
+        run_regex:
+            "^TestAccCodeArtifact_serial$/^(Domain|Repository|DomainPermissionsPolicy|RepositoryPermissionsPolicy)$/^basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1751,6 +1765,13 @@ pub const SHARDS: &[Shard] = &[
         name: "codepipeline",
         service: "codepipeline",
         run_regex: "^TestAccCodePipeline(_basic|Webhook_basic|CustomActionType_basic)$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codeartifact",
+        service: "codeartifact",
+        run_regex:
+            "^TestAccCodeArtifact_serial$/^(Domain|Repository|DomainPermissionsPolicy|RepositoryPermissionsPolicy)$/^basic$",
         extra_deny: &[],
     },
 ];

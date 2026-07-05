@@ -286,5 +286,9 @@
   "codepipeline": {
     "repo_dir": "codepipeline",
     "service_name": "codepipeline"
+  },
+  "codeartifact": {
+    "repo_dir": "codeartifact",
+    "service_name": "codeartifact"
   }
 }

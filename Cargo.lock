@@ -3451,6 +3451,7 @@ dependencies = [
  "fakecloud-cloudfront",
  "fakecloud-cloudtrail",
  "fakecloud-cloudwatch",
+ "fakecloud-codeartifact",
  "fakecloud-codebuild",
  "fakecloud-codeconnections",
  "fakecloud-codedeploy",
@@ -3998,6 +3999,28 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-codeartifact"
+version = "0.37.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

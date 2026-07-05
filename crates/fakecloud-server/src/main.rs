@@ -601,6 +601,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let codeartifact_state: fakecloud_codeartifact::SharedCodeArtifactState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let codedeploy_state: fakecloud_codedeploy::SharedCodeDeployState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4735,6 +4742,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("codepipeline", h);
     }
     registry.register(Arc::new(codepipeline_service));
+
+    // AWS CodeArtifact: restJson1 control plane (domains, repositories,
+    // package groups, packages/versions/assets, policies, auth, tagging).
+    let codeartifact_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("codeartifact").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_codeartifact::persistence::load_into(&store, &codeartifact_state) {
+                Ok(fakecloud_codeartifact::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded codeartifact persistence snapshot");
+                }
+                Ok(fakecloud_codeartifact::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no codeartifact persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut codeartifact_service =
+        fakecloud_codeartifact::CodeArtifactService::new(codeartifact_state.clone());
+    if let Some(store) = codeartifact_snapshot_store {
+        codeartifact_service = codeartifact_service.with_snapshot_store(store);
+    }
+    if let Some(h) = codeartifact_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("codeartifact", h);
+    }
+    registry.register(Arc::new(codeartifact_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

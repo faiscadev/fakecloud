@@ -212,6 +212,14 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // a connection created with neither ProviderType nor HostArn. A handler
         // returning it to the probes' synthetic inputs ran correctly.
         "codeconnections" => &["InvalidInputException"],
+        // CodeArtifact's `ResourceNotFoundException` is a service-wide response:
+        // AWS returns it for a missing domain/repository/package/version on
+        // essentially every operation that dereferences one, but the model only
+        // enumerates it on a subset (for example `DeleteDomain`, `ListDomains`,
+        // and `ListRepositories` omit it even though the live API returns it
+        // when the referenced domain does not exist). A handler returning it for
+        // the probes' synthetic (non-existent) resources ran correctly.
+        "codeartifact" => &["ResourceNotFoundException"],
         _ => &[],
     }
 }
