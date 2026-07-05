@@ -1122,6 +1122,18 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        // AWS CodeCommit control plane. Scoped to the `_basic` resources whose
+        // create/read/update/delete round-trips through the fakecloud control
+        // plane: `aws_codecommit_repository`, `aws_codecommit_trigger` (its
+        // destination is an SNS topic provisioned against fakecloud's own SNS),
+        // `aws_codecommit_approval_rule_template`, and
+        // `aws_codecommit_approval_rule_template_association`.
+        name: "codecommit",
+        run_regex:
+            "^TestAccCodeCommit(Repository_basic|Trigger_basic|ApprovalRuleTemplate_basic|ApprovalRuleTemplateAssociation_basic)$",
+        deny: &[],
+    },
+    Service {
         // AWS CodeDeploy control plane. The upstream Go package is `deploy`
         // (its resources are `aws_codedeploy_*`). Scoped to the `_basic`
         // resources whose create/read/update/delete round-trips through the
@@ -1753,6 +1765,13 @@ pub const SHARDS: &[Shard] = &[
         service: "codebuild",
         run_regex:
             "^TestAccCodeBuild(Project|ReportGroup|SourceCredential|Fleet|ResourcePolicy)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codecommit",
+        service: "codecommit",
+        run_regex:
+            "^TestAccCodeCommit(Repository_basic|Trigger_basic|ApprovalRuleTemplate_basic|ApprovalRuleTemplateAssociation_basic)$",
         extra_deny: &[],
     },
     Shard {

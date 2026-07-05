@@ -93,6 +93,7 @@ SERVICES=(
     "s3tables|Amazon S3 Tables|s3tables"
     "lakeformation|AWS Lake Formation|lakeformation"
     "codebuild|AWS CodeBuild|codebuild"
+    "codecommit|AWS CodeCommit|codecommit"
     "codeconnections|AWS CodeConnections|codeconnections"
     "codedeploy|AWS CodeDeploy|codedeploy"
     "codepipeline|AWS CodePipeline|codepipeline"

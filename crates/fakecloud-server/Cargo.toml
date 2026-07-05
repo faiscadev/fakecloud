@@ -54,6 +54,7 @@ fakecloud-ram = { workspace = true }
 fakecloud-s3tables = { workspace = true }
 fakecloud-lakeformation = { workspace = true }
 fakecloud-codebuild = { workspace = true }
+fakecloud-codecommit = { workspace = true }
 fakecloud-codedeploy = { workspace = true }
 fakecloud-codepipeline = { workspace = true }
 fakecloud-codeartifact = { workspace = true }

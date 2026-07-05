@@ -227,6 +227,10 @@
     "repo_dir": "codebuild",
     "service_name": "codebuild"
   },
+  "codecommit": {
+    "repo_dir": "codecommit",
+    "service_name": "codecommit"
+  },
   "es": {
     "repo_dir": "elasticsearch-service",
     "service_name": "es"
