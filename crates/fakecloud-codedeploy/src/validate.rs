@@ -30,6 +30,31 @@ pub const LIFECYCLE_EVENT_STATUS: &[&str] = &[
 
 pub const DEPLOYMENT_WAIT_TYPE: &[&str] = &["READY_WAIT", "TERMINATION_WAIT"];
 
+pub const MINIMUM_HEALTHY_HOSTS_TYPE: &[&str] = &["HOST_COUNT", "FLEET_PERCENT"];
+
+/// `EC2TagFilterType` and `TagFilterType` (on-premises) share the same member
+/// set in the CodeDeploy model.
+pub const TAG_FILTER_TYPE: &[&str] = &["KEY_ONLY", "VALUE_ONLY", "KEY_AND_VALUE"];
+
+pub const TRIGGER_EVENT_TYPE: &[&str] = &[
+    "DeploymentStart",
+    "DeploymentSuccess",
+    "DeploymentFailure",
+    "DeploymentStop",
+    "DeploymentRollback",
+    "DeploymentReady",
+    "InstanceStart",
+    "InstanceSuccess",
+    "InstanceFailure",
+    "InstanceReady",
+];
+
+pub const AUTO_ROLLBACK_EVENT: &[&str] = &[
+    "DEPLOYMENT_FAILURE",
+    "DEPLOYMENT_STOP_ON_ALARM",
+    "DEPLOYMENT_STOP_ON_REQUEST",
+];
+
 pub const REVISION_LOCATION_TYPE: &[&str] = &["S3", "GitHub", "String", "AppSpecContent"];
 
 pub const DEPLOYMENT_STATUS: &[&str] = &[

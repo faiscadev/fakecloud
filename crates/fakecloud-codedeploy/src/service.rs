@@ -417,6 +417,18 @@ fn is_codedeploy_arn(s: &str) -> bool {
     )
 }
 
+fn application_arn(region: &str, account: &str, name: &str) -> String {
+    format!("arn:aws:codedeploy:{region}:{account}:application:{name}")
+}
+
+fn deployment_group_arn(region: &str, account: &str, app: &str, group: &str) -> String {
+    format!("arn:aws:codedeploy:{region}:{account}:deploymentgroup:{app}/{group}")
+}
+
+fn deployment_config_arn(region: &str, account: &str, name: &str) -> String {
+    format!("arn:aws:codedeploy:{region}:{account}:deploymentconfig:{name}")
+}
+
 fn opt_enum(
     b: &Value,
     key: &str,
@@ -427,6 +439,118 @@ fn opt_enum(
     if let Some(v) = str_field(b, key) {
         if !validate::is_enum(set, &v) {
             return Err(e(code, msg));
+        }
+    }
+    Ok(())
+}
+
+/// Merge an incoming `TagList` into `stored`, replacing any existing tag that
+/// shares a `Key` (last-write-wins), matching `TagResource` semantics.
+fn merge_tags(stored: &mut Vec<Value>, incoming: &[Value]) {
+    for t in incoming {
+        if let Some(k) = t.get("Key").and_then(Value::as_str).map(str::to_string) {
+            stored.retain(|x| x.get("Key").and_then(Value::as_str) != Some(k.as_str()));
+        }
+        stored.push(t.clone());
+    }
+}
+
+/// Validate a list of tag filters' `Type` members against `TagFilterType`,
+/// returning `err_code` for any value outside the model enum.
+fn validate_tag_filters(
+    b: &Value,
+    key: &str,
+    err_code: &str,
+    msg: &str,
+) -> Result<(), AwsServiceError> {
+    if let Some(filters) = b.get(key).and_then(Value::as_array) {
+        for f in filters {
+            if let Some(t) = f.get("Type").and_then(Value::as_str) {
+                if !validate::is_enum(validate::TAG_FILTER_TYPE, t) {
+                    return Err(e(err_code, msg));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the nested enums shared by CreateDeploymentGroup and
+/// UpdateDeploymentGroup: EC2/on-premises tag-filter `Type`, trigger
+/// `triggerEvents`, and auto-rollback `events`. Each malformed member maps to
+/// the operation-declared `Invalid*Exception`.
+fn validate_deployment_group_config(b: &Value) -> Result<(), AwsServiceError> {
+    validate_tag_filters(
+        b,
+        "ec2TagFilters",
+        "InvalidEC2TagException",
+        "The EC2 tag was specified in an invalid format.",
+    )?;
+    validate_tag_filters(
+        b,
+        "onPremisesInstanceTagFilters",
+        "InvalidOnPremisesTagCombinationException",
+        "The on-premises instance tag was specified in an invalid format.",
+    )?;
+    if let Some(triggers) = b.get("triggerConfigurations").and_then(Value::as_array) {
+        for tc in triggers {
+            if let Some(events) = tc.get("triggerEvents").and_then(Value::as_array) {
+                for ev in events.iter().filter_map(Value::as_str) {
+                    if !validate::is_enum(validate::TRIGGER_EVENT_TYPE, ev) {
+                        return Err(e(
+                            "InvalidTriggerConfigException",
+                            "The trigger was specified in an invalid format.",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(events) = b
+        .get("autoRollbackConfiguration")
+        .and_then(|c| c.get("events"))
+        .and_then(Value::as_array)
+    {
+        for ev in events.iter().filter_map(Value::as_str) {
+            if !validate::is_enum(validate::AUTO_ROLLBACK_EVENT, ev) {
+                return Err(e(
+                    "InvalidAutoRollbackConfigException",
+                    "The automatic rollback configuration was specified in an invalid format.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `minimumHealthyHosts` structure's `type` enum and `value` range
+/// for CreateDeploymentConfig, returning the declared
+/// `InvalidMinimumHealthyHostValueException` for a bad type
+/// (must be HOST_COUNT|FLEET_PERCENT) or an out-of-range value
+/// (FLEET_PERCENT: 0-100; HOST_COUNT: >= 0).
+fn validate_minimum_healthy_hosts(b: &Value) -> Result<(), AwsServiceError> {
+    let Some(mhh) = b.get("minimumHealthyHosts").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let bad = || {
+        e(
+            "InvalidMinimumHealthyHostValueException",
+            "The minimum healthy instances value was specified in an invalid format.",
+        )
+    };
+    let mhh_type = mhh.get("type").and_then(Value::as_str);
+    if let Some(t) = mhh_type {
+        if !validate::is_enum(validate::MINIMUM_HEALTHY_HOSTS_TYPE, t) {
+            return Err(bad());
+        }
+    }
+    if let Some(value) = mhh.get("value").and_then(Value::as_i64) {
+        let out_of_range = match mhh_type {
+            Some("FLEET_PERCENT") => !(0..=100).contains(&value),
+            _ => value < 0,
+        };
+        if out_of_range {
+            return Err(bad());
         }
     }
     Ok(())
@@ -562,7 +686,7 @@ impl CodeDeployService {
             "InvalidComputePlatformException",
             "The computePlatform is invalid.",
         )?;
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let compute = str_field(&b, "computePlatform").unwrap_or_else(|| "Server".into());
         let app_id = gen_uuid();
         let now = Utc::now();
@@ -582,7 +706,15 @@ impl CodeDeployService {
             "computePlatform": compute,
         });
         st.applications.insert(name.clone(), info);
-        st.application_order.push(name);
+        st.application_order.push(name.clone());
+        // Persist create-time `tags` under the application ARN so
+        // ListTagsForResource echoes them, matching TagResource storage.
+        if let Some(tags) = b.get("tags").and_then(Value::as_array) {
+            if !tags.is_empty() {
+                let arn = application_arn(&region, &account, &name);
+                merge_tags(st.tags.entry(arn).or_default(), tags);
+            }
+        }
         ok(json!({ "applicationId": app_id }))
     }
 
@@ -677,7 +809,7 @@ impl CodeDeployService {
     fn delete_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = req_application_name(&b)?;
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         // DeleteApplication is idempotent: its Smithy contract declares no
@@ -685,7 +817,15 @@ impl CodeDeployService {
         st.applications.remove(&name);
         st.application_order.retain(|n| n != &name);
         st.app_revisions.remove(&name);
-        st.deployment_groups.remove(&name);
+        // Purge tags for the application and every deployment group under it, so
+        // a later same-named resource does not resurrect stale tags.
+        st.tags.remove(&application_arn(&region, &account, &name));
+        if let Some(groups) = st.deployment_groups.remove(&name) {
+            for dg in groups.keys() {
+                st.tags
+                    .remove(&deployment_group_arn(&region, &account, &name, dg));
+            }
+        }
         ok(json!({}))
     }
 
@@ -1021,10 +1161,11 @@ impl CodeDeployService {
             "InvalidInputException",
             "The outdated instances strategy is invalid.",
         )?;
+        validate_deployment_group_config(&b)?;
         let Some(service_role) = str_field(&b, "serviceRoleArn") else {
             return Err(e("RoleRequiredException", "The role ID was not specified."));
         };
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let config_name = str_field(&b, "deploymentConfigName")
             .unwrap_or_else(|| "CodeDeployDefault.OneAtATime".into());
         let dg_id = gen_uuid();
@@ -1066,7 +1207,15 @@ impl CodeDeployService {
         st.deployment_groups
             .entry(app.clone())
             .or_default()
-            .insert(dg_name, group);
+            .insert(dg_name.clone(), group);
+        // Persist create-time `tags` under the deployment group ARN so
+        // ListTagsForResource echoes them.
+        if let Some(tags) = b.get("tags").and_then(Value::as_array) {
+            if !tags.is_empty() {
+                let arn = deployment_group_arn(&region, &account, &app, &dg_name);
+                merge_tags(st.tags.entry(arn).or_default(), tags);
+            }
+        }
         ok(json!({ "deploymentGroupId": dg_id }))
     }
 
@@ -1109,6 +1258,7 @@ impl CodeDeployService {
             "InvalidInputException",
             "The outdated instances strategy is invalid.",
         )?;
+        validate_deployment_group_config(&b)?;
         let (_region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1183,13 +1333,16 @@ impl CodeDeployService {
         let b = body(req);
         let app = req_application_name(&b)?;
         let dg_name = req_deployment_group_name(&b, "deploymentGroupName")?;
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         // Idempotent: the Smithy contract declares no "does not exist" error.
         if let Some(groups) = st.deployment_groups.get_mut(&app) {
             groups.remove(&dg_name);
         }
+        // Purge tags so a later same-named group does not resurrect stale tags.
+        st.tags
+            .remove(&deployment_group_arn(&region, &account, &app, &dg_name));
         ok(json!({ "hooksNotCleanedUp": [] }))
     }
 
@@ -1256,6 +1409,7 @@ impl CodeDeployService {
             "InvalidComputePlatformException",
             "The computePlatform is invalid.",
         )?;
+        validate_minimum_healthy_hosts(&b)?;
         let (_region, account) = self.region_account(req);
         let compute = str_field(&b, "computePlatform").unwrap_or_else(|| "Server".into());
         let config_id = gen_uuid();
@@ -1311,12 +1465,15 @@ impl CodeDeployService {
                 "A predefined deployment configuration cannot be deleted.",
             ));
         }
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         if st.deployment_configs.remove(&name).is_some() {
             st.deployment_config_order.retain(|n| n != &name);
         }
+        // Purge tags so a later same-named config does not resurrect stale tags.
+        st.tags
+            .remove(&deployment_config_arn(&region, &account, &name));
         ok(json!({}))
     }
 
@@ -1373,9 +1530,10 @@ impl CodeDeployService {
     fn create_deployment(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let app = req_application_name(&b)?;
-        if let Some(v) = str_field(&b, "deploymentGroupName") {
-            check_deployment_group_name(&v)?;
-        }
+        // A deployment must target a deployment group. The model declares
+        // DeploymentGroupNameRequiredException for its absence and
+        // InvalidDeploymentGroupNameException for a malformed value.
+        let dg_name = req_deployment_group_name(&b, "deploymentGroupName")?;
         if let Some(v) = str_field(&b, "deploymentConfigName") {
             check_deployment_config_name(&v)?;
         }
@@ -1399,24 +1557,21 @@ impl CodeDeployService {
                 format!("No application found for name: {app}"),
             ));
         }
-        let dg_name = str_field(&b, "deploymentGroupName");
-        if let Some(dg) = &dg_name {
-            if !st
-                .deployment_groups
-                .get(&app)
-                .map(|g| g.contains_key(dg))
-                .unwrap_or(false)
-            {
-                return Err(e(
-                    "DeploymentGroupDoesNotExistException",
-                    format!("No deployment group found for name: {dg}"),
-                ));
-            }
+        if !st
+            .deployment_groups
+            .get(&app)
+            .map(|g| g.contains_key(&dg_name))
+            .unwrap_or(false)
+        {
+            return Err(e(
+                "DeploymentGroupDoesNotExistException",
+                format!("No deployment group found for name: {dg_name}"),
+            ));
         }
         let config_name = str_field(&b, "deploymentConfigName").unwrap_or_else(|| {
-            dg_name
-                .as_ref()
-                .and_then(|dg| st.deployment_groups.get(&app).and_then(|g| g.get(dg)))
+            st.deployment_groups
+                .get(&app)
+                .and_then(|g| g.get(&dg_name))
                 .and_then(|g| g.get("deploymentConfigName").and_then(Value::as_str))
                 .unwrap_or("CodeDeployDefault.OneAtATime")
                 .to_string()
@@ -1430,22 +1585,27 @@ impl CodeDeployService {
             ));
         }
         let compute = Self::app_compute_platform(st, &app);
+        // Inherit the target group's stored deploymentStyle; fall back to the
+        // AWS default (in-place, no traffic control) only when the group has none.
+        let deployment_style = st
+            .deployment_groups
+            .get(&app)
+            .and_then(|g| g.get(&dg_name))
+            .and_then(|g| g.get("deploymentStyle").cloned())
+            .unwrap_or_else(|| {
+                json!({ "deploymentType": "IN_PLACE", "deploymentOption": "WITHOUT_TRAFFIC_CONTROL" })
+            });
         let deployment_id = gen_deployment_id();
         let mut info = Map::new();
         info.insert("deploymentId".into(), json!(deployment_id));
         info.insert("applicationName".into(), json!(app));
-        if let Some(dg) = &dg_name {
-            info.insert("deploymentGroupName".into(), json!(dg));
-        }
+        info.insert("deploymentGroupName".into(), json!(dg_name));
         info.insert("deploymentConfigName".into(), json!(config_name));
         info.insert("computePlatform".into(), json!(compute));
         info.insert("status".into(), json!("Created"));
         info.insert("creator".into(), json!("user"));
         info.insert("createTime".into(), ts(now));
-        info.insert(
-            "deploymentStyle".into(),
-            json!({ "deploymentType": "IN_PLACE", "deploymentOption": "WITHOUT_TRAFFIC_CONTROL" }),
-        );
+        info.insert("deploymentStyle".into(), deployment_style);
         info.insert(
             "ignoreApplicationStopFailures".into(),
             json!(b
@@ -1466,6 +1626,7 @@ impl CodeDeployService {
             ("autoRollbackConfiguration", "autoRollbackConfiguration"),
             ("fileExistsBehavior", "fileExistsBehavior"),
             ("targetInstances", "targetInstances"),
+            ("overrideAlarmConfiguration", "overrideAlarmConfiguration"),
         ] {
             if let Some(v) = b.get(in_key).filter(|v| !v.is_null()) {
                 info.insert(out_key.into(), v.clone());
@@ -2377,9 +2538,17 @@ mod tests {
             json!({ "applicationName": "da" }),
         ))
         .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({ "applicationName": "da", "deploymentGroupName": "dg", "serviceRoleArn": "arn:aws:iam::000000000000:role/cd" }),
+        ))
+        .unwrap();
         let id = body_of(
-            s.create_deployment(&req("CreateDeployment", json!({ "applicationName": "da" })))
-                .unwrap(),
+            s.create_deployment(&req(
+                "CreateDeployment",
+                json!({ "applicationName": "da", "deploymentGroupName": "dg" }),
+            ))
+            .unwrap(),
         )["deploymentId"]
             .as_str()
             .unwrap()
@@ -2558,9 +2727,17 @@ mod tests {
         let s = svc();
         s.create_application(&req("CreateApplication", json!({ "applicationName": "a" })))
             .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({ "applicationName": "a", "deploymentGroupName": "dg", "serviceRoleArn": "arn:aws:iam::000000000000:role/cd" }),
+        ))
+        .unwrap();
         let id = body_of(
-            s.create_deployment(&req("CreateDeployment", json!({ "applicationName": "a" })))
-                .unwrap(),
+            s.create_deployment(&req(
+                "CreateDeployment",
+                json!({ "applicationName": "a", "deploymentGroupName": "dg" }),
+            ))
+            .unwrap(),
         )["deploymentId"]
             .as_str()
             .unwrap()
@@ -2654,11 +2831,16 @@ mod tests {
             json!({ "applicationName": "app" }),
         ))
         .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({ "applicationName": "app", "deploymentGroupName": "dg", "serviceRoleArn": "arn:aws:iam::000000000000:role/cd" }),
+        ))
+        .unwrap();
         let mk = || {
             body_of(
                 s.create_deployment(&req(
                     "CreateDeployment",
-                    json!({ "applicationName": "app" }),
+                    json!({ "applicationName": "app", "deploymentGroupName": "dg" }),
                 ))
                 .unwrap(),
             )["deploymentId"]
@@ -2878,5 +3060,356 @@ mod tests {
             json!({ "applicationName": "ghost" }),
         ))
         .unwrap();
+    }
+
+    // Helper: create an application plus a deployment group under it.
+    fn make_app_and_group(s: &CodeDeployService, app: &str, group: &str) {
+        s.create_application(&req("CreateApplication", json!({ "applicationName": app })))
+            .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({ "applicationName": app, "deploymentGroupName": group, "serviceRoleArn": "arn:aws:iam::000000000000:role/cd" }),
+        ))
+        .unwrap();
+    }
+
+    fn tags_for(s: &CodeDeployService, arn: &str) -> Vec<Value> {
+        body_of(
+            s.list_tags_for_resource(&req("ListTagsForResource", json!({ "ResourceArn": arn })))
+                .unwrap(),
+        )["Tags"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    // T1.1: CreateApplication persists its create-time `tags` so
+    // ListTagsForResource echoes them.
+    #[test]
+    fn create_application_persists_tags() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "tagged", "tags": [{ "Key": "env", "Value": "prod" }] }),
+        ))
+        .unwrap();
+        let arn = "arn:aws:codedeploy:us-east-1:000000000000:application:tagged";
+        let tags = tags_for(&s, arn);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["Key"], "env");
+        assert_eq!(tags[0]["Value"], "prod");
+    }
+
+    // T1.2: CreateDeploymentGroup persists its create-time `tags`.
+    #[test]
+    fn create_deployment_group_persists_tags() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "app" }),
+        ))
+        .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({
+                "applicationName": "app",
+                "deploymentGroupName": "dg",
+                "serviceRoleArn": "arn:aws:iam::000000000000:role/cd",
+                "tags": [{ "Key": "team", "Value": "core" }]
+            }),
+        ))
+        .unwrap();
+        let arn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:app/dg";
+        let tags = tags_for(&s, arn);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["Key"], "team");
+    }
+
+    // T1.3: CreateDeploymentConfig validates the minimumHealthyHosts type and
+    // value range with the declared error.
+    #[test]
+    fn create_deployment_config_validates_minimum_healthy_hosts() {
+        let s = svc();
+        // Bad type.
+        assert_eq!(
+            err_code(s.create_deployment_config(&req(
+                "CreateDeploymentConfig",
+                json!({ "deploymentConfigName": "c1", "minimumHealthyHosts": { "type": "BOGUS", "value": 1 } })
+            ))),
+            "InvalidMinimumHealthyHostValueException"
+        );
+        // FLEET_PERCENT out of range.
+        assert_eq!(
+            err_code(s.create_deployment_config(&req(
+                "CreateDeploymentConfig",
+                json!({ "deploymentConfigName": "c2", "minimumHealthyHosts": { "type": "FLEET_PERCENT", "value": 150 } })
+            ))),
+            "InvalidMinimumHealthyHostValueException"
+        );
+        // HOST_COUNT negative.
+        assert_eq!(
+            err_code(s.create_deployment_config(&req(
+                "CreateDeploymentConfig",
+                json!({ "deploymentConfigName": "c3", "minimumHealthyHosts": { "type": "HOST_COUNT", "value": -1 } })
+            ))),
+            "InvalidMinimumHealthyHostValueException"
+        );
+        // A valid combination is accepted.
+        s.create_deployment_config(&req(
+            "CreateDeploymentConfig",
+            json!({ "deploymentConfigName": "ok", "minimumHealthyHosts": { "type": "FLEET_PERCENT", "value": 50 } }),
+        ))
+        .unwrap();
+    }
+
+    // T1.4: CreateDeploymentGroup and UpdateDeploymentGroup reject malformed
+    // nested enums with the declared errors.
+    #[test]
+    fn deployment_group_validates_nested_enums() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "app" }),
+        ))
+        .unwrap();
+        let role = "arn:aws:iam::000000000000:role/cd";
+        let base = |extra: Value| -> Value {
+            let mut m = json!({
+                "applicationName": "app",
+                "deploymentGroupName": "dg",
+                "serviceRoleArn": role,
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                m.as_object_mut().unwrap().insert(k.clone(), v.clone());
+            }
+            m
+        };
+        let cases = [
+            (
+                json!({ "ec2TagFilters": [{ "Key": "k", "Value": "v", "Type": "BOGUS" }] }),
+                "InvalidEC2TagException",
+            ),
+            (
+                json!({ "onPremisesInstanceTagFilters": [{ "Key": "k", "Value": "v", "Type": "BOGUS" }] }),
+                "InvalidOnPremisesTagCombinationException",
+            ),
+            (
+                json!({ "triggerConfigurations": [{ "triggerName": "t", "triggerTargetArn": "arn:aws:sns:us-east-1:000000000000:x", "triggerEvents": ["BogusEvent"] }] }),
+                "InvalidTriggerConfigException",
+            ),
+            (
+                json!({ "autoRollbackConfiguration": { "enabled": true, "events": ["NOT_AN_EVENT"] } }),
+                "InvalidAutoRollbackConfigException",
+            ),
+        ];
+        for (extra, code) in &cases {
+            assert_eq!(
+                err_code(
+                    s.create_deployment_group(&req("CreateDeploymentGroup", base(extra.clone())))
+                ),
+                *code,
+                "create: {extra}"
+            );
+        }
+        // The same validation runs on update. Create a valid group first.
+        s.create_deployment_group(&req("CreateDeploymentGroup", base(json!({}))))
+            .unwrap();
+        assert_eq!(
+            err_code(s.update_deployment_group(&req(
+                "UpdateDeploymentGroup",
+                json!({
+                    "applicationName": "app",
+                    "currentDeploymentGroupName": "dg",
+                    "ec2TagFilters": [{ "Key": "k", "Value": "v", "Type": "BOGUS" }]
+                })
+            ))),
+            "InvalidEC2TagException"
+        );
+        // Valid nested enums are accepted.
+        s.update_deployment_group(&req(
+            "UpdateDeploymentGroup",
+            json!({
+                "applicationName": "app",
+                "currentDeploymentGroupName": "dg",
+                "autoRollbackConfiguration": { "enabled": true, "events": ["DEPLOYMENT_FAILURE"] },
+                "triggerConfigurations": [{ "triggerName": "t", "triggerTargetArn": "arn:aws:sns:us-east-1:000000000000:x", "triggerEvents": ["DeploymentSuccess"] }]
+            }),
+        ))
+        .unwrap();
+    }
+
+    // Suspicious: CreateDeployment requires a deployment group name, and the
+    // named group must exist.
+    #[test]
+    fn create_deployment_requires_and_checks_group() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "app" }),
+        ))
+        .unwrap();
+        assert_eq!(
+            err_code(s.create_deployment(&req(
+                "CreateDeployment",
+                json!({ "applicationName": "app" })
+            ))),
+            "DeploymentGroupNameRequiredException"
+        );
+        assert_eq!(
+            err_code(s.create_deployment(&req(
+                "CreateDeployment",
+                json!({ "applicationName": "app", "deploymentGroupName": "ghost" })
+            ))),
+            "DeploymentGroupDoesNotExistException"
+        );
+    }
+
+    // T2.5: CreateDeployment inherits the target group's deploymentStyle.
+    #[test]
+    fn create_deployment_inherits_deployment_style() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "app" }),
+        ))
+        .unwrap();
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({
+                "applicationName": "app",
+                "deploymentGroupName": "dg",
+                "serviceRoleArn": "arn:aws:iam::000000000000:role/cd",
+                "deploymentStyle": { "deploymentType": "BLUE_GREEN", "deploymentOption": "WITH_TRAFFIC_CONTROL" }
+            }),
+        ))
+        .unwrap();
+        let id = body_of(
+            s.create_deployment(&req(
+                "CreateDeployment",
+                json!({ "applicationName": "app", "deploymentGroupName": "dg" }),
+            ))
+            .unwrap(),
+        )["deploymentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let got = body_of(
+            s.get_deployment(&req("GetDeployment", json!({ "deploymentId": id })))
+                .unwrap(),
+        );
+        assert_eq!(
+            got["deploymentInfo"]["deploymentStyle"]["deploymentType"],
+            "BLUE_GREEN"
+        );
+        assert_eq!(
+            got["deploymentInfo"]["deploymentStyle"]["deploymentOption"],
+            "WITH_TRAFFIC_CONTROL"
+        );
+    }
+
+    // T2.6: CreateDeployment carries overrideAlarmConfiguration into the stored
+    // deployment so GetDeployment echoes it.
+    #[test]
+    fn create_deployment_carries_override_alarm_configuration() {
+        let s = svc();
+        make_app_and_group(&s, "app", "dg");
+        let id = body_of(
+            s.create_deployment(&req(
+                "CreateDeployment",
+                json!({
+                    "applicationName": "app",
+                    "deploymentGroupName": "dg",
+                    "overrideAlarmConfiguration": { "enabled": true, "alarms": [{ "name": "cpu-high" }] }
+                }),
+            ))
+            .unwrap(),
+        )["deploymentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let got = body_of(
+            s.get_deployment(&req("GetDeployment", json!({ "deploymentId": id })))
+                .unwrap(),
+        );
+        assert_eq!(
+            got["deploymentInfo"]["overrideAlarmConfiguration"]["enabled"],
+            true
+        );
+        assert_eq!(
+            got["deploymentInfo"]["overrideAlarmConfiguration"]["alarms"][0]["name"],
+            "cpu-high"
+        );
+    }
+
+    // T2.7: deleting a resource purges its tag entry, so a same-named
+    // recreation does not resurrect stale tags.
+    #[test]
+    fn delete_purges_resource_tags() {
+        let s = svc();
+        // Application.
+        s.create_application(&req(
+            "CreateApplication",
+            json!({ "applicationName": "app", "tags": [{ "Key": "k", "Value": "v" }] }),
+        ))
+        .unwrap();
+        let app_arn = "arn:aws:codedeploy:us-east-1:000000000000:application:app";
+        assert_eq!(tags_for(&s, app_arn).len(), 1);
+        // Deployment group with tags, under the same app.
+        s.create_deployment_group(&req(
+            "CreateDeploymentGroup",
+            json!({
+                "applicationName": "app",
+                "deploymentGroupName": "dg",
+                "serviceRoleArn": "arn:aws:iam::000000000000:role/cd",
+                "tags": [{ "Key": "t", "Value": "core" }]
+            }),
+        ))
+        .unwrap();
+        let dg_arn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:app/dg";
+        assert_eq!(tags_for(&s, dg_arn).len(), 1);
+        // Deleting the application purges both the app and group tag entries.
+        s.delete_application(&req(
+            "DeleteApplication",
+            json!({ "applicationName": "app" }),
+        ))
+        .unwrap();
+        assert_eq!(tags_for(&s, app_arn).len(), 0);
+        assert_eq!(tags_for(&s, dg_arn).len(), 0);
+
+        // Deployment config.
+        s.create_deployment_config(&req(
+            "CreateDeploymentConfig",
+            json!({ "deploymentConfigName": "cfg", "minimumHealthyHosts": { "type": "HOST_COUNT", "value": 1 } }),
+        ))
+        .unwrap();
+        let cfg_arn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentconfig:cfg";
+        s.tag_resource(&req(
+            "TagResource",
+            json!({ "ResourceArn": cfg_arn, "Tags": [{ "Key": "k", "Value": "v" }] }),
+        ))
+        .unwrap();
+        assert_eq!(tags_for(&s, cfg_arn).len(), 1);
+        s.delete_deployment_config(&req(
+            "DeleteDeploymentConfig",
+            json!({ "deploymentConfigName": "cfg" }),
+        ))
+        .unwrap();
+        assert_eq!(tags_for(&s, cfg_arn).len(), 0);
+
+        // Deleting a deployment group directly also purges its tags.
+        make_app_and_group(&s, "app2", "dg2");
+        let dg2_arn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:app2/dg2";
+        s.tag_resource(&req(
+            "TagResource",
+            json!({ "ResourceArn": dg2_arn, "Tags": [{ "Key": "k", "Value": "v" }] }),
+        ))
+        .unwrap();
+        assert_eq!(tags_for(&s, dg2_arn).len(), 1);
+        s.delete_deployment_group(&req(
+            "DeleteDeploymentGroup",
+            json!({ "applicationName": "app2", "deploymentGroupName": "dg2" }),
+        ))
+        .unwrap();
+        assert_eq!(tags_for(&s, dg2_arn).len(), 0);
     }
 }
