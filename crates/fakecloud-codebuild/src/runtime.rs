@@ -7,8 +7,11 @@
 //! The task resolves the environment image, assembles the buildspec (inline on
 //! the project `source.buildspec` or a `StartBuild.buildspecOverride`), parses
 //! its `env`/`phases`/`artifacts`, then runs a real container from the image and
-//! executes ALL phases in ONE continuous shell so `cd`/`export` persist across
-//! phases exactly like AWS. It honors CodeBuild phase-failure semantics
+//! executes the phases in one `docker exec`, carrying cwd + exported vars across
+//! phases (via a threaded state file) so `cd`/`export` persist exactly like AWS.
+//! Each phase runs in a subshell so a failing command — including a user
+//! `exit N` — fails only that phase (recorded FAILED) instead of aborting the
+//! build. It honors CodeBuild phase-failure semantics
 //! (`install`/`pre_build`/`build` short-circuit on the first failing phase,
 //! `post_build` always runs), settles `buildStatus` on the REAL container exit
 //! codes (or `TIMED_OUT` at the configured `timeoutInMinutes`), streams output
@@ -474,56 +477,65 @@ fn resolve_image(image: Option<&str>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Build script (single continuous shell so cd/export persist across phases)
+// Build script (cwd + exported vars threaded across phases so state persists,
+// while a failing command — including `exit N` — still records the phase FAILED)
 // ---------------------------------------------------------------------------
 
-/// Emit a phase function whose body runs in the CURRENT shell (not a subshell),
-/// so any `cd`/`export` persists to later phases. Commands are chained with
-/// `&&` so the phase stops at (and reports) the first failing command, matching
-/// CodeBuild. An empty phase is `:` (a no-op success).
-fn phase_fn(fn_suffix: &str, cmds: &[String]) -> String {
+/// Emit one phase's block. Each phase runs its commands in a SUBSHELL so a
+/// user `exit N` (or any non-zero) fails only that phase instead of aborting the
+/// whole build before the end-marker is printed. Cross-phase state is preserved
+/// by sourcing the threaded env (`$FCB_S/env`) and cwd (`$FCB_S/cwd`) at the
+/// start and, on success, writing them back — so `cd`/`export` in one phase are
+/// visible to the next, matching AWS. Commands are `&&`-chained so the phase
+/// stops at (and reports) the first failing command. `guarded` phases
+/// (install/pre_build/build) only run while no earlier phase has failed;
+/// post_build always runs.
+fn phase_block(label: &str, cmds: &[String], guarded: bool) -> String {
+    let ts = "$(date +%s%3N 2>/dev/null || echo 0)";
     let body = if cmds.is_empty() {
         ":".to_string()
     } else {
         cmds.join(" &&\n")
     };
-    format!("fcb_{fn_suffix} () {{\n{body}\n}}\n")
+    let inner = format!(
+        "printf '{MARKER}S {label} %s\\n' \"{ts}\"\n\
+         (\n\
+         . \"$FCB_S/env\" 2>/dev/null || true\n\
+         cd \"$(cat \"$FCB_S/cwd\")\" 2>/dev/null || cd '{BUILD_WORKDIR}'\n\
+         {body}\n\
+         __fc_rc=$?\n\
+         if [ \"$__fc_rc\" = 0 ]; then pwd > \"$FCB_S/cwd\"; export -p > \"$FCB_S/env\"; fi\n\
+         exit $__fc_rc\n\
+         )\n\
+         FC_RC=$?\n\
+         printf '{MARKER}E {label} %s %s\\n' \"$FC_RC\" \"{ts}\"\n\
+         if [ \"$FC_RC\" != 0 ]; then FC_FAILED=1; fi\n"
+    );
+    if guarded {
+        format!("if [ \"$FC_FAILED\" = 0 ]; then\n{inner}fi\n")
+    } else {
+        inner
+    }
 }
 
-/// Build the single shell script that runs all phases in one `docker exec`.
-/// Phase boundaries + exit codes are printed as [`MARKER`] lines the parser
-/// separates from build output; `install`/`pre_build`/`build` short-circuit on
-/// the first failing phase while `post_build` always runs.
+/// Build the shell script that runs all phases in one `docker exec`. Phase
+/// boundaries + exit codes are printed as [`MARKER`] lines the parser separates
+/// from build output; `install`/`pre_build`/`build` short-circuit on the first
+/// failing phase while `post_build` always runs. The script's own exit code is
+/// non-zero iff any phase failed.
 fn build_script(spec: &Buildspec) -> String {
-    let ts = "$(date +%s%3N 2>/dev/null || echo 0)";
     let mut s = String::new();
     s.push_str("exec 2>&1\n");
-    s.push_str(&format!("cd '{BUILD_WORKDIR}' || exit 97\n"));
+    // Thread cwd + exported vars across phases via a small state dir.
+    s.push_str("FCB_S=/tmp/.fcb_state\n");
+    s.push_str("rm -rf \"$FCB_S\"; mkdir -p \"$FCB_S\"\n");
+    s.push_str(&format!("printf '%s' '{BUILD_WORKDIR}' > \"$FCB_S/cwd\"\n"));
+    s.push_str(": > \"$FCB_S/env\"\n");
     s.push_str("FC_FAILED=0\n");
-    s.push_str(&phase_fn("install", &spec.install));
-    s.push_str(&phase_fn("pre_build", &spec.pre_build));
-    s.push_str(&phase_fn("build", &spec.build));
-    s.push_str(&phase_fn("post_build", &spec.post_build));
-    for phase in ["INSTALL", "PRE_BUILD", "BUILD"] {
-        let f = phase.to_lowercase();
-        s.push_str(&format!(
-            "if [ \"$FC_FAILED\" = 0 ]; then\n\
-             printf '{MARKER}S {phase} %s\\n' \"{ts}\"\n\
-             fcb_{f}\n\
-             FC_RC=$?\n\
-             printf '{MARKER}E {phase} %s %s\\n' \"$FC_RC\" \"{ts}\"\n\
-             if [ \"$FC_RC\" != 0 ]; then FC_FAILED=1; fi\n\
-             fi\n"
-        ));
-    }
-    // post_build always runs, even after an earlier phase failed.
-    s.push_str(&format!(
-        "printf '{MARKER}S POST_BUILD %s\\n' \"{ts}\"\n\
-         fcb_post_build\n\
-         FC_RC=$?\n\
-         printf '{MARKER}E POST_BUILD %s %s\\n' \"$FC_RC\" \"{ts}\"\n\
-         if [ \"$FC_RC\" != 0 ]; then FC_FAILED=1; fi\n"
-    ));
+    s.push_str(&phase_block("INSTALL", &spec.install, true));
+    s.push_str(&phase_block("PRE_BUILD", &spec.pre_build, true));
+    s.push_str(&phase_block("BUILD", &spec.build, true));
+    s.push_str(&phase_block("POST_BUILD", &spec.post_build, false));
     s.push_str("exit $FC_FAILED\n");
     s
 }
@@ -538,10 +550,17 @@ struct PhaseResult {
 
 /// Split a build script's combined stdout into (phase results, build log
 /// lines). Marker lines drive the phase breakdown; every other line is real
-/// build output destined for CloudWatch Logs.
+/// build output destined for CloudWatch Logs. A phase whose start-marker has NO
+/// matching end-marker (the shell died mid-phase) is recorded FAILED rather than
+/// dropped, so an unknown outcome never lets the build settle SUCCEEDED.
 fn parse_exec_output(stdout: &str) -> (Vec<PhaseResult>, Vec<String>) {
-    let mut phases: Vec<PhaseResult> = Vec::new();
-    let mut starts: HashMap<String, i64> = HashMap::new();
+    // An open phase (start seen); `end` is set when its end-marker arrives.
+    struct Open {
+        name: String,
+        start_ms: i64,
+        end: Option<(i64, i64)>, // (rc, end_ms)
+    }
+    let mut order: Vec<Open> = Vec::new();
     let mut logs: Vec<String> = Vec::new();
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix(MARKER) {
@@ -549,20 +568,25 @@ fn parse_exec_output(stdout: &str) -> (Vec<PhaseResult>, Vec<String>) {
             match it.next() {
                 Some("S") => {
                     if let (Some(name), Some(ms)) = (it.next(), it.next()) {
-                        starts.insert(name.to_string(), ms.parse().unwrap_or(0));
+                        order.push(Open {
+                            name: name.to_string(),
+                            start_ms: ms.parse().unwrap_or(0),
+                            end: None,
+                        });
                     }
                 }
                 Some("E") => {
                     let name = it.next().unwrap_or("").to_string();
-                    let rc: i64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(-1);
+                    let rc: i64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
                     let end_ms: i64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let start_ms = starts.get(&name).copied().unwrap_or(0);
-                    phases.push(PhaseResult {
-                        name,
-                        rc,
-                        start_ms,
-                        end_ms,
-                    });
+                    // Close the most-recent still-open phase of this name.
+                    if let Some(e) = order
+                        .iter_mut()
+                        .rev()
+                        .find(|o| o.name == name && o.end.is_none())
+                    {
+                        e.end = Some((rc, end_ms));
+                    }
                 }
                 _ => {}
             }
@@ -570,6 +594,24 @@ fn parse_exec_output(stdout: &str) -> (Vec<PhaseResult>, Vec<String>) {
             logs.push(line.to_string());
         }
     }
+    let phases = order
+        .into_iter()
+        .map(|o| match o.end {
+            Some((rc, end_ms)) => PhaseResult {
+                name: o.name,
+                rc,
+                start_ms: o.start_ms,
+                end_ms,
+            },
+            // Start with no end: the shell died during this phase -> FAILED.
+            None => PhaseResult {
+                name: o.name,
+                rc: 1,
+                start_ms: o.start_ms,
+                end_ms: 0,
+            },
+        })
+        .collect();
     (phases, logs)
 }
 
@@ -665,7 +707,10 @@ fn submitted_queued(now: DateTime<Utc>, is_batch: bool) -> Vec<Value> {
 // ---------------------------------------------------------------------------
 
 enum ExecOutcome {
-    Ran { stdout: String },
+    Ran {
+        stdout: String,
+        exit_code: Option<i32>,
+    },
     TimedOut,
     LaunchError(String),
 }
@@ -800,10 +845,12 @@ pub async fn run_build(job: BuildJob) {
                 ),
             );
         }
-        ExecOutcome::Ran { stdout } => {
+        ExecOutcome::Ran { stdout, exit_code } => {
             let (results, lines) = parse_exec_output(&stdout);
             log_lines = lines;
-            build_failed = results.iter().any(|p| p.rc != 0);
+            // A phase reported non-zero, OR the build script itself exited
+            // non-zero (defence against a lost marker) fails the build.
+            build_failed = results.iter().any(|p| p.rc != 0) || !matches!(exit_code, Some(0));
             for p in &results {
                 phases.push(buildspec_phase_value(p, host_start, host_end));
             }
@@ -1000,6 +1047,7 @@ async fn run_build_script(
         Ok(Err(e)) => ExecOutcome::LaunchError(e.to_string()),
         Ok(Ok(out)) => ExecOutcome::Ran {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            exit_code: out.status.code(),
         },
     }
 }
@@ -1331,21 +1379,27 @@ mod tests {
     }
 
     #[test]
-    fn build_script_chains_phase_commands_in_one_shell() {
-        // Cross-phase state relies on phase commands running in the current
-        // shell (functions), not subshells, and on `&&`-chaining within a phase.
+    fn build_script_threads_state_and_isolates_exit() {
+        // Cross-phase state is threaded (env + cwd files), phase bodies run in a
+        // subshell (so a user `exit N` fails only that phase), and `&&`-chaining
+        // stops a phase at its first failing command.
         let spec = parse_buildspec(
             "version: 0.2\nphases:\n  \
              pre_build:\n    commands:\n      - export TAG=1\n  \
-             build:\n    commands:\n      - echo $TAG\n      - true\n",
+             build:\n    commands:\n      - echo $TAG\n      - exit 1\n",
         )
         .unwrap();
         let script = build_script(&spec);
-        assert!(script.contains("fcb_pre_build () {\nexport TAG=1\n}"));
-        assert!(script.contains("echo $TAG &&\ntrue"));
-        // post_build runs unconditionally (outside the FC_FAILED guard block).
-        assert!(script.contains("fcb_post_build\n"));
-        assert!(script.contains("cd '/codebuild/build'"));
+        // Each phase's commands run inside a subshell that restores + persists
+        // state, so `exit 1` cannot abort the driver before the end-marker.
+        assert!(script.contains(". \"$FCB_S/env\""));
+        assert!(script.contains("cd \"$(cat \"$FCB_S/cwd\")\""));
+        assert!(script.contains("export -p > \"$FCB_S/env\""));
+        assert!(script.contains("echo $TAG &&\nexit 1"));
+        // BUILD is guarded by FC_FAILED; POST_BUILD runs unconditionally.
+        assert!(script.contains("if [ \"$FC_FAILED\" = 0 ]; then\nprintf '@@FCB@@S BUILD"));
+        assert!(script.contains("printf '@@FCB@@S POST_BUILD"));
+        assert!(script.trim_end().ends_with("exit $FC_FAILED"));
     }
 
     #[test]
@@ -1367,6 +1421,46 @@ mod tests {
         let v = buildspec_phase_value(&phases[0], Utc::now(), Utc::now());
         assert_eq!(v["phaseStatus"], "SUCCEEDED");
         assert_eq!(v["durationInSeconds"], 0); // 1000..1500ms -> 0 whole seconds
+    }
+
+    #[test]
+    fn failing_phase_is_recorded_failed_and_fails_build() {
+        // A BUILD phase reporting a non-zero exit must appear as a FAILED phase,
+        // and any FAILED phase makes the overall build FAILED.
+        let out = format!(
+            "{MARKER}S INSTALL 1000\n{MARKER}E INSTALL 0 1010\n\
+             {MARKER}S BUILD 1010\nrunning\n{MARKER}E BUILD 1 1020\n\
+             {MARKER}S POST_BUILD 1020\n{MARKER}E POST_BUILD 0 1030\n"
+        );
+        let (phases, _) = parse_exec_output(&out);
+        let build = phases
+            .iter()
+            .find(|p| p.name == "BUILD")
+            .expect("BUILD present");
+        assert_eq!(build.rc, 1, "BUILD must be recorded, not dropped");
+        assert!(phases.iter().any(|p| p.name == "POST_BUILD" && p.rc == 0));
+        assert!(phases.iter().any(|p| p.rc != 0));
+        assert_eq!(
+            buildspec_phase_value(build, Utc::now(), Utc::now())["phaseStatus"],
+            "FAILED"
+        );
+    }
+
+    #[test]
+    fn missing_end_marker_is_failed_not_dropped() {
+        // The shell died mid-BUILD (start, no end). The phase must be FAILED,
+        // never absent (which previously let the build settle SUCCEEDED).
+        let out = format!(
+            "{MARKER}S INSTALL 1000\n{MARKER}E INSTALL 0 1010\n\
+             {MARKER}S BUILD 1010\nboom\n"
+        );
+        let (phases, _) = parse_exec_output(&out);
+        let build = phases
+            .iter()
+            .find(|p| p.name == "BUILD")
+            .expect("BUILD present");
+        assert_ne!(build.rc, 0, "missing end-marker must be FAILED");
+        assert!(phases.iter().any(|p| p.rc != 0));
     }
 
     #[test]

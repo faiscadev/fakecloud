@@ -59,8 +59,11 @@ When a container runtime is available, the background build task:
   `StartBuild.buildspecOverride` — reading `env.variables` and the
   `install` / `pre_build` / `build` / `post_build` phase `commands` and the
   `artifacts` block.
-- **Runs all phases in ONE continuous shell** in the container, so `cd` and
-  `export` in one phase persist into the next exactly like AWS. The standard
+- **Runs the phases in the container, carrying state across them** (cwd +
+  exported variables are threaded phase-to-phase), so `cd` and `export` in one
+  phase persist into the next exactly like AWS — while a failing command
+  (including a `exit N`) fails only that phase (recorded FAILED) rather than
+  silently aborting the build. The standard
   CodeBuild environment variables are set (`CODEBUILD_BUILD_ID`,
   `CODEBUILD_BUILD_ARN`, `CODEBUILD_SOURCE_VERSION`, `CODEBUILD_BUILD_NUMBER`,
   plus the project's `environmentVariables` and the buildspec `env.variables`).

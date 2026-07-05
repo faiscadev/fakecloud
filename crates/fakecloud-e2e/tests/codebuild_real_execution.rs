@@ -193,6 +193,17 @@ async fn start_build_failing_command_settles_failed() {
         "failing command must fail the build; phases: {:?}",
         build.phases()
     );
+    // The BUILD phase must ACTUALLY appear in the breakdown (the regression was
+    // that a `exit 1` command aborted the shell before the BUILD end-marker, so
+    // BUILD went missing and the build wrongly settled SUCCEEDED).
+    assert!(
+        build
+            .phases()
+            .iter()
+            .any(|p| p.phase_type().map(|t| t.as_str()) == Some("BUILD")),
+        "BUILD phase must be present in the breakdown; phases: {:?}",
+        build.phases()
+    );
     assert_eq!(phase_status(&build, "BUILD"), Some(StatusType::Failed));
     // post_build still runs even after build fails (AWS semantics).
     assert!(
