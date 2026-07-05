@@ -1723,6 +1723,30 @@ Resources:
     }
 
     #[test]
+    fn fn_select_over_json_array_string_getatt_resolves_as_list() {
+        // A list-valued Fn::GetAtt (e.g. AWS::AmazonMQ::Broker AmqpEndpoints)
+        // resolves to a JSON-array *string* because attributes are String-keyed;
+        // Fn::Select must parse it back into a list and index into it rather than
+        // collapsing to the first element.
+        let (p, r, ids, mut attrs) = empty();
+        let mut broker_attrs = BTreeMap::new();
+        broker_attrs.insert(
+            "AmqpEndpoints".to_string(),
+            r#"["amqps://a.example:5671","amqps://b.example:5671"]"#.to_string(),
+        );
+        attrs.insert("MyBroker".to_string(), broker_attrs);
+        let v: Value = serde_json::from_str(
+            r#"{"Fn::Select": [1, {"Fn::GetAtt": ["MyBroker", "AmqpEndpoints"]}]}"#,
+        )
+        .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(
+            resolved,
+            Value::String("amqps://b.example:5671".to_string())
+        );
+    }
+
+    #[test]
     fn fn_select_resolves_ref_inside_list() {
         let template = r#"{
             "Parameters": {"AZs": {"Type": "CommaDelimitedList"}},

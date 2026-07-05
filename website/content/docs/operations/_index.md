@@ -2243,6 +2243,34 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateFileSystem`
 - `UpdateFileSystemProtection`
 
+## [Amazon MQ](@/docs/services/mq.md)
+
+- `CreateBroker`
+- `CreateConfiguration`
+- `CreateTags`
+- `CreateUser`
+- `DeleteBroker`
+- `DeleteConfiguration`
+- `DeleteTags`
+- `DeleteUser`
+- `DescribeBroker`
+- `DescribeBrokerEngineTypes`
+- `DescribeBrokerInstanceOptions`
+- `DescribeConfiguration`
+- `DescribeConfigurationRevision`
+- `DescribeSharedResources`
+- `DescribeUser`
+- `ListBrokers`
+- `ListConfigurationRevisions`
+- `ListConfigurations`
+- `ListTags`
+- `ListUsers`
+- `Promote`
+- `RebootBroker`
+- `UpdateBroker`
+- `UpdateConfiguration`
+- `UpdateUser`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`

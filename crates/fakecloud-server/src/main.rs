@@ -615,6 +615,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let mq_state: fakecloud_mq::SharedMqState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let codecommit_state: fakecloud_codecommit::SharedCodeCommitState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1179,6 +1186,7 @@ async fn main() {
             codecommit: codecommit_state.clone(),
             efs: efs_state.clone(),
             elasticbeanstalk: beanstalk_state.clone(),
+            mq: mq_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -4906,6 +4914,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("elasticfilesystem", h);
     }
     registry.register(Arc::new(efs_service));
+
+    // Amazon MQ: restJson1 control plane (brokers, configurations, users, tags).
+    let mq_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("mq").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_mq::persistence::load_into(&store, &mq_state) {
+                Ok(fakecloud_mq::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded mq persistence snapshot");
+                }
+                Ok(fakecloud_mq::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no mq persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut mq_service = fakecloud_mq::MqService::new(mq_state.clone());
+    if let Some(store) = mq_snapshot_store {
+        mq_service = mq_service.with_snapshot_store(store);
+    }
+    if let Some(h) = mq_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("mq", h);
+    }
+    registry.register(Arc::new(mq_service));
 
     // AWS CodeCommit: awsJson1.1 git-repository control plane (repositories,
     // branches, commits/files/blobs, pull requests, approval-rule templates,

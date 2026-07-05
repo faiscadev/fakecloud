@@ -133,6 +133,11 @@ async fn efs_acceptance() {
 }
 
 #[tokio::test]
+async fn mq_acceptance() {
+    run_shard("mq").await;
+}
+
+#[tokio::test]
 async fn glacier_acceptance() {
     run_shard("glacier").await;
 }
