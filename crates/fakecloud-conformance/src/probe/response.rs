@@ -220,6 +220,24 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // when the referenced domain does not exist). A handler returning it for
         // the probes' synthetic (non-existent) resources ran correctly.
         "codeartifact" => &["ResourceNotFoundException"],
+        // Elastic Beanstalk's Query API uses two service-wide client-error
+        // codes that its per-operation Smithy `errors:` lists do not enumerate:
+        //   - InvalidParameterValue: the canonical response whenever an
+        //     operation dereferences a resource that does not exist or is
+        //     malformed -- a missing application (`DescribeConfigurationSettings`,
+        //     `CreateEnvironment`), a missing environment (`UpdateEnvironment`,
+        //     `TerminateEnvironment`, `DescribeEnvironmentHealth`), a missing
+        //     version/template, etc. The Smithy model only declares the
+        //     `TooMany*` / `InsufficientPrivilegesException` shapes on these ops,
+        //     never a not-found shape, yet the live API returns
+        //     `InvalidParameterValue` for the probes' synthetic (non-existent)
+        //     names and ids.
+        //   - MissingParameter: returned by the Query framework when a required
+        //     form parameter is absent.
+        // A handler returning either to the probes' synthetic inputs ran
+        // correctly. Source: Elastic Beanstalk API "Common Errors" + the
+        // per-op error text the live service returns for unknown resources.
+        "elasticbeanstalk" => &["InvalidParameterValue", "MissingParameter"],
         _ => &[],
     }
 }

@@ -405,6 +405,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_CLOUDTRAIL", "cloudtrail"),
     ("AWS_ENDPOINT_URL_REDSHIFT", "redshift"),
     ("AWS_ENDPOINT_URL_ELASTICACHE", "elasticache"),
+    ("AWS_ENDPOINT_URL_ELASTIC_BEANSTALK", "elasticbeanstalk"),
     ("AWS_ENDPOINT_URL_MEMORYDB", "memorydb"),
     ("AWS_ENDPOINT_URL_SERVICEDISCOVERY", "servicediscovery"),
     ("AWS_ENDPOINT_URL_EKS", "eks"),

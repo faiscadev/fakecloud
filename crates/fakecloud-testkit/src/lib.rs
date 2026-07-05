@@ -748,6 +748,10 @@ impl TestServer {
         aws_sdk_elasticache::Client::new(&self.aws_config().await)
     }
 
+    pub async fn elasticbeanstalk_client(&self) -> aws_sdk_elasticbeanstalk::Client {
+        aws_sdk_elasticbeanstalk::Client::new(&self.aws_config().await)
+    }
+
     pub async fn cloudformation_client(&self) -> aws_sdk_cloudformation::Client {
         aws_sdk_cloudformation::Client::new(&self.aws_config().await)
     }

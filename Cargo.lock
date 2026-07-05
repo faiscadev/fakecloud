@@ -1030,6 +1030,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-elasticbeanstalk"
+version = "1.99.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4207ab9193e21cd6aeb8643dda38940ea54f467879506bce92fb385ae9d63742"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-elasticloadbalancingv2"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3515,6 +3540,7 @@ dependencies = [
  "fakecloud-ecs",
  "fakecloud-eks",
  "fakecloud-elasticache",
+ "fakecloud-elasticbeanstalk",
  "fakecloud-elbv2",
  "fakecloud-eventbridge",
  "fakecloud-firehose",
@@ -4235,6 +4261,7 @@ dependencies = [
  "aws-sdk-ecs",
  "aws-sdk-eks",
  "aws-sdk-elasticache",
+ "aws-sdk-elasticbeanstalk",
  "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-eventbridge",
  "aws-sdk-firehose",
@@ -4581,6 +4608,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fakecloud-elasticbeanstalk"
+version = "0.38.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5456,6 +5502,7 @@ dependencies = [
  "aws-sdk-ecs",
  "aws-sdk-eks",
  "aws-sdk-elasticache",
+ "aws-sdk-elasticbeanstalk",
  "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-eventbridge",
  "aws-sdk-firehose",

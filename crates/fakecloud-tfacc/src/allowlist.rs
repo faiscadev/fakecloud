@@ -603,6 +603,35 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "elasticbeanstalk",
+        // Elastic Beanstalk is a full control plane. The provider's
+        // application and configuration-template resources are pure
+        // control-plane CRUD; the environment resource creates an
+        // environment that our async settle drives to `Ready`/`Green` fast
+        // enough for Terraform's create waiter, and exposes the synthesized
+        // web-tier resources (Auto Scaling group, launch configuration,
+        // instance, load balancer, ELB-shaped endpoint) the provider asserts.
+        //
+        // The application-version acceptance test is NOT an Elastic Beanstalk
+        // gap: it fails in its S3 fixture step, not in Elastic Beanstalk. The
+        // upstream config uploads the source bundle to a dotted S3 bucket
+        // (`tftest.applicationversion.bucket-<rand>`), which the AWS SDK
+        // addresses virtual-hosted-style (`<bucket>.<endpoint>`) against the
+        // loopback fakecloud endpoint — a hostname that cannot resolve, so the
+        // `aws_s3_bucket` dependency never applies. That is an S3
+        // virtual-hosted-addressing constraint of the loopback tfacc harness,
+        // independent of Elastic Beanstalk; `CreateApplicationVersion` itself
+        // is exercised by the conformance suite and the crate's unit tests.
+        run_regex: concat!(
+            "^TestAccElasticBeanstalk(",
+            "Application_basic",
+            "|ConfigurationTemplate_basic",
+            "|Environment_basic",
+            ")$",
+        ),
+        deny: &[],
+    },
+    Service {
         name: "memorydb",
         // MemoryDB is a full control plane (no Redis/Valkey data-plane container),
         // so the Terraform provider's control-plane resources are exercisable:
@@ -1498,6 +1527,18 @@ pub const SHARDS: &[Shard] = &[
             "|UserGroup|UserGroupAssociation",
             "|SubnetGroup|SubnetGroupDataSource",
             ")_basic$",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "elasticbeanstalk",
+        service: "elasticbeanstalk",
+        run_regex: concat!(
+            "^TestAccElasticBeanstalk(",
+            "Application_basic",
+            "|ConfigurationTemplate_basic",
+            "|Environment_basic",
+            ")$",
         ),
         extra_deny: &[],
     },

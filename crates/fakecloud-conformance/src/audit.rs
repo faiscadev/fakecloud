@@ -102,6 +102,12 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service.rs"],
             &["elasticache"],
         ),
+        (
+            "elasticbeanstalk",
+            "elasticbeanstalk",
+            &["service.rs"],
+            &["elasticbeanstalk"],
+        ),
         // Step Functions tests historically tagged `sfn`; Smithy / service-map uses `states`.
         (
             "states",

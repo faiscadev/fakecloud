@@ -63,6 +63,7 @@ SERVICES=(
     "resource-groups|Resource Groups|resource-groups"
     "tagging|Resource Groups Tagging API|resource-groups-tagging"
     "elasticache|ElastiCache|elasticache"
+    "elasticbeanstalk|Elastic Beanstalk|elasticbeanstalk"
     "memorydb|MemoryDB|memorydb"
     "eks|EKS|eks"
     "glacier|Amazon S3 Glacier|glacier"

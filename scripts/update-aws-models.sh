@@ -46,6 +46,7 @@ SERVICES=(
     "rds-data:rds-data"
     "dsql:dsql"
     "elasticache:elasticache"
+    "elasticbeanstalk:elastic-beanstalk"
     "memorydb:memorydb"
     "eks:eks"
     "glacier:glacier"

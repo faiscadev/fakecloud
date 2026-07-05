@@ -2043,6 +2043,56 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `TestFailover`
 - `TestMigration`
 
+## [Elastic Beanstalk](@/docs/services/elasticbeanstalk.md)
+
+- `AbortEnvironmentUpdate`
+- `ApplyEnvironmentManagedAction`
+- `AssociateEnvironmentOperationsRole`
+- `CheckDNSAvailability`
+- `ComposeEnvironments`
+- `CreateApplication`
+- `CreateApplicationVersion`
+- `CreateConfigurationTemplate`
+- `CreateEnvironment`
+- `CreatePlatformVersion`
+- `CreateStorageLocation`
+- `DeleteApplication`
+- `DeleteApplicationVersion`
+- `DeleteConfigurationTemplate`
+- `DeleteEnvironmentConfiguration`
+- `DeletePlatformVersion`
+- `DescribeAccountAttributes`
+- `DescribeApplicationVersions`
+- `DescribeApplications`
+- `DescribeConfigurationOptions`
+- `DescribeConfigurationSettings`
+- `DescribeEnvironmentHealth`
+- `DescribeEnvironmentManagedActionHistory`
+- `DescribeEnvironmentManagedActions`
+- `DescribeEnvironmentResources`
+- `DescribeEnvironments`
+- `DescribeEvents`
+- `DescribeInstancesHealth`
+- `DescribePlatformVersion`
+- `DisassociateEnvironmentOperationsRole`
+- `ListAvailableSolutionStacks`
+- `ListPlatformBranches`
+- `ListPlatformVersions`
+- `ListTagsForResource`
+- `RebuildEnvironment`
+- `RequestEnvironmentInfo`
+- `RestartAppServer`
+- `RetrieveEnvironmentInfo`
+- `SwapEnvironmentCNAMEs`
+- `TerminateEnvironment`
+- `UpdateApplication`
+- `UpdateApplicationResourceLifecycle`
+- `UpdateApplicationVersion`
+- `UpdateConfigurationTemplate`
+- `UpdateEnvironment`
+- `UpdateTagsForResource`
+- `ValidateConfigurationSettings`
+
 ## [MemoryDB](@/docs/services/memorydb.md)
 
 - `BatchUpdateCluster`

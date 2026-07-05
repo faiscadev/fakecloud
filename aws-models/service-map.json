@@ -95,6 +95,10 @@
     "repo_dir": "elasticache",
     "service_name": "elasticache"
   },
+  "elasticbeanstalk": {
+    "repo_dir": "elastic-beanstalk",
+    "service_name": "elasticbeanstalk"
+  },
   "sfn": {
     "repo_dir": "sfn",
     "service_name": "states"
