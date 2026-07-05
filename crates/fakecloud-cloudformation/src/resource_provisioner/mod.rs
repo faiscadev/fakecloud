@@ -905,6 +905,7 @@ pub struct ResourceProvisioner {
     pub servicediscovery_state: SharedServiceDiscoveryState,
     pub codeartifact_state: fakecloud_codeartifact::SharedCodeArtifactState,
     pub codecommit_state: fakecloud_codecommit::SharedCodeCommitState,
+    pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1061,6 +1062,7 @@ mod ec2;
 mod ecr;
 mod ecs;
 mod eks;
+mod elasticbeanstalk;
 mod eventbridge;
 mod firehose;
 mod glue;
@@ -1199,6 +1201,14 @@ impl ResourceProvisioner {
             "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
             "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
+            "AWS::ElasticBeanstalk::Application" => self.create_eb_application(resource),
+            "AWS::ElasticBeanstalk::ApplicationVersion" => {
+                self.create_eb_application_version(resource)
+            }
+            "AWS::ElasticBeanstalk::Environment" => self.create_eb_environment(resource),
+            "AWS::ElasticBeanstalk::ConfigurationTemplate" => {
+                self.create_eb_configuration_template(resource)
+            }
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Instance" => self.create_ec2_instance(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
@@ -1532,6 +1542,18 @@ impl ResourceProvisioner {
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
+            "AWS::ElasticBeanstalk::Application" => {
+                Some(self.update_eb_application(existing, new_def)?)
+            }
+            "AWS::ElasticBeanstalk::ApplicationVersion" => {
+                Some(self.update_eb_application_version(existing, new_def)?)
+            }
+            "AWS::ElasticBeanstalk::Environment" => {
+                Some(self.update_eb_environment(existing, new_def)?)
+            }
+            "AWS::ElasticBeanstalk::ConfigurationTemplate" => {
+                Some(self.update_eb_configuration_template(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1654,6 +1676,9 @@ impl ResourceProvisioner {
             }
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
+            }
+            "AWS::ElasticBeanstalk::Environment" => {
+                self.get_att_eb_environment(&resource.physical_id, attribute)
             }
             "AWS::EKS::Cluster" => self.get_att_eks_cluster(&resource.physical_id, attribute),
             "AWS::EKS::Nodegroup" => self.get_att_eks_nodegroup(&resource.physical_id, attribute),
@@ -1884,6 +1909,22 @@ impl ResourceProvisioner {
             }
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::ElasticBeanstalk::Application" => {
+                self.delete_eb_application(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::ElasticBeanstalk::ApplicationVersion" => {
+                self.delete_eb_application_version(resource);
+                Ok(())
+            }
+            "AWS::ElasticBeanstalk::Environment" => {
+                self.delete_eb_environment(resource);
+                Ok(())
+            }
+            "AWS::ElasticBeanstalk::ConfigurationTemplate" => {
+                self.delete_eb_configuration_template(resource);
                 Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
@@ -6453,6 +6494,9 @@ mod tests {
             )),
             codecommit_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            elasticbeanstalk_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,

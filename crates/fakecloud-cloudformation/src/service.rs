@@ -56,6 +56,7 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::CodeArtifact::Domain" => &["Arn", "EncryptionKey", "Name", "Owner"],
         "AWS::CodeArtifact::Repository" => &["Arn", "DomainName", "DomainOwner", "Name"],
         "AWS::CodeCommit::Repository" => &["Arn", "CloneUrlHttp", "CloneUrlSsh", "Name"],
+        "AWS::ElasticBeanstalk::Environment" => &["EndpointURL"],
         _ => &[],
     }
 }
@@ -132,6 +133,10 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Pipes" => "pipes",
         "CodeArtifact" => "codeartifact",
         "CodeCommit" => "codecommit",
+        // A single entry covers all four AWS::ElasticBeanstalk::* types
+        // (Application / ApplicationVersion / Environment / ConfigurationTemplate)
+        // since the mapping keys on the service segment.
+        "ElasticBeanstalk" => "elasticbeanstalk",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
         _ => return None,
@@ -365,6 +370,7 @@ pub struct CloudFormationDeps {
     pub servicediscovery: fakecloud_servicediscovery::state::SharedServiceDiscoveryState,
     pub codeartifact: fakecloud_codeartifact::SharedCodeArtifactState,
     pub codecommit: fakecloud_codecommit::SharedCodeCommitState,
+    pub elasticbeanstalk: fakecloud_elasticbeanstalk::SharedEbState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -815,6 +821,7 @@ impl CloudFormationService {
             servicediscovery_state: self.deps.servicediscovery.clone(),
             codeartifact_state: self.deps.codeartifact.clone(),
             codecommit_state: self.deps.codecommit.clone(),
+            elasticbeanstalk_state: self.deps.elasticbeanstalk.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3075,6 +3082,9 @@ mod tests {
                     "us-east-1",
                     "",
                 ),
+            )),
+            elasticbeanstalk: Arc::new(parking_lot::RwLock::new(
+                fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
