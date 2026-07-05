@@ -47,6 +47,7 @@ fakecloud-resource-groups-tagging = { workspace = true }
 fakecloud-cloudcontrol = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-elasticbeanstalk = { workspace = true }
+fakecloud-efs = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-glacier = { workspace = true }
 fakecloud-appconfig = { workspace = true }

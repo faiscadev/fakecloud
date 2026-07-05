@@ -2209,6 +2209,40 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateNodegroupVersion`
 - `UpdatePodIdentityAssociation`
 
+## [Amazon EFS](@/docs/services/efs.md)
+
+- `CreateAccessPoint`
+- `CreateFileSystem`
+- `CreateMountTarget`
+- `CreateReplicationConfiguration`
+- `CreateTags`
+- `DeleteAccessPoint`
+- `DeleteFileSystem`
+- `DeleteFileSystemPolicy`
+- `DeleteMountTarget`
+- `DeleteReplicationConfiguration`
+- `DeleteTags`
+- `DescribeAccessPoints`
+- `DescribeAccountPreferences`
+- `DescribeBackupPolicy`
+- `DescribeFileSystemPolicy`
+- `DescribeFileSystems`
+- `DescribeLifecycleConfiguration`
+- `DescribeMountTargetSecurityGroups`
+- `DescribeMountTargets`
+- `DescribeReplicationConfigurations`
+- `DescribeTags`
+- `ListTagsForResource`
+- `ModifyMountTargetSecurityGroups`
+- `PutAccountPreferences`
+- `PutBackupPolicy`
+- `PutFileSystemPolicy`
+- `PutLifecycleConfiguration`
+- `TagResource`
+- `UntagResource`
+- `UpdateFileSystem`
+- `UpdateFileSystemProtection`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`

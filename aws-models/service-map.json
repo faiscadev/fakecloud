@@ -298,5 +298,9 @@
   "codeartifact": {
     "repo_dir": "codeartifact",
     "service_name": "codeartifact"
+  },
+  "efs": {
+    "repo_dir": "efs",
+    "service_name": "elasticfilesystem"
   }
 }

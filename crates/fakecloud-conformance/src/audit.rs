@@ -215,6 +215,12 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["appconfig", "appconfigdata"],
         ),
         ("glacier", "glacier", &["service.rs"], &["glacier"]),
+        (
+            "elasticfilesystem",
+            "efs",
+            &["service.rs"],
+            &["elasticfilesystem"],
+        ),
         ("transfer", "transfer", &["service.rs"], &["transfer"]),
         ("cloudtrail", "cloudtrail", &["service.rs"], &["cloudtrail"]),
         ("ce", "ce", &["service.rs"], &["ce"]),
