@@ -408,6 +408,9 @@ async fn main() {
     let config_state: fakecloud_config::SharedConfigState = Arc::new(parking_lot::RwLock::new(
         fakecloud_config::ConfigAccounts::new(),
     ));
+    let route53resolver_state: fakecloud_route53resolver::SharedRoute53ResolverState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_route53resolver::Route53ResolverAccounts::new()),
+    );
     let app_autoscaling_state: fakecloud_application_autoscaling::SharedApplicationAutoScalingState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
@@ -1072,6 +1075,7 @@ async fn main() {
         acm: acm_state.clone(),
         acmpca: acmpca_state.clone(),
         config: config_state.clone(),
+        route53resolver: route53resolver_state.clone(),
         firehose: firehose_state.clone(),
         glue: glue_state.clone(),
         cloudwatch: cloudwatch_state.clone(),
@@ -1190,6 +1194,7 @@ async fn main() {
             acm: acm_state.clone(),
             acmpca: acmpca_state.clone(),
             config: config_state.clone(),
+            route53resolver: route53resolver_state.clone(),
             elasticache: elasticache_state.clone(),
             route53: route53_state.clone(),
             cloudfront: cloudfront_state.clone(),
@@ -3136,6 +3141,67 @@ async fn main() {
     acmpca_inner.rearm_pending_creations();
     let acmpca_service = Arc::new(acmpca_inner);
     registry.register(acmpca_service.clone());
+    let route53resolver_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("route53resolver").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_route53resolver::Route53ResolverSnapshot>(
+                        &bytes,
+                    ) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_route53resolver::R53R_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "route53resolver persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_route53resolver::R53R_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *route53resolver_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded route53resolver persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse route53resolver persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no route53resolver persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read route53resolver persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut route53resolver_inner =
+        fakecloud_route53resolver::Route53ResolverService::new(route53resolver_state.clone())
+            .with_ec2_state(ec2_state.clone());
+    if let Some(store) = route53resolver_snapshot_store.clone() {
+        route53resolver_inner = route53resolver_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = route53resolver_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("route53resolver", h);
+    }
+    // Re-arm the background settle for any resource restored mid-transition.
+    route53resolver_inner.rearm_pending();
+    registry.register(Arc::new(route53resolver_inner));
     let config_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

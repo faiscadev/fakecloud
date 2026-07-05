@@ -63,6 +63,26 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::ACMPCA::CertificateAuthority" => &["Arn", "CertificateSigningRequest"],
         "AWS::ACMPCA::Certificate" => &["Arn", "Certificate"],
         "AWS::ACMPCA::CertificateAuthorityActivation" => &["CompleteCertificateChain"],
+        "AWS::Route53Resolver::ResolverEndpoint" => &[
+            "Arn",
+            "ResolverEndpointId",
+            "IpAddressCount",
+            "Direction",
+            "HostVPCId",
+            "Name",
+        ],
+        "AWS::Route53Resolver::ResolverRule" => {
+            &["Arn", "ResolverRuleId", "Name", "DomainName", "TargetIps"]
+        }
+        "AWS::Route53Resolver::ResolverRuleAssociation" => &["ResolverRuleAssociationId", "Name"],
+        "AWS::Route53Resolver::ResolverQueryLoggingConfig" => &["Arn", "Id"],
+        "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation" => &["Id"],
+        "AWS::Route53Resolver::FirewallDomainList" => &["Arn", "Id"],
+        "AWS::Route53Resolver::FirewallRuleGroup" => &["Arn", "Id", "RuleCount"],
+        "AWS::Route53Resolver::FirewallRuleGroupAssociation" => &["Arn", "Id"],
+        "AWS::Route53Resolver::ResolverConfig" => &["Id", "OwnerId", "ResourceId"],
+        "AWS::Route53Resolver::ResolverDNSSECConfig" => &["Id", "OwnerId", "ResourceId"],
+        "AWS::Route53Resolver::FirewallConfig" => &["Id", "OwnerId", "ResourceId"],
         "AWS::Config::ConfigRule" => &["Arn", "ComplianceType", "ConfigRuleId"],
         "AWS::Config::ConformancePack" => &["Arn"],
         "AWS::Config::AggregationAuthorization" => &["AggregationAuthorizationArn"],
@@ -123,6 +143,7 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         // snapshot hook in the server.
         "CertificateManager" => "acm",
         "ACMPCA" => "acm-pca",
+        "Route53Resolver" => "route53resolver",
         "Config" => "config",
         "ElasticLoadBalancingV2" => "elbv2",
         "CloudFront" => "cloudfront",
@@ -377,6 +398,7 @@ pub struct CloudFormationDeps {
     pub acm: fakecloud_acm::SharedAcmState,
     pub acmpca: fakecloud_acmpca::SharedAcmPcaState,
     pub config: fakecloud_config::SharedConfigState,
+    pub route53resolver: fakecloud_route53resolver::SharedRoute53ResolverState,
     pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
@@ -860,6 +882,7 @@ impl CloudFormationService {
             acm_state: self.deps.acm.clone(),
             acmpca_state: self.deps.acmpca.clone(),
             config_state: self.deps.config.clone(),
+            route53resolver_state: self.deps.route53resolver.clone(),
             elasticache_state: self.deps.elasticache.clone(),
             route53_state: self.deps.route53.clone(),
             cloudfront_state: self.deps.cloudfront.clone(),
@@ -3067,6 +3090,9 @@ mod tests {
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             acmpca: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
             config: Arc::new(RwLock::new(fakecloud_config::ConfigAccounts::new())),
+            route53resolver: Arc::new(RwLock::new(
+                fakecloud_route53resolver::Route53ResolverAccounts::new(),
+            )),
             elasticache: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",

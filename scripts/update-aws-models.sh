@@ -69,6 +69,7 @@ SERVICES=(
     "elasticloadbalancingv2:elastic-load-balancing-v2"
     "cloudfront:cloudfront"
     "route53:route-53"
+    "route53resolver:route53resolver"
     "acm:acm"
     "acm-pca:acm-pca"
     "application-autoscaling:application-auto-scaling"

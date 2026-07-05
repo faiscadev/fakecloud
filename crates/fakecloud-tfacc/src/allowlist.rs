@@ -1257,6 +1257,17 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccConfigConfigurationRecorder_basic$",
         deny: &[],
     },
+    Service {
+        // Amazon Route 53 Resolver. The `_basic` suite for the resolver endpoint
+        // (which the test provisions over a real VPC + two subnets + a security
+        // group created by the ec2 provider — fakecloud validates those against
+        // its EC2 state), the resolver rule, and the DNS Firewall domain list +
+        // rule group. fakecloud stores each in real, persisted route53resolver
+        // state with AWS-format ids and the create/settle state machine.
+        name: "route53resolver",
+        run_regex: "^TestAccRoute53Resolver(Endpoint|Rule|FirewallDomainList|FirewallRuleGroup)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1919,6 +1930,12 @@ pub const SHARDS: &[Shard] = &[
         name: "config",
         service: "config",
         run_regex: "^TestAccConfigConfigurationRecorder_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "route53resolver",
+        service: "route53resolver",
+        run_regex: "^TestAccRoute53Resolver(Endpoint|Rule|FirewallDomainList|FirewallRuleGroup)_basic$",
         extra_deny: &[],
     },
 ];

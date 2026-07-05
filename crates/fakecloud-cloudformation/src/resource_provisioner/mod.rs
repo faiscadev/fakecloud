@@ -892,6 +892,7 @@ pub struct ResourceProvisioner {
     pub acm_state: SharedAcmState,
     pub acmpca_state: SharedAcmPcaState,
     pub config_state: fakecloud_config::SharedConfigState,
+    pub route53resolver_state: fakecloud_route53resolver::SharedRoute53ResolverState,
     pub elasticache_state: SharedElastiCacheState,
     pub route53_state: SharedRoute53State,
     pub cloudfront_state: SharedCloudFrontState,
@@ -1090,6 +1091,7 @@ mod mq;
 mod pipes;
 mod rds;
 mod route;
+mod route53resolver;
 mod s3;
 mod secrets;
 mod servicediscovery;
@@ -1253,6 +1255,33 @@ impl ResourceProvisioner {
                 self.create_acmpca_certificate_authority_activation(resource)
             }
             "AWS::ACMPCA::Permission" => self.create_acmpca_permission(resource),
+            "AWS::Route53Resolver::ResolverEndpoint" => {
+                self.create_r53r_resolver_endpoint(resource)
+            }
+            "AWS::Route53Resolver::ResolverRule" => self.create_r53r_resolver_rule(resource),
+            "AWS::Route53Resolver::ResolverRuleAssociation" => {
+                self.create_r53r_rule_association(resource)
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfig" => {
+                self.create_r53r_query_log_config(resource)
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation" => {
+                self.create_r53r_query_log_association(resource)
+            }
+            "AWS::Route53Resolver::FirewallDomainList" => {
+                self.create_r53r_firewall_domain_list(resource)
+            }
+            "AWS::Route53Resolver::FirewallRuleGroup" => {
+                self.create_r53r_firewall_rule_group(resource)
+            }
+            "AWS::Route53Resolver::FirewallRuleGroupAssociation" => {
+                self.create_r53r_firewall_rule_group_association(resource)
+            }
+            "AWS::Route53Resolver::FirewallConfig" => self.create_r53r_firewall_config(resource),
+            "AWS::Route53Resolver::ResolverConfig" => self.create_r53r_resolver_config(resource),
+            "AWS::Route53Resolver::ResolverDNSSECConfig" => {
+                self.create_r53r_dnssec_config(resource)
+            }
             "AWS::Config::ConfigurationRecorder"
             | "AWS::Config::DeliveryChannel"
             | "AWS::Config::ConfigRule"
@@ -2026,6 +2055,39 @@ impl ResourceProvisioner {
             "AWS::ACMPCA::Certificate" => Ok(()),
             "AWS::ACMPCA::CertificateAuthorityActivation" => Ok(()),
             "AWS::ACMPCA::Permission" => self.delete_acmpca_permission(&resource.physical_id),
+            "AWS::Route53Resolver::ResolverEndpoint" => {
+                self.delete_r53r_resolver_endpoint(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverRule" => {
+                self.delete_r53r_resolver_rule(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverRuleAssociation" => {
+                self.delete_r53r_rule_association(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfig" => {
+                self.delete_r53r_query_log_config(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation" => {
+                self.delete_r53r_query_log_association(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::FirewallDomainList" => {
+                self.delete_r53r_firewall_domain_list(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::FirewallRuleGroup" => {
+                self.delete_r53r_firewall_rule_group(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::FirewallRuleGroupAssociation" => {
+                self.delete_r53r_firewall_rule_group_association(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::FirewallConfig" => {
+                self.delete_r53r_firewall_config(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverConfig" => {
+                self.delete_r53r_resolver_config(&resource.physical_id)
+            }
+            "AWS::Route53Resolver::ResolverDNSSECConfig" => {
+                self.delete_r53r_dnssec_config(&resource.physical_id)
+            }
             "AWS::Config::ConfigurationRecorder"
             | "AWS::Config::DeliveryChannel"
             | "AWS::Config::ConfigRule"
@@ -6532,6 +6594,9 @@ mod tests {
             acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             acmpca_state: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
             config_state: Arc::new(RwLock::new(fakecloud_config::ConfigAccounts::new())),
+            route53resolver_state: Arc::new(RwLock::new(
+                fakecloud_route53resolver::Route53ResolverAccounts::new(),
+            )),
             elasticache_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),

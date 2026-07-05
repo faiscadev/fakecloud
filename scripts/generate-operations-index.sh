@@ -102,6 +102,7 @@ SERVICES=(
     "codepipeline|AWS CodePipeline|codepipeline"
     "codeartifact|AWS CodeArtifact|codeartifact"
     "route53|Route 53|route53"
+    "route53resolver|Route 53 Resolver|route53resolver"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"
     "batch|Batch|batch"

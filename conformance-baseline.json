@@ -1,6 +1,6 @@
 {
-  "variants_passed": 185391,
-  "total_variants": 185391,
+  "variants_passed": 187837,
+  "total_variants": 187837,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -201,6 +201,10 @@
     "route53": {
       "passed": 2398,
       "total": 2398
+    },
+    "route53resolver": {
+      "passed": 2446,
+      "total": 2446
     },
     "s3": {
       "passed": 3668,
