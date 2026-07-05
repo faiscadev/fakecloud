@@ -544,9 +544,7 @@ impl CodeArtifactService {
         let Some(desc) = acct.repositories.get_mut(&key) else {
             return Err(not_found(format!("Repository {repo} does not exist")));
         };
-        let conns = desc["externalConnections"]
-            .as_array_mut()
-            .expect("externalConnections is an array");
+        let conns = ensure_array(desc, "externalConnections");
         if conns
             .iter()
             .any(|c| c.get("externalConnectionName").and_then(|v| v.as_str()) == Some(&connection))
@@ -577,9 +575,7 @@ impl CodeArtifactService {
         let Some(desc) = acct.repositories.get_mut(&key) else {
             return Err(not_found(format!("Repository {repo} does not exist")));
         };
-        let conns = desc["externalConnections"]
-            .as_array_mut()
-            .expect("externalConnections is an array");
+        let conns = ensure_array(desc, "externalConnections");
         conns.retain(|c| {
             c.get("externalConnectionName").and_then(|v| v.as_str()) != Some(&connection)
         });
@@ -642,6 +638,7 @@ impl CodeArtifactService {
     // ------------------------------------------------------------- packages
 
     fn list_packages(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        check_max_results(req)?;
         let domain = req_q(req, "domain")?;
         let repo = req_q(req, "repository")?;
         let format = q(req, "format");
@@ -740,6 +737,7 @@ impl CodeArtifactService {
     // ------------------------------------------------------ package versions
 
     fn list_package_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        check_max_results(req)?;
         let (domain, repo, format, namespace, package) = package_coords(req)?;
         if let Some(s) = q(req, "sortBy") {
             if !crate::validate::is_enum(crate::validate::PACKAGE_VERSION_SORT, &s) {
@@ -764,6 +762,12 @@ impl CodeArtifactService {
         if !acct.packages.contains_key(&key) {
             return Err(not_found(format!("Package {package} does not exist")));
         }
+        // The default display version is a package-level attribute (the latest
+        // published version), independent of the `status` filter applied to the
+        // returned list. Pick the most recently published version, breaking ties
+        // on the higher version string, matching AWS's "latest" semantics rather
+        // than the lexicographically-smallest BTreeMap key.
+        let default_display = latest_published_version(acct, &vprefix);
         let versions: Vec<Value> = acct
             .package_versions
             .iter()
@@ -776,11 +780,6 @@ impl CodeArtifactService {
             })
             .map(summarize_version)
             .collect();
-        let default_display = versions
-            .first()
-            .and_then(|v| v.get("version"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
         let (page_items, token) = page(versions, req)?;
         let mut out = Map::new();
         if let Some(d) = default_display {
@@ -846,6 +845,12 @@ impl CodeArtifactService {
         if versions.is_empty() {
             return Err(validation("versions is required"));
         }
+        // Optimistic-concurrency preconditions. `expectedStatus` requires the
+        // current status to match; `versionRevisions` maps version -> expected
+        // revision. A mismatch places the version in `failedVersions` with the
+        // AWS error code and leaves it unchanged.
+        let expected_status = body_str(&b, "expectedStatus");
+        let version_revisions = b.get("versionRevisions").and_then(|v| v.as_object()).cloned();
         let key = pkg_key(&domain, &repo, &format, &namespace, &package);
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
@@ -856,35 +861,92 @@ impl CodeArtifactService {
         let mut failed = Map::new();
         for v in versions {
             let vk = version_key(&key, &v);
-            match acct.package_versions.get_mut(&vk) {
-                Some(desc) => {
-                    let rev = desc
-                        .get("revision")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let status = match &op {
-                        VersionOp::Delete => "Deleted",
-                        VersionOp::Dispose => "Disposed",
-                        VersionOp::SetStatus(s) => s.as_str(),
-                    };
-                    if matches!(op, VersionOp::Delete) {
-                        acct.package_versions.remove(&vk);
-                    } else {
-                        desc["status"] = Value::String(status.to_string());
-                    }
-                    successful.insert(v, json!({ "revision": rev, "status": status }));
-                }
-                None => {
+            let Some(desc) = acct.package_versions.get(&vk) else {
+                failed.insert(
+                    v.clone(),
+                    json!({
+                        "errorCode": "NOT_FOUND",
+                        "errorMessage": format!("Package version {v} does not exist"),
+                    }),
+                );
+                continue;
+            };
+            let rev = desc
+                .get("revision")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cur_status = desc
+                .get("status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            // Precondition: expected revision.
+            if let Some(expected_rev) = version_revisions
+                .as_ref()
+                .and_then(|m| m.get(&v))
+                .and_then(|x| x.as_str())
+            {
+                if expected_rev != rev {
                     failed.insert(
                         v.clone(),
                         json!({
-                            "errorCode": "NOT_FOUND",
-                            "errorMessage": format!("Package version {v} does not exist"),
+                            "errorCode": "MISMATCHED_REVISION",
+                            "errorMessage": format!(
+                                "Package version {v} revision does not match expected revision"
+                            ),
                         }),
                     );
+                    continue;
                 }
             }
+            // Precondition: expected status.
+            if let Some(exp) = &expected_status {
+                if exp != &cur_status {
+                    failed.insert(
+                        v.clone(),
+                        json!({
+                            "errorCode": "MISMATCHED_STATUS",
+                            "errorMessage": format!(
+                                "Package version {v} status {cur_status} does not match expected status {exp}"
+                            ),
+                        }),
+                    );
+                    continue;
+                }
+            }
+            let status = match &op {
+                VersionOp::Delete => "Deleted",
+                VersionOp::Dispose => "Disposed",
+                VersionOp::SetStatus(s) => s.as_str(),
+            };
+            let aprefix = format!("{vk}{SEP}");
+            match &op {
+                VersionOp::Delete => {
+                    // Deleting a version removes the version record along with
+                    // its assets, asset bytes, and readme, mirroring
+                    // `delete_package`'s cleanup so nothing stays downloadable.
+                    acct.package_versions.remove(&vk);
+                    acct.assets.retain(|k, _| !k.starts_with(&aprefix));
+                    acct.asset_content.retain(|k, _| !k.starts_with(&aprefix));
+                    acct.readmes.remove(&vk);
+                }
+                VersionOp::Dispose => {
+                    // Dispose keeps the version record (marked Disposed) but
+                    // deletes the asset bytes so the content is no longer
+                    // downloadable, matching AWS.
+                    if let Some(d) = acct.package_versions.get_mut(&vk) {
+                        d["status"] = Value::String(status.to_string());
+                    }
+                    acct.asset_content.retain(|k, _| !k.starts_with(&aprefix));
+                }
+                VersionOp::SetStatus(_) => {
+                    if let Some(d) = acct.package_versions.get_mut(&vk) {
+                        d["status"] = Value::String(status.to_string());
+                    }
+                }
+            }
+            successful.insert(v, json!({ "revision": rev, "status": status }));
         }
         ok(json!({ "successfulVersions": successful, "failedVersions": failed }))
     }
@@ -908,6 +970,13 @@ impl CodeArtifactService {
                     .map(|m| m.keys().cloned().collect())
             })
             .unwrap_or_default();
+        // AWS requires exactly one of `versions` or `versionRevisions`; an empty
+        // selection is a ValidationException, never an implicit "copy all".
+        if versions.is_empty() {
+            return Err(validation(
+                "Either the versions or versionRevisions parameter must be provided",
+            ));
+        }
         let src_key = format!("{domain}/{source}");
         let dst_key = format!("{domain}/{dest}");
         let src_pkg = pkg_key(&domain, &source, &format, &namespace, &package);
@@ -925,22 +994,39 @@ impl CodeArtifactService {
         ensure_package(acct, &dst_pkg, &format, &namespace, &package);
         let mut successful = Map::new();
         let mut failed = Map::new();
-        let src_versions: Vec<String> = if versions.is_empty() {
-            let vprefix = format!("{src_pkg}{SEP}");
-            acct.package_versions
-                .keys()
-                .filter(|k| k.starts_with(&vprefix))
-                .filter_map(|k| k.rsplit(SEP).next().map(str::to_string))
-                .collect()
-        } else {
-            versions
-        };
-        for v in src_versions {
+        for v in versions {
             let svk = version_key(&src_pkg, &v);
             match acct.package_versions.get(&svk).cloned() {
                 Some(mut desc) => {
                     desc["status"] = Value::String("Published".into());
-                    acct.package_versions.insert(version_key(&dst_pkg, &v), desc.clone());
+                    let dvk = version_key(&dst_pkg, &v);
+                    acct.package_versions.insert(dvk.clone(), desc.clone());
+                    // Carry the version's assets, asset bytes, and readme to the
+                    // destination so GetPackageVersionAsset / ListPackageVersionAssets
+                    // work against the copy, not just its metadata.
+                    let sprefix = format!("{svk}{SEP}");
+                    let copied: Vec<(String, Value, Option<String>)> = acct
+                        .assets
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&sprefix))
+                        .map(|(k, summary)| {
+                            let asset_name = &k[sprefix.len()..];
+                            (
+                                asset_key(&dvk, asset_name),
+                                summary.clone(),
+                                acct.asset_content.get(k).cloned(),
+                            )
+                        })
+                        .collect();
+                    for (dak, summary, content) in copied {
+                        acct.assets.insert(dak.clone(), summary);
+                        if let Some(c) = content {
+                            acct.asset_content.insert(dak, c);
+                        }
+                    }
+                    if let Some(readme) = acct.readmes.get(&svk).cloned() {
+                        acct.readmes.insert(dvk, readme);
+                    }
                     let rev = desc.get("revision").and_then(|x| x.as_str()).unwrap_or("");
                     successful.insert(v, json!({ "revision": rev, "status": "Published" }));
                 }
@@ -969,10 +1055,29 @@ impl CodeArtifactService {
         let version = req_q(req, "version")?;
         let asset_name = req_q(req, "asset")?;
         let unfinished = q(req, "unfinished").map(|s| s == "true").unwrap_or(false);
+        // `assetSHA256` is a required `@httpHeader("x-amz-content-sha256")`. It
+        // must be a well-formed lowercase 64-char hex digest and must match the
+        // SHA-256 the server computes over the uploaded body.
+        let asset_sha256 = req
+            .headers
+            .get("x-amz-content-sha256")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| validation("assetSHA256 (x-amz-content-sha256) header is required"))?;
+        if !is_sha256_hex(&asset_sha256) {
+            return Err(validation(
+                "assetSHA256 must be a 64-character lowercase hexadecimal SHA-256 digest",
+            ));
+        }
         let content = req.body.to_vec();
         let mut hasher = Sha256::new();
         hasher.update(&content);
         let sha256 = hex_encode(&hasher.finalize());
+        if asset_sha256 != sha256 {
+            return Err(validation(
+                "The provided assetSHA256 does not match the SHA-256 of the uploaded asset content",
+            ));
+        }
         let key = format!("{domain}/{repo}");
         let pk = pkg_key(&domain, &repo, &format, &namespace, &package);
         let vk = version_key(&pk, &version);
@@ -984,6 +1089,22 @@ impl CodeArtifactService {
         let acct = guard.get_or_create(&req.account_id);
         if !acct.repositories.contains_key(&key) {
             return Err(not_found(format!("Repository {repo} does not exist")));
+        }
+        // Republishing an existing asset is a ConflictException unless the
+        // stored version is still Unfinished (an in-progress publish that may be
+        // completed/overwritten). AWS rejects overwriting a Published asset.
+        if acct.assets.contains_key(&ak) {
+            let overwritable = acct
+                .package_versions
+                .get(&vk)
+                .and_then(|d| d.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("Unfinished");
+            if !overwritable {
+                return Err(conflict(format!(
+                    "Package version {version} asset {asset_name} already exists"
+                )));
+            }
         }
         ensure_package(acct, &pk, &format, &namespace, &package);
         let asset = json!({
@@ -1061,20 +1182,26 @@ impl CodeArtifactService {
         let ak = asset_key(&vk, &asset_name);
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
+        // The version must still exist; a Disposed (or deleted) version has had
+        // its asset bytes removed, so the asset is no longer downloadable.
+        let Some(desc) = acct.package_versions.get(&vk) else {
+            return Err(not_found(format!("Package version {version} does not exist")));
+        };
+        let rev = desc
+            .get("revision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let Some(b64) = acct.asset_content.get(&ak) else {
             return Err(not_found(format!("Asset {asset_name} does not exist")));
         };
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
             .unwrap_or_default();
-        let rev = acct
-            .package_versions
-            .get(&vk)
-            .and_then(|d| d.get("revision"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        // The `@httpPayload` blob is raw bytes, not JSON: advertise
+        // application/octet-stream rather than the awsJson default.
         let mut resp = AwsResponse::json(StatusCode::OK, bytes);
+        resp.content_type = "application/octet-stream".to_string();
         set_header(&mut resp, "X-AssetName", &asset_name);
         set_header(&mut resp, "X-PackageVersion", &version);
         set_header(&mut resp, "X-PackageVersionRevision", &rev);
@@ -1239,6 +1366,7 @@ impl CodeArtifactService {
     }
 
     fn list_package_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        check_max_results(req)?;
         let domain = req_q(req, "domain")?;
         let prefix = q(req, "prefix").unwrap_or_default();
         let gprefix = format!("{domain}{SEP}");
@@ -1388,7 +1516,35 @@ impl CodeArtifactService {
         if !acct.package_groups.contains_key(&gkey) {
             return Err(not_found(format!("Package group {pattern} does not exist")));
         }
-        // Apply allowed-repository add/remove per restriction type.
+        // Validate every input BEFORE mutating any state, so an invalid mode or
+        // restriction type can never leave a partially-applied update. Both the
+        // allowed-repository restriction types and the restriction modes must be
+        // recognised enum values.
+        for field in ["addAllowedRepositories", "removeAllowedRepositories"] {
+            if let Some(entries) = b.get(field).and_then(|v| v.as_array()) {
+                for e in entries {
+                    if let Some(rtype) = e.get("originRestrictionType").and_then(|v| v.as_str()) {
+                        if !crate::validate::is_enum(
+                            crate::validate::ORIGIN_RESTRICTION_TYPE,
+                            rtype,
+                        ) {
+                            return Err(validation(format!(
+                                "Invalid originRestrictionType: {rtype}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(restrictions) = b.get("restrictions").and_then(|v| v.as_object()) {
+            for mode in restrictions.values().filter_map(|v| v.as_str()) {
+                if !crate::validate::is_enum(crate::validate::ORIGIN_RESTRICTION_MODE, mode) {
+                    return Err(validation(format!("Invalid restriction mode: {mode}")));
+                }
+            }
+        }
+        // All inputs validated -- now apply allowed-repository add/remove and
+        // restriction-mode changes.
         let mut updates = Map::new();
         if let Some(add) = b.get("addAllowedRepositories").and_then(|v| v.as_array()) {
             apply_allowed(acct, &domain, &pattern, add, true, &mut updates);
@@ -1396,13 +1552,7 @@ impl CodeArtifactService {
         if let Some(rem) = b.get("removeAllowedRepositories").and_then(|v| v.as_array()) {
             apply_allowed(acct, &domain, &pattern, rem, false, &mut updates);
         }
-        // Apply origin restriction mode changes.
         if let Some(restrictions) = b.get("restrictions").and_then(|v| v.as_object()) {
-            for mode in restrictions.values().filter_map(|v| v.as_str()) {
-                if !crate::validate::is_enum(crate::validate::ORIGIN_RESTRICTION_MODE, mode) {
-                    return Err(validation(format!("Invalid restriction mode: {mode}")));
-                }
-            }
             if let Some(g) = acct.package_groups.get_mut(&gkey) {
                 let origin = g["originConfiguration"]["restrictions"]
                     .as_object_mut()
@@ -1432,6 +1582,13 @@ impl CodeArtifactService {
         let duration = q(req, "duration")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(43200);
+        // AWS only accepts 0 (max/12h, bound to the caller's session) or a value
+        // in [900, 43200]; anything else is a ValidationException.
+        if duration != 0 && !(900..=43200).contains(&duration) {
+            return Err(validation(
+                "durationSeconds must be 0 or between 900 and 43200 seconds",
+            ));
+        }
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
         if !acct.domains.contains_key(&domain) {
@@ -1459,6 +1616,9 @@ impl CodeArtifactService {
         let new_tags = parse_tags(b.get("tags"));
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
+        if !arn_exists(acct, &arn) {
+            return Err(not_found(format!("Resource {arn} does not exist")));
+        }
         let entry = acct.tags.entry(arn).or_default();
         for t in new_tags {
             let key = t.get("key").and_then(|k| k.as_str()).unwrap_or("").to_string();
@@ -1479,6 +1639,9 @@ impl CodeArtifactService {
             .unwrap_or_default();
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
+        if !arn_exists(acct, &arn) {
+            return Err(not_found(format!("Resource {arn} does not exist")));
+        }
         if let Some(entry) = acct.tags.get_mut(&arn) {
             entry.retain(|t| {
                 t.get("key")
@@ -1494,6 +1657,9 @@ impl CodeArtifactService {
         check_arn(&arn)?;
         let mut guard = self.state.write();
         let acct = guard.get_or_create(&req.account_id);
+        if !arn_exists(acct, &arn) {
+            return Err(not_found(format!("Resource {arn} does not exist")));
+        }
         let tags = acct.tags.get(&arn).cloned().unwrap_or_default();
         ok(json!({ "tags": tags }))
     }
@@ -1519,6 +1685,67 @@ fn set_header(resp: &mut AwsResponse, name: &str, value: &str) {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// True when `s` is a well-formed lowercase 64-character hex SHA-256 digest,
+/// matching the `SHA256` shape's `@length(64,64)` + `^[0-9a-f]+$` constraints.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Borrow `obj[key]` as a mutable array, coercing a missing or non-array value
+/// to an empty array first so a persisted/deserialized record with an
+/// unexpected shape never panics on the request path.
+fn ensure_array<'a>(obj: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
+    if !obj.get(key).map(Value::is_array).unwrap_or(false) {
+        obj[key] = Value::Array(Vec::new());
+    }
+    obj[key]
+        .as_array_mut()
+        .expect("value was just set to an array")
+}
+
+/// True when `arn` resolves to an existing domain, repository, or package group
+/// in this account (compared against the stored `arn` field of each resource).
+fn arn_exists(acct: &crate::state::CodeArtifactState, arn: &str) -> bool {
+    let matches = |v: &Value| v.get("arn").and_then(|a| a.as_str()) == Some(arn);
+    acct.domains.values().any(matches)
+        || acct.repositories.values().any(matches)
+        || acct.package_groups.values().any(matches)
+}
+
+/// The latest published version for a package (keys under `vprefix`), by
+/// most-recent `publishedTime`, breaking ties on the higher version string.
+/// Returns `None` when the package has no published version.
+fn latest_published_version(
+    acct: &crate::state::CodeArtifactState,
+    vprefix: &str,
+) -> Option<String> {
+    let mut best: Option<(f64, String)> = None;
+    for v in acct
+        .package_versions
+        .iter()
+        .filter(|(k, _)| k.starts_with(vprefix))
+        .map(|(_, v)| v)
+    {
+        if v.get("status").and_then(|s| s.as_str()) != Some("Published") {
+            continue;
+        }
+        let pt = v.get("publishedTime").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let ver = v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let better = match &best {
+            None => true,
+            Some((bpt, bver)) => pt > *bpt || (pt == *bpt && ver > *bver),
+        };
+        if better {
+            best = Some((pt, ver));
+        }
+    }
+    best.map(|(_, ver)| ver)
 }
 
 /// Extract the five package coordinates from query parameters.
@@ -1699,5 +1926,423 @@ fn apply_allowed(
             .entry(rtype.to_string())
             .or_insert_with(|| json!({}));
         entry[update_type] = json!(repos);
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use crate::state::CodeArtifactState;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::HeaderMap;
+    use std::collections::HashMap;
+
+    fn svc() -> CodeArtifactService {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(MultiAccountState::<
+            CodeArtifactState,
+        >::new(
+            "123456789012", "us-east-1", ""
+        )));
+        CodeArtifactService::new(state)
+    }
+
+    fn jbody(v: Value) -> Vec<u8> {
+        serde_json::to_vec(&v).unwrap()
+    }
+
+    fn mkreq(action: &str, raw_query: &str, body: Vec<u8>, headers: HeaderMap) -> AwsRequest {
+        AwsRequest {
+            service: "codeartifact".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "req-1".into(),
+            headers,
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(body),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: raw_query.into(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn err_code(e: &AwsServiceError) -> String {
+        match e {
+            AwsServiceError::AwsError { code, .. } => code.clone(),
+            other => panic!("expected AwsError, got {other:?}"),
+        }
+    }
+
+    fn body_json(resp: &AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn sha_header(content: &[u8]) -> HeaderMap {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let sha = hex_encode(&hasher.finalize());
+        let mut h = HeaderMap::new();
+        h.insert("x-amz-content-sha256", sha.parse().unwrap());
+        h
+    }
+
+    fn setup(svc: &CodeArtifactService, domain: &str, repo: &str) {
+        svc.create_domain(&mkreq(
+            "CreateDomain",
+            &format!("domain={domain}"),
+            jbody(json!({})),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+        svc.create_repository(&mkreq(
+            "CreateRepository",
+            &format!("domain={domain}&repository={repo}"),
+            jbody(json!({})),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+    }
+
+    fn publish(
+        svc: &CodeArtifactService,
+        domain: &str,
+        repo: &str,
+        pkg: &str,
+        version: &str,
+        asset: &str,
+        content: &[u8],
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let q = format!(
+            "domain={domain}&repository={repo}&format=npm&package={pkg}&version={version}&asset={asset}"
+        );
+        svc.publish_package_version(&mkreq(
+            "PublishPackageVersion",
+            &q,
+            content.to_vec(),
+            sha_header(content),
+        ))
+    }
+
+    fn get_asset(
+        svc: &CodeArtifactService,
+        domain: &str,
+        repo: &str,
+        pkg: &str,
+        version: &str,
+        asset: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let q = format!(
+            "domain={domain}&repository={repo}&format=npm&package={pkg}&version={version}&asset={asset}"
+        );
+        svc.get_package_version_asset(&mkreq("GetPackageVersionAsset", &q, vec![], HeaderMap::new()))
+    }
+
+    // Defect 1: a deleted version's asset is no longer downloadable (404).
+    #[test]
+    fn deleted_version_asset_returns_404() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "p", "1.0.0", "p-1.0.0.tgz", b"hello").unwrap();
+        // Sanity: downloadable before delete, with octet-stream content type.
+        let resp = get_asset(&s, "d1", "r1", "p", "1.0.0", "p-1.0.0.tgz").unwrap();
+        assert_eq!(resp.content_type, "application/octet-stream");
+        assert_eq!(resp.body.expect_bytes(), b"hello");
+
+        s.delete_package_versions(&mkreq(
+            "DeletePackageVersions",
+            "domain=d1&repository=r1&format=npm&package=p",
+            jbody(json!({ "versions": ["1.0.0"] })),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+
+        let err = get_asset(&s, "d1", "r1", "p", "1.0.0", "p-1.0.0.tgz").map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&err), "ResourceNotFoundException");
+    }
+
+    // Defect 1: a disposed version keeps its record but drops its asset bytes.
+    #[test]
+    fn disposed_version_asset_returns_404() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"bytes").unwrap();
+        s.dispose_package_versions(&mkreq(
+            "DisposePackageVersions",
+            "domain=d1&repository=r1&format=npm&package=p",
+            jbody(json!({ "versions": ["1.0.0"] })),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+        // Version record still exists (status Disposed) but asset is gone.
+        let desc = s
+            .describe_package_version(&mkreq(
+                "DescribePackageVersion",
+                "domain=d1&repository=r1&format=npm&package=p&version=1.0.0",
+                vec![],
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        assert_eq!(body_json(&desc)["packageVersion"]["status"], "Disposed");
+        let err = get_asset(&s, "d1", "r1", "p", "1.0.0", "a.tgz").map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&err), "ResourceNotFoundException");
+    }
+
+    // Defect 2: CopyPackageVersions carries the asset bytes to the copy.
+    #[test]
+    fn copy_carries_assets() {
+        let s = svc();
+        setup(&s, "d1", "src");
+        setup_repo(&s, "d1", "dst");
+        publish(&s, "d1", "src", "p", "1.0.0", "a.tgz", b"payload").unwrap();
+        s.copy_package_versions(&mkreq(
+            "CopyPackageVersions",
+            "domain=d1&source-repository=src&destination-repository=dst&format=npm&package=p",
+            jbody(json!({ "versions": ["1.0.0"] })),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+        let resp = get_asset(&s, "d1", "dst", "p", "1.0.0", "a.tgz").unwrap();
+        assert_eq!(resp.body.expect_bytes(), b"payload");
+        // And the asset summary is listable on the copy.
+        let listed = s
+            .list_package_version_assets(&mkreq(
+                "ListPackageVersionAssets",
+                "domain=d1&repository=dst&format=npm&package=p&version=1.0.0",
+                vec![],
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        assert_eq!(
+            body_json(&listed)["assets"].as_array().unwrap().len(),
+            1,
+            "copied version should carry its asset summary"
+        );
+    }
+
+    fn setup_repo(svc: &CodeArtifactService, domain: &str, repo: &str) {
+        svc.create_repository(&mkreq(
+            "CreateRepository",
+            &format!("domain={domain}&repository={repo}"),
+            jbody(json!({})),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+    }
+
+    // Defect 3: assetSHA256 header is required + must be well-formed + must match.
+    #[test]
+    fn publish_requires_valid_matching_sha256() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        let q = "domain=d1&repository=r1&format=npm&package=p&version=1.0.0&asset=a.tgz";
+        // Missing header.
+        let e = s
+            .publish_package_version(&mkreq("PublishPackageVersion", q, b"x".to_vec(), HeaderMap::new()))
+            .map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ValidationException");
+        // Malformed (not 64 lowercase hex).
+        let mut bad = HeaderMap::new();
+        bad.insert("x-amz-content-sha256", "notahash".parse().unwrap());
+        let e = s
+            .publish_package_version(&mkreq("PublishPackageVersion", q, b"x".to_vec(), bad))
+            .map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ValidationException");
+        // Well-formed but mismatched digest.
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-amz-content-sha256", "a".repeat(64).parse().unwrap());
+        let e = s
+            .publish_package_version(&mkreq("PublishPackageVersion", q, b"x".to_vec(), wrong))
+            .map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ValidationException");
+        // Correct digest succeeds.
+        publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"x").unwrap();
+    }
+
+    // Defect 4: republishing an existing published asset is a ConflictException.
+    #[test]
+    fn republish_existing_asset_conflicts() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"first").unwrap();
+        let e = publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"second").map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ConflictException");
+        // The original bytes are untouched.
+        let resp = get_asset(&s, "d1", "r1", "p", "1.0.0", "a.tgz").unwrap();
+        assert_eq!(resp.body.expect_bytes(), b"first");
+    }
+
+    // Defect 4: an Unfinished asset may be overwritten (completed).
+    #[test]
+    fn republish_unfinished_asset_allowed() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        let content = b"draft";
+        let q = "domain=d1&repository=r1&format=npm&package=p&version=1.0.0&asset=a.tgz&unfinished=true";
+        s.publish_package_version(&mkreq(
+            "PublishPackageVersion",
+            q,
+            content.to_vec(),
+            sha_header(content),
+        ))
+        .unwrap();
+        // Overwriting the unfinished asset with final bytes is allowed.
+        publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"final").unwrap();
+        let resp = get_asset(&s, "d1", "r1", "p", "1.0.0", "a.tgz").unwrap();
+        assert_eq!(resp.body.expect_bytes(), b"final");
+    }
+
+    // Defect 5: CopyPackageVersions with no version selection is a ValidationException.
+    #[test]
+    fn copy_empty_selection_rejected() {
+        let s = svc();
+        setup(&s, "d1", "src");
+        setup_repo(&s, "d1", "dst");
+        let e = s
+            .copy_package_versions(&mkreq(
+                "CopyPackageVersions",
+                "domain=d1&source-repository=src&destination-repository=dst&format=npm&package=p",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ValidationException");
+    }
+
+    // Defect 6: expectedStatus mismatch places the version in failedVersions.
+    #[test]
+    fn expected_status_mismatch_fails_version() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "p", "1.0.0", "a.tgz", b"x").unwrap(); // status Published
+        let resp = s
+            .update_package_versions_status(&mkreq(
+                "UpdatePackageVersionsStatus",
+                "domain=d1&repository=r1&format=npm&package=p",
+                jbody(json!({
+                    "targetStatus": "Archived",
+                    "versions": ["1.0.0"],
+                    "expectedStatus": "Unfinished"
+                })),
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        let j = body_json(&resp);
+        assert_eq!(
+            j["failedVersions"]["1.0.0"]["errorCode"], "MISMATCHED_STATUS",
+            "status precondition mismatch should fail the version"
+        );
+        assert!(j["successfulVersions"].as_object().unwrap().is_empty());
+        // The version status is unchanged.
+        let desc = s
+            .describe_package_version(&mkreq(
+                "DescribePackageVersion",
+                "domain=d1&repository=r1&format=npm&package=p&version=1.0.0",
+                vec![],
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        assert_eq!(body_json(&desc)["packageVersion"]["status"], "Published");
+    }
+
+    // Defect 7: tagging a non-existent ARN is a ResourceNotFoundException.
+    #[test]
+    fn tag_nonexistent_resource_404() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        let bad_arn = "arn:aws:codeartifact:us-east-1:123456789012:domain/nope";
+        let e = s
+            .tag_resource(&mkreq(
+                "TagResource",
+                &format!("resourceArn={}", urlencode(bad_arn)),
+                jbody(json!({ "tags": [{ "key": "k", "value": "v" }] })),
+                HeaderMap::new(),
+            ))
+            .map(|_| ()).unwrap_err();
+        assert_eq!(err_code(&e), "ResourceNotFoundException");
+        // Tagging the real domain ARN works.
+        let good = "arn:aws:codeartifact:us-east-1:123456789012:domain/d1".to_string();
+        s.tag_resource(&mkreq(
+            "TagResource",
+            &format!("resourceArn={}", urlencode(&good)),
+            jbody(json!({ "tags": [{ "key": "k", "value": "v" }] })),
+            HeaderMap::new(),
+        ))
+        .unwrap();
+    }
+
+    fn urlencode(s: &str) -> String {
+        s.replace(':', "%3A").replace('/', "%2F")
+    }
+
+    // Defect 8: defaultDisplayVersion is the latest published, not the smallest.
+    #[test]
+    fn default_display_version_is_latest_published() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "p", "1.0.0", "a1.tgz", b"one").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        publish(&s, "d1", "r1", "p", "2.0.0", "a2.tgz", b"two").unwrap();
+        let resp = s
+            .list_package_versions(&mkreq(
+                "ListPackageVersions",
+                "domain=d1&repository=r1&format=npm&package=p",
+                vec![],
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        assert_eq!(body_json(&resp)["defaultDisplayVersion"], "2.0.0");
+    }
+
+    // Defect 9: durationSeconds must be 0 or in [900, 43200].
+    #[test]
+    fn authorization_token_duration_range() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        let call = |dur: &str| {
+            s.get_authorization_token(&mkreq(
+                "GetAuthorizationToken",
+                &format!("domain=d1&duration={dur}"),
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+        };
+        assert!(call("0").is_ok());
+        assert!(call("900").is_ok());
+        assert!(call("43200").is_ok());
+        assert_eq!(err_code(&call("100").map(|_| ()).unwrap_err()), "ValidationException");
+        assert_eq!(err_code(&call("-5").map(|_| ()).unwrap_err()), "ValidationException");
+        assert_eq!(err_code(&call("50000").map(|_| ()).unwrap_err()), "ValidationException");
+    }
+
+    // Defect 13: a persisted repository with a non-array externalConnections
+    // must not panic when associating a connection.
+    #[test]
+    fn associate_connection_tolerates_bad_shape() {
+        let s = svc();
+        setup(&s, "d1", "r1");
+        {
+            let mut g = s.state.write();
+            let acct = g.get_or_create("123456789012");
+            let repo = acct.repositories.get_mut("d1/r1").unwrap();
+            repo["externalConnections"] = Value::Null;
+        }
+        let resp = s
+            .associate_external_connection(&mkreq(
+                "AssociateExternalConnection",
+                "domain=d1&repository=r1&external-connection=public:npmjs",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        let conns = body_json(&resp)["repository"]["externalConnections"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(conns, 1);
     }
 }
