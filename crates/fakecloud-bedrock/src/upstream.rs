@@ -3,8 +3,8 @@
 //! Bedrock's product *is* its data plane: model inference. By default
 //! fakecloud returns deterministic canned completions (see
 //! [`crate::invoke`]) so conformance and offline tests stay hermetic. When
-//! the operator wires a real backing LLM — the Bedrock equivalent of
-//! pointing RDS at a real Postgres container — the runtime operations
+//! the operator wires a real backing LLM (the Bedrock equivalent of
+//! pointing RDS at a real Postgres container) the runtime operations
 //! perform genuine HTTP inference against it.
 //!
 //! Configuration is entirely environment-driven (config, not API surface):
@@ -22,9 +22,10 @@
 //! Titan/Nova, Llama, Cohere, Mistral) is translated into the configured
 //! upstream protocol, the call is made with async `reqwest`, and the
 //! upstream response is translated *back* into the exact Bedrock
-//! provider-native shape the aws-sdk client expects — including real token
+//! provider-native shape the aws-sdk client expects, including real token
 //! counts surfaced through the `x-amzn-bedrock-*-token-count` headers.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use http::StatusCode;
@@ -132,7 +133,22 @@ fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Cross-region inference-profile ids prefix the provider with a region
+/// family token, e.g. `us.anthropic.claude-3-5-sonnet-...` or
+/// `apac.amazon.nova-lite-...`. Strip a leading region token so that
+/// provider-shape resolution keys on the real `provider.` prefix.
+pub(crate) fn strip_region_prefix(id: &str) -> &str {
+    const REGION_PREFIXES: [&str; 4] = ["us.", "eu.", "apac.", "us-gov."];
+    for p in REGION_PREFIXES {
+        if let Some(rest) = id.strip_prefix(p) {
+            return rest;
+        }
+    }
+    id
+}
+
 fn strip_provider(id: &str) -> String {
+    let id = strip_region_prefix(id);
     id.split_once('.')
         .map(|(_, rest)| rest.to_string())
         .unwrap_or_else(|| id.to_string())
@@ -147,11 +163,27 @@ struct ChatMsg {
     text: String,
 }
 
+/// A tool the caller made available to the model, in provider-neutral form.
+struct ToolSpec {
+    name: String,
+    description: Option<String>,
+    input_schema: Value,
+}
+
+/// A tool invocation the model chose to make, translated back to the
+/// Bedrock `toolUse` vocabulary.
+struct ToolCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
 struct Chat {
     system: Option<String>,
     messages: Vec<ChatMsg>,
     max_tokens: Option<u64>,
     temperature: Option<f64>,
+    tools: Vec<ToolSpec>,
 }
 
 impl Chat {
@@ -173,6 +205,9 @@ impl Chat {
 
 struct Completion {
     text: String,
+    tool_calls: Vec<ToolCall>,
+    /// The upstream's own finish/stop reason, verbatim and un-mapped.
+    stop_reason: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -283,7 +318,58 @@ fn bedrock_request_to_chat(input: &Value) -> Chat {
         messages,
         max_tokens,
         temperature,
+        tools: extract_tools(input),
     }
+}
+
+/// Collect the tools the caller offered the model, from either the Converse
+/// `toolConfig.tools[].toolSpec` shape or the Anthropic-native InvokeModel
+/// `tools[]` shape.
+fn extract_tools(input: &Value) -> Vec<ToolSpec> {
+    let mut tools = Vec::new();
+    if let Some(arr) = input
+        .pointer("/toolConfig/tools")
+        .and_then(|t| t.as_array())
+    {
+        for t in arr {
+            if let Some(spec) = t.get("toolSpec") {
+                if let Some(name) = spec.get("name").and_then(|n| n.as_str()) {
+                    tools.push(ToolSpec {
+                        name: name.to_string(),
+                        description: spec
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .map(str::to_string),
+                        input_schema: spec
+                            .pointer("/inputSchema/json")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "type": "object" })),
+                    });
+                }
+            }
+        }
+    }
+    if tools.is_empty() {
+        // Anthropic-native InvokeModel bodies carry tools at the top level.
+        if let Some(arr) = input.get("tools").and_then(|t| t.as_array()) {
+            for t in arr {
+                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                    tools.push(ToolSpec {
+                        name: name.to_string(),
+                        description: t
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .map(str::to_string),
+                        input_schema: t
+                            .get("input_schema")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "type": "object" })),
+                    });
+                }
+            }
+        }
+    }
+    tools
 }
 
 fn norm_anthropic_role(role: &str) -> &str {
@@ -325,53 +411,170 @@ fn openai_messages(chat: &Chat) -> Vec<Value> {
     msgs
 }
 
+/// Render the chat's tools in the OpenAI / Ollama `tools` shape.
+fn openai_tools(chat: &Chat) -> Value {
+    Value::Array(
+        chat.tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description.clone().unwrap_or_default(),
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Stop / finish reason normalization
+// ---------------------------------------------------------------------------
+
+/// Provider-neutral view of why a generation ended. The upstream protocols
+/// each use their own vocabulary; we normalize once and re-render into each
+/// Bedrock provider's native reason so a `max_tokens`-truncated generation
+/// is never reported as a natural completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopKind {
+    EndTurn,
+    MaxTokens,
+    ToolUse,
+    StopSequence,
+    ContentFiltered,
+}
+
+/// Map an upstream finish/stop reason onto [`StopKind`]. A model that
+/// emitted a tool call is always `ToolUse` regardless of the raw string.
+pub(crate) fn normalize_stop(upstream: Option<&str>, has_tool_calls: bool) -> StopKind {
+    if has_tool_calls {
+        return StopKind::ToolUse;
+    }
+    match upstream.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("length") | Some("max_tokens") | Some("model_length") => StopKind::MaxTokens,
+        Some("tool_calls") | Some("tool_use") | Some("function_call") => StopKind::ToolUse,
+        Some("content_filter") | Some("content_filtered") => StopKind::ContentFiltered,
+        Some("stop_sequence") => StopKind::StopSequence,
+        _ => StopKind::EndTurn,
+    }
+}
+
+/// Converse / Anthropic `stopReason` vocabulary.
+pub(crate) fn stop_converse(kind: StopKind) -> &'static str {
+    match kind {
+        StopKind::EndTurn => "end_turn",
+        StopKind::MaxTokens => "max_tokens",
+        StopKind::ToolUse => "tool_use",
+        StopKind::StopSequence => "stop_sequence",
+        StopKind::ContentFiltered => "content_filtered",
+    }
+}
+
+/// Anthropic-native `stop_reason` (no `content_filtered` in that vocabulary).
+pub(crate) fn stop_anthropic(kind: StopKind) -> &'static str {
+    match kind {
+        StopKind::EndTurn | StopKind::ContentFiltered => "end_turn",
+        StopKind::MaxTokens => "max_tokens",
+        StopKind::ToolUse => "tool_use",
+        StopKind::StopSequence => "stop_sequence",
+    }
+}
+
+/// Amazon Titan `completionReason`.
+pub(crate) fn stop_titan(kind: StopKind) -> &'static str {
+    match kind {
+        StopKind::MaxTokens => "LENGTH",
+        StopKind::ContentFiltered => "CONTENT_FILTERED",
+        _ => "FINISH",
+    }
+}
+
+/// Meta Llama / Mistral `stop_reason`.
+pub(crate) fn stop_meta_mistral(kind: StopKind) -> &'static str {
+    match kind {
+        StopKind::MaxTokens => "length",
+        _ => "stop",
+    }
+}
+
+/// Cohere `finish_reason`.
+pub(crate) fn stop_cohere(kind: StopKind) -> &'static str {
+    match kind {
+        StopKind::MaxTokens => "MAX_TOKENS",
+        _ => "COMPLETE",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bedrock provider-native response construction
 // ---------------------------------------------------------------------------
 
-/// Wrap a completion `text` + usage back into the exact Bedrock
-/// provider-native response body the caller expects for the given model.
-pub(crate) fn build_provider_response(
-    model_id: &str,
-    text: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-) -> String {
-    let value = if model_id.starts_with("anthropic.") {
+/// Wrap a completion back into the exact Bedrock provider-native response
+/// body the caller expects for the given model, preserving real usage, the
+/// upstream stop reason, and any tool-use blocks.
+fn build_provider_response(model_id: &str, completion: &Completion) -> String {
+    let family = strip_region_prefix(model_id);
+    let text = completion.text.as_str();
+    let input_tokens = completion.input_tokens;
+    let output_tokens = completion.output_tokens;
+    let stop = normalize_stop(
+        completion.stop_reason.as_deref(),
+        !completion.tool_calls.is_empty(),
+    );
+
+    let value = if family.starts_with("anthropic.") {
+        let mut content: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            content.push(json!({ "type": "text", "text": text }));
+        }
+        for tc in &completion.tool_calls {
+            content.push(json!({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.name,
+                "input": tc.input
+            }));
+        }
+        if content.is_empty() {
+            content.push(json!({ "type": "text", "text": "" }));
+        }
         json!({
             "id": "msg_fakecloudupstream01",
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
             "model": model_id,
-            "stop_reason": "end_turn",
+            "stop_reason": stop_anthropic(stop),
             "stop_sequence": null,
             "usage": { "input_tokens": input_tokens, "output_tokens": output_tokens }
         })
-    } else if model_id.starts_with("amazon.") {
+    } else if family.starts_with("amazon.") {
         json!({
             "inputTextTokenCount": input_tokens,
             "results": [{
                 "tokenCount": output_tokens,
                 "outputText": text,
-                "completionReason": "FINISH"
+                "completionReason": stop_titan(stop)
             }]
         })
-    } else if model_id.starts_with("meta.") {
+    } else if family.starts_with("meta.") {
         json!({
             "generation": text,
             "prompt_token_count": input_tokens,
             "generation_token_count": output_tokens,
-            "stop_reason": "stop"
+            "stop_reason": stop_meta_mistral(stop)
         })
-    } else if model_id.starts_with("cohere.") {
+    } else if family.starts_with("cohere.") {
         json!({
-            "generations": [{ "id": "gen-fakecloud-upstream", "text": text, "finish_reason": "COMPLETE" }],
+            "generations": [{ "id": "gen-fakecloud-upstream", "text": text, "finish_reason": stop_cohere(stop) }],
             "id": "fakecloud-upstream",
             "prompt": ""
         })
-    } else if model_id.starts_with("mistral.") {
-        json!({ "outputs": [{ "text": text, "stop_reason": "stop" }] })
+    } else if family.starts_with("mistral.") {
+        json!({ "outputs": [{ "text": text, "stop_reason": stop_meta_mistral(stop) }] })
     } else {
         json!({ "output": text })
     };
@@ -398,6 +601,18 @@ fn validation_error(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
 }
 
+/// Parse a runtime request body as JSON. A body that isn't valid JSON is a
+/// client error in real Bedrock (`ValidationException`), so we reject it
+/// rather than coercing it to `null` and forwarding an empty request
+/// upstream (which would yield a spurious 200 completion).
+fn parse_body(body: &[u8]) -> Result<Value, AwsServiceError> {
+    serde_json::from_slice(body).map_err(|e| {
+        validation_error(format!(
+            "Malformed input request: {e}, please reformat and try again."
+        ))
+    })
+}
+
 /// Map an unsuccessful upstream HTTP status onto a faithful Bedrock error.
 fn map_upstream_status(status: StatusCode, body: &str) -> AwsServiceError {
     let snippet: String = body.chars().take(500).collect();
@@ -410,11 +625,19 @@ fn map_upstream_status(status: StatusCode, body: &str) -> AwsServiceError {
     }
 }
 
-fn http_client() -> Result<reqwest::Client, AwsServiceError> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| model_error(format!("failed to build HTTP client: {e}")))
+/// A process-wide, lazily-built `reqwest::Client`. The client is internally
+/// reference-counted and pools connections, so it is cached and cloned per
+/// call rather than rebuilt (which would discard keep-alive / TLS reuse).
+fn http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +664,23 @@ fn chat_request_builder(
             if let Some(t) = chat.temperature {
                 body["temperature"] = json!(t);
             }
+            if !chat.tools.is_empty() {
+                body["tools"] = Value::Array(
+                    chat.tools
+                        .iter()
+                        .map(|t| {
+                            let mut v = json!({
+                                "name": t.name,
+                                "input_schema": t.input_schema,
+                            });
+                            if let Some(d) = &t.description {
+                                v["description"] = json!(d);
+                            }
+                            v
+                        })
+                        .collect(),
+                );
+            }
             if stream {
                 body["stream"] = json!(true);
             }
@@ -463,6 +703,9 @@ fn chat_request_builder(
             }
             if let Some(t) = chat.temperature {
                 body["temperature"] = json!(t);
+            }
+            if !chat.tools.is_empty() {
+                body["tools"] = openai_tools(chat);
             }
             if stream {
                 body["stream"] = json!(true);
@@ -491,6 +734,9 @@ fn chat_request_builder(
             });
             if !options.is_empty() {
                 body["options"] = Value::Object(options);
+            }
+            if !chat.tools.is_empty() {
+                body["tools"] = openai_tools(chat);
             }
             let mut rb = client.post(cfg.endpoint("/api/chat")).json(&body);
             if let Some(k) = &cfg.key {
@@ -527,24 +773,48 @@ async fn call_chat(
     upstream_model: &str,
     chat: &Chat,
 ) -> Result<Completion, AwsServiceError> {
-    let client = http_client()?;
+    let client = http_client();
     let rb = chat_request_builder(&client, cfg, upstream_model, chat, false);
     let v = send_and_read(rb).await?;
 
-    let (text, in_t, out_t) = match cfg.protocol {
+    let (text, tool_calls, stop_reason, in_t, out_t) = match cfg.protocol {
         Protocol::Anthropic => {
-            let text = v
-                .get("content")
-                .and_then(|c| c.as_array())
+            let content = v.get("content").and_then(|c| c.as_array());
+            let text = content
                 .map(|a| {
                     a.iter()
+                        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
                         .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                         .collect::<Vec<_>>()
                         .join("")
                 })
                 .unwrap_or_default();
+            let tool_calls = content
+                .map(|a| {
+                    a.iter()
+                        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                        .map(|p| ToolCall {
+                            id: p
+                                .get("id")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("tooluse_fakecloud_01")
+                                .to_string(),
+                            name: p
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            input: p.get("input").cloned().unwrap_or_else(|| json!({})),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 text,
+                tool_calls,
+                v.get("stop_reason")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
                 v.pointer("/usage/input_tokens").and_then(|x| x.as_u64()),
                 v.pointer("/usage/output_tokens").and_then(|x| x.as_u64()),
             )
@@ -555,8 +825,37 @@ async fn call_chat(
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let tool_calls = v
+                .pointer("/choices/0/message/tool_calls")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|tc| {
+                            let name = tc.pointer("/function/name").and_then(|x| x.as_str())?;
+                            let args = tc
+                                .pointer("/function/arguments")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("{}");
+                            Some(ToolCall {
+                                id: tc
+                                    .get("id")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("tooluse_fakecloud_01")
+                                    .to_string(),
+                                name: name.to_string(),
+                                input: serde_json::from_str::<Value>(args)
+                                    .unwrap_or_else(|_| json!({})),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 text,
+                tool_calls,
+                v.pointer("/choices/0/finish_reason")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
                 v.pointer("/usage/prompt_tokens").and_then(|x| x.as_u64()),
                 v.pointer("/usage/completion_tokens")
                     .and_then(|x| x.as_u64()),
@@ -568,8 +867,31 @@ async fn call_chat(
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let tool_calls = v
+                .pointer("/message/tool_calls")
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|tc| {
+                            let name = tc.pointer("/function/name").and_then(|x| x.as_str())?;
+                            Some(ToolCall {
+                                id: "tooluse_fakecloud_01".to_string(),
+                                name: name.to_string(),
+                                input: tc
+                                    .pointer("/function/arguments")
+                                    .cloned()
+                                    .unwrap_or_else(|| json!({})),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (
                 text,
+                tool_calls,
+                v.get("done_reason")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string),
                 v.get("prompt_eval_count").and_then(|x| x.as_u64()),
                 v.get("eval_count").and_then(|x| x.as_u64()),
             )
@@ -580,6 +902,8 @@ async fn call_chat(
     let output_tokens = out_t.unwrap_or_else(|| crate::prompt::count_tokens(&text));
     Ok(Completion {
         text,
+        tool_calls,
+        stop_reason,
         input_tokens,
         output_tokens,
     })
@@ -594,6 +918,34 @@ struct StreamAcc {
     deltas: Vec<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    stop_reason: Option<String>,
+}
+
+/// Byte-oriented line buffer for the streaming path. Raw chunk bytes are
+/// accumulated and only *complete* lines (delimited by `\n`, which can never
+/// appear inside a multibyte UTF-8 sequence) are decoded. Decoding whole
+/// lines rather than each network chunk avoids splitting a multibyte
+/// character across a chunk boundary and corrupting it to U+FFFD.
+#[derive(Default)]
+struct LineBuffer {
+    buf: Vec<u8>,
+}
+
+impl LineBuffer {
+    fn push(&mut self, chunk: &[u8], protocol: Protocol, acc: &mut StreamAcc) {
+        self.buf.extend_from_slice(chunk);
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            process_stream_line(protocol, &String::from_utf8_lossy(&line), acc);
+        }
+    }
+
+    fn finish(&mut self, protocol: Protocol, acc: &mut StreamAcc) {
+        if !self.buf.is_empty() {
+            process_stream_line(protocol, &String::from_utf8_lossy(&self.buf), acc);
+            self.buf.clear();
+        }
+    }
 }
 
 /// Parse a single completed line from the upstream stream, appending any
@@ -644,6 +996,9 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                 if let Some(n) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64()) {
                     acc.output_tokens = Some(n);
                 }
+                if let Some(s) = v.pointer("/delta/stop_reason").and_then(|x| x.as_str()) {
+                    acc.stop_reason = Some(s.to_string());
+                }
             }
             _ => {}
         },
@@ -655,6 +1010,12 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                 if !t.is_empty() {
                     acc.deltas.push(t.to_string());
                 }
+            }
+            if let Some(s) = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(|x| x.as_str())
+            {
+                acc.stop_reason = Some(s.to_string());
             }
             if let Some(n) = v.pointer("/usage/prompt_tokens").and_then(|x| x.as_u64()) {
                 acc.input_tokens = Some(n);
@@ -672,6 +1033,9 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
                     acc.deltas.push(t.to_string());
                 }
             }
+            if let Some(s) = v.get("done_reason").and_then(|x| x.as_str()) {
+                acc.stop_reason = Some(s.to_string());
+            }
             if let Some(n) = v.get("prompt_eval_count").and_then(|x| x.as_u64()) {
                 acc.input_tokens = Some(n);
             }
@@ -682,15 +1046,24 @@ fn process_stream_line(protocol: Protocol, line: &str, acc: &mut StreamAcc) {
     }
 }
 
-/// Stream a completion from the upstream, returning the ordered text deltas
-/// plus resolved token counts. The deltas are the upstream's *real*
-/// incremental tokens; the caller re-frames them as a Bedrock event stream.
+/// Ordered real token deltas plus resolved usage and stop reason from a
+/// streaming upstream response. The caller re-frames the deltas as a Bedrock
+/// event stream.
+struct StreamResult {
+    deltas: Vec<String>,
+    stop: StopKind,
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+/// Stream a completion from the upstream. The deltas are the upstream's
+/// *real* incremental tokens.
 async fn call_chat_stream(
     cfg: &UpstreamConfig,
     upstream_model: &str,
     chat: &Chat,
-) -> Result<(Vec<String>, u64, u64), AwsServiceError> {
-    let client = http_client()?;
+) -> Result<StreamResult, AwsServiceError> {
+    let client = http_client();
     let rb = chat_request_builder(&client, cfg, upstream_model, chat, true);
     let mut resp = rb
         .send()
@@ -709,28 +1082,18 @@ async fn call_chat_stream(
         deltas: Vec::new(),
         input_tokens: None,
         output_tokens: None,
+        stop_reason: None,
     };
-    let mut buf = String::new();
+    let mut buf = LineBuffer::default();
 
-    loop {
-        // Drain all complete lines currently in the buffer.
-        while let Some(nl) = buf.find('\n') {
-            let line: String = buf.drain(..=nl).collect();
-            process_stream_line(cfg.protocol, &line, &mut acc);
-        }
-        match resp
-            .chunk()
-            .await
-            .map_err(|e| model_error(format!("reading upstream stream failed: {e}")))?
-        {
-            Some(chunk) => buf.push_str(&String::from_utf8_lossy(&chunk)),
-            None => break,
-        }
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| model_error(format!("reading upstream stream failed: {e}")))?
+    {
+        buf.push(&chunk, cfg.protocol, &mut acc);
     }
-    // Process any trailing partial line without a terminating newline.
-    if !buf.is_empty() {
-        process_stream_line(cfg.protocol, &buf, &mut acc);
-    }
+    buf.finish(cfg.protocol, &mut acc);
 
     let output_text = acc.deltas.concat();
     let input_tokens = acc
@@ -739,7 +1102,12 @@ async fn call_chat_stream(
     let output_tokens = acc
         .output_tokens
         .unwrap_or_else(|| crate::prompt::count_tokens(&output_text));
-    Ok((acc.deltas, input_tokens, output_tokens))
+    Ok(StreamResult {
+        deltas: acc.deltas,
+        stop: normalize_stop(acc.stop_reason.as_deref(), false),
+        input_tokens,
+        output_tokens,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -811,7 +1179,7 @@ async fn invoke_embedding_upstream(
             0,
         )),
         Protocol::OpenAi => {
-            let client = http_client()?;
+            let client = http_client();
             let body = json!({ "model": embed_model, "input": text });
             let mut rb = client.post(cfg.endpoint("/v1/embeddings")).json(&body);
             if let Some(k) = &cfg.key {
@@ -836,7 +1204,7 @@ async fn invoke_embedding_upstream(
             ))
         }
         Protocol::Ollama => {
-            let client = http_client()?;
+            let client = http_client();
             let body = json!({ "model": embed_model, "prompt": text });
             let mut rb = client.post(cfg.endpoint("/api/embeddings")).json(&body);
             if let Some(k) = &cfg.key {
@@ -896,7 +1264,7 @@ pub(crate) async fn invoke_model_upstream(
         return Err(crate::faults::fault_to_error(&fault));
     }
 
-    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+    let input = parse_body(body)?;
 
     // Explicit simulation overrides (response rules / custom responses)
     // keep working even with an upstream configured.
@@ -912,11 +1280,9 @@ pub(crate) async fn invoke_model_upstream(
         let chat = bedrock_request_to_chat(&input);
         let upstream_model = cfg.resolve_model(model_id);
         call_chat(cfg, &upstream_model, &chat).await.map(|c| {
-            (
-                build_provider_response(model_id, &c.text, c.input_tokens, c.output_tokens),
-                c.input_tokens,
-                c.output_tokens,
-            )
+            let in_t = c.input_tokens;
+            let out_t = c.output_tokens;
+            (build_provider_response(model_id, &c), in_t, out_t)
         })
     };
 
@@ -946,7 +1312,7 @@ pub(crate) async fn converse_upstream(
         return Err(crate::faults::fault_to_error(&fault));
     }
 
-    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+    let input = parse_body(body)?;
     let chat = bedrock_request_to_chat(&input);
     let upstream_model = cfg.resolve_model(model_id);
 
@@ -955,14 +1321,36 @@ pub(crate) async fn converse_upstream(
         Err(e) => return Err(record_error(state, req, model_id, body, e)),
     };
 
+    // Build Converse content blocks: the assistant text, then a `toolUse`
+    // block for every tool the model chose to call, mirroring the offline
+    // `converse()` shape.
+    let mut content: Vec<Value> = Vec::new();
+    if !completion.text.is_empty() || completion.tool_calls.is_empty() {
+        content.push(json!({ "text": completion.text }));
+    }
+    for tc in &completion.tool_calls {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": tc.id,
+                "name": tc.name,
+                "input": tc.input
+            }
+        }));
+    }
+
+    let stop = normalize_stop(
+        completion.stop_reason.as_deref(),
+        !completion.tool_calls.is_empty(),
+    );
+
     let response = json!({
         "output": {
             "message": {
                 "role": "assistant",
-                "content": [{ "text": completion.text }]
+                "content": content
             }
         },
-        "stopReason": "end_turn",
+        "stopReason": stop_converse(stop),
         "usage": {
             "inputTokens": completion.input_tokens,
             "outputTokens": completion.output_tokens,
@@ -986,25 +1374,53 @@ pub(crate) async fn invoke_stream_upstream(
     body: &[u8],
     cfg: &UpstreamConfig,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+    // A configured simulation override wins over the live upstream, same as
+    // the non-streaming path: stream the override text deterministically.
+    if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
+        let text = crate::streaming::override_text(model_id, custom);
+        let input = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let in_t = crate::prompt::count_tokens(&crate::invoke::extract_input_text(&input));
+        let out_t = crate::prompt::count_tokens(&text);
+        let deltas = vec![text];
+        let event_body = crate::streaming::build_invoke_stream_from_deltas(
+            model_id,
+            &deltas,
+            StopKind::EndTurn,
+            in_t,
+            out_t,
+        );
+        crate::invoke::record_invocation(state, req, model_id, body, &deltas.concat(), None);
+        return Ok(eventstream_response(event_body));
+    }
+
+    let input = parse_body(body)?;
     let chat = bedrock_request_to_chat(&input);
     let upstream_model = cfg.resolve_model(model_id);
 
-    let (deltas, in_t, out_t) = match call_chat_stream(cfg, &upstream_model, &chat).await {
+    let result = match call_chat_stream(cfg, &upstream_model, &chat).await {
         Ok(t) => t,
         Err(e) => return Err(record_error(state, req, model_id, body, e)),
     };
 
-    let event_body =
-        crate::streaming::build_invoke_stream_from_deltas(model_id, &deltas, in_t, out_t);
+    let event_body = crate::streaming::build_invoke_stream_from_deltas(
+        model_id,
+        &result.deltas,
+        result.stop,
+        result.input_tokens,
+        result.output_tokens,
+    );
 
-    crate::invoke::record_invocation(state, req, model_id, body, &deltas.concat(), None);
-    Ok(AwsResponse {
+    crate::invoke::record_invocation(state, req, model_id, body, &result.deltas.concat(), None);
+    Ok(eventstream_response(event_body))
+}
+
+fn eventstream_response(event_body: Vec<u8>) -> AwsResponse {
+    AwsResponse {
         status: StatusCode::OK,
         content_type: "application/vnd.amazon.eventstream".to_string(),
         body: bytes::Bytes::from(event_body).into(),
         headers: http::HeaderMap::new(),
-    })
+    }
 }
 
 /// Real-inference `ConverseStream`.
@@ -1015,24 +1431,40 @@ pub(crate) async fn converse_stream_upstream(
     body: &[u8],
     cfg: &UpstreamConfig,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let input: Value = serde_json::from_slice(body).unwrap_or_default();
+    // A configured simulation override wins over the live upstream.
+    if let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) {
+        let text = crate::streaming::override_text(model_id, custom);
+        let in_t = crate::prompt::count_tokens(&crate::prompt::extract_prompt_text(model_id, body));
+        let out_t = crate::prompt::count_tokens(&text);
+        let deltas = vec![text];
+        let event_body = crate::streaming::build_converse_stream_from_deltas(
+            &deltas,
+            StopKind::EndTurn,
+            in_t,
+            out_t,
+        );
+        crate::invoke::record_invocation(state, req, model_id, body, &deltas.concat(), None);
+        return Ok(eventstream_response(event_body));
+    }
+
+    let input = parse_body(body)?;
     let chat = bedrock_request_to_chat(&input);
     let upstream_model = cfg.resolve_model(model_id);
 
-    let (deltas, in_t, out_t) = match call_chat_stream(cfg, &upstream_model, &chat).await {
+    let result = match call_chat_stream(cfg, &upstream_model, &chat).await {
         Ok(t) => t,
         Err(e) => return Err(record_error(state, req, model_id, body, e)),
     };
 
-    let event_body = crate::streaming::build_converse_stream_from_deltas(&deltas, in_t, out_t);
+    let event_body = crate::streaming::build_converse_stream_from_deltas(
+        &result.deltas,
+        result.stop,
+        result.input_tokens,
+        result.output_tokens,
+    );
 
-    crate::invoke::record_invocation(state, req, model_id, body, &deltas.concat(), None);
-    Ok(AwsResponse {
-        status: StatusCode::OK,
-        content_type: "application/vnd.amazon.eventstream".to_string(),
-        body: bytes::Bytes::from(event_body).into(),
-        headers: http::HeaderMap::new(),
-    })
+    crate::invoke::record_invocation(state, req, model_id, body, &result.deltas.concat(), None);
+    Ok(eventstream_response(event_body))
 }
 
 #[cfg(test)]
@@ -1437,6 +1869,236 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_stream_llama_reencodes_as_generation_not_output_text() {
+        // A non-anthropic (Llama) stream must use the Meta-native
+        // `generation` field, not Titan `outputText`, or the aws-sdk Llama
+        // decoder yields empty chunks.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Lla\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"ma!\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"prompt":"hello llama","max_gen_len":16}"#;
+
+        let resp = invoke_stream_upstream(&s, &req(), "meta.llama3-70b-instruct-v1:0", body, &c)
+            .await
+            .unwrap();
+
+        let frames = split_frames(&body_bytes(&resp));
+        let mut gens = Vec::new();
+        for f in &frames {
+            let inner = invoke_frame_inner(f);
+            // No frame may carry Titan `outputText`.
+            assert!(
+                inner.get("outputText").is_none(),
+                "llama stream must not use outputText: {inner}"
+            );
+            if let Some(g) = inner.get("generation").and_then(|g| g.as_str()) {
+                if !g.is_empty() {
+                    gens.push(g.to_string());
+                }
+            }
+        }
+        assert_eq!(gens.concat(), "Llama!");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_stream_regional_profile_uses_anthropic_shape() {
+        // A cross-region inference-profile id (`us.anthropic.*`) must still
+        // render the Anthropic Messages streaming shape.
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                   data: [DONE]\n\n";
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let sse = sse.to_string();
+                async move { ([(http::header::CONTENT_TYPE, "text/event-stream")], sse) }
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+
+        let resp = invoke_stream_upstream(
+            &s,
+            &req(),
+            "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+            body,
+            &c,
+        )
+        .await
+        .unwrap();
+
+        let frames = split_frames(&body_bytes(&resp));
+        let types: Vec<String> = frames
+            .iter()
+            .filter_map(|f| invoke_frame_inner(f)["type"].as_str().map(str::to_string))
+            .collect();
+        assert!(types.iter().any(|t| t == "message_start"));
+        assert!(types.iter().any(|t| t == "content_block_delta"));
+    }
+
+    #[test]
+    fn line_buffer_decodes_multibyte_char_split_across_chunks() {
+        // Regression: a UTF-8 sequence ('é' = 0xC3 0xA9) split across two
+        // network chunks must not be corrupted to U+FFFD. The old code
+        // lossy-decoded each chunk before buffering; the byte-oriented
+        // LineBuffer only decodes complete lines.
+        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n";
+        let bytes = line.as_bytes();
+        // Find the byte offset of 'é' (first non-ASCII byte) and split it.
+        let split = bytes.iter().position(|&b| b >= 0x80).unwrap() + 1;
+        assert!(split < bytes.len());
+
+        let mut acc = StreamAcc {
+            deltas: Vec::new(),
+            input_tokens: None,
+            output_tokens: None,
+            stop_reason: None,
+        };
+        let mut buf = LineBuffer::default();
+        buf.push(&bytes[..split], Protocol::OpenAi, &mut acc);
+        buf.push(&bytes[split..], Protocol::OpenAi, &mut acc);
+        buf.finish(Protocol::OpenAi, &mut acc);
+
+        assert_eq!(acc.deltas.concat(), "café");
+        assert!(
+            !acc.deltas.concat().contains('\u{FFFD}'),
+            "multibyte char was corrupted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_tool_config_produces_tool_use_block_on_upstream_path() {
+        // The upstream returns an OpenAI-style tool call; converse_upstream
+        // must map it back to a Bedrock toolUse block + stopReason tool_use,
+        // and must have forwarded the tool spec to the upstream.
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|axum::Json(payload): axum::Json<Value>| async move {
+                // Tool spec was translated into the OpenAI tools shape.
+                assert_eq!(payload["tools"][0]["function"]["name"], "get_weather");
+                axum::Json(json!({
+                    "choices": [{
+                        "message": {
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": "{\"city\":\"Paris\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": { "prompt_tokens": 9, "completion_tokens": 5 }
+                }))
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{
+            "messages":[{"role":"user","content":[{"text":"weather in Paris?"}]}],
+            "toolConfig":{"tools":[{"toolSpec":{"name":"get_weather","description":"weather","inputSchema":{"json":{"type":"object"}}}}]}
+        }"#;
+
+        let resp = converse_upstream(&s, &req(), "anthropic.claude-3", body, &c)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body_bytes(&resp)).unwrap();
+        assert_eq!(v["stopReason"], "tool_use");
+        let content = v["output"]["message"]["content"].as_array().unwrap();
+        let tool_use = content
+            .iter()
+            .find(|b| b.get("toolUse").is_some())
+            .expect("expected a toolUse content block");
+        assert_eq!(tool_use["toolUse"]["name"], "get_weather");
+        assert_eq!(tool_use["toolUse"]["input"]["city"], "Paris");
+        assert_eq!(tool_use["toolUse"]["toolUseId"], "call_abc");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn converse_propagates_max_tokens_stop_reason() {
+        // An upstream length-truncated generation must surface as Bedrock
+        // stopReason `max_tokens`, not a natural `end_turn`.
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                axum::Json(json!({
+                    "choices": [{ "message": { "content": "trunc" }, "finish_reason": "length" }],
+                    "usage": { "prompt_tokens": 3, "completion_tokens": 2 }
+                }))
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}],"inferenceConfig":{"maxTokens":2}}"#;
+
+        let resp = converse_upstream(&s, &req(), "anthropic.claude-3", body, &c)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body_bytes(&resp)).unwrap();
+        assert_eq!(v["stopReason"], "max_tokens");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_malformed_request_body_returns_validation_exception() {
+        // A request body that isn't valid JSON is rejected before any
+        // upstream call (real Bedrock returns ValidationException), rather
+        // than being coerced to null and forwarded.
+        let c = cfg("http://127.0.0.1:1".to_string(), Protocol::OpenAi);
+        let s = shared();
+        let err = invoke_model_upstream(&s, &req(), "anthropic.claude-3", b"not json {", &c)
+            .await
+            .err()
+            .expect("malformed body must be rejected");
+        assert_eq!(err.code(), "ValidationException");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_stream_override_streams_deterministically_without_upstream() {
+        // With a configured override, the streaming path must NOT call the
+        // live upstream; pointing at a dead URL proves the override wins.
+        let c = cfg("http://127.0.0.1:1".to_string(), Protocol::OpenAi);
+        let s = shared();
+        {
+            let mut st = s.write();
+            st.default_mut().custom_responses.insert(
+                "anthropic.claude-3".to_string(),
+                "OVERRIDE TEXT".to_string(),
+            );
+        }
+        let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let resp = invoke_stream_upstream(&s, &req(), "anthropic.claude-3", body, &c)
+            .await
+            .expect("override path should not touch the dead upstream");
+        let frames = split_frames(&body_bytes(&resp));
+        let mut text = String::new();
+        for f in &frames {
+            let inner = invoke_frame_inner(f);
+            if inner["type"] == "content_block_delta" {
+                text.push_str(inner["delta"]["text"].as_str().unwrap());
+            }
+        }
+        assert_eq!(text, "OVERRIDE TEXT");
+    }
+
     #[test]
     fn resolve_model_prefers_map_then_default_then_stripped() {
         let c = UpstreamConfig {
@@ -1460,5 +2122,29 @@ mod tests {
             ..c
         };
         assert_eq!(c2.resolve_model("meta.llama3-70b"), "llama3-70b");
+        // Cross-region inference-profile prefix is stripped before the
+        // provider namespace when falling back to the bare model name.
+        assert_eq!(c2.resolve_model("us.meta.llama3-70b"), "llama3-70b");
+    }
+
+    #[test]
+    fn strip_region_prefix_handles_inference_profiles() {
+        assert_eq!(
+            strip_region_prefix("us.anthropic.claude-3"),
+            "anthropic.claude-3"
+        );
+        assert_eq!(
+            strip_region_prefix("eu.amazon.nova-lite"),
+            "amazon.nova-lite"
+        );
+        assert_eq!(
+            strip_region_prefix("apac.anthropic.claude-3"),
+            "anthropic.claude-3"
+        );
+        // A bare provider id (no region) is unchanged.
+        assert_eq!(
+            strip_region_prefix("anthropic.claude-3"),
+            "anthropic.claude-3"
+        );
     }
 }

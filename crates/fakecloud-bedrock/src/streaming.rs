@@ -196,24 +196,28 @@ pub(crate) fn build_converse_stream_response(
 }
 
 /// Re-encode a sequence of real upstream token deltas as a Bedrock
-/// `InvokeModelWithResponseStream` event stream. Each `deltas` entry
-/// becomes its own frame, so the caller streams genuine incremental tokens
-/// rather than a single canned block.
+/// `InvokeModelWithResponseStream` event stream. Each `deltas` entry becomes
+/// its own frame, so the caller streams genuine incremental tokens rather
+/// than a single canned block.
 ///
-/// For `anthropic.*` models the frames follow the Anthropic Messages
-/// streaming envelope (`message_start` / `content_block_delta` per token /
-/// `message_stop`); every other provider emits Titan-style `outputText`
-/// chunks, matching `build_invoke_stream_response`'s generic branch.
+/// Every provider is re-encoded into *its own* provider-native streaming
+/// shape (matching the non-streaming `build_provider_response`) so the
+/// aws-sdk decoder for each provider finds the field it expects: Anthropic
+/// `content_block_delta.text`, Titan/Amazon `outputText`, Llama
+/// `generation`, Cohere `text`, Mistral `outputs[].text`.
 pub(crate) fn build_invoke_stream_from_deltas(
     model_id: &str,
     deltas: &[String],
+    stop: crate::upstream::StopKind,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Vec<u8> {
+    use crate::upstream::{stop_anthropic, stop_cohere, stop_meta_mistral, stop_titan};
     let mut body = Vec::new();
+    let family = crate::upstream::strip_region_prefix(model_id);
 
-    if model_id.starts_with("anthropic.") {
-        push_anthropic_chunk(
+    if family.starts_with("anthropic.") {
+        push_bytes_chunk(
             &mut body,
             &json!({
                 "type": "message_start",
@@ -228,7 +232,7 @@ pub(crate) fn build_invoke_stream_from_deltas(
                 }
             }),
         );
-        push_anthropic_chunk(
+        push_bytes_chunk(
             &mut body,
             &json!({
                 "type": "content_block_start",
@@ -237,7 +241,7 @@ pub(crate) fn build_invoke_stream_from_deltas(
             }),
         );
         for delta in deltas {
-            push_anthropic_chunk(
+            push_bytes_chunk(
                 &mut body,
                 &json!({
                     "type": "content_block_delta",
@@ -246,22 +250,87 @@ pub(crate) fn build_invoke_stream_from_deltas(
                 }),
             );
         }
-        push_anthropic_chunk(
+        push_bytes_chunk(
             &mut body,
             &json!({ "type": "content_block_stop", "index": 0 }),
         );
-        push_anthropic_chunk(
+        push_bytes_chunk(
             &mut body,
             &json!({
                 "type": "message_delta",
-                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                "delta": { "stop_reason": stop_anthropic(stop), "stop_sequence": null },
                 "usage": { "output_tokens": output_tokens }
             }),
         );
-        push_anthropic_chunk(&mut body, &json!({ "type": "message_stop" }));
+        push_bytes_chunk(&mut body, &json!({ "type": "message_stop" }));
+    } else if family.starts_with("amazon.") {
+        for (i, delta) in deltas.iter().enumerate() {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "outputText": delta,
+                    "index": 0,
+                    "completionReason": Value::Null,
+                    "inputTextTokenCount": if i == 0 { json!(input_tokens) } else { Value::Null }
+                }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "outputText": "",
+                "index": 0,
+                "totalOutputTextTokenCount": output_tokens,
+                "completionReason": stop_titan(stop),
+                "inputTextTokenCount": input_tokens
+            }),
+        );
+    } else if family.starts_with("meta.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({
+                    "generation": delta,
+                    "prompt_token_count": Value::Null,
+                    "generation_token_count": Value::Null,
+                    "stop_reason": Value::Null
+                }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({
+                "generation": "",
+                "prompt_token_count": input_tokens,
+                "generation_token_count": output_tokens,
+                "stop_reason": stop_meta_mistral(stop)
+            }),
+        );
+    } else if family.starts_with("cohere.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "text": delta, "is_finished": false, "index": 0 }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({ "is_finished": true, "finish_reason": stop_cohere(stop) }),
+        );
+    } else if family.starts_with("mistral.") {
+        for delta in deltas {
+            push_bytes_chunk(
+                &mut body,
+                &json!({ "outputs": [{ "text": delta, "stop_reason": Value::Null }] }),
+            );
+        }
+        push_bytes_chunk(
+            &mut body,
+            &json!({ "outputs": [{ "text": "", "stop_reason": stop_meta_mistral(stop) }] }),
+        );
     } else {
         for delta in deltas {
-            push_anthropic_chunk(&mut body, &json!({ "outputText": delta }));
+            push_bytes_chunk(&mut body, &json!({ "outputText": delta }));
         }
     }
 
@@ -270,7 +339,7 @@ pub(crate) fn build_invoke_stream_from_deltas(
 
 /// Encode a single `chunk` event whose payload is the base64-wrapped JSON
 /// value, matching how Bedrock frames provider-native streaming bodies.
-fn push_anthropic_chunk(body: &mut Vec<u8>, chunk: &Value) {
+fn push_bytes_chunk(body: &mut Vec<u8>, chunk: &Value) {
     let payload = serde_json::to_vec(&json!({
         "bytes": base64_encode(&serde_json::to_vec(chunk)
             .expect("serde_json::Value serialization is infallible"))
@@ -280,10 +349,11 @@ fn push_anthropic_chunk(body: &mut Vec<u8>, chunk: &Value) {
 }
 
 /// Re-encode a sequence of real upstream token deltas as a Bedrock
-/// `ConverseStream` event stream — one `contentBlockDelta` event per token,
+/// `ConverseStream` event stream: one `contentBlockDelta` event per token,
 /// terminated with real usage figures in the `metadata` event.
 pub(crate) fn build_converse_stream_from_deltas(
     deltas: &[String],
+    stop: crate::upstream::StopKind,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Vec<u8> {
@@ -326,8 +396,8 @@ pub(crate) fn build_converse_stream_from_deltas(
         &payload,
     ));
 
-    let stop = json!({ "stopReason": "end_turn" });
-    let payload = serde_json::to_vec(&json!({ "messageStop": stop }))
+    let stop_event = json!({ "stopReason": crate::upstream::stop_converse(stop) });
+    let payload = serde_json::to_vec(&json!({ "messageStop": stop_event }))
         .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event("messageStop", "application/json", &payload));
 
@@ -377,13 +447,19 @@ pub(crate) fn get_response_text(
         }
         return default_stream_text().to_string();
     };
-    // Try to extract text from a JSON response body.
+    override_text(model_id, custom)
+}
+
+/// Extract the assistant text from a configured simulation override. The
+/// override may be a provider-native JSON body (Anthropic `content[].text`
+/// or Converse `output.message.content[].text`) or an opaque raw string, in
+/// which case it is returned verbatim. `model_id` is currently unused but
+/// kept for symmetry with the provider-shaped extractors.
+pub(crate) fn override_text(_model_id: &str, custom: String) -> String {
     if let Ok(parsed) = serde_json::from_str::<Value>(&custom) {
-        // Anthropic format
         if let Some(text) = parsed["content"][0]["text"].as_str() {
             return text.to_string();
         }
-        // Converse format
         if let Some(text) = parsed["output"]["message"]["content"][0]["text"].as_str() {
             return text.to_string();
         }
