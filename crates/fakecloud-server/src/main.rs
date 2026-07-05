@@ -261,6 +261,11 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    // Clones for the CodeBuild service, which resolves PARAMETER_STORE /
+    // SECRETS_MANAGER build env vars — captured before these states are moved
+    // into their own SSM / Secrets Manager services below.
+    let ssm_state_for_codebuild = ssm_state.clone();
+    let secretsmanager_state_for_codebuild = secretsmanager_state.clone();
     let s3_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4884,6 +4889,7 @@ async fn main() {
         .with_s3(Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
             s3_state.clone(),
         )))
+        .with_secret_stores(ssm_state_for_codebuild, secretsmanager_state_for_codebuild)
         .with_backend_autodetect();
     if let Some(store) = codebuild_snapshot_store {
         codebuild_service = codebuild_service.with_snapshot_store(store);

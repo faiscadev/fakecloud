@@ -247,3 +247,138 @@ async fn restart_fails_in_flight_build_instead_of_zombie() {
         "in-flight build must be failed by restart reconcile, not left a zombie"
     );
 }
+
+#[tokio::test]
+async fn cross_phase_shell_state_persists() {
+    if !require_docker_or_skip("cross_phase_shell_state_persists") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let cb = aws_sdk_codebuild::Client::new(&s.aws_config().await);
+
+    // pre_build exports a var and changes directory; build relies on BOTH
+    // surviving into the next phase. If each phase ran in its own shell (the
+    // bug), `$FCTAG` would be empty and the cwd would reset -> the assertions
+    // would fail and the build FAIL. It must SUCCEED, proving one continuous
+    // shell across phases (matching AWS).
+    let spec = "version: 0.2\n\
+                phases:\n  \
+                pre_build:\n    commands:\n      - export FCTAG=cross-phase-ok\n      - cd /tmp\n  \
+                build:\n    commands:\n      \
+                - test \"$FCTAG\" = cross-phase-ok\n      \
+                - test \"$(pwd)\" = /tmp\n";
+    create_project(&cb, "e2e-crossphase", spec).await;
+
+    let start = cb
+        .start_build()
+        .project_name("e2e-crossphase")
+        .send()
+        .await
+        .expect("start build");
+    let build_id = start.build_value().unwrap().id().unwrap().to_string();
+    let build = wait_complete(&cb, &build_id).await;
+    assert_eq!(
+        build.build_status(),
+        Some(&StatusType::Succeeded),
+        "cross-phase env/cwd must persist; phases: {:?}",
+        build.phases()
+    );
+    assert_eq!(phase_status(&build, "BUILD"), Some(StatusType::Succeeded));
+}
+
+#[tokio::test]
+async fn glob_artifacts_upload_to_s3() {
+    if !require_docker_or_skip("glob_artifacts_upload_to_s3") {
+        return;
+    }
+    let s = TestServer::start().await;
+    let cfg = s.aws_config().await;
+    let cb = aws_sdk_codebuild::Client::new(&cfg);
+    let s3 = aws_sdk_s3::Client::new(&cfg);
+
+    let bucket = "e2e-codebuild-artifacts";
+    s3.create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("create bucket");
+
+    // The build produces two files under target/; the artifact glob
+    // `target/*.txt` must match ONLY the .txt (a literal-path bug matches
+    // nothing and silently uploads zero). packaging NONE -> individual objects.
+    let spec = "version: 0.2\n\
+                phases:\n  \
+                build:\n    commands:\n      \
+                - mkdir -p target\n      \
+                - echo artifact-body > target/result.txt\n      \
+                - echo ignore > target/other.bin\n\
+                artifacts:\n  files:\n    - 'target/*.txt'\n  name: myartifacts\n";
+    cb.create_project()
+        .name("e2e-artifacts")
+        .source(
+            ProjectSource::builder()
+                .r#type(SourceType::NoSource)
+                .buildspec(spec)
+                .build()
+                .unwrap(),
+        )
+        .artifacts(
+            ProjectArtifacts::builder()
+                .r#type(ArtifactsType::S3)
+                .location(bucket)
+                .name("myartifacts")
+                .packaging(aws_sdk_codebuild::types::ArtifactPackaging::None)
+                .build()
+                .unwrap(),
+        )
+        .environment(
+            ProjectEnvironment::builder()
+                .r#type(EnvironmentType::LinuxContainer)
+                .image("aws/codebuild/standard:7.0")
+                .compute_type(ComputeType::BuildGeneral1Small)
+                .build()
+                .unwrap(),
+        )
+        .service_role("arn:aws:iam::000000000000:role/codebuild-service-role")
+        .send()
+        .await
+        .expect("create project");
+
+    let start = cb
+        .start_build()
+        .project_name("e2e-artifacts")
+        .send()
+        .await
+        .expect("start build");
+    let build_id = start.build_value().unwrap().id().unwrap().to_string();
+    let build = wait_complete(&cb, &build_id).await;
+    assert_eq!(
+        build.build_status(),
+        Some(&StatusType::Succeeded),
+        "artifact build should succeed; phases: {:?}",
+        build.phases()
+    );
+
+    // The matched .txt artifact was uploaded under <name>/<relpath>; the .bin
+    // (not matched by the glob) must NOT be present.
+    let obj = s3
+        .get_object()
+        .bucket(bucket)
+        .key("myartifacts/target/result.txt")
+        .send()
+        .await
+        .expect("artifact object present in S3");
+    let body = obj.body.collect().await.expect("read body").into_bytes();
+    assert_eq!(&body[..], b"artifact-body\n");
+
+    let missing = s3
+        .get_object()
+        .bucket(bucket)
+        .key("myartifacts/target/other.bin")
+        .send()
+        .await;
+    assert!(
+        missing.is_err(),
+        "non-matching file must not be uploaded as an artifact"
+    );
+}

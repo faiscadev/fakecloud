@@ -59,20 +59,32 @@ When a container runtime is available, the background build task:
   `StartBuild.buildspecOverride` — reading `env.variables` and the
   `install` / `pre_build` / `build` / `post_build` phase `commands` and the
   `artifacts` block.
-- **Runs each phase in the container**, in order, with the standard CodeBuild
-  environment variables set (`CODEBUILD_BUILD_ID`, `CODEBUILD_BUILD_ARN`,
-  `CODEBUILD_SOURCE_VERSION`, `CODEBUILD_BUILD_NUMBER`, plus the project's
-  `environmentVariables` and the buildspec `env.variables`). A failing command
-  fails its phase; a failed `install`/`pre_build`/`build` skips ahead but
-  `post_build` still runs — matching AWS's phase-failure semantics. Each
-  `phases[]` entry carries the real `phaseStatus`, `startTime`, `endTime`,
-  `durationInSeconds`, and `contexts`.
+- **Runs all phases in ONE continuous shell** in the container, so `cd` and
+  `export` in one phase persist into the next exactly like AWS. The standard
+  CodeBuild environment variables are set (`CODEBUILD_BUILD_ID`,
+  `CODEBUILD_BUILD_ARN`, `CODEBUILD_SOURCE_VERSION`, `CODEBUILD_BUILD_NUMBER`,
+  plus the project's `environmentVariables` and the buildspec `env.variables`).
+  `PARAMETER_STORE` and `SECRETS_MANAGER` environment variables are resolved
+  cross-service from SSM / Secrets Manager and injected into the container. A
+  failing command fails its phase; a failed `install`/`pre_build`/`build` skips
+  ahead but `post_build` still runs — matching AWS's phase-failure semantics.
+  Each `phases[]` entry carries the real `phaseStatus`, `startTime`, `endTime`,
+  `durationInSeconds`, and `contexts`. A build that exceeds its
+  `timeoutInMinutes` (default 60, up to 480) is killed and settles `TIMED_OUT`.
 - **Streams logs to CloudWatch Logs** into the project's `logsConfig` group and
   stream (or the default `/aws/codebuild/<project>` group), so `Build.logs`
   points at a real, readable log group/stream.
 - **Uploads S3 artifacts** — when `artifacts.type == S3`, the declared
-  `artifacts.files` are read out of the container and written to the S3 location
-  (`NONE` or `ZIP` packaging). `NO_ARTIFACTS` skips this phase.
+  `artifacts.files` glob patterns (`**/*`, `target/*.jar`, `base-directory`,
+  `discard-paths`) are matched against the build output and written to the S3
+  location (`NONE` or `ZIP` packaging). A pattern that matches nothing fails the
+  build, matching AWS. `NO_ARTIFACTS` skips this phase.
+
+`StartBuildBatch` mirrors this single-build execution for real (running the
+resolved buildspec in a container and settling `buildBatchStatus` on the exit
+code), and reports the BuildBatch-shaped phases (`DOWNLOAD_BATCHSPEC`,
+`IN_PROGRESS`, `COMBINE_ARTIFACTS`) with `logConfig`. fakecloud does not fan a
+batch out into a build matrix/graph of child builds.
 
 `buildStatus` settles on the real container exit codes. A build that is still
 `IN_PROGRESS` when the server restarts (its container is gone) is reconciled to

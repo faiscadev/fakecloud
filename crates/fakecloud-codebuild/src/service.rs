@@ -27,6 +27,8 @@ use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_logs::SharedLogsState;
 use fakecloud_persistence::SnapshotStore;
+use fakecloud_secretsmanager::SharedSecretsManagerState;
+use fakecloud_ssm::SharedSsmState;
 
 use crate::runtime::{BuildJob, CodeBuildBackend, RunningContainers};
 use crate::state::{CodeBuildState, SharedCodeBuildState};
@@ -109,6 +111,10 @@ pub struct CodeBuildService {
     backend: Option<Arc<CodeBuildBackend>>,
     /// Live build containers, so `StopBuild` can kill one mid-run.
     running: RunningContainers,
+    /// SSM state for resolving `PARAMETER_STORE`-typed build env vars.
+    ssm_state: Option<SharedSsmState>,
+    /// Secrets Manager state for resolving `SECRETS_MANAGER`-typed env vars.
+    secrets_state: Option<SharedSecretsManagerState>,
 }
 
 impl CodeBuildService {
@@ -121,6 +127,8 @@ impl CodeBuildService {
             s3_delivery: None,
             backend: None,
             running: Arc::new(Mutex::new(HashMap::new())),
+            ssm_state: None,
+            secrets_state: None,
         }
     }
 
@@ -147,6 +155,18 @@ impl CodeBuildService {
     /// Wire the S3 sink for real build artifacts.
     pub fn with_s3(mut self, s3: Arc<dyn S3Delivery>) -> Self {
         self.s3_delivery = Some(s3);
+        self
+    }
+
+    /// Wire SSM + Secrets Manager so `PARAMETER_STORE` / `SECRETS_MANAGER`
+    /// build environment variables resolve into the container (like AWS).
+    pub fn with_secret_stores(
+        mut self,
+        ssm: SharedSsmState,
+        secrets: SharedSecretsManagerState,
+    ) -> Self {
+        self.ssm_state = Some(ssm);
+        self.secrets_state = Some(secrets);
         self
     }
 
@@ -889,6 +909,46 @@ impl CodeBuildService {
 // Builds
 // ---------------------------------------------------------------------------
 
+/// Grace period (minutes) added to a real-backed build's configured timeout
+/// before the read-side safety net declares it stuck.
+const STUCK_GRACE_MINUTES: i64 = 15;
+
+/// Read-side safety net: a real-backed build/batch that is still `IN_PROGRESS`
+/// long past its configured timeout (its background task must have died without
+/// settling, and no restart reconciled it) is settled `TIMED_OUT` on read so it
+/// can never hang forever. Returns true if it settled the record. A build within
+/// its timeout window is left alone (its task still owns it).
+fn settle_if_stuck(record: &mut Value, status_key: &str, complete_key: &str) -> bool {
+    if record.get(status_key).and_then(Value::as_str) != Some("IN_PROGRESS") {
+        return false;
+    }
+    let start = record
+        .get("startTime")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if start <= 0.0 {
+        return false;
+    }
+    let timeout_min = record
+        .get("timeoutInMinutes")
+        .or_else(|| record.get("buildTimeoutInMinutes"))
+        .and_then(Value::as_i64)
+        .filter(|m| *m > 0)
+        .unwrap_or(60);
+    let deadline = start + ((timeout_min + STUCK_GRACE_MINUTES) * 60) as f64;
+    let now = Utc::now().timestamp_millis() as f64 / 1000.0;
+    if now < deadline {
+        return false;
+    }
+    if let Some(obj) = record.as_object_mut() {
+        obj.insert(status_key.into(), json!("TIMED_OUT"));
+        obj.insert(complete_key.into(), json!(true));
+        obj.insert("currentPhase".into(), json!("COMPLETED"));
+        obj.insert("endTime".into(), ts(Utc::now()));
+    }
+    true
+}
+
 /// Build the ordered phase list of a settled (successful) build.
 fn settled_phases(start: DateTime<Utc>, end: DateTime<Utc>) -> Value {
     let phase = |t: &str| {
@@ -968,50 +1028,75 @@ fn settle_command_execution(record: &mut Value) -> bool {
     true
 }
 
-/// Assemble the base environment variables a build container runs with: the
-/// standard `CODEBUILD_*` set plus the resolved `environment.environmentVariables`
-/// (PLAINTEXT members; PARAMETER_STORE/SECRETS_MANAGER references are skipped —
-/// fakecloud does not resolve them into the container).
-fn collect_base_env(
-    build: &Value,
-    build_id: &str,
-    build_arn: &str,
-    build_number: i64,
-    source_version: Option<&str>,
-) -> Vec<(String, String)> {
-    let sv = source_version.unwrap_or("");
-    let mut env = vec![
-        ("CODEBUILD_BUILD_ID".to_string(), build_id.to_string()),
-        ("CODEBUILD_BUILD_ARN".to_string(), build_arn.to_string()),
-        (
-            "CODEBUILD_BUILD_NUMBER".to_string(),
-            build_number.to_string(),
-        ),
-        ("CODEBUILD_INITIATOR".to_string(), "fakecloud".to_string()),
-        ("CODEBUILD_SOURCE_VERSION".to_string(), sv.to_string()),
-        (
-            "CODEBUILD_RESOLVED_SOURCE_VERSION".to_string(),
-            sv.to_string(),
-        ),
-    ];
-    if let Some(vars) = build
-        .get("environment")
-        .and_then(|e| e.get("environmentVariables"))
-        .and_then(Value::as_array)
-    {
-        for v in vars {
-            let Some(name) = v.get("name").and_then(Value::as_str) else {
-                continue;
+/// Resolve a CodeBuild environment variable's `value` for a given `type` into
+/// the actual string injected into the container. `PLAINTEXT` is verbatim;
+/// `PARAMETER_STORE` reads the named SSM parameter; `SECRETS_MANAGER` reads the
+/// named secret (with an optional `:json-key` selector). A miss yields an empty
+/// string so the container env still carries the (empty) variable, matching a
+/// dereference of a missing value.
+fn resolve_env_value(
+    ssm: Option<&SharedSsmState>,
+    secrets: Option<&SharedSecretsManagerState>,
+    account: &str,
+    ty: &str,
+    value: &str,
+) -> String {
+    match ty {
+        "PARAMETER_STORE" => {
+            let Some(ssm) = ssm else {
+                return String::new();
             };
-            let ty = v.get("type").and_then(Value::as_str).unwrap_or("PLAINTEXT");
-            if ty != "PLAINTEXT" {
-                continue;
-            }
-            let value = v.get("value").and_then(Value::as_str).unwrap_or("");
-            env.push((name.to_string(), value.to_string()));
+            let accounts = ssm.read();
+            let Some(st) = accounts.get(account) else {
+                return String::new();
+            };
+            let name = value.trim_start_matches('/');
+            st.parameters
+                .get(&format!("/{name}"))
+                .or_else(|| st.parameters.get(name))
+                .map(|p| p.value.clone())
+                .unwrap_or_default()
         }
+        "SECRETS_MANAGER" => {
+            let Some(secrets) = secrets else {
+                return String::new();
+            };
+            // CodeBuild's value is `secret-id` or `secret-id:json-key`.
+            let (secret_id, json_key) = match value.split_once(':') {
+                Some((id, key)) if !key.is_empty() => (id, Some(key)),
+                _ => (value, None),
+            };
+            let accounts = secrets.read();
+            let Some(st) = accounts.get(account) else {
+                return String::new();
+            };
+            // Accept a bare name or an ARN tail; strip the AWS 6-char suffix.
+            let name = secret_id.rsplit(":secret:").next().unwrap_or(secret_id);
+            let name = name.rsplit_once('-').map(|(n, _)| n).unwrap_or(name);
+            let Some(secret) = st.secrets.get(name).or_else(|| st.secrets.get(secret_id)) else {
+                return String::new();
+            };
+            let Some(vid) = secret.current_version_id.as_ref() else {
+                return String::new();
+            };
+            let Some(raw) = secret
+                .versions
+                .get(vid)
+                .and_then(|v| v.secret_string.clone())
+            else {
+                return String::new();
+            };
+            match json_key {
+                Some(key) => serde_json::from_str::<Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.get(key).and_then(Value::as_str).map(str::to_string))
+                    .unwrap_or_default(),
+                None => raw,
+            }
+        }
+        // PLAINTEXT (and any unknown type) -> verbatim.
+        _ => value.to_string(),
     }
-    env
 }
 
 /// Next per-project `buildBatchNumber`, with the same monotonic semantics.
@@ -1133,7 +1218,19 @@ impl CodeBuildService {
             .cloned()
             .unwrap_or(Value::Null);
         let artifacts = build_value.get("artifacts").cloned().unwrap_or(Value::Null);
-        let base_env = collect_base_env(
+        // A batch stores its timeout under `buildTimeoutInMinutes`; a build under
+        // `timeoutInMinutes`. Default 60 minutes.
+        let timeout_minutes = build_value
+            .get(if is_batch {
+                "buildTimeoutInMinutes"
+            } else {
+                "timeoutInMinutes"
+            })
+            .and_then(Value::as_i64)
+            .filter(|m| *m > 0)
+            .unwrap_or(60);
+        let base_env = self.collect_base_env(
+            account,
             build_value,
             build_id,
             build_arn,
@@ -1161,8 +1258,61 @@ impl CodeBuildService {
             source_version,
             cw_logs,
             artifacts,
+            timeout_minutes,
         };
         tokio::spawn(crate::runtime::run_build(job));
+    }
+
+    /// Assemble the base environment variables a build container runs with: the
+    /// standard `CODEBUILD_*` set plus the resolved
+    /// `environment.environmentVariables` (PLAINTEXT verbatim; PARAMETER_STORE
+    /// and SECRETS_MANAGER resolved cross-service from SSM / Secrets Manager).
+    fn collect_base_env(
+        &self,
+        account: &str,
+        build: &Value,
+        build_id: &str,
+        build_arn: &str,
+        build_number: i64,
+        source_version: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let sv = source_version.unwrap_or("");
+        let mut env = vec![
+            ("CODEBUILD_BUILD_ID".to_string(), build_id.to_string()),
+            ("CODEBUILD_BUILD_ARN".to_string(), build_arn.to_string()),
+            (
+                "CODEBUILD_BUILD_NUMBER".to_string(),
+                build_number.to_string(),
+            ),
+            ("CODEBUILD_INITIATOR".to_string(), "fakecloud".to_string()),
+            ("CODEBUILD_SOURCE_VERSION".to_string(), sv.to_string()),
+            (
+                "CODEBUILD_RESOLVED_SOURCE_VERSION".to_string(),
+                sv.to_string(),
+            ),
+        ];
+        if let Some(vars) = build
+            .get("environment")
+            .and_then(|e| e.get("environmentVariables"))
+            .and_then(Value::as_array)
+        {
+            for v in vars {
+                let Some(name) = v.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let ty = v.get("type").and_then(Value::as_str).unwrap_or("PLAINTEXT");
+                let value = v.get("value").and_then(Value::as_str).unwrap_or("");
+                let resolved = resolve_env_value(
+                    self.ssm_state.as_ref(),
+                    self.secrets_state.as_ref(),
+                    account,
+                    ty,
+                    value,
+                );
+                env.push((name.to_string(), resolved));
+            }
+        }
+        env
     }
 
     /// Kill the live container backing `build_id` (best-effort, off-thread).
@@ -1346,15 +1496,20 @@ impl CodeBuildService {
         let st = guard.get_or_create(&account);
         let mut found = Vec::new();
         let mut missing = Vec::new();
+        let mut unstuck = Vec::new();
         for id in ids {
             // A real-backed build is settled by its own background execution
             // task on the REAL container exit code; the lazy settle-on-read must
             // not race it to a fabricated SUCCEEDED (nor mark an in-progress
-            // build complete).
+            // build complete). The one exception is the stuck-build safety net.
             let real = st.real_backed_builds.contains(&id);
             match st.builds.get_mut(&id) {
                 Some(build) => {
-                    if !real {
+                    if real {
+                        if settle_if_stuck(build, "buildStatus", "buildComplete") {
+                            unstuck.push(id.clone());
+                        }
+                    } else {
                         settle_build(build, "buildStatus");
                         if let Some(obj) = build.as_object_mut() {
                             obj.insert("buildComplete".into(), json!(true));
@@ -1364,6 +1519,9 @@ impl CodeBuildService {
                 }
                 None => missing.push(json!(id)),
             }
+        }
+        for id in &unstuck {
+            st.real_backed_builds.remove(id);
         }
         ok(json!({ "builds": found, "buildsNotFound": missing }))
     }
@@ -1615,11 +1773,16 @@ impl CodeBuildService {
         let st = guard.get_or_create(&account);
         let mut found = Vec::new();
         let mut missing = Vec::new();
+        let mut unstuck = Vec::new();
         for id in ids {
             let real = st.real_backed_build_batches.contains(&id);
             match st.build_batches.get_mut(&id) {
                 Some(batch) => {
-                    if !real {
+                    if real {
+                        if settle_if_stuck(batch, "buildBatchStatus", "complete") {
+                            unstuck.push(id.clone());
+                        }
+                    } else {
                         settle_build(batch, "buildBatchStatus");
                         if let Some(obj) = batch.as_object_mut() {
                             obj.insert("complete".into(), json!(true));
@@ -1629,6 +1792,9 @@ impl CodeBuildService {
                 }
                 None => missing.push(json!(id)),
             }
+        }
+        for id in &unstuck {
+            st.real_backed_build_batches.remove(id);
         }
         ok(json!({ "buildBatches": found, "buildBatchesNotFound": missing }))
     }
