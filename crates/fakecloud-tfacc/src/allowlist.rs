@@ -1132,6 +1132,17 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccDeploy(App|DeploymentConfig|DeploymentGroup)_basic$",
         deny: &[],
     },
+    Service {
+        // AWS CodePipeline control plane. Scoped to the `_basic` resources
+        // whose create/read/update/delete round-trips through the fakecloud
+        // control plane: `aws_codepipeline`, `aws_codepipeline_webhook`, and
+        // `aws_codepipeline_custom_action_type`. A pipeline requires an S3
+        // artifactStore and an IAM service role, both of which the upstream
+        // test provisions against fakecloud's own S3 + IAM.
+        name: "codepipeline",
+        run_regex: "^TestAccCodePipeline(_basic|Webhook_basic|CustomActionType_basic)$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1734,6 +1745,12 @@ pub const SHARDS: &[Shard] = &[
         name: "codedeploy",
         service: "deploy",
         run_regex: "^TestAccDeploy(App|DeploymentConfig|DeploymentGroup)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codepipeline",
+        service: "codepipeline",
+        run_regex: "^TestAccCodePipeline(_basic|Webhook_basic|CustomActionType_basic)$",
         extra_deny: &[],
     },
 ];

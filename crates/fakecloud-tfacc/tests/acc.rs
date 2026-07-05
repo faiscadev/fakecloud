@@ -396,3 +396,8 @@ async fn codebuild_acceptance() {
 async fn codedeploy_acceptance() {
     run_shard("codedeploy").await;
 }
+
+#[tokio::test]
+async fn codepipeline_acceptance() {
+    run_shard("codepipeline").await;
+}

@@ -87,6 +87,7 @@ SERVICES=(
     "ram:ram"
     "codeconnections:codeconnections"
     "codedeploy:codedeploy"
+    "codepipeline:codepipeline"
 )
 
 # Sparse checkout only the models we need

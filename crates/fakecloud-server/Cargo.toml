@@ -55,6 +55,7 @@ fakecloud-s3tables = { workspace = true }
 fakecloud-lakeformation = { workspace = true }
 fakecloud-codebuild = { workspace = true }
 fakecloud-codedeploy = { workspace = true }
+fakecloud-codepipeline = { workspace = true }
 fakecloud-opensearch = { workspace = true }
 fakecloud-memorydb = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
