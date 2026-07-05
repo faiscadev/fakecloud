@@ -3,23 +3,32 @@
 //! Implements the full CodeBuild control plane: build projects, builds and
 //! build batches, report groups and reports, fleets, webhooks, source
 //! credentials, resource policies, curated environment images, and
-//! command-execution sandboxes. There is no real build container engine, so a
-//! `StartBuild` mints a Build in `IN_PROGRESS` that deterministically settles
-//! to a terminal `SUCCEEDED` state on the first `BatchGetBuilds` read (the same
-//! lazy-settle pattern EKS and Cloud Map use for async state). Everything else
-//! is real, persisted, account-partitioned CRUD.
+//! command-execution sandboxes. `StartBuild` mints a Build in `IN_PROGRESS` and
+//! returns immediately; when a container backend is available (and not disabled
+//! via `FAKECLOUD_CODEBUILD_DISABLE_BACKEND`) a background task
+//! ([`crate::runtime`]) runs the buildspec for real in a Docker/Podman
+//! container and settles `buildStatus` on the REAL exit codes. When the backend
+//! is disabled (conformance/tfacc), the build deterministically settles to
+//! `SUCCEEDED` on the first `BatchGetBuilds` read (the same lazy-settle pattern
+//! EKS and Cloud Map use for async state), keeping response shapes identical.
+//! Everything else is real, persisted, account-partitioned CRUD.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use http::StatusCode;
+use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+use fakecloud_core::delivery::S3Delivery;
 use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_logs::SharedLogsState;
 use fakecloud_persistence::SnapshotStore;
 
+use crate::runtime::{BuildJob, CodeBuildBackend, RunningContainers};
 use crate::state::{CodeBuildState, SharedCodeBuildState};
 use crate::validate;
 
@@ -89,6 +98,17 @@ pub struct CodeBuildService {
     state: SharedCodeBuildState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// CloudWatch Logs sink for real build output (`None` in unit tests /
+    /// unwired). Wired by the server so `BatchGetBuilds().logs` points at a
+    /// readable log group/stream.
+    logs_state: Option<SharedLogsState>,
+    /// S3 sink for real build artifacts (`None` when unwired).
+    s3_delivery: Option<Arc<dyn S3Delivery>>,
+    /// Container backend. `Some` only when a container CLI is available and the
+    /// backend is not disabled by env; otherwise builds settle deterministically.
+    backend: Option<Arc<CodeBuildBackend>>,
+    /// Live build containers, so `StopBuild` can kill one mid-run.
+    running: RunningContainers,
 }
 
 impl CodeBuildService {
@@ -97,11 +117,36 @@ impl CodeBuildService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            logs_state: None,
+            s3_delivery: None,
+            backend: None,
+            running: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Enable the real container-backed build engine when a container CLI is
+    /// available and it is not disabled via `FAKECLOUD_CODEBUILD_DISABLE_BACKEND`.
+    /// Opt-in (only the server calls this) so embedders and unit tests keep the
+    /// deterministic settle-on-read behavior unless they ask for the real one.
+    pub fn with_backend_autodetect(mut self) -> Self {
+        self.backend = CodeBuildBackend::detect();
+        self
+    }
+
+    /// Wire the CloudWatch Logs sink for real build output.
+    pub fn with_logs(mut self, logs: SharedLogsState) -> Self {
+        self.logs_state = Some(logs);
+        self
+    }
+
+    /// Wire the S3 sink for real build artifacts.
+    pub fn with_s3(mut self, s3: Arc<dyn S3Delivery>) -> Self {
+        self.s3_delivery = Some(s3);
         self
     }
 
@@ -923,6 +968,52 @@ fn settle_command_execution(record: &mut Value) -> bool {
     true
 }
 
+/// Assemble the base environment variables a build container runs with: the
+/// standard `CODEBUILD_*` set plus the resolved `environment.environmentVariables`
+/// (PLAINTEXT members; PARAMETER_STORE/SECRETS_MANAGER references are skipped —
+/// fakecloud does not resolve them into the container).
+fn collect_base_env(
+    build: &Value,
+    build_id: &str,
+    build_arn: &str,
+    build_number: i64,
+    source_version: Option<&str>,
+) -> Vec<(String, String)> {
+    let sv = source_version.unwrap_or("");
+    let mut env = vec![
+        ("CODEBUILD_BUILD_ID".to_string(), build_id.to_string()),
+        ("CODEBUILD_BUILD_ARN".to_string(), build_arn.to_string()),
+        (
+            "CODEBUILD_BUILD_NUMBER".to_string(),
+            build_number.to_string(),
+        ),
+        ("CODEBUILD_INITIATOR".to_string(), "fakecloud".to_string()),
+        ("CODEBUILD_SOURCE_VERSION".to_string(), sv.to_string()),
+        (
+            "CODEBUILD_RESOLVED_SOURCE_VERSION".to_string(),
+            sv.to_string(),
+        ),
+    ];
+    if let Some(vars) = build
+        .get("environment")
+        .and_then(|e| e.get("environmentVariables"))
+        .and_then(Value::as_array)
+    {
+        for v in vars {
+            let Some(name) = v.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let ty = v.get("type").and_then(Value::as_str).unwrap_or("PLAINTEXT");
+            if ty != "PLAINTEXT" {
+                continue;
+            }
+            let value = v.get("value").and_then(Value::as_str).unwrap_or("");
+            env.push((name.to_string(), value.to_string()));
+        }
+    }
+    env
+}
+
 /// Next per-project `buildBatchNumber`, with the same monotonic semantics.
 fn next_build_batch_number(st: &mut CodeBuildState, project: &str) -> i64 {
     let n = st
@@ -999,6 +1090,95 @@ impl CodeBuildService {
         fields
     }
 
+    /// Spawn the background container-execution task for a real build/batch.
+    /// No-op when the backend is disabled (deterministic settle path instead).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_build_execution(
+        &self,
+        account: &str,
+        region: &str,
+        build_id: &str,
+        build_arn: &str,
+        project_name: &str,
+        build_number: i64,
+        build_value: &Value,
+        buildspec_override: Option<String>,
+        is_batch: bool,
+    ) {
+        let Some(backend) = self.backend.clone() else {
+            return;
+        };
+        let image = build_value
+            .get("environment")
+            .and_then(|e| e.get("image"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // buildspecOverride wins over the project source's inline buildspec.
+        let buildspec = buildspec_override.or_else(|| {
+            build_value
+                .get("source")
+                .and_then(|s| s.get("buildspec"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        let source_version = build_value
+            .get("sourceVersion")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // For a batch the resolved logsConfig is under `logConfig`, not `logs`.
+        let logs_key = if is_batch { "logConfig" } else { "logs" };
+        let cw_logs = build_value
+            .get(logs_key)
+            .and_then(|l| l.get("cloudWatchLogs"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let artifacts = build_value.get("artifacts").cloned().unwrap_or(Value::Null);
+        let base_env = collect_base_env(
+            build_value,
+            build_id,
+            build_arn,
+            build_number,
+            source_version.as_deref(),
+        );
+        let job = BuildJob {
+            backend,
+            state: self.state.clone(),
+            snapshot_store: self.snapshot_store.clone(),
+            snapshot_lock: self.snapshot_lock.clone(),
+            logs_state: self.logs_state.clone(),
+            s3_delivery: self.s3_delivery.clone(),
+            running: self.running.clone(),
+            account: account.to_string(),
+            region: region.to_string(),
+            build_id: build_id.to_string(),
+            build_arn: build_arn.to_string(),
+            project_name: project_name.to_string(),
+            build_number,
+            is_batch,
+            image,
+            base_env,
+            buildspec,
+            source_version,
+            cw_logs,
+            artifacts,
+        };
+        tokio::spawn(crate::runtime::run_build(job));
+    }
+
+    /// Kill the live container backing `build_id` (best-effort, off-thread).
+    fn kill_running(&self, build_id: &str) {
+        let Some(backend) = self.backend.clone() else {
+            return;
+        };
+        let Some(container) = self.running.lock().remove(build_id) else {
+            return;
+        };
+        let cli = backend.cli().to_string();
+        tokio::spawn(async move {
+            crate::runtime::kill_container(&cli, &container).await;
+        });
+    }
+
     fn start_build(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let Some(project_name) = str_field(&b, "projectName") else {
@@ -1045,7 +1225,24 @@ impl CodeBuildService {
         );
         let build = Value::Object(build);
         st.builds.insert(id.clone(), build.clone());
-        st.build_order.push(id);
+        st.build_order.push(id.clone());
+        // When the real backend is live, mark the build so BatchGetBuilds does
+        // NOT lazily settle it (its background task owns the terminal state).
+        if self.backend.is_some() {
+            st.real_backed_builds.insert(id.clone());
+        }
+        drop(guard);
+        self.spawn_build_execution(
+            &account,
+            &region,
+            &id,
+            &build_arn,
+            &project_name,
+            build_number,
+            &build,
+            str_field(&b, "buildspecOverride"),
+            false,
+        );
         ok(json!({ "build": build }))
     }
 
@@ -1071,7 +1268,14 @@ impl CodeBuildService {
             obj.insert("buildComplete".into(), json!(true));
             obj.insert("endTime".into(), ts(Utc::now()));
         }
-        ok(json!({ "build": build.clone() }))
+        let response = build.clone();
+        // The record is now terminal, so its background task (if any) must no
+        // longer touch it; drop it from the real-backed set and kill the live
+        // container so the build actually stops instead of finishing.
+        st.real_backed_builds.remove(&id);
+        drop(guard);
+        self.kill_running(&id);
+        ok(json!({ "build": response }))
     }
 
     fn retry_build(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1110,7 +1314,24 @@ impl CodeBuildService {
         );
         let build = Value::Object(build);
         st.builds.insert(new_id.clone(), build.clone());
-        st.build_order.push(new_id);
+        st.build_order.push(new_id.clone());
+        if self.backend.is_some() {
+            st.real_backed_builds.insert(new_id.clone());
+        }
+        drop(guard);
+        // A retry re-runs the same resolved buildspec for real (no override on a
+        // retry — it reuses the original build's resolved source).
+        self.spawn_build_execution(
+            &account,
+            &region,
+            &new_id,
+            &build_arn,
+            &project_name,
+            build_number,
+            &build,
+            None,
+            false,
+        );
         ok(json!({ "build": build }))
     }
 
@@ -1126,11 +1347,18 @@ impl CodeBuildService {
         let mut found = Vec::new();
         let mut missing = Vec::new();
         for id in ids {
+            // A real-backed build is settled by its own background execution
+            // task on the REAL container exit code; the lazy settle-on-read must
+            // not race it to a fabricated SUCCEEDED (nor mark an in-progress
+            // build complete).
+            let real = st.real_backed_builds.contains(&id);
             match st.builds.get_mut(&id) {
                 Some(build) => {
-                    settle_build(build, "buildStatus");
-                    if let Some(obj) = build.as_object_mut() {
-                        obj.insert("buildComplete".into(), json!(true));
+                    if !real {
+                        settle_build(build, "buildStatus");
+                        if let Some(obj) = build.as_object_mut() {
+                            obj.insert("buildComplete".into(), json!(true));
+                        }
                     }
                     found.push(build.clone());
                 }
@@ -1150,11 +1378,19 @@ impl CodeBuildService {
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         let mut deleted = Vec::new();
+        let mut to_kill = Vec::new();
         for id in ids {
             if st.builds.remove(&id).is_some() {
                 st.build_order.retain(|x| x != &id);
+                if st.real_backed_builds.remove(&id) {
+                    to_kill.push(id.clone());
+                }
                 deleted.push(json!(id));
             }
+        }
+        drop(guard);
+        for id in &to_kill {
+            self.kill_running(id);
         }
         ok(json!({ "buildsDeleted": deleted, "buildsNotDeleted": [] }))
     }
@@ -1235,7 +1471,25 @@ impl CodeBuildService {
         batch.insert("buildGroups".into(), json!([]));
         let batch = Value::Object(batch);
         st.build_batches.insert(id.clone(), batch.clone());
-        st.build_batch_order.push(id);
+        st.build_batch_order.push(id.clone());
+        if self.backend.is_some() {
+            st.real_backed_build_batches.insert(id.clone());
+        }
+        drop(guard);
+        // A build batch mirrors the single-build execution path: run the
+        // resolved buildspec in a real container and settle buildBatchStatus on
+        // the real exit code.
+        self.spawn_build_execution(
+            &account,
+            &region,
+            &id,
+            &batch_arn,
+            &project_name,
+            number,
+            &batch,
+            str_field(&b, "buildspecOverride"),
+            true,
+        );
         ok(json!({ "buildBatch": batch }))
     }
 
@@ -1261,7 +1515,11 @@ impl CodeBuildService {
             obj.insert("complete".into(), json!(true));
             obj.insert("endTime".into(), ts(Utc::now()));
         }
-        ok(json!({ "buildBatch": batch.clone() }))
+        let response = batch.clone();
+        st.real_backed_build_batches.remove(&id);
+        drop(guard);
+        self.kill_running(&id);
+        ok(json!({ "buildBatch": response }))
     }
 
     fn retry_build_batch(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1269,7 +1527,7 @@ impl CodeBuildService {
         let Some(id) = str_field(&b, "id") else {
             return Err(invalid("A build batch id must be specified"));
         };
-        let (_region, account) = self.region_account(req);
+        let (region, account) = self.region_account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         let Some(batch) = st.build_batches.get_mut(&id) else {
@@ -1287,7 +1545,37 @@ impl CodeBuildService {
             obj.insert("complete".into(), json!(false));
             obj.remove("endTime");
         }
-        ok(json!({ "buildBatch": batch.clone() }))
+        let batch_value = batch.clone();
+        let project_name = batch_value
+            .get("projectName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let batch_arn = batch_value
+            .get("arn")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let number = batch_value
+            .get("buildBatchNumber")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if self.backend.is_some() {
+            st.real_backed_build_batches.insert(id.clone());
+        }
+        drop(guard);
+        self.spawn_build_execution(
+            &account,
+            &region,
+            &id,
+            &batch_arn,
+            &project_name,
+            number,
+            &batch_value,
+            None,
+            true,
+        );
+        ok(json!({ "buildBatch": batch_value }))
     }
 
     fn delete_build_batch(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1297,9 +1585,17 @@ impl CodeBuildService {
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
         let mut deleted = Vec::new();
+        let mut to_kill = Vec::new();
         if st.build_batches.remove(&id).is_some() {
             st.build_batch_order.retain(|x| x != &id);
+            if st.real_backed_build_batches.remove(&id) {
+                to_kill.push(id.clone());
+            }
             deleted.push(json!(id));
+        }
+        drop(guard);
+        for id in &to_kill {
+            self.kill_running(id);
         }
         ok(json!({
             "statusCode": "SUCCESS",
@@ -1320,11 +1616,14 @@ impl CodeBuildService {
         let mut found = Vec::new();
         let mut missing = Vec::new();
         for id in ids {
+            let real = st.real_backed_build_batches.contains(&id);
             match st.build_batches.get_mut(&id) {
                 Some(batch) => {
-                    settle_build(batch, "buildBatchStatus");
-                    if let Some(obj) = batch.as_object_mut() {
-                        obj.insert("complete".into(), json!(true));
+                    if !real {
+                        settle_build(batch, "buildBatchStatus");
+                        if let Some(obj) = batch.as_object_mut() {
+                            obj.insert("complete".into(), json!(true));
+                        }
                     }
                     found.push(batch.clone());
                 }

@@ -2,13 +2,21 @@
 //!
 //! awsJson1.1 control plane for CodeBuild: build projects, builds and build
 //! batches, report groups and reports, fleets, webhooks, source credentials,
-//! resource policies, and command-execution sandboxes. There is no real build
-//! container engine, so a `StartBuild` mints a [`state`] Build that lazily
-//! settles from `IN_PROGRESS` to a terminal `SUCCEEDED` state on read (the same
-//! deterministic settle pattern EKS and Cloud Map use); everything else is
-//! real, persisted, account-partitioned CRUD.
+//! resource policies, and command-execution sandboxes.
+//!
+//! `StartBuild` mints a [`state`] Build `IN_PROGRESS` and returns immediately.
+//! When a container backend is available (and not disabled via
+//! `FAKECLOUD_CODEBUILD_DISABLE_BACKEND`), a background task ([`runtime`]) runs
+//! the build for real: it resolves the environment image, parses the buildspec
+//! phases, executes each phase's `commands` in a real Docker/Podman container,
+//! streams output to CloudWatch Logs, uploads S3 artifacts, and settles
+//! `buildStatus` on the REAL container exit codes. When the backend is disabled
+//! (conformance/tfacc), the build falls back to the deterministic
+//! settle-to-`SUCCEEDED`-on-read path so response shapes are unchanged.
+//! Everything else is real, persisted, account-partitioned CRUD.
 
 pub mod persistence;
+pub mod runtime;
 pub mod service;
 pub mod state;
 mod validate;

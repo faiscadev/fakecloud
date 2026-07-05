@@ -801,6 +801,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-codebuild"
+version = "1.122.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8820b7fd4aa0b86005e62e684ecae5c8531319a714eacb03ed788bf9c8f16c1"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-codecommit"
 version = "1.99.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4251,15 +4275,18 @@ dependencies = [
  "bytes",
  "chrono",
  "fakecloud-core",
+ "fakecloud-logs",
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -4588,6 +4615,7 @@ dependencies = [
  "aws-sdk-cloudwatch",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-codeartifact",
+ "aws-sdk-codebuild",
  "aws-sdk-codecommit",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",

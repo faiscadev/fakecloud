@@ -4879,7 +4879,12 @@ async fn main() {
         } else {
             None
         };
-    let mut codebuild_service = fakecloud_codebuild::CodeBuildService::new(codebuild_state.clone());
+    let mut codebuild_service = fakecloud_codebuild::CodeBuildService::new(codebuild_state.clone())
+        .with_logs(logs_state.clone())
+        .with_s3(Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
+            s3_state.clone(),
+        )))
+        .with_backend_autodetect();
     if let Some(store) = codebuild_snapshot_store {
         codebuild_service = codebuild_service.with_snapshot_store(store);
     }
