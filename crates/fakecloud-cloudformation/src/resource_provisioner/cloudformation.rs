@@ -123,6 +123,7 @@ impl ResourceProvisioner {
             ec2_runtime: self.ec2_runtime.clone(),
             ecs_runtime: self.ecs_runtime.clone(),
             elasticache_runtime: self.elasticache_runtime.clone(),
+            mq_runtime: self.mq_runtime.clone(),
             // Share the parent's queues so nested-stack container resources are
             // drained and backed/reaped by the same parent op, and any deferred
             // custom-resource invokes are drained alongside the parent's.

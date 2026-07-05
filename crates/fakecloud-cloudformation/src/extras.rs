@@ -2746,6 +2746,7 @@ mod tests {
             ec2_runtime: None,
             ecs_runtime: None,
             elasticache_runtime: None,
+            mq_runtime: None,
         }
     }
 

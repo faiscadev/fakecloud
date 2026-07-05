@@ -18,11 +18,14 @@
 //! transient state and settling on the next describe (with in-flight
 //! transitions reconciled on restart).
 
+pub mod cfn_provision;
 pub mod persistence;
+pub mod runtime;
 pub mod service;
 pub mod shared;
 pub mod state;
 mod validate;
 
+pub use runtime::MqRuntime;
 pub use service::{MqService, MQ_ACTIONS};
-pub use state::{MqData, MqSnapshot, SharedMqState, MQ_SNAPSHOT_SCHEMA_VERSION};
+pub use state::{BrokerDataPlane, MqData, MqSnapshot, SharedMqState, MQ_SNAPSHOT_SCHEMA_VERSION};

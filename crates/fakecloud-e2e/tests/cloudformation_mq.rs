@@ -113,17 +113,34 @@ async fn cfn_provisions_mq_broker_and_configuration() {
     assert_eq!(output(stack, "ConfigRev"), "1");
 
     // --- The resources exist in the mq service ---
-    let broker = mq
-        .describe_broker()
-        .broker_id(broker_ref)
-        .send()
-        .await
-        .expect("DescribeBroker");
+    // CloudFormation settles the broker to RUNNING: instantly in the
+    // control-plane-only path (no container runtime), or once the REAL backing
+    // broker container comes up when a runtime is configured. Poll either way.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let broker = loop {
+        let broker = mq
+            .describe_broker()
+            .broker_id(broker_ref)
+            .send()
+            .await
+            .expect("DescribeBroker");
+        let state = broker.broker_state().map(|s| s.as_str()).unwrap_or("");
+        if state == "RUNNING" {
+            break broker;
+        }
+        if state == "CREATION_FAILED" {
+            helpers::dump_mq_broker_diagnostics(broker_ref);
+            panic!("broker container failed to start");
+        }
+        if std::time::Instant::now() >= deadline {
+            helpers::dump_mq_broker_diagnostics(broker_ref);
+            panic!("CFN broker did not reach RUNNING (last state: {state})");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
     assert_eq!(broker.broker_arn(), Some(broker_arn));
     assert_eq!(broker.broker_name(), Some("cfn-mq-broker"));
     assert_eq!(broker.engine_type().map(|e| e.as_str()), Some("RABBITMQ"));
-    // CloudFormation provisions the broker already RUNNING.
-    assert_eq!(broker.broker_state().map(|s| s.as_str()), Some("RUNNING"));
     // Subnets are synthesized (not empty) just like the direct API, so the
     // resource reads back without import drift.
     assert!(

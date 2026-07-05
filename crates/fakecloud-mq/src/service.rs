@@ -10,8 +10,10 @@
 //! `users` summary are derived at describe time from live state.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use http::{Method, StatusCode};
 use percent_encoding::percent_decode_str;
 use serde_json::{json, Map, Value};
@@ -22,8 +24,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
+use crate::runtime::{BrokerUser, MqEngine, MqRuntime};
 use crate::shared;
-use crate::state::{MqData, SharedMqState};
+use crate::state::{BrokerDataPlane, MqData, SharedMqState};
 
 /// Every operation name in the Amazon MQ Smithy model (25 operations).
 pub const MQ_ACTIONS: &[&str] = &[
@@ -80,6 +83,12 @@ pub struct MqService {
     state: SharedMqState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// The backing-container runtime. `None` in the degraded / control-plane-
+    /// only mode (no Docker/Podman): brokers still reach a state via the
+    /// in-memory lifecycle but no real engine container is spawned. When
+    /// present, the runtime owns the CREATION/REBOOT/DELETION transitions and
+    /// a broker is only `RUNNING` once its container accepts connections.
+    runtime: Option<Arc<MqRuntime>>,
 }
 
 impl MqService {
@@ -88,12 +97,27 @@ impl MqService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            runtime: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Attach the backing-container runtime that spawns real ActiveMQ/RabbitMQ
+    /// brokers. Without it, MQ runs control-plane-only.
+    pub fn with_runtime(mut self, runtime: Arc<MqRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Whether the in-memory lifecycle should auto-settle broker transitions.
+    /// `true` only when no container runtime is attached; otherwise the
+    /// runtime's background tasks own every transition.
+    fn auto_settle(&self) -> bool {
+        self.runtime.is_none()
     }
 
     async fn save(&self) {
@@ -379,8 +403,14 @@ fn paginate(items: &[Value], q: &[(String, String)]) -> (Vec<Value>, Option<Stri
 /// and IP) from live state. Only present once the broker is `RUNNING`.
 /// Projected from the single `shared::broker_endpoints` source so the describe
 /// view and the CFN `Fn::GetAtt` list attributes stay in lock-step.
-fn broker_instances(id: &str, engine: &str, region: &str, deployment_mode: &str) -> Value {
-    let e = shared::broker_endpoints(id, engine, region, deployment_mode);
+fn broker_instances(
+    id: &str,
+    engine: &str,
+    region: &str,
+    deployment_mode: &str,
+    data_plane: Option<&BrokerDataPlane>,
+) -> Value {
+    let e = shared::broker_endpoints(id, engine, region, deployment_mode, data_plane);
     let mut out = Vec::new();
     for i in 0..e.ips.len() {
         let mut endpoints = Vec::new();
@@ -406,6 +436,212 @@ fn broker_instances(id: &str, engine: &str, region: &str, deployment_mode: &str)
         }));
     }
     Value::Array(out)
+}
+
+/// The engine, users, and configuration needed to bring a broker's backing
+/// container up. Derived from live state so the create, reboot, and restart-
+/// recovery paths all provision identically.
+pub(crate) struct BrokerSpec {
+    pub(crate) engine: MqEngine,
+    pub(crate) users: Vec<BrokerUser>,
+    /// Decoded configuration data (`activemq.xml` / `rabbitmq.conf`), if the
+    /// broker has one associated.
+    pub(crate) user_config: Option<String>,
+}
+
+/// Whether a broker runs the RabbitMQ engine (user changes apply immediately)
+/// vs ActiveMQ (staged for reboot).
+fn broker_is_rabbit(data: &MqData, id: &str) -> bool {
+    data.brokers
+        .get(id)
+        .and_then(|b| b.get("engineType"))
+        .and_then(Value::as_str)
+        .map(shared::is_rabbit)
+        .unwrap_or(false)
+}
+
+/// Build a [`BrokerUser`] from a stored user wire object.
+fn broker_user_from_value(u: &Value) -> BrokerUser {
+    BrokerUser {
+        username: u
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        password: u
+            .get("password")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        groups: u
+            .get("groups")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|g| g.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        console_access: u
+            .get("consoleAccess")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+/// Project a `RunningBroker` into the persisted, describe-facing data-plane
+/// binding.
+fn running_to_dp(r: &crate::runtime::RunningBroker) -> BrokerDataPlane {
+    BrokerDataPlane {
+        container_id: r.container_id.clone(),
+        host: r.host.clone(),
+        ports: r.ports.clone(),
+    }
+}
+
+/// Bounded bring-up attempts for restart-recovery / reboot, so a transient
+/// daemon or readiness hiccup never terminally fails a broker that was healthy.
+const BRING_UP_ATTEMPTS: u32 = 5;
+
+/// Bounded attempts for applying a RabbitMQ user change live, covering the race
+/// where the user op arrives before the broker container is tracked.
+const RABBIT_USER_ATTEMPTS: u32 = 30;
+
+/// Linear backoff between bring-up attempts (2s, 4s, ...), capped.
+async fn backoff(attempt: u32) {
+    let secs = (u64::from(attempt) + 1).saturating_mul(2).min(15);
+    tokio::time::sleep(Duration::from_secs(secs)).await;
+}
+
+/// Drop a broker's data-plane binding under the state lock.
+fn clear_data_plane(state: &SharedMqState, account: &str, id: &str) {
+    let mut guard = state.write();
+    guard.get_or_create(account).data_plane.remove(id);
+}
+
+/// Settle a broker after a bring-up attempt: on success flip it to `RUNNING`
+/// and record the real host/port binding (reaping the container if the broker
+/// was deleted meanwhile); on failure (`None`) mark `CREATION_FAILED`.
+pub(crate) async fn settle_broker_up(
+    state: &SharedMqState,
+    account: &str,
+    id: &str,
+    running: Option<crate::runtime::RunningBroker>,
+    runtime: &Arc<MqRuntime>,
+) {
+    match running {
+        Some(r) => {
+            let present = {
+                let mut guard = state.write();
+                let data = guard.get_or_create(account);
+                if let Some(obj) = data.brokers.get_mut(id).and_then(Value::as_object_mut) {
+                    obj.insert("brokerState".into(), json!("RUNNING"));
+                    data.data_plane.insert(id.to_string(), running_to_dp(&r));
+                    true
+                } else {
+                    false
+                }
+            };
+            if !present {
+                // Deleted mid-bring-up: don't leak the container.
+                runtime.stop_broker(id).await;
+            }
+        }
+        None => {
+            let mut guard = state.write();
+            let data = guard.get_or_create(account);
+            if let Some(obj) = data.brokers.get_mut(id).and_then(Value::as_object_mut) {
+                obj.insert("brokerState".into(), json!("CREATION_FAILED"));
+            }
+        }
+    }
+}
+
+/// Bring a persisted broker's container back after a restart: re-attach the
+/// persisted container if it still exists (preserving message data), otherwise
+/// create a fresh one. Both phases retry with backoff so a transient failure
+/// doesn't lose a previously-RUNNING broker. Returns `None` only after all
+/// retries are exhausted.
+async fn recover_bring_up(
+    runtime: &Arc<MqRuntime>,
+    id: &str,
+    spec: &BrokerSpec,
+    persisted_container_id: Option<&str>,
+) -> Option<crate::runtime::RunningBroker> {
+    // Phase 1: prefer re-attaching the persisted container.
+    if let Some(cid) = persisted_container_id {
+        for attempt in 0..BRING_UP_ATTEMPTS {
+            match runtime.reattach_broker(id, spec.engine, cid).await {
+                Ok(Some(r)) => return Some(r),
+                Ok(None) => break, // container is gone -> create fresh below
+                Err(error) => {
+                    tracing::warn!(%error, broker_id = %id, attempt, "re-attach attempt failed; retrying");
+                    backoff(attempt).await;
+                }
+            }
+        }
+    }
+    // Phase 2: no persisted container to re-attach -> create a fresh one.
+    for attempt in 0..BRING_UP_ATTEMPTS {
+        match runtime
+            .ensure_broker(id, spec.engine, &spec.users, spec.user_config.as_deref())
+            .await
+        {
+            Ok(r) => return Some(r),
+            Err(error) => {
+                tracing::warn!(%error, broker_id = %id, attempt, "respawn attempt failed; retrying");
+                backoff(attempt).await;
+            }
+        }
+    }
+    tracing::error!(broker_id = %id, "gave up recovering broker container after retries");
+    None
+}
+
+/// Gather the container-provisioning spec for a broker from live state,
+/// reflecting any staged pending changes: users staged for deletion are
+/// excluded, and the pending configuration (if any) wins over the current one.
+/// This makes the create path (no pending changes), the reboot path (apply
+/// pending), and the restart-recovery path provision from one source.
+pub(crate) fn gather_spec(data: &MqData, id: &str) -> Option<BrokerSpec> {
+    let broker = data.brokers.get(id)?;
+    let engine = MqEngine::from_wire(
+        broker
+            .get("engineType")
+            .and_then(Value::as_str)
+            .unwrap_or("ACTIVEMQ"),
+    );
+    let mut users = Vec::new();
+    if let Some(map) = data.users.get(id) {
+        for (name, u) in map {
+            if u.get("pendingChange").and_then(Value::as_str) == Some("DELETE") {
+                continue;
+            }
+            let mut user = broker_user_from_value(u);
+            // The map key is authoritative for the username.
+            user.username = name.clone();
+            users.push(user);
+        }
+    }
+    let cfg_ref = broker
+        .get("configurations")
+        .and_then(|c| c.get("pending").or_else(|| c.get("current")));
+    let user_config = cfg_ref.and_then(|c| {
+        let cid = c.get("id").and_then(Value::as_str)?;
+        let rev = c.get("revision").and_then(Value::as_i64)?;
+        let revs = data.configuration_revisions.get(cid)?;
+        let entry = revs
+            .iter()
+            .find(|r| r.get("revision").and_then(Value::as_i64) == Some(rev))?;
+        let b64 = entry.get("data").and_then(Value::as_str)?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+        String::from_utf8(bytes).ok()
+    });
+    Some(BrokerSpec {
+        engine,
+        users,
+        user_config,
+    })
 }
 
 // ===================== brokers =====================
@@ -455,7 +691,79 @@ impl MqService {
             data.broker_creator_ids.insert(cr, id.clone());
         }
 
+        // Background-spawn the real backing engine container (never in the
+        // request handler -- a synchronous pull/start would time the client
+        // out, #1539/#1730). The broker stays CREATION_IN_PROGRESS and only
+        // settles to RUNNING once the container accepts connections. With no
+        // runtime attached, the in-memory lifecycle settles it instead.
+        if let Some(spec) = gather_spec(data, &id) {
+            drop(guard);
+            self.spawn_create(ctx.account.clone(), id.clone(), spec);
+        }
+
         ok(json!({ "brokerId": id, "brokerArn": arn }))
+    }
+
+    /// Spawn the backing container for a freshly-created broker and settle it
+    /// to `RUNNING` (recording the real host/port map) once reachable, or to
+    /// `CREATION_FAILED` if the container can't come up. Reaps the container if
+    /// the broker was deleted mid-create.
+    fn spawn_create(&self, account: String, id: String, spec: BrokerSpec) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            // A brand-new broker gets a single bring-up attempt: a hard failure
+            // is a real CREATION_FAILED (matching AWS failing a create).
+            let running = runtime
+                .ensure_broker(&id, spec.engine, &spec.users, spec.user_config.as_deref())
+                .await
+                .map_err(
+                    |error| tracing::error!(%error, broker_id = %id, "MQ broker container failed to start"),
+                )
+                .ok();
+            settle_broker_up(&state, &account, &id, running, &runtime).await;
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Recover a persisted broker's backing container after a restart. Prefers
+    /// RE-ATTACHING the persisted container (preserving its message data) and
+    /// only creates a fresh one if it is truly gone; bounded retries with
+    /// backoff mean a transient readiness timeout never terminally fails a
+    /// previously-RUNNING broker (finding 6). `persisted_container_id` is the
+    /// container recorded in the snapshot before this restart.
+    fn spawn_recover(
+        &self,
+        account: String,
+        id: String,
+        persisted_container_id: Option<String>,
+        spec: BrokerSpec,
+    ) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let running =
+                recover_bring_up(&runtime, &id, &spec, persisted_container_id.as_deref()).await;
+            if running.is_some() {
+                settle_broker_up(&state, &account, &id, running, &runtime).await;
+            } else {
+                // Recovery exhausted its retries. Leave the broker
+                // CREATION_IN_PROGRESS (set during recovery setup) rather than a
+                // terminal CREATION_FAILED, so a subsequent restart re-drives it
+                // again -- a previously-healthy broker is never permanently
+                // failed by a transient outage (finding 6).
+                tracing::error!(broker_id = %id, "broker container recovery exhausted; will retry on next restart");
+            }
+            save_snapshot(&state, store, &lock).await;
+        });
     }
 
     fn describe_broker(
@@ -468,7 +776,7 @@ impl MqService {
         let data = guard.get_or_create(&ctx.account);
         // Settle any in-flight lifecycle transition; report whether one fired so
         // the handler persists only when the read actually changed state.
-        *settled = data.reconcile_brokers();
+        *settled = data.reconcile_brokers(self.auto_settle());
         let mut broker = data
             .brokers
             .get(id)
@@ -490,11 +798,15 @@ impl MqService {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        // brokerInstances are served once the broker is running.
+        // brokerInstances are served once the broker is running, projecting the
+        // REAL host + mapped ports from the live data-plane binding when a
+        // backing container is up (falling back to the cosmetic synthesis in
+        // the control-plane-only path -- same shape either way).
+        let data_plane = data.data_plane.get(id).cloned();
         if state == "RUNNING" {
             obj.insert(
                 "brokerInstances".into(),
-                broker_instances(id, &engine, &ctx.region, &deployment),
+                broker_instances(id, &engine, &ctx.region, &deployment, data_plane.as_ref()),
             );
         }
         // users summary is derived from live per-broker user state.
@@ -522,7 +834,7 @@ impl MqService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         let broker = data
             .brokers
             .get_mut(id)
@@ -587,7 +899,7 @@ impl MqService {
     fn delete_broker(&self, ctx: &Ctx, id: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         let broker = data
             .brokers
             .get_mut(id)
@@ -596,13 +908,50 @@ impl MqService {
             .as_object_mut()
             .expect("broker is an object")
             .insert("brokerState".into(), json!("DELETION_IN_PROGRESS"));
+        // With a runtime, stop + remove the real container and free state in a
+        // background task; without one, the in-memory reconcile removes it on
+        // the next describe.
+        if self.runtime.is_some() {
+            drop(guard);
+            self.spawn_delete(ctx.account.clone(), id.to_string());
+        }
         ok(json!({ "brokerId": id }))
+    }
+
+    /// Tear down a broker's backing container and free its state. Container
+    /// removal is best-effort and time-bounded; state cleanup (which frees the
+    /// broker name) is GUARANTEED so a hung daemon can never wedge the broker in
+    /// `DELETION_IN_PROGRESS` forever (finding 8).
+    fn spawn_delete(&self, account: String, id: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            if tokio::time::timeout(Duration::from_secs(30), runtime.stop_broker(&id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(broker_id = %id, "container removal timed out; freeing broker state anyway");
+            }
+            {
+                let mut guard = state.write();
+                let data = guard.get_or_create(&account);
+                data.brokers.remove(&id);
+                data.users.remove(&id);
+                data.data_plane.remove(&id);
+                data.broker_creator_ids.retain(|_, v| v != &id);
+            }
+            save_snapshot(&state, store, &lock).await;
+        });
     }
 
     fn reboot_broker(&self, ctx: &Ctx, id: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         let broker = data
             .brokers
             .get_mut(id)
@@ -611,13 +960,190 @@ impl MqService {
             .as_object_mut()
             .expect("broker is an object")
             .insert("brokerState".into(), json!("REBOOT_IN_PROGRESS"));
+        // With a runtime, recreate the container applying the staged pending
+        // users/configuration (matching AWS applying changes on reboot), then
+        // settle back to RUNNING once reachable. Without one, the in-memory
+        // reconcile applies pending + settles on the next describe.
+        if self.runtime.is_some() {
+            // Compute the post-reboot spec (pending changes applied) WITHOUT
+            // mutating state yet, so the broker stays REBOOT_IN_PROGRESS until
+            // the fresh container is ready.
+            if let Some(spec) = gather_spec(data, id) {
+                drop(guard);
+                self.spawn_reboot(ctx.account.clone(), id.to_string(), spec);
+            }
+        }
         ok(json!({}))
+    }
+
+    /// Recreate a broker's backing container with its post-reboot users/config,
+    /// then apply the staged pending changes in state and settle to `RUNNING`.
+    /// `reboot_broker` removes the old container first, so a respawn failure
+    /// would otherwise strand the broker; bounded retries with backoff give it
+    /// every chance to come back, and the stale data-plane binding is cleared
+    /// throughout so `DescribeBroker` never advertises a removed container
+    /// (finding 2).
+    fn spawn_reboot(&self, account: String, id: String, spec: BrokerSpec) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            // Clear the pre-reboot binding immediately: the old container is
+            // already gone, so its host ports are dead.
+            clear_data_plane(&state, &account, &id);
+            let mut running = None;
+            for attempt in 0..BRING_UP_ATTEMPTS {
+                match runtime
+                    .reboot_broker(&id, spec.engine, &spec.users, spec.user_config.as_deref())
+                    .await
+                {
+                    Ok(r) => {
+                        running = Some(r);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, broker_id = %id, attempt, "MQ broker reboot attempt failed; retrying");
+                        clear_data_plane(&state, &account, &id);
+                        backoff(attempt).await;
+                    }
+                }
+            }
+            {
+                let mut guard = state.write();
+                let data = guard.get_or_create(&account);
+                if data.brokers.contains_key(&id) {
+                    // apply_pending drains pending users/config into the live
+                    // fields and flips REBOOT_IN_PROGRESS -> RUNNING either way.
+                    data.apply_pending(&id);
+                    match running {
+                        Some(ref r) => {
+                            data.data_plane.insert(id.clone(), running_to_dp(r));
+                        }
+                        None => {
+                            // Retries exhausted: leave the binding cleared so the
+                            // broker degrades to cosmetic endpoints rather than
+                            // advertising a dead real one.
+                            data.data_plane.remove(&id);
+                            tracing::error!(broker_id = %id, "MQ broker reboot exhausted retries; degraded to control-plane-only endpoints");
+                        }
+                    }
+                }
+            }
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Recreate the backing containers for persisted brokers after a restart.
+    /// Same bug class as RDS #1338 / ElastiCache: without this, a broker reads
+    /// back `RUNNING` while its container is gone, so the endpoint is dead.
+    /// Fire-and-forget: one task per broker, so a slow broker bring-up doesn't
+    /// block startup.
+    ///
+    /// Every deserialized data-plane binding is dropped up front -- its host
+    /// ports referred to a container owned by the previous process and are dead
+    /// now. This runs BEFORE the runtime guard so control-plane-only mode (no
+    /// container runtime on this run) never keeps a stale binding and emits a
+    /// dead `tcp://127.0.0.1:<port>` instead of the cosmetic fallback (finding
+    /// 5). When a runtime is present, each recoverable broker is re-driven
+    /// through its PERSISTED container (re-attached, preserving message data) or
+    /// a fresh one if that container is gone (finding 1).
+    pub async fn recover_persisted_containers(&self) {
+        let runtime_present = self.runtime.is_some();
+        struct Pending {
+            account: String,
+            id: String,
+            container_id: Option<String>,
+            spec: BrokerSpec,
+        }
+        let (pending, changed) = {
+            let mut guard = self.state.write();
+            let mut out: Vec<Pending> = Vec::new();
+            let mut changed = false;
+            for (account_id, data) in guard.iter_mut() {
+                let account = account_id.to_string();
+                let ids: Vec<String> = data.brokers.keys().cloned().collect();
+                for id in ids {
+                    // Always drop the stale persisted binding first (capturing
+                    // the old container id for a possible re-attach).
+                    let persisted_container_id =
+                        data.data_plane.remove(&id).map(|dp| dp.container_id);
+                    if persisted_container_id.is_some() {
+                        changed = true;
+                    }
+                    let st = data
+                        .brokers
+                        .get(&id)
+                        .and_then(|b| b.get("brokerState"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if st == "DELETION_IN_PROGRESS" {
+                        data.brokers.remove(&id);
+                        data.users.remove(&id);
+                        changed = true;
+                        continue;
+                    }
+                    // Only a container runtime can re-drive the data plane; in
+                    // control-plane-only mode the cleared binding above is all
+                    // that is needed (describe falls back to cosmetic endpoints).
+                    if !runtime_present {
+                        continue;
+                    }
+                    let recoverable = matches!(
+                        st.as_str(),
+                        "RUNNING" | "CREATION_IN_PROGRESS" | "REBOOT_IN_PROGRESS"
+                    );
+                    if !recoverable {
+                        continue;
+                    }
+                    // Mark CREATION_IN_PROGRESS so a describe during recovery
+                    // doesn't advertise an endpoint before the container is up.
+                    if let Some(obj) = data.brokers.get_mut(&id).and_then(Value::as_object_mut) {
+                        obj.insert("brokerState".into(), json!("CREATION_IN_PROGRESS"));
+                    }
+                    changed = true;
+                    if let Some(spec) = gather_spec(data, &id) {
+                        out.push(Pending {
+                            account: account.clone(),
+                            id,
+                            container_id: persisted_container_id,
+                            spec,
+                        });
+                    }
+                }
+            }
+            (out, changed)
+        };
+        // Persist the cleared bindings / settled deletions so a subsequent
+        // restart starts from a clean slate even if nothing else mutates state
+        // (notably the control-plane-only path, which spawns no tasks).
+        if changed && !runtime_present {
+            save_snapshot(
+                &self.state,
+                self.snapshot_store.clone(),
+                &self.snapshot_lock,
+            )
+            .await;
+        }
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = pending.len(),
+            "recovering backing containers for persisted mq brokers",
+        );
+        for p in pending {
+            self.spawn_recover(p.account, p.id, p.container_id, p.spec);
+        }
     }
 
     fn promote(&self, ctx: &Ctx, id: &str, _b: &Value) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         if !data.brokers.contains_key(id) {
             return Err(not_found(&format!("Can't find requested broker [{id}].")));
         }
@@ -631,7 +1157,7 @@ impl MqService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         // ListBrokers is scoped to the request's region (a broker created in
         // another region must not leak into this region's listing).
         let summaries: Vec<Value> = data
@@ -666,7 +1192,7 @@ impl MqService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        data.reconcile_brokers();
+        data.reconcile_brokers(self.auto_settle());
         if !data.brokers.contains_key(id) {
             return Err(not_found(&format!("Can't find requested broker [{id}].")));
         }
@@ -982,6 +1508,13 @@ impl MqService {
                 "Can't find requested broker [{broker_id}]."
             )));
         }
+        // Both engines stage the change as a `pendingChange`. ActiveMQ applies
+        // it on the next reboot (matching AWS). RabbitMQ applies it immediately
+        // via a background `rabbitmqctl` task that CLEARS the marker only once
+        // the user really exists on the broker -- so a user the API accepted but
+        // could not yet provision honestly still reads back as pending, and a
+        // user that can log in reads back with no pending change (finding 4).
+        let is_rabbit = broker_is_rabbit(data, broker_id);
         let users = data.users.entry(broker_id.to_string()).or_default();
         if users.contains_key(username) {
             return Err(conflict(&format!("User [{username}] already exists.")));
@@ -997,7 +1530,90 @@ impl MqService {
                 "pendingChange": "CREATE",
             }),
         );
+        if is_rabbit {
+            self.spawn_rabbit_settle_user(
+                ctx.account.clone(),
+                broker_id.to_string(),
+                username.to_string(),
+            );
+        }
         ok(json!({}))
+    }
+
+    /// Apply a RabbitMQ user to the running broker via `rabbitmqctl`, retrying
+    /// with backoff (covering the race where the op arrives before the broker
+    /// container is tracked). On success the staged `pendingChange` marker is
+    /// cleared and the change persisted; on exhausted retries the marker is
+    /// left so `DescribeUser` honestly reports the user as not-yet-applied.
+    fn spawn_rabbit_settle_user(&self, account: String, broker_id: String, username: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            for attempt in 0..RABBIT_USER_ATTEMPTS {
+                // Re-read the user each attempt: it may have been updated or
+                // deleted while we were retrying.
+                let user = {
+                    let guard = state.read();
+                    guard
+                        .get(&account)
+                        .and_then(|d| d.users.get(&broker_id))
+                        .and_then(|m| m.get(&username))
+                        .map(broker_user_from_value)
+                };
+                let Some(user) = user else {
+                    return; // user removed meanwhile
+                };
+                match runtime.rabbit_apply_user(&broker_id, &user).await {
+                    Ok(()) => {
+                        {
+                            let mut guard = state.write();
+                            if let Some(u) = guard
+                                .get_or_create(&account)
+                                .users
+                                .get_mut(&broker_id)
+                                .and_then(|m| m.get_mut(&username))
+                                .and_then(Value::as_object_mut)
+                            {
+                                u.remove("pendingChange");
+                            }
+                        }
+                        save_snapshot(&state, store, &lock).await;
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, broker_id = %broker_id, username = %username, attempt, "rabbitmq user apply failed; retrying");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+            tracing::error!(broker_id = %broker_id, username = %username, "rabbitmq user apply exhausted retries; user remains staged (pendingChange)");
+        });
+    }
+
+    /// Remove a RabbitMQ user from the running broker via `rabbitmqctl`,
+    /// best-effort with bounded retries. The user is already gone from state, so
+    /// this only reconciles the live broker.
+    fn spawn_rabbit_delete_user(&self, broker_id: String, username: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            for _ in 0..RABBIT_USER_ATTEMPTS {
+                if runtime
+                    .rabbit_delete_user(&broker_id, &username)
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            tracing::warn!(broker_id = %broker_id, username = %username, "rabbitmq user delete exhausted retries");
+        });
     }
 
     fn describe_user(
@@ -1049,6 +1665,7 @@ impl MqService {
                 "Can't find requested broker [{broker_id}]."
             )));
         }
+        let is_rabbit = broker_is_rabbit(data, broker_id);
         let u = data
             .users
             .get_mut(broker_id)
@@ -1067,7 +1684,16 @@ impl MqService {
         if let Some(v) = b.get("replicationUser") {
             obj.insert("replicationUser".into(), v.clone());
         }
+        // Stage the change on both engines; RabbitMQ additionally applies it
+        // live via a background task that clears the marker on success.
         obj.insert("pendingChange".into(), json!("UPDATE"));
+        if is_rabbit {
+            self.spawn_rabbit_settle_user(
+                ctx.account.clone(),
+                broker_id.to_string(),
+                username.to_string(),
+            );
+        }
         ok(json!({}))
     }
 
@@ -1084,12 +1710,29 @@ impl MqService {
                 "Can't find requested broker [{broker_id}]."
             )));
         }
+        let is_rabbit = broker_is_rabbit(data, broker_id);
+        if is_rabbit {
+            // RabbitMQ removes the user immediately; drop it from state and the
+            // running broker now.
+            if data
+                .users
+                .get_mut(broker_id)
+                .map(|m| m.remove(username).is_some())
+                != Some(true)
+            {
+                return Err(not_found(&format!(
+                    "Can't find requested user [{username}]."
+                )));
+            }
+            self.spawn_rabbit_delete_user(broker_id.to_string(), username.to_string());
+            return ok(json!({}));
+        }
         let u = data
             .users
             .get_mut(broker_id)
             .and_then(|m| m.get_mut(username))
             .ok_or_else(|| not_found(&format!("Can't find requested user [{username}].")))?;
-        // Deletion is staged; a reboot removes the user.
+        // ActiveMQ deletion is staged; a reboot removes the user.
         u.as_object_mut()
             .expect("user is an object")
             .insert("pendingChange".into(), json!("DELETE"));
@@ -1321,6 +1964,55 @@ mod tests {
             "hostInstanceType": "mq.m5.large",
             "publiclyAccessible": false
         })
+    }
+
+    #[tokio::test]
+    async fn recover_without_runtime_clears_persisted_data_plane() {
+        // A snapshot restored in control-plane-only mode (no container runtime)
+        // must NOT keep a deserialized data-plane binding, or DescribeBroker
+        // would emit a dead `tcp://127.0.0.1:<port>` for a container the previous
+        // process owned. recover_persisted_containers clears it up front so the
+        // broker falls back to the cosmetic endpoints (finding 5).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("recov")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        // Settle to RUNNING and inject a stale binding as a restored snapshot would.
+        {
+            let mut guard = s.state.write();
+            let data = guard.get_or_create(&c.account);
+            data.reconcile_brokers(true);
+            let mut ports = std::collections::BTreeMap::new();
+            ports.insert("openwire".to_string(), 51616u16);
+            data.data_plane.insert(
+                id.clone(),
+                BrokerDataPlane {
+                    container_id: "dead-container".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    ports,
+                },
+            );
+        }
+
+        s.recover_persisted_containers().await;
+
+        // The binding is gone, so describe projects cosmetic endpoints.
+        assert!(!s
+            .state
+            .read()
+            .get(&c.account)
+            .unwrap()
+            .data_plane
+            .contains_key(&id));
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        let ow = described["brokerInstances"][0]["endpoints"][0]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            ow.contains("amazonaws.com"),
+            "without a runtime the endpoint must fall back to cosmetic, got {ow}"
+        );
     }
 
     #[test]
