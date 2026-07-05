@@ -1,10 +1,14 @@
 {
-  "variants_passed": 179310,
-  "total_variants": 179310,
+  "variants_passed": 180098,
+  "total_variants": 180098,
   "per_service": {
     "acm": {
       "passed": 599,
       "total": 599
+    },
+    "acm-pca": {
+      "passed": 788,
+      "total": 788
     },
     "apigatewayv1": {
       "passed": 3373,

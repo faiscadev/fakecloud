@@ -155,6 +155,10 @@
     "repo_dir": "acm",
     "service_name": "acm"
   },
+  "acm-pca": {
+    "repo_dir": "acm-pca",
+    "service_name": "acm-pca"
+  },
   "application-autoscaling": {
     "repo_dir": "application-auto-scaling",
     "service_name": "application-autoscaling"

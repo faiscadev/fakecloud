@@ -4552,6 +4552,32 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `SearchCertificates`
 - `UpdateCertificateOptions`
 
+## [ACM PCA](@/docs/services/acm-pca.md)
+
+- `CreateCertificateAuthority`
+- `CreateCertificateAuthorityAuditReport`
+- `CreatePermission`
+- `DeleteCertificateAuthority`
+- `DeletePermission`
+- `DeletePolicy`
+- `DescribeCertificateAuthority`
+- `DescribeCertificateAuthorityAuditReport`
+- `GetCertificate`
+- `GetCertificateAuthorityCertificate`
+- `GetCertificateAuthorityCsr`
+- `GetPolicy`
+- `ImportCertificateAuthorityCertificate`
+- `IssueCertificate`
+- `ListCertificateAuthorities`
+- `ListPermissions`
+- `ListTags`
+- `PutPolicy`
+- `RestoreCertificateAuthority`
+- `RevokeCertificate`
+- `TagCertificateAuthority`
+- `UntagCertificateAuthority`
+- `UpdateCertificateAuthority`
+
 ## [CloudWatch (Metrics & Alarms)](@/docs/services/cloudwatch.md)
 
 - `AssociateDatasetKmsKey`

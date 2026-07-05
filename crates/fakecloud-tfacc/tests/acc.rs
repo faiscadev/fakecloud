@@ -421,3 +421,8 @@ async fn codepipeline_acceptance() {
 async fn codeartifact_acceptance() {
     run_shard("codeartifact").await;
 }
+
+#[tokio::test]
+async fn acmpca_acceptance() {
+    run_shard("acmpca").await;
+}

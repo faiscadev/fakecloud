@@ -1223,6 +1223,17 @@ pub const SERVICES: &[Service] = &[
             "^TestAccCodeArtifact_serial$/^(Domain|Repository|DomainPermissionsPolicy|RepositoryPermissionsPolicy)$/^basic$",
         deny: &[],
     },
+    Service {
+        // AWS Certificate Manager Private CA. `aws_acmpca_certificate_authority`
+        // provisions a private CA; the `_basic` test creates a SUBORDINATE CA
+        // (`PENDING_CERTIFICATE`), reads back its real computed
+        // `certificate_signing_request`, and destroys it (a pending CA deletes
+        // directly, without the disable step an ACTIVE CA needs). fakecloud
+        // mints a genuine CA key pair and serves a real PEM CSR.
+        name: "acmpca",
+        run_regex: "^TestAccACMPCACertificateAuthority_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1867,6 +1878,12 @@ pub const SHARDS: &[Shard] = &[
         service: "codeartifact",
         run_regex:
             "^TestAccCodeArtifact_serial$/^(Domain|Repository|DomainPermissionsPolicy|RepositoryPermissionsPolicy)$/^basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "acmpca",
+        service: "acmpca",
+        run_regex: "^TestAccACMPCACertificateAuthority_basic$",
         extra_deny: &[],
     },
 ];

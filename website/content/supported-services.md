@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 5,388 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 5,411 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 5,388 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 5,411 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
 - **Total Operations**: 4,220
-- **Conformance Engine**: 179,310 Smithy-based test variants
+- **Conformance Engine**: 180,098 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services

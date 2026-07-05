@@ -462,6 +462,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSStepFunctions") => "states",
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         "CertificateManager" => "acm",
+        "ACMPrivateCA" => "acm-pca",
         "AnyScaleFrontendService" => "application-autoscaling",
         // Match the WAFv2 target version exactly so legacy WAF Classic
         // (`AWSWAF_*` without the `_20190729` suffix) doesn't get routed here.

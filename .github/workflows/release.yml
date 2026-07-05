@@ -231,6 +231,7 @@ jobs:
           publish fakecloud-bedrock
           publish fakecloud-cloudfront
           publish fakecloud-acm
+          publish fakecloud-acmpca
           publish fakecloud-application-autoscaling
           publish fakecloud-autoscaling
           publish fakecloud-wafv2
