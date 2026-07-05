@@ -903,6 +903,7 @@ pub struct ResourceProvisioner {
     pub glue_state: fakecloud_glue::SharedGlueState,
     pub eks_state: SharedEksState,
     pub servicediscovery_state: SharedServiceDiscoveryState,
+    pub codeartifact_state: fakecloud_codeartifact::SharedCodeArtifactState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1051,6 +1052,7 @@ mod autoscaling;
 mod batch;
 mod cloudformation;
 mod cloudwatch;
+mod codeartifact;
 mod cognito;
 mod dynamodb;
 mod ec2;
@@ -1192,6 +1194,8 @@ impl ResourceProvisioner {
             "AWS::Batch::JobDefinition" => self.create_batch_job_definition(resource),
             "AWS::Batch::SchedulingPolicy" => self.create_batch_scheduling_policy(resource),
             "AWS::Pipes::Pipe" => self.create_pipes_pipe(resource),
+            "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
+            "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Instance" => self.create_ec2_instance(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
@@ -1516,6 +1520,12 @@ impl ResourceProvisioner {
             "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
             "AWS::Pipes::Pipe" => Some(self.update_pipes_pipe(existing, new_def)?),
+            "AWS::CodeArtifact::Domain" => {
+                Some(self.update_codeartifact_domain(existing, new_def)?)
+            }
+            "AWS::CodeArtifact::Repository" => {
+                Some(self.update_codeartifact_repository(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1630,6 +1640,12 @@ impl ResourceProvisioner {
                 self.get_att_cloudformation_stack(&resource.physical_id, attribute)
             }
             "AWS::Pipes::Pipe" => self.get_att_pipes_pipe(&resource.physical_id, attribute),
+            "AWS::CodeArtifact::Domain" => {
+                self.get_att_codeartifact_domain(&resource.physical_id, attribute)
+            }
+            "AWS::CodeArtifact::Repository" => {
+                self.get_att_codeartifact_repository(&resource.physical_id, attribute)
+            }
             "AWS::EKS::Cluster" => self.get_att_eks_cluster(&resource.physical_id, attribute),
             "AWS::EKS::Nodegroup" => self.get_att_eks_nodegroup(&resource.physical_id, attribute),
             "AWS::EKS::FargateProfile" => {
@@ -1847,6 +1863,14 @@ impl ResourceProvisioner {
             }
             "AWS::Pipes::Pipe" => {
                 self.delete_pipes_pipe(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::CodeArtifact::Domain" => {
+                self.delete_codeartifact_domain(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::CodeArtifact::Repository" => {
+                self.delete_codeartifact_repository(&resource.physical_id);
                 Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
@@ -6409,6 +6433,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             servicediscovery_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            codeartifact_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

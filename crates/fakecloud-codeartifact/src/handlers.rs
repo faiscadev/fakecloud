@@ -144,7 +144,38 @@ fn package_group_arn(region: &str, owner: &str, domain: &str, pattern: &str) -> 
     format!("arn:aws:codeartifact:{region}:{owner}:package-group/{domain}{pattern}")
 }
 
-fn repo_endpoint(region: &str, owner: &str, domain: &str, repo: &str, format: &str) -> String {
+/// Build the repository endpoint URL a package manager is pointed at. Prefer the
+/// emulator host from the request `Host` header so a client configured with the
+/// returned URL talks to fakecloud rather than real AWS; fall back to the
+/// AWS-format host only when no `Host` header is present. The URL path
+/// (`/{format}/{repo}/`) stays AWS-accurate either way.
+fn repo_endpoint(
+    req: &AwsRequest,
+    region: &str,
+    owner: &str,
+    domain: &str,
+    repo: &str,
+    format: &str,
+) -> String {
+    if let Some(host) = req
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .filter(|h| !h.is_empty())
+    {
+        let scheme = if req
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.eq_ignore_ascii_case("https"))
+            .unwrap_or(false)
+        {
+            "https"
+        } else {
+            "http"
+        };
+        return format!("{scheme}://{host}/{format}/{repo}/");
+    }
     format!("https://{domain}-{owner}.d.codeartifact.{region}.amazonaws.com/{format}/{repo}/")
 }
 
@@ -528,7 +559,7 @@ impl CodeArtifactService {
         if !acct.repositories.contains_key(&key) {
             return Err(not_found(format!("Repository {repo} does not exist")));
         }
-        ok(json!({ "repositoryEndpoint": repo_endpoint(&region, &owner, &domain, &repo, &format) }))
+        ok(json!({ "repositoryEndpoint": repo_endpoint(req, &region, &owner, &domain, &repo, &format) }))
     }
 
     fn associate_external_connection(
@@ -1554,9 +1585,9 @@ impl CodeArtifactService {
         }
         if let Some(restrictions) = b.get("restrictions").and_then(|v| v.as_object()) {
             if let Some(g) = acct.package_groups.get_mut(&gkey) {
-                let origin = g["originConfiguration"]["restrictions"]
+                let origin = ensure_object(ensure_object(g, "originConfiguration"), "restrictions")
                     .as_object_mut()
-                    .expect("restrictions map");
+                    .expect("value was just set to an object");
                 for (rtype, mode) in restrictions {
                     if let Some(mode_s) = mode.as_str() {
                         origin.insert(
@@ -1703,6 +1734,18 @@ fn ensure_array<'a>(obj: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
     obj[key]
         .as_array_mut()
         .expect("value was just set to an array")
+}
+
+/// Borrow `obj[key]` as a mutable object, coercing a missing or non-object value
+/// to an empty object first so a persisted/deserialized record with an
+/// unexpected shape never panics on the request path. Composes for nested keys
+/// (e.g. `originConfiguration.restrictions`) since it returns a `&mut Value`
+/// that is guaranteed to be an object.
+fn ensure_object<'a>(obj: &'a mut Value, key: &str) -> &'a mut Value {
+    if !obj.get(key).map(Value::is_object).unwrap_or(false) {
+        obj[key] = Value::Object(Map::new());
+    }
+    &mut obj[key]
 }
 
 /// True when `arn` resolves to an existing domain, repository, or package group
