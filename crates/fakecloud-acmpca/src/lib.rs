@@ -12,7 +12,7 @@ pub mod validate;
 
 pub use persistence::save_acmpca_snapshot;
 pub use provision::{
-    build_creating_ca, default_revocation_configuration, fill_keygen, generate_ca_material,
+    build_pending_ca, default_revocation_configuration, fill_keygen, generate_ca_material,
     subject_of, CaCreateParams, DEFAULT_KEY_STORAGE_STANDARD,
 };
 pub use service::AcmPcaService;

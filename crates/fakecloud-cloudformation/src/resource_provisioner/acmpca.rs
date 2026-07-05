@@ -62,9 +62,10 @@ impl ResourceProvisioner {
 
         // Use the same shared builder + defaults as the API handler (one source
         // of truth). CFN provisioning is synchronous and not probe-timed, so the
-        // (possibly slow) key generation runs inline here, then the CA settles
-        // to PENDING_CERTIFICATE — a ROOT CA is activated later via the
-        // AWS::ACMPCA::Certificate + CertificateAuthorityActivation resources.
+        // (possibly slow) key generation runs inline here and the CA is left
+        // PENDING_CERTIFICATE with its key installed — a ROOT CA is activated
+        // later via the AWS::ACMPCA::Certificate + CertificateAuthorityActivation
+        // resources.
         let params = fakecloud_acmpca::CaCreateParams {
             arn: arn.clone(),
             account: self.account_id.clone(),
@@ -79,7 +80,7 @@ impl ResourceProvisioner {
             idempotency_token: None,
             tags: parse_acmpca_tags(props.get("Tags")),
         };
-        let mut ca = fakecloud_acmpca::build_creating_ca(params);
+        let mut ca = fakecloud_acmpca::build_pending_ca(params);
         let (key_pem, csr_pem) = fakecloud_acmpca::generate_ca_material(&key_algorithm, &subject)
             .map_err(|e| format!("ACM PCA key generation failed: {e}"))?;
         fakecloud_acmpca::fill_keygen(&mut ca, key_pem, csr_pem.clone());

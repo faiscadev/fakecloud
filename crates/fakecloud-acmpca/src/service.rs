@@ -1,21 +1,23 @@
 //! ACM Private CA (`acm-pca`) awsJson1_1 service.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use http::StatusCode;
-use parking_lot::RwLock;
+use parking_lot::{Mutex as SyncMutex, RwLock};
 use serde_json::{json, Value};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_acmpca_snapshot;
-use crate::provision::{build_creating_ca, CaCreateParams};
+use crate::provision::{build_pending_ca, CaCreateParams};
 use crate::state::{
     AcmPcaAccounts, AuditReport, CertificateAuthority, IssuedCertificate, Permission,
     RevokedCertificate, SharedAcmPcaState, TagEntry,
@@ -66,10 +68,26 @@ const MUTATING_ACTIONS: &[&str] = &[
     "CreateCertificateAuthorityAuditReport",
 ];
 
+/// Actions that need the CA's private key (or its CSR) to be present, so they
+/// wait for background key generation to finish before running.
+const KEY_DEPENDENT_ACTIONS: &[&str] = &[
+    "GetCertificateAuthorityCsr",
+    "IssueCertificate",
+    "ImportCertificateAuthorityCertificate",
+];
+
+/// Upper bound on how long a key-dependent action waits for background key
+/// generation. Real RSA-4096 generation in an unoptimized build can take tens of
+/// seconds; past this the handler proceeds and returns its own not-ready error.
+const KEYGEN_WAIT: Duration = Duration::from_secs(300);
+
 pub struct AcmPcaService {
     state: SharedAcmPcaState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Per-CA notifiers signalled when background key generation completes.
+    /// Not persisted — rebuilt by `rearm_pending_creations` after a restart.
+    keygen_waiters: Arc<SyncMutex<HashMap<String, Arc<Notify>>>>,
 }
 
 impl AcmPcaService {
@@ -78,6 +96,7 @@ impl AcmPcaService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            keygen_waiters: Arc::new(SyncMutex::new(HashMap::new())),
         }
     }
 
@@ -116,11 +135,13 @@ impl AcmPcaService {
         }))
     }
 
-    /// Generate a CA's key pair + CSR off the async runtime and settle the CA
-    /// from `CREATING` to `PENDING_CERTIFICATE`. Real RSA-4096 generation can
-    /// take tens of seconds; running it on `spawn_blocking` keeps the create
-    /// call fast and never blocks the request path. On failure the CA is marked
-    /// `FAILED`. The transition is persisted so it survives a restart.
+    /// Generate a CA's key pair + CSR off the async runtime and install it. The
+    /// CA is already `PENDING_CERTIFICATE`; this only fills in the private key +
+    /// CSR (decoupled from status so the CA never wedges in `CREATING`). Real
+    /// RSA-4096 generation can take tens of seconds, so it runs on
+    /// `spawn_blocking` and never blocks the request path. On failure the CA is
+    /// marked `FAILED`. A per-CA notifier wakes any handler waiting on the key,
+    /// and the result is persisted so it survives a restart.
     fn spawn_ca_keygen(
         &self,
         account_id: String,
@@ -131,6 +152,11 @@ impl AcmPcaService {
         let state = Arc::clone(&self.state);
         let store = self.snapshot_store.clone();
         let lock = self.snapshot_lock.clone();
+        let waiters = Arc::clone(&self.keygen_waiters);
+        // Register the readiness notifier before spawning so a handler that
+        // starts waiting immediately can find it.
+        let notify = Arc::new(Notify::new());
+        waiters.lock().insert(arn.clone(), notify.clone());
         tokio::spawn(async move {
             let material = tokio::task::spawn_blocking(move || {
                 crate::provision::generate_ca_material(&key_algorithm, &subject)
@@ -143,7 +169,9 @@ impl AcmPcaService {
                     .get_mut(&account_id)
                     .and_then(|a| a.authorities.get_mut(&arn))
                 {
-                    if ca.status == "CREATING" {
+                    // Only fill if the key is still missing and the CA has not
+                    // moved to a terminal state in the meantime.
+                    if ca.ca_key_pem.is_empty() && ca.status != "FAILED" && ca.status != "DELETED" {
                         match material {
                             Ok(Ok((key_pem, csr_pem))) => {
                                 crate::provision::fill_keygen(ca, key_pem, csr_pem);
@@ -162,20 +190,72 @@ impl AcmPcaService {
                     }
                 }
             }
+            // Wake waiters (removing the notifier first so a late waiter that
+            // misses the wake re-checks the now-ready state instead).
+            waiters.lock().remove(&arn);
+            notify.notify_waiters();
             save_acmpca_snapshot(&state, store, &lock).await;
         });
     }
 
-    /// Re-arm key generation for any CA restored in the `CREATING` state (its
-    /// key was never persisted because the previous process exited mid-keygen).
-    /// Called by the server after loading the persistence snapshot.
+    /// Wait (bounded) for a CA's background key generation to finish before a
+    /// key-dependent action uses it. Returns as soon as the key material is
+    /// present, or the CA reaches a terminal/absent state, or [`KEYGEN_WAIT`]
+    /// elapses — in which case the handler runs and returns its own not-ready
+    /// error. A no-op for CAs whose key is already installed (e.g. CFN-created).
+    async fn ensure_key_ready(&self, account: &str, arn: &str) {
+        let deadline = Instant::now() + KEYGEN_WAIT;
+        loop {
+            {
+                let st = self.state.read();
+                match st
+                    .accounts
+                    .get(account)
+                    .and_then(|a| a.authorities.get(arn))
+                {
+                    // Unknown CA: let the handler produce ResourceNotFound.
+                    None => return,
+                    Some(ca) => {
+                        if !ca.ca_key_pem.is_empty() || ca.status == "FAILED" {
+                            return;
+                        }
+                    }
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let notify = self.keygen_waiters.lock().get(arn).cloned();
+            match notify {
+                Some(n) => {
+                    let _ = tokio::time::timeout(remaining, n.notified()).await;
+                }
+                // Notifier already gone (keygen finished, or never armed): the
+                // next loop re-reads state; a short sleep bounds the spin.
+                None => {
+                    tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
+                }
+            }
+        }
+    }
+
+    /// Re-arm key generation for any CA restored with no key material (the key
+    /// was never persisted because the previous process exited mid-keygen).
+    /// Called by the server after loading the persistence snapshot. Also migrates
+    /// any legacy `CREATING` state to `PENDING_CERTIFICATE`.
     pub fn rearm_pending_creations(&self) {
         let pending: Vec<(String, String, String, Value)> = {
-            let state = self.state.read();
+            let mut state = self.state.write();
             let mut out = Vec::new();
-            for (account_id, account) in state.accounts.iter() {
-                for (arn, ca) in account.authorities.iter() {
-                    if ca.status == "CREATING" {
+            for (account_id, account) in state.accounts.iter_mut() {
+                for (arn, ca) in account.authorities.iter_mut() {
+                    let unfinished = ca.ca_key_pem.is_empty()
+                        && (ca.status == "PENDING_CERTIFICATE" || ca.status == "CREATING");
+                    if unfinished {
+                        if ca.status == "CREATING" {
+                            ca.status = "PENDING_CERTIFICATE".to_string();
+                        }
                         out.push((
                             account_id.clone(),
                             arn.clone(),
@@ -211,6 +291,18 @@ impl AwsService for AcmPcaService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = MUTATING_ACTIONS.contains(&req.action.as_str());
+        // Key-dependent actions wait for background key generation to finish so a
+        // client that creates a CA and immediately calls GetCsr / IssueCertificate
+        // / Import does not race the keygen task.
+        if KEY_DEPENDENT_ACTIONS.contains(&req.action.as_str()) {
+            if let Some(arn) = req
+                .json_body()
+                .get("CertificateAuthorityArn")
+                .and_then(Value::as_str)
+            {
+                self.ensure_key_ready(&account_id(&req), arn).await;
+            }
+        }
         let result = match req.action.as_str() {
             "CreateCertificateAuthority" => self.create_certificate_authority(&req),
             "DescribeCertificateAuthority" => self.describe_certificate_authority(&req),
@@ -344,10 +436,11 @@ impl AcmPcaService {
         let ca_id = Uuid::new_v4().to_string();
         let arn = format!("arn:aws:acm-pca:{region}:{account}:certificate-authority/{ca_id}");
 
-        // Every CA — ROOT included — starts in CREATING and settles to
-        // PENDING_CERTIFICATE once its (real, requested-algorithm) key pair has
-        // been generated on a background task, matching AWS's lifecycle and
-        // keeping CreateCertificateAuthority fast even for slow RSA-4096 keygen.
+        // Every CA — ROOT included — is reported PENDING_CERTIFICATE immediately
+        // (matching AWS, which reaches that state within seconds), while its
+        // real, requested-algorithm key pair is generated on a background task.
+        // Decoupling status from keygen keeps the CA out of a prolonged CREATING
+        // state that would trip clients' create waiters on slow RSA-4096 keys.
         // A ROOT CA is activated by the self-sign ceremony (GetCsr ->
         // IssueCertificate(RootCACertificate) -> ImportCertificateAuthorityCertificate).
         let params = CaCreateParams {
@@ -364,7 +457,7 @@ impl AcmPcaService {
             idempotency_token,
             tags,
         };
-        let ca = build_creating_ca(params);
+        let ca = build_pending_ca(params);
         {
             let mut accounts = self.state.write();
             accounts
@@ -1506,29 +1599,34 @@ mod tests {
     }
 
     const ROOT_TEMPLATE: &str = "arn:aws:acm-pca:::template/RootCACertificate/V1";
+    const TEST_ACCOUNT: &str = "123456789012";
 
-    /// Poll `DescribeCertificateAuthority` until the CA leaves `CREATING`. Key
-    /// generation now runs on a background task, so a freshly created CA starts
-    /// in `CREATING` and settles to `PENDING_CERTIFICATE` once its key + CSR are
-    /// ready.
+    /// A freshly created CA is `PENDING_CERTIFICATE` immediately; its real key
+    /// pair is generated in the background. Assert the status is `PENDING_CERTIFICATE`
+    /// straight away, then wait for the key material to become available (the unit
+    /// tests call handlers directly, bypassing the `handle` dispatch that awaits
+    /// keygen for the HTTP path).
     async fn poll_pending(svc: &AcmPcaService, arn: &str) {
-        for _ in 0..400 {
-            let d = svc
-                .describe_certificate_authority(&req(
-                    "DescribeCertificateAuthority",
-                    json!({ "CertificateAuthorityArn": arn }),
-                ))
-                .unwrap();
-            match body_json(&d)["CertificateAuthority"]["Status"]
-                .as_str()
-                .unwrap()
-            {
-                "PENDING_CERTIFICATE" => return,
-                "FAILED" => panic!("CA key generation FAILED"),
-                _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
-            }
-        }
-        panic!("CA never reached PENDING_CERTIFICATE");
+        let d = svc
+            .describe_certificate_authority(&req(
+                "DescribeCertificateAuthority",
+                json!({ "CertificateAuthorityArn": arn }),
+            ))
+            .unwrap();
+        assert_eq!(
+            body_json(&d)["CertificateAuthority"]["Status"],
+            "PENDING_CERTIFICATE",
+            "CA should be PENDING_CERTIFICATE immediately after create"
+        );
+        svc.ensure_key_ready(TEST_ACCOUNT, arn).await;
+        let st = svc.state.read();
+        let ca = st
+            .accounts
+            .get(TEST_ACCOUNT)
+            .and_then(|a| a.authorities.get(arn))
+            .unwrap();
+        assert_ne!(ca.status, "FAILED", "CA key generation FAILED");
+        assert!(!ca.ca_key_pem.is_empty(), "CA key never became ready");
     }
 
     /// Run the full activation ceremony for a ROOT CA: wait for keygen, fetch the

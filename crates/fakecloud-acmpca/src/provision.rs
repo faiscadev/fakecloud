@@ -1,7 +1,14 @@
 //! Shared certificate-authority construction used by BOTH the awsJson API
-//! handler and the CloudFormation provisioner, so CA defaults, the
-//! `CREATING -> PENDING_CERTIFICATE` lifecycle, and key/CSR generation have a
-//! single source of truth (no per-creation-path drift).
+//! handler and the CloudFormation provisioner, so CA defaults, the CA lifecycle,
+//! and key/CSR generation have a single source of truth (no per-creation-path
+//! drift).
+//!
+//! A new CA is reported `PENDING_CERTIFICATE` immediately (matching AWS, which
+//! reaches that state within seconds of `CreateCertificateAuthority`). Its real,
+//! requested-algorithm key pair is generated in the background and installed by
+//! [`fill_keygen`]; the *status* is deliberately decoupled from the (potentially
+//! slow) RSA keygen so clients — and Terraform's create waiter — never see the
+//! CA wedged in `CREATING`.
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -38,12 +45,13 @@ pub fn default_revocation_configuration() -> Value {
 /// The AWS default `KeyStorageSecurityStandard` in commercial regions.
 pub const DEFAULT_KEY_STORAGE_STANDARD: &str = "FIPS_140_2_LEVEL_3_OR_HIGHER";
 
-/// Build the initial CA record. It starts in `CREATING` with no key material;
-/// key + CSR are filled in by [`fill_keygen`] once the (potentially slow) key
-/// generation completes, at which point the CA settles to
-/// `PENDING_CERTIFICATE`. Applies AWS defaults (FIPS L3 key storage, both
-/// revocation methods disabled) in one place for every creation path.
-pub fn build_creating_ca(params: CaCreateParams) -> CertificateAuthority {
+/// Build the initial CA record. It is reported `PENDING_CERTIFICATE` right away
+/// (with no key material yet); the real key pair + CSR are filled in by
+/// [`fill_keygen`] once background generation completes. Decoupling the status
+/// from keygen keeps `CreateCertificateAuthority` fast even for slow RSA-4096
+/// keys. Applies AWS defaults (FIPS L3 key storage, both revocation methods
+/// disabled) in one place for every creation path.
+pub fn build_pending_ca(params: CaCreateParams) -> CertificateAuthority {
     let now = Utc::now();
     CertificateAuthority {
         arn: params.arn,
@@ -52,7 +60,7 @@ pub fn build_creating_ca(params: CaCreateParams) -> CertificateAuthority {
         last_state_change_at: Some(now),
         ca_type: params.ca_type,
         serial: None,
-        status: "CREATING".to_string(),
+        status: "PENDING_CERTIFICATE".to_string(),
         not_before: None,
         not_after: None,
         failure_reason: None,
@@ -104,11 +112,16 @@ pub fn generate_ca_material(
     Ok((key_pair.serialize_pem(), csr))
 }
 
-/// Install freshly generated key material into a `CREATING` CA and settle it to
-/// `PENDING_CERTIFICATE`.
+/// Install freshly generated key material into a `PENDING_CERTIFICATE` CA. The
+/// status is already `PENDING_CERTIFICATE`; this only makes the CA's private key
+/// and CSR available, which is what `GetCertificateAuthorityCsr`,
+/// `IssueCertificate` and `ImportCertificateAuthorityCertificate` wait for.
 pub fn fill_keygen(ca: &mut CertificateAuthority, key_pem: String, csr_pem: String) {
     ca.ca_key_pem = key_pem;
     ca.csr_pem = csr_pem;
-    ca.status = "PENDING_CERTIFICATE".to_string();
+    if ca.status == "CREATING" {
+        // Legacy snapshots may still carry the old `CREATING` state.
+        ca.status = "PENDING_CERTIFICATE".to_string();
+    }
     ca.last_state_change_at = Some(Utc::now());
 }
