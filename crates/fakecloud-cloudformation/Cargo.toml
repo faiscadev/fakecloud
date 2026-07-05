@@ -50,6 +50,7 @@ fakecloud-firehose = { workspace = true }
 fakecloud-glue = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
+fakecloud-codeartifact = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

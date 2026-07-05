@@ -146,6 +146,11 @@ impl CodeArtifactService {
     fn resolve_action(req: &AwsRequest) -> Option<&'static str> {
         let raw = req.raw_path.split('?').next().unwrap_or(&req.raw_path);
         let trimmed = raw.strip_prefix('/').unwrap_or(raw);
+        // Drop a single trailing slash so a trailing-slash variant (`/v1/domain/`)
+        // routes like its canonical form instead of yielding an empty final
+        // segment that matches nothing. No CodeArtifact route relies on a trailing
+        // empty segment.
+        let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
         let segs: Vec<&str> = if trimmed.is_empty() {
             Vec::new()
         } else {

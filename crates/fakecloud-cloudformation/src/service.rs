@@ -53,6 +53,8 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::EC2::InternetGateway" => &["InternetGatewayId"],
         "AWS::EC2::RouteTable" => &["RouteTableId"],
         "AWS::Pipes::Pipe" => &["Arn"],
+        "AWS::CodeArtifact::Domain" => &["Arn", "EncryptionKey", "Name", "Owner"],
+        "AWS::CodeArtifact::Repository" => &["Arn", "DomainName", "DomainOwner", "Name"],
         _ => &[],
     }
 }
@@ -127,6 +129,7 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Batch" => "batch",
         "ApplicationAutoScaling" => "application-autoscaling",
         "Pipes" => "pipes",
+        "CodeArtifact" => "codeartifact",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
         _ => return None,
@@ -358,6 +361,7 @@ pub struct CloudFormationDeps {
     pub glue: fakecloud_glue::SharedGlueState,
     pub eks: fakecloud_eks::state::SharedEksState,
     pub servicediscovery: fakecloud_servicediscovery::state::SharedServiceDiscoveryState,
+    pub codeartifact: fakecloud_codeartifact::SharedCodeArtifactState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -806,6 +810,7 @@ impl CloudFormationService {
             glue_state: self.deps.glue.clone(),
             eks_state: self.deps.eks.clone(),
             servicediscovery_state: self.deps.servicediscovery.clone(),
+            codeartifact_state: self.deps.codeartifact.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3047,6 +3052,13 @@ mod tests {
                 ),
             )),
             servicediscovery: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            codeartifact: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",
