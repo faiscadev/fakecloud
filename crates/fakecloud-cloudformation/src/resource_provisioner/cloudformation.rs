@@ -110,6 +110,7 @@ impl ResourceProvisioner {
             eks_state: self.eks_state.clone(),
             servicediscovery_state: self.servicediscovery_state.clone(),
             codeartifact_state: self.codeartifact_state.clone(),
+            codecommit_state: self.codecommit_state.clone(),
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),

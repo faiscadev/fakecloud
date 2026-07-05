@@ -904,6 +904,7 @@ pub struct ResourceProvisioner {
     pub eks_state: SharedEksState,
     pub servicediscovery_state: SharedServiceDiscoveryState,
     pub codeartifact_state: fakecloud_codeartifact::SharedCodeArtifactState,
+    pub codecommit_state: fakecloud_codecommit::SharedCodeCommitState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1053,6 +1054,7 @@ mod batch;
 mod cloudformation;
 mod cloudwatch;
 mod codeartifact;
+mod codecommit;
 mod cognito;
 mod dynamodb;
 mod ec2;
@@ -1196,6 +1198,7 @@ impl ResourceProvisioner {
             "AWS::Pipes::Pipe" => self.create_pipes_pipe(resource),
             "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
             "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
+            "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EC2::VPC" => self.create_ec2_vpc(resource),
             "AWS::EC2::Instance" => self.create_ec2_instance(resource),
             "AWS::EC2::Subnet" => self.create_ec2_subnet(resource),
@@ -1526,6 +1529,9 @@ impl ResourceProvisioner {
             "AWS::CodeArtifact::Repository" => {
                 Some(self.update_codeartifact_repository(existing, new_def)?)
             }
+            "AWS::CodeCommit::Repository" => {
+                Some(self.update_codecommit_repository(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1645,6 +1651,9 @@ impl ResourceProvisioner {
             }
             "AWS::CodeArtifact::Repository" => {
                 self.get_att_codeartifact_repository(&resource.physical_id, attribute)
+            }
+            "AWS::CodeCommit::Repository" => {
+                self.get_att_codecommit_repository(&resource.physical_id, attribute)
             }
             "AWS::EKS::Cluster" => self.get_att_eks_cluster(&resource.physical_id, attribute),
             "AWS::EKS::Nodegroup" => self.get_att_eks_nodegroup(&resource.physical_id, attribute),
@@ -1871,6 +1880,10 @@ impl ResourceProvisioner {
             }
             "AWS::CodeArtifact::Repository" => {
                 self.delete_codeartifact_repository(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::CodeCommit::Repository" => {
+                self.delete_codecommit_repository(&resource.physical_id);
                 Ok(())
             }
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
@@ -6436,6 +6449,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             codeartifact_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            codecommit_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

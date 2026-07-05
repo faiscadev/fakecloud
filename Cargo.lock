@@ -762,6 +762,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-codecommit"
+version = "1.99.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51b78252a15065d3785c7ac3fef8d3c05580b226d2ff4ef771b32f9c985bd94"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-cognitoidentity"
 version = "1.98.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3917,6 +3941,7 @@ dependencies = [
  "fakecloud-cloudfront",
  "fakecloud-cloudwatch",
  "fakecloud-codeartifact",
+ "fakecloud-codecommit",
  "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dynamodb",
@@ -4373,6 +4398,7 @@ dependencies = [
  "aws-sdk-cloudwatch",
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-codeartifact",
+ "aws-sdk-codecommit",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",

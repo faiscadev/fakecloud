@@ -1163,6 +1163,7 @@ async fn main() {
             eks: eks_state.clone(),
             servicediscovery: servicediscovery_state.clone(),
             codeartifact: codeartifact_state.clone(),
+            codecommit: codecommit_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
