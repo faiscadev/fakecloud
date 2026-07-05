@@ -7,7 +7,7 @@
 
 use super::*;
 
-use fakecloud_acmpca::{CertificateAuthority, IssuedCertificate, Permission};
+use fakecloud_acmpca::{IssuedCertificate, Permission};
 use serde_json::json;
 
 impl ResourceProvisioner {
@@ -50,65 +50,39 @@ impl ResourceProvisioner {
             "Subject": subject,
         });
 
+        let key_storage = props
+            .get("KeyStorageSecurityStandard")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let ca_id = Uuid::new_v4();
         let arn = format!(
             "arn:aws:acm-pca:{}:{}:certificate-authority/{}",
             self.region, self.account_id, ca_id
         );
-        let now = Utc::now();
 
-        let key_pair = fakecloud_acmpca::generate_key_pair(&key_algorithm)
-            .map_err(|e| format!("ACM PCA key generation failed: {e}"))?;
-        let key_pem = key_pair.serialize_pem();
-        let csr_pem = fakecloud_acmpca::generate_ca_csr(&subject, &key_pair)
-            .map_err(|e| format!("ACM PCA CSR generation failed: {e}"))?;
-
-        let (status, ca_cert_pem, serial, not_before, not_after) = if ca_type == "ROOT" {
-            let nb = now;
-            let na = now + chrono::Duration::days(3650);
-            let (cert_pem, serial) =
-                fakecloud_acmpca::generate_root_ca(&subject, &key_pair, nb, na)
-                    .map_err(|e| format!("ACM PCA root CA generation failed: {e}"))?;
-            (
-                "ACTIVE".to_string(),
-                Some(cert_pem),
-                Some(serial),
-                Some(nb),
-                Some(na),
-            )
-        } else {
-            ("PENDING_CERTIFICATE".to_string(), None, None, None, None)
-        };
-
-        let ca = CertificateAuthority {
+        // Use the same shared builder + defaults as the API handler (one source
+        // of truth). CFN provisioning is synchronous and not probe-timed, so the
+        // (possibly slow) key generation runs inline here, then the CA settles
+        // to PENDING_CERTIFICATE — a ROOT CA is activated later via the
+        // AWS::ACMPCA::Certificate + CertificateAuthorityActivation resources.
+        let params = fakecloud_acmpca::CaCreateParams {
             arn: arn.clone(),
-            owner_account: self.account_id.clone(),
-            created_at: now,
-            last_state_change_at: Some(now),
+            account: self.account_id.clone(),
             ca_type,
-            serial,
-            status,
-            not_before,
-            not_after,
-            failure_reason: None,
-            key_algorithm,
+            key_algorithm: key_algorithm.clone(),
             signing_algorithm,
+            subject: subject.clone(),
             configuration,
-            revocation_configuration,
             usage_mode,
-            key_storage_security_standard: None,
-            restorable_until: None,
+            key_storage_security_standard: key_storage,
+            revocation_configuration,
             idempotency_token: None,
             tags: parse_acmpca_tags(props.get("Tags")),
-            ca_key_pem: key_pem,
-            ca_cert_pem,
-            ca_cert_chain_pem: None,
-            csr_pem: csr_pem.clone(),
-            issued: Default::default(),
-            revoked: Default::default(),
-            permissions: Default::default(),
-            audit_reports: Default::default(),
         };
+        let mut ca = fakecloud_acmpca::build_creating_ca(params);
+        let (key_pem, csr_pem) = fakecloud_acmpca::generate_ca_material(&key_algorithm, &subject)
+            .map_err(|e| format!("ACM PCA key generation failed: {e}"))?;
+        fakecloud_acmpca::fill_keygen(&mut ca, key_pem, csr_pem.clone());
 
         let mut accounts = self.acmpca_state.write();
         accounts
@@ -178,7 +152,7 @@ impl ResourceProvisioner {
             .map(|t| t.contains("CACertificate") || t.contains("RootCACertificate"))
             .unwrap_or(false);
         let now = Utc::now();
-        let not_after = fakecloud_acmpca::resolve_validity(now, validity_value, &validity_type);
+        let not_after = fakecloud_acmpca::resolve_validity(now, validity_value, &validity_type)?;
 
         let mut accounts = self.acmpca_state.write();
         let ca = accounts
@@ -186,34 +160,47 @@ impl ResourceProvisioner {
             .get_mut(&self.account_id)
             .and_then(|a| a.authorities.get_mut(&ca_arn))
             .ok_or_else(|| format!("certificate authority {ca_arn} not found"))?;
-        let ca_cert_pem = ca
-            .ca_cert_pem
-            .clone()
-            .ok_or_else(|| "certificate authority has no certificate".to_string())?;
-        let ca_key = fakecloud_acmpca::load_key_pair(&ca.ca_key_pem)
-            .map_err(|e| format!("failed to load CA key: {e}"))?;
-        let (cert_pem, serial) = fakecloud_acmpca::issue_certificate(
-            &ca_cert_pem,
-            &ca_key,
-            &csr_pem,
-            now,
-            not_after,
-            is_ca,
+        // Honour the requested signing algorithm (RSA hash level) like the API.
+        let ca_key = fakecloud_acmpca::load_signing_key(
+            &ca.ca_key_pem,
+            &ca.key_algorithm,
+            &signing_algorithm,
         )
-        .map_err(|e| format!("ACM PCA certificate issuance failed: {e}"))?;
+        .map_err(|e| format!("failed to load CA signing key: {e}"))?;
+        // A ROOT CA self-signs its own certificate during activation; every
+        // other issuance signs against the installed CA certificate.
+        let root_self_sign = ca.status == "PENDING_CERTIFICATE" && ca.ca_type == "ROOT" && is_ca;
+        let (issuer, chain_base) = if root_self_sign {
+            let issuer = fakecloud_acmpca::self_issuer(&fakecloud_acmpca::subject_of(ca), &ca_key)
+                .map_err(|e| format!("failed to build root issuer: {e}"))?;
+            (issuer, None)
+        } else {
+            let ca_cert_pem = ca
+                .ca_cert_pem
+                .clone()
+                .ok_or_else(|| "certificate authority has no certificate".to_string())?;
+            let issuer = fakecloud_acmpca::issuer_from_ca_cert(&ca_cert_pem, &ca_key)
+                .map_err(|e| format!("failed to build issuer: {e}"))?;
+            (issuer, Some(ca_cert_pem))
+        };
+        let (cert_pem, serial) =
+            fakecloud_acmpca::issue_certificate(&issuer, &ca_key, &csr_pem, now, not_after, is_ca)
+                .map_err(|e| format!("ACM PCA certificate issuance failed: {e}"))?;
 
         let cert_arn = format!("{ca_arn}/certificate/{serial}");
-        let mut chain = ca_cert_pem;
-        if let Some(parent) = &ca.ca_cert_chain_pem {
-            chain.push_str(parent);
-        }
+        let chain = chain_base.map(|mut c| {
+            if let Some(parent) = &ca.ca_cert_chain_pem {
+                c.push_str(parent);
+            }
+            c
+        });
         ca.issued.insert(
             cert_arn.clone(),
             IssuedCertificate {
                 arn: cert_arn.clone(),
                 serial,
                 certificate_pem: cert_pem.clone(),
-                chain_pem: Some(chain),
+                chain_pem: chain,
                 issued_at: now,
                 not_before: now,
                 not_after,

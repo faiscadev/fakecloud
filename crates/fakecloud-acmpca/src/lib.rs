@@ -5,11 +5,16 @@
 //! the CA's certificate.
 
 pub(crate) mod persistence;
+pub mod provision;
 pub(crate) mod service;
 pub(crate) mod state;
 pub mod validate;
 
 pub use persistence::save_acmpca_snapshot;
+pub use provision::{
+    build_creating_ca, default_revocation_configuration, fill_keygen, generate_ca_material,
+    subject_of, CaCreateParams, DEFAULT_KEY_STORAGE_STANDARD,
+};
 pub use service::AcmPcaService;
 pub use state::{
     AccountState, AcmPcaAccounts, AcmPcaSnapshot, AuditReport, CertificateAuthority,
@@ -17,6 +22,7 @@ pub use state::{
     ACM_PCA_SNAPSHOT_SCHEMA_VERSION,
 };
 pub use validate::{
-    generate_ca_csr, generate_key_pair, generate_root_ca, issue_certificate, load_key_pair,
-    resolve_validity,
+    generate_ca_csr, generate_key_pair, issue_certificate, issuer_from_ca_cert, load_key_pair,
+    load_signing_key, resolve_validity, self_issuer, verify_imported_cert, ImportCheck,
+    SUPPORTED_CA_KEY_ALGORITHMS,
 };

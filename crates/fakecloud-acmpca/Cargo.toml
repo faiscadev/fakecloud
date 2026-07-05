@@ -28,6 +28,4 @@ rsa = { workspace = true }
 rand = { workspace = true }
 time = "0.3"
 tokio = { workspace = true }
-
-[dev-dependencies]
 x509-parser = "0.16"

@@ -3105,6 +3105,9 @@ async fn main() {
     if let Some(h) = acmpca_inner.snapshot_hook() {
         cfn_snapshot_hooks.insert("acm-pca", h);
     }
+    // Re-arm key generation for any CA restored in CREATING (its key never
+    // persisted because the previous process exited mid-keygen).
+    acmpca_inner.rearm_pending_creations();
     let acmpca_service = Arc::new(acmpca_inner);
     registry.register(acmpca_service.clone());
     let firehose_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

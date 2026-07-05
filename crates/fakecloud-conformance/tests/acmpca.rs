@@ -32,7 +32,13 @@ async fn pca(server: &TestServer, op: &str, body: Value) -> (u16, Value) {
     (status, parsed)
 }
 
-/// Create an ACTIVE ROOT CA and return its ARN.
+const ROOT_TEMPLATE: &str = "arn:aws:acm-pca:::template/RootCACertificate/V1";
+
+/// Create a ROOT CA and drive the full activation ceremony to bring it to
+/// `ACTIVE`, returning its ARN. Every CA now starts `CREATING` (key generation
+/// runs in the background) and settles to `PENDING_CERTIFICATE`; a ROOT CA is
+/// then activated by self-signing its own CSR with the `RootCACertificate`
+/// template and importing the result, exactly as with real AWS.
 async fn make_root_ca(server: &TestServer) -> String {
     let (status, body) = pca(
         server,
@@ -48,10 +54,60 @@ async fn make_root_ca(server: &TestServer) -> String {
     )
     .await;
     assert_eq!(status, 200, "create root CA: {body}");
-    body["CertificateAuthorityArn"]
+    let arn = body["CertificateAuthorityArn"]
         .as_str()
         .unwrap()
-        .to_string()
+        .to_string();
+
+    // Wait for background keygen to settle the CA to PENDING_CERTIFICATE.
+    let mut csr = None;
+    for _ in 0..400 {
+        let (_, d) = pca(
+            server,
+            "GetCertificateAuthorityCsr",
+            json!({ "CertificateAuthorityArn": arn }),
+        )
+        .await;
+        if let Some(c) = d["Csr"].as_str() {
+            csr = Some(c.to_string());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let csr = csr.expect("CA never produced a CSR (keygen stuck)");
+
+    // Self-sign the root certificate (allowed while PENDING_CERTIFICATE).
+    let (status, issued) = pca(
+        server,
+        "IssueCertificate",
+        json!({
+            "CertificateAuthorityArn": arn,
+            "Csr": csr,
+            "SigningAlgorithm": "SHA256WITHECDSA",
+            "TemplateArn": ROOT_TEMPLATE,
+            "Validity": { "Value": 3650, "Type": "DAYS" }
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "self-sign root: {issued}");
+    let cert_arn = issued["CertificateArn"].as_str().unwrap().to_string();
+    let (_, got) = pca(
+        server,
+        "GetCertificate",
+        json!({ "CertificateAuthorityArn": arn, "CertificateArn": cert_arn }),
+    )
+    .await;
+    let root_cert = got["Certificate"].as_str().unwrap().to_string();
+
+    // Import the self-signed root -> ACTIVE.
+    let (status, imp) = pca(
+        server,
+        "ImportCertificateAuthorityCertificate",
+        json!({ "CertificateAuthorityArn": arn, "Certificate": root_cert }),
+    )
+    .await;
+    assert_eq!(status, 200, "import root: {imp}");
+    arn
 }
 
 /// Build a real end-entity CSR PEM.

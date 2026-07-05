@@ -15,11 +15,12 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_acmpca_snapshot;
+use crate::provision::{build_creating_ca, CaCreateParams};
 use crate::state::{
     AcmPcaAccounts, AuditReport, CertificateAuthority, IssuedCertificate, Permission,
     RevokedCertificate, SharedAcmPcaState, TagEntry,
 };
-use crate::validate;
+use crate::validate::{self, ImportCheck};
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateCertificateAuthority",
@@ -114,6 +115,82 @@ impl AcmPcaService {
             })
         }))
     }
+
+    /// Generate a CA's key pair + CSR off the async runtime and settle the CA
+    /// from `CREATING` to `PENDING_CERTIFICATE`. Real RSA-4096 generation can
+    /// take tens of seconds; running it on `spawn_blocking` keeps the create
+    /// call fast and never blocks the request path. On failure the CA is marked
+    /// `FAILED`. The transition is persisted so it survives a restart.
+    fn spawn_ca_keygen(
+        &self,
+        account_id: String,
+        arn: String,
+        key_algorithm: String,
+        subject: Value,
+    ) {
+        let state = Arc::clone(&self.state);
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let material = tokio::task::spawn_blocking(move || {
+                crate::provision::generate_ca_material(&key_algorithm, &subject)
+            })
+            .await;
+            {
+                let mut accounts = state.write();
+                if let Some(ca) = accounts
+                    .accounts
+                    .get_mut(&account_id)
+                    .and_then(|a| a.authorities.get_mut(&arn))
+                {
+                    if ca.status == "CREATING" {
+                        match material {
+                            Ok(Ok((key_pem, csr_pem))) => {
+                                crate::provision::fill_keygen(ca, key_pem, csr_pem);
+                            }
+                            Ok(Err(err)) => {
+                                ca.status = "FAILED".to_string();
+                                ca.failure_reason = Some("OTHER".to_string());
+                                tracing::error!(%err, "acm-pca CA key generation failed");
+                            }
+                            Err(err) => {
+                                ca.status = "FAILED".to_string();
+                                ca.failure_reason = Some("OTHER".to_string());
+                                tracing::error!(%err, "acm-pca CA keygen task panicked");
+                            }
+                        }
+                    }
+                }
+            }
+            save_acmpca_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Re-arm key generation for any CA restored in the `CREATING` state (its
+    /// key was never persisted because the previous process exited mid-keygen).
+    /// Called by the server after loading the persistence snapshot.
+    pub fn rearm_pending_creations(&self) {
+        let pending: Vec<(String, String, String, Value)> = {
+            let state = self.state.read();
+            let mut out = Vec::new();
+            for (account_id, account) in state.accounts.iter() {
+                for (arn, ca) in account.authorities.iter() {
+                    if ca.status == "CREATING" {
+                        out.push((
+                            account_id.clone(),
+                            arn.clone(),
+                            ca.key_algorithm.clone(),
+                            crate::provision::subject_of(ca),
+                        ));
+                    }
+                }
+            }
+            out
+        };
+        for (account_id, arn, key_algorithm, subject) in pending {
+            self.spawn_ca_keygen(account_id, arn, key_algorithm, subject);
+        }
+    }
 }
 
 impl Default for AcmPcaService {
@@ -192,9 +269,12 @@ impl AcmPcaService {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_args("KeyAlgorithm is required"))?
             .to_string();
-        if !VALID_KEY_ALGORITHMS.contains(&key_algorithm.as_str()) {
+        // AWS ACM PCA only accepts a subset of the model's `KeyAlgorithm` enum
+        // as a CA key algorithm. Reject the rest with the same validation error
+        // AWS returns rather than silently substituting a different key type.
+        if !validate::SUPPORTED_CA_KEY_ALGORITHMS.contains(&key_algorithm.as_str()) {
             return Err(invalid_args(format!(
-                "Invalid KeyAlgorithm: {key_algorithm}"
+                "The certificate authority key algorithm {key_algorithm} is not supported"
             )));
         }
         let signing_algorithm = config
@@ -243,10 +323,6 @@ impl AcmPcaService {
                 )));
             }
         }
-        // AWS defaults the key-storage standard to the highest FIPS level
-        // available in commercial regions when the caller omits it.
-        let key_storage =
-            Some(key_storage.unwrap_or_else(|| "FIPS_140_2_LEVEL_3_OR_HIGHER".to_string()));
         let idempotency_token = body
             .get("IdempotencyToken")
             .and_then(Value::as_str)
@@ -258,82 +334,47 @@ impl AcmPcaService {
                 ));
             }
         }
-        // AWS always reports a RevocationConfiguration; when the caller omits it
-        // the CA defaults to both CRL and OCSP disabled.
-        let revocation_configuration = Some(body.get("RevocationConfiguration").cloned().unwrap_or_else(
-            || json!({ "CrlConfiguration": { "Enabled": false }, "OcspConfiguration": { "Enabled": false } }),
-        ));
+        // The builder applies AWS's default RevocationConfiguration (CRL + OCSP
+        // disabled) when the caller omits one.
+        let revocation_configuration = body.get("RevocationConfiguration").cloned();
         let tags = parse_tags(body.get("Tags"))?;
 
         let account = account_id(req);
         let region = region(req);
         let ca_id = Uuid::new_v4().to_string();
         let arn = format!("arn:aws:acm-pca:{region}:{account}:certificate-authority/{ca_id}");
-        let now = Utc::now();
 
-        // Real key pair.
-        let key_pair = validate::generate_key_pair(&key_algorithm)
-            .map_err(|e| request_failed(format!("key generation failed: {e}")))?;
-        let key_pem = key_pair.serialize_pem();
-        // Genuine CSR for the CA subject.
-        let csr_pem = validate::generate_ca_csr(&subject, &key_pair)
-            .map_err(|e| request_failed(format!("CSR generation failed: {e}")))?;
-
-        let (status, ca_cert_pem, serial, not_before, not_after) = if ca_type == "ROOT" {
-            // ROOT CAs are self-signed and immediately usable.
-            let nb = now;
-            let na = now + chrono::Duration::days(3650);
-            let (cert_pem, serial) = validate::generate_root_ca(&subject, &key_pair, nb, na)
-                .map_err(|e| request_failed(format!("root CA generation failed: {e}")))?;
-            (
-                "ACTIVE".to_string(),
-                Some(cert_pem),
-                Some(serial),
-                Some(nb),
-                Some(na),
-            )
-        } else {
-            // SUBORDINATE CAs wait for the parent to sign their CSR.
-            ("PENDING_CERTIFICATE".to_string(), None, None, None, None)
-        };
-
-        let ca = CertificateAuthority {
+        // Every CA — ROOT included — starts in CREATING and settles to
+        // PENDING_CERTIFICATE once its (real, requested-algorithm) key pair has
+        // been generated on a background task, matching AWS's lifecycle and
+        // keeping CreateCertificateAuthority fast even for slow RSA-4096 keygen.
+        // A ROOT CA is activated by the self-sign ceremony (GetCsr ->
+        // IssueCertificate(RootCACertificate) -> ImportCertificateAuthorityCertificate).
+        let params = CaCreateParams {
             arn: arn.clone(),
-            owner_account: account.clone(),
-            created_at: now,
-            last_state_change_at: Some(now),
+            account: account.clone(),
             ca_type,
-            serial,
-            status,
-            not_before,
-            not_after,
-            failure_reason: None,
-            key_algorithm,
+            key_algorithm: key_algorithm.clone(),
             signing_algorithm,
+            subject: subject.clone(),
             configuration: config.clone(),
-            revocation_configuration,
             usage_mode,
             key_storage_security_standard: key_storage,
-            restorable_until: None,
+            revocation_configuration,
             idempotency_token,
             tags,
-            ca_key_pem: key_pem,
-            ca_cert_pem,
-            ca_cert_chain_pem: None,
-            csr_pem,
-            issued: Default::default(),
-            revoked: Default::default(),
-            permissions: Default::default(),
-            audit_reports: Default::default(),
         };
-
-        let mut accounts = self.state.write();
-        accounts
-            .accounts
-            .entry(account)
-            .or_default()
-            .authorities
-            .insert(arn.clone(), ca);
+        let ca = build_creating_ca(params);
+        {
+            let mut accounts = self.state.write();
+            accounts
+                .accounts
+                .entry(account.clone())
+                .or_default()
+                .authorities
+                .insert(arn.clone(), ca);
+        }
+        self.spawn_ca_keygen(account, arn.clone(), key_algorithm, subject);
 
         Ok(AwsResponse::ok_json(
             json!({ "CertificateAuthorityArn": arn }),
@@ -539,6 +580,13 @@ impl AcmPcaService {
         if ca.status == "DELETED" {
             return Err(invalid_state("The certificate authority is deleted"));
         }
+        if ca.status == "CREATING" || ca.csr_pem.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "RequestInProgressException",
+                "The certificate authority is still being created",
+            ));
+        }
         Ok(AwsResponse::ok_json(json!({ "Csr": ca.csr_pem })))
     }
 
@@ -550,11 +598,6 @@ impl AcmPcaService {
         let arn = required_ca_arn(&body)?;
         let cert_pem = decode_blob(body.get("Certificate"))
             .ok_or_else(|| malformed_certificate("Certificate is required"))?;
-        if !cert_pem.contains("BEGIN CERTIFICATE") {
-            return Err(malformed_certificate(
-                "The certificate is not in a valid PEM format",
-            ));
-        }
         let chain_pem = decode_blob(body.get("CertificateChain"));
         let mut accounts = self.state.write();
         let ca = accounts
@@ -565,6 +608,11 @@ impl AcmPcaService {
         if ca.status == "DELETED" {
             return Err(invalid_state("The certificate authority is deleted"));
         }
+        if ca.status == "CREATING" || ca.ca_key_pem.is_empty() {
+            return Err(invalid_state(
+                "The certificate authority is still being created",
+            ));
+        }
         // For a subordinate CA a certificate chain is required.
         if ca.ca_type == "SUBORDINATE" && chain_pem.is_none() {
             return Err(AwsServiceError::aws_error(
@@ -572,6 +620,25 @@ impl AcmPcaService {
                 "InvalidRequestException",
                 "A certificate chain is required to import a subordinate CA certificate",
             ));
+        }
+        // The imported certificate must parse as real X.509 and certify this
+        // CA's own key pair — not just contain a "BEGIN CERTIFICATE" marker.
+        let ca_key = validate::load_key_pair(&ca.ca_key_pem)
+            .map_err(|e| request_failed(format!("failed to load CA key: {e}")))?;
+        match validate::verify_imported_cert(&cert_pem, &ca_key) {
+            ImportCheck::Ok => {}
+            ImportCheck::Malformed(reason) => {
+                return Err(malformed_certificate(format!(
+                    "The certificate is not valid: {reason}"
+                )));
+            }
+            ImportCheck::Mismatch => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CertificateMismatchException",
+                    "The certificate's public key does not match this certificate authority's key pair",
+                ));
+            }
         }
         ca.ca_cert_pem = Some(cert_pem);
         ca.ca_cert_chain_pem = chain_pem;
@@ -629,8 +696,30 @@ impl AcmPcaService {
             .unwrap_or(false);
 
         let now = Utc::now();
-        let not_before = now;
-        let not_after = validate::resolve_validity(now, validity_value, validity_type);
+        // `ValidityNotBefore` (optional) sets the cert's start; default is now.
+        let not_before = match body.get("ValidityNotBefore").filter(|v| v.is_object()) {
+            Some(vnb) => {
+                let v = vnb
+                    .get("Value")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| invalid_args("ValidityNotBefore.Value is required"))?;
+                let t = vnb
+                    .get("Type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid_args("ValidityNotBefore.Type is required"))?;
+                validate::resolve_validity(now, v, t).map_err(invalid_args)?
+            }
+            None => now,
+        };
+        // Checked resolution — a hostile Validity.Value can no longer overflow.
+        let not_after =
+            validate::resolve_validity(now, validity_value, validity_type).map_err(invalid_args)?;
+        // The certificate's validity window must be well-ordered.
+        if not_after <= not_before {
+            return Err(invalid_args(
+                "The requested validity period ends on or before it begins",
+            ));
+        }
 
         let mut accounts = self.state.write();
         let ca = accounts
@@ -638,21 +727,45 @@ impl AcmPcaService {
             .get_mut(&account_id(req))
             .and_then(|a| a.authorities.get_mut(&arn))
             .ok_or_else(|| not_found(&arn))?;
-        if ca.status != "ACTIVE" {
+
+        // A ROOT CA self-signs its own certificate during activation:
+        // IssueCertificate(RootCACertificate template) is permitted while the CA
+        // is still PENDING_CERTIFICATE. Every other issuance requires an ACTIVE CA.
+        let root_self_sign =
+            ca.status == "PENDING_CERTIFICATE" && ca.ca_type == "ROOT" && is_ca_template;
+        if ca.status != "ACTIVE" && !root_self_sign {
+            if ca.status == "CREATING" {
+                return Err(invalid_state(
+                    "The certificate authority is still being created",
+                ));
+            }
             return Err(invalid_state(format!(
                 "The certificate authority is not in the ACTIVE state (current: {})",
                 ca.status
             )));
         }
-        let ca_cert_pem = ca
-            .ca_cert_pem
-            .clone()
-            .ok_or_else(|| invalid_state("The certificate authority has no certificate"))?;
-        let ca_key = validate::load_key_pair(&ca.ca_key_pem)
-            .map_err(|e| request_failed(format!("failed to load CA key: {e}")))?;
+
+        // Load the CA key configured to sign with the requested algorithm's hash.
+        let ca_key =
+            validate::load_signing_key(&ca.ca_key_pem, &ca.key_algorithm, &signing_algorithm)
+                .map_err(invalid_args)?;
+
+        let (issuer, chain_base) = if root_self_sign {
+            let issuer = validate::self_issuer(&crate::provision::subject_of(ca), &ca_key)
+                .map_err(|e| request_failed(format!("failed to build root issuer: {e}")))?;
+            (issuer, None)
+        } else {
+            let ca_cert_pem = ca
+                .ca_cert_pem
+                .clone()
+                .ok_or_else(|| invalid_state("The certificate authority has no certificate"))?;
+            let issuer = validate::issuer_from_ca_cert(&ca_cert_pem, &ca_key)
+                .map_err(|e| request_failed(format!("failed to build issuer: {e}")))?;
+            (issuer, Some(ca_cert_pem))
+        };
 
         let (cert_pem, serial) = validate::issue_certificate(
-            &ca_cert_pem,
+            &issuer,
             &ca_key,
             &csr_pem,
             not_before,
@@ -662,17 +775,21 @@ impl AcmPcaService {
         .map_err(malformed_csr)?;
 
         let cert_arn = format!("{arn}/certificate/{serial}");
-        let mut chain = ca_cert_pem;
-        if let Some(parent) = &ca.ca_cert_chain_pem {
-            chain.push_str(parent);
-        }
+        // Chain = the CA's own cert (if installed) + any parent chain. A root
+        // self-sign has no chain yet (it becomes the trust anchor on import).
+        let chain = chain_base.map(|mut c| {
+            if let Some(parent) = &ca.ca_cert_chain_pem {
+                c.push_str(parent);
+            }
+            c
+        });
         ca.issued.insert(
             cert_arn.clone(),
             IssuedCertificate {
                 arn: cert_arn.clone(),
                 serial,
                 certificate_pem: cert_pem,
-                chain_pem: Some(chain),
+                chain_pem: chain,
                 issued_at: now,
                 not_before,
                 not_after,
@@ -713,11 +830,14 @@ impl AcmPcaService {
     fn revoke_certificate(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let arn = required_ca_arn(&body)?;
-        let serial = body
+        let raw_serial = body
             .get("CertificateSerial")
             .and_then(Value::as_str)
-            .ok_or_else(|| invalid_args("CertificateSerial is required"))?
-            .to_string();
+            .ok_or_else(|| invalid_args("CertificateSerial is required"))?;
+        // AWS accepts the serial in several presentations (lowercase hex, upper
+        // hex, colon-delimited); normalize before matching so a legitimate cert
+        // can always be revoked regardless of the format the caller used.
+        let serial = normalize_serial(raw_serial);
         let reason = body
             .get("RevocationReason")
             .and_then(Value::as_str)
@@ -732,8 +852,13 @@ impl AcmPcaService {
             .get_mut(&account_id(req))
             .and_then(|a| a.authorities.get_mut(&arn))
             .ok_or_else(|| not_found(&arn))?;
-        if ca.status == "DELETED" {
-            return Err(invalid_state("The certificate authority is deleted"));
+        // Revocation is only meaningful against an active CA (a CRL/OCSP is
+        // published from an ACTIVE authority).
+        if ca.status != "ACTIVE" {
+            return Err(invalid_state(format!(
+                "The certificate authority is not in the ACTIVE state (current: {})",
+                ca.status
+            )));
         }
         if ca.revoked.contains_key(&serial) {
             return Err(AwsServiceError::aws_error(
@@ -743,7 +868,10 @@ impl AcmPcaService {
             ));
         }
         // The serial must belong to a certificate this CA issued.
-        let known = ca.issued.values().any(|c| c.serial == serial);
+        let known = ca
+            .issued
+            .values()
+            .any(|c| normalize_serial(&c.serial) == serial);
         if !known {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -789,19 +917,26 @@ impl AcmPcaService {
             .get_mut(&account_id(req))
             .and_then(|a| a.authorities.get_mut(&arn))
             .ok_or_else(|| not_found(&arn))?;
+        // Compute the resulting tag count BEFORE mutating so an over-limit
+        // request is rejected atomically with no state change (and no
+        // over-limit snapshot written to disk).
+        let added_keys = new_tags
+            .iter()
+            .filter(|t| !ca.tags.iter().any(|e| e.key == t.key))
+            .count();
+        if ca.tags.len() + added_keys > 50 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TooManyTagsException",
+                "A certificate authority cannot have more than 50 tags",
+            ));
+        }
         for tag in new_tags {
             if let Some(existing) = ca.tags.iter_mut().find(|t| t.key == tag.key) {
                 existing.value = tag.value;
             } else {
                 ca.tags.push(tag);
             }
-        }
-        if ca.tags.len() > 50 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "TooManyTagsException",
-                "A certificate authority cannot have more than 50 tags",
-            ));
         }
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -1209,6 +1344,21 @@ fn ca_id_from_arn(arn: &str) -> &str {
         .unwrap_or(arn)
 }
 
+/// Normalize a certificate serial to fakecloud's stored form (lowercase hex,
+/// no separators) so callers can pass any AWS presentation — plain lowercase
+/// or uppercase hex, or colon-delimited (`1a:2b:...`), with an optional `0x`.
+fn normalize_serial(s: &str) -> String {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// Extract + validate the `CertificateAuthorityArn` field.
 fn required_ca_arn(body: &Value) -> Result<String, AwsServiceError> {
     let arn = body
@@ -1299,19 +1449,6 @@ fn not_found(arn: &str) -> AwsServiceError {
     ))
 }
 
-const VALID_KEY_ALGORITHMS: &[&str] = &[
-    "RSA_2048",
-    "RSA_3072",
-    "RSA_4096",
-    "EC_prime256v1",
-    "EC_secp384r1",
-    "EC_secp521r1",
-    "ML_DSA_44",
-    "ML_DSA_65",
-    "ML_DSA_87",
-    "SM2",
-];
-
 const VALID_SIGNING_ALGORITHMS: &[&str] = &[
     "SHA256WITHECDSA",
     "SHA384WITHECDSA",
@@ -1368,17 +1505,44 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn root_ca_issues_verifiable_certificate() {
-        let svc = AcmPcaService::default();
-        // Create a ROOT CA.
+    const ROOT_TEMPLATE: &str = "arn:aws:acm-pca:::template/RootCACertificate/V1";
+
+    /// Poll `DescribeCertificateAuthority` until the CA leaves `CREATING`. Key
+    /// generation now runs on a background task, so a freshly created CA starts
+    /// in `CREATING` and settles to `PENDING_CERTIFICATE` once its key + CSR are
+    /// ready.
+    async fn poll_pending(svc: &AcmPcaService, arn: &str) {
+        for _ in 0..400 {
+            let d = svc
+                .describe_certificate_authority(&req(
+                    "DescribeCertificateAuthority",
+                    json!({ "CertificateAuthorityArn": arn }),
+                ))
+                .unwrap();
+            match body_json(&d)["CertificateAuthority"]["Status"]
+                .as_str()
+                .unwrap()
+            {
+                "PENDING_CERTIFICATE" => return,
+                "FAILED" => panic!("CA key generation FAILED"),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+        panic!("CA never reached PENDING_CERTIFICATE");
+    }
+
+    /// Run the full activation ceremony for a ROOT CA: wait for keygen, fetch the
+    /// CA's own CSR, self-sign it with the `RootCACertificate` template, then
+    /// import the resulting certificate to bring the CA to `ACTIVE`. Mirrors the
+    /// real AWS flow where every CA starts `PENDING_CERTIFICATE`.
+    async fn create_active_root(svc: &AcmPcaService, key_algo: &str, signing_algo: &str) -> String {
         let resp = svc
             .create_certificate_authority(&req(
                 "CreateCertificateAuthority",
                 json!({
                     "CertificateAuthorityConfiguration": {
-                        "KeyAlgorithm": "EC_prime256v1",
-                        "SigningAlgorithm": "SHA256WITHECDSA",
+                        "KeyAlgorithm": key_algo,
+                        "SigningAlgorithm": signing_algo,
                         "Subject": { "CommonName": "root.example.com", "Organization": "Test" }
                     },
                     "CertificateAuthorityType": "ROOT"
@@ -1390,7 +1554,55 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Describe -> ACTIVE root.
+        // A brand-new CA is PENDING_CERTIFICATE (not ACTIVE) after keygen.
+        poll_pending(svc, &arn).await;
+
+        let csr = body_json(
+            &svc.get_certificate_authority_csr(&req(
+                "GetCertificateAuthorityCsr",
+                json!({ "CertificateAuthorityArn": arn }),
+            ))
+            .unwrap(),
+        )["Csr"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Self-sign the root certificate (permitted while PENDING_CERTIFICATE).
+        let issued = svc
+            .issue_certificate(&req(
+                "IssueCertificate",
+                json!({
+                    "CertificateAuthorityArn": arn,
+                    "Csr": csr,
+                    "SigningAlgorithm": signing_algo,
+                    "TemplateArn": ROOT_TEMPLATE,
+                    "Validity": { "Value": 3650, "Type": "DAYS" }
+                }),
+            ))
+            .unwrap();
+        let cert_arn = body_json(&issued)["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let root_cert = body_json(
+            &svc.get_certificate(&req(
+                "GetCertificate",
+                json!({ "CertificateAuthorityArn": arn, "CertificateArn": cert_arn }),
+            ))
+            .unwrap(),
+        )["Certificate"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Import the self-signed root -> CA becomes ACTIVE.
+        svc.import_certificate_authority_certificate(&req(
+            "ImportCertificateAuthorityCertificate",
+            json!({ "CertificateAuthorityArn": arn, "Certificate": root_cert }),
+        ))
+        .unwrap();
+
         let d = svc
             .describe_certificate_authority(&req(
                 "DescribeCertificateAuthority",
@@ -1398,8 +1610,75 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(body_json(&d)["CertificateAuthority"]["Status"], "ACTIVE");
+        arn
+    }
 
-        // Grab the CA certificate PEM.
+    /// Build a real end-entity CSR for a leaf certificate request.
+    fn leaf_csr() -> String {
+        let client_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(vec!["leaf.example.com".to_string()]).unwrap();
+        params.distinguished_name = {
+            let mut dn = rcgen::DistinguishedName::new();
+            dn.push(rcgen::DnType::CommonName, "leaf.example.com");
+            dn
+        };
+        params
+            .serialize_request(&client_key)
+            .unwrap()
+            .pem()
+            .unwrap()
+    }
+
+    /// Issue a leaf cert against `arn` and return the leaf PEM.
+    fn issue_leaf(svc: &AcmPcaService, arn: &str, signing_algo: &str) -> String {
+        let issued = svc
+            .issue_certificate(&req(
+                "IssueCertificate",
+                json!({
+                    "CertificateAuthorityArn": arn,
+                    "Csr": leaf_csr(),
+                    "SigningAlgorithm": signing_algo,
+                    "Validity": { "Value": 365, "Type": "DAYS" }
+                }),
+            ))
+            .unwrap();
+        let cert_arn = body_json(&issued)["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        body_json(
+            &svc.get_certificate(&req(
+                "GetCertificate",
+                json!({ "CertificateAuthorityArn": arn, "CertificateArn": cert_arn }),
+            ))
+            .unwrap(),
+        )["Certificate"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Assert that `leaf_pem` was really signed by the CA cert in `ca_cert_pem`.
+    fn assert_leaf_verifies(leaf_pem: &str, ca_cert_pem: &str) {
+        let (_, ca_pem) = x509_parser::pem::parse_x509_pem(ca_cert_pem.as_bytes()).unwrap();
+        let ca_x509 = ca_pem.parse_x509().unwrap();
+        let (_, leaf_der) = x509_parser::pem::parse_x509_pem(leaf_pem.as_bytes()).unwrap();
+        let leaf_x509 = leaf_der.parse_x509().unwrap();
+        assert_eq!(
+            leaf_x509.issuer().to_string(),
+            ca_x509.subject().to_string()
+        );
+        leaf_x509
+            .verify_signature(Some(ca_x509.public_key()))
+            .expect("issued certificate must verify against the CA");
+    }
+
+    #[tokio::test]
+    async fn root_ca_issues_verifiable_certificate() {
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+
         let ca_cert = body_json(
             &svc.get_certificate_authority_certificate(&req(
                 "GetCertificateAuthorityCertificate",
@@ -1411,61 +1690,46 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Build a real client CSR.
-        let client_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut params =
-            rcgen::CertificateParams::new(vec!["leaf.example.com".to_string()]).unwrap();
-        params.distinguished_name = {
-            let mut dn = rcgen::DistinguishedName::new();
-            dn.push(rcgen::DnType::CommonName, "leaf.example.com");
-            dn
-        };
-        let csr_pem = params
-            .serialize_request(&client_key)
-            .unwrap()
-            .pem()
-            .unwrap();
+        let leaf = issue_leaf(&svc, &arn, "SHA256WITHECDSA");
+        assert_leaf_verifies(&leaf, &ca_cert);
+    }
 
-        // Issue an end-entity certificate.
-        let issued = svc
-            .issue_certificate(&req(
-                "IssueCertificate",
-                json!({
-                    "CertificateAuthorityArn": arn,
-                    "Csr": csr_pem,
-                    "SigningAlgorithm": "SHA256WITHECDSA",
-                    "Validity": { "Value": 365, "Type": "DAYS" }
-                }),
+    /// Finding 2 regression: a real RSA CA's key material must survive a restart
+    /// (serialize the snapshot, reload it into a fresh service) and still sign
+    /// verifiable certificates. This exercises the `rsa`-crate keygen + PEM
+    /// reload path end to end.
+    #[tokio::test]
+    async fn rsa_ca_survives_restart_and_keeps_issuing() {
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "RSA_2048", "SHA256WITHRSA").await;
+
+        let ca_cert = body_json(
+            &svc.get_certificate_authority_certificate(&req(
+                "GetCertificateAuthorityCertificate",
+                json!({ "CertificateAuthorityArn": arn }),
             ))
-            .unwrap();
-        let cert_arn = body_json(&issued)["CertificateArn"]
+            .unwrap(),
+        )["Certificate"]
             .as_str()
             .unwrap()
             .to_string();
 
-        let got = body_json(
-            &svc.get_certificate(&req(
-                "GetCertificate",
-                json!({ "CertificateAuthorityArn": arn, "CertificateArn": cert_arn }),
-            ))
-            .unwrap(),
-        );
-        let leaf_pem = got["Certificate"].as_str().unwrap();
+        // First issuance before the restart.
+        let leaf_before = issue_leaf(&svc, &arn, "SHA256WITHRSA");
+        assert_leaf_verifies(&leaf_before, &ca_cert);
 
-        // The issued leaf must verify against the CA public key.
-        let (_, ca_pem) = x509_parser::pem::parse_x509_pem(ca_cert.as_bytes()).unwrap();
-        let ca_x509 = ca_pem.parse_x509().unwrap();
-        let (_, leaf_pem_parsed) = x509_parser::pem::parse_x509_pem(leaf_pem.as_bytes()).unwrap();
-        let leaf_x509 = leaf_pem_parsed.parse_x509().unwrap();
-        // Issuer of leaf == subject of CA.
-        assert_eq!(
-            leaf_x509.issuer().to_string(),
-            ca_x509.subject().to_string()
-        );
-        // Signature verifies with the CA public key.
-        leaf_x509
-            .verify_signature(Some(ca_x509.public_key()))
-            .expect("issued certificate must verify against the CA");
+        // Simulate a restart: serialize the snapshot and rehydrate a new service.
+        let snapshot = crate::state::AcmPcaSnapshot {
+            schema_version: crate::state::ACM_PCA_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(svc.state.read().clone()),
+        };
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let restored: crate::state::AcmPcaSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let svc2 = AcmPcaService::new(Arc::new(RwLock::new(restored.accounts.unwrap())));
+
+        // The reloaded RSA CA must still sign verifiable certificates.
+        let leaf_after = issue_leaf(&svc2, &arn, "SHA256WITHRSA");
+        assert_leaf_verifies(&leaf_after, &ca_cert);
     }
 
     fn body_json(resp: &AwsResponse) -> Value {
