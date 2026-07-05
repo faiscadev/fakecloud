@@ -377,7 +377,13 @@ fn paginate_body(
         .map(|n| n as usize)
         .unwrap_or(100);
     let (page, next) = paginate_checked(&items, token.as_deref(), page_size).map_err(|_| {
-        validation("The next token was specified in an invalid format.".to_string())
+        // Every paginated CodePipeline op declares InvalidNextTokenException as
+        // the wire error for a token not produced by a prior page, so a
+        // non-numeric/negative token maps there, not to ValidationException.
+        err(
+            "InvalidNextTokenException",
+            "The next token was specified in an invalid format.",
+        )
     })?;
     let mut out = Map::new();
     out.insert(list_key.to_string(), Value::Array(page));
@@ -451,10 +457,18 @@ fn validate_pipeline_declaration(pipeline: &Value) -> Result<String, AwsServiceE
     // Validate every stage carries a name and at least one action, and every
     // action carries a well-formed actionTypeId.
     for stage in stages {
-        if stage.get("name").and_then(Value::as_str).is_none() {
+        // StageName is `@length(1,100)` + `@pattern ^[A-Za-z0-9.@\-_]+$`; a
+        // missing or malformed name is an InvalidStageDeclarationException.
+        let Some(stage_name) = stage.get("name").and_then(Value::as_str) else {
             return Err(err(
                 "InvalidStageDeclarationException",
                 "Each stage must include a name.",
+            ));
+        };
+        if !valid_name(stage_name) {
+            return Err(err(
+                "InvalidStageDeclarationException",
+                format!("Stage name '{stage_name}' was specified in an invalid format."),
             ));
         }
         let actions = stage.get("actions").and_then(Value::as_array);
@@ -465,6 +479,21 @@ fn validate_pipeline_declaration(pipeline: &Value) -> Result<String, AwsServiceE
             ));
         };
         for action in actions {
+            // ActionName shares StageName's `@length(1,100)` + pattern; a
+            // nameless or malformed action is InvalidActionDeclarationException
+            // (AWS otherwise silently drops it from GetPipelineState).
+            let Some(action_name) = action.get("name").and_then(Value::as_str) else {
+                return Err(err(
+                    "InvalidActionDeclarationException",
+                    "Each action must include a name.",
+                ));
+            };
+            if !valid_name(action_name) {
+                return Err(err(
+                    "InvalidActionDeclarationException",
+                    format!("Action name '{action_name}' was specified in an invalid format."),
+                ));
+            }
             let tid = action.get("actionTypeId");
             let Some(tid) = tid else {
                 return Err(err(
@@ -566,20 +595,28 @@ impl CodePipelineService {
                 format!("Account does not have a pipeline with name {name}."),
             ));
         }
-        let decl = if let Some(v) = b.get("version").and_then(Value::as_u64) {
-            let versions = st.pipeline_versions.get(&name);
-            let idx = (v as usize).checked_sub(1);
-            match idx.and_then(|i| versions.and_then(|vs| vs.get(i))) {
-                Some(d) => d.clone(),
-                None => {
-                    return Err(err(
-                        "PipelineVersionNotFoundException",
-                        format!("Pipeline {name} does not have a version {v}."),
-                    ))
+        let decl = match b.get("version").filter(|v| !v.is_null()) {
+            Some(vv) => {
+                // PipelineVersion is `@range(min: 1)`; a non-integer or
+                // non-positive value is a ValidationException, not a silent
+                // fall-back to the current version.
+                let v = vv.as_u64().filter(|n| *n >= 1).ok_or_else(|| {
+                    validation(
+                        "Value at 'version' failed to satisfy constraint: Member must be a positive integer.",
+                    )
+                })?;
+                let versions = st.pipeline_versions.get(&name);
+                match versions.and_then(|vs| vs.get((v as usize) - 1)) {
+                    Some(d) => d.clone(),
+                    None => {
+                        return Err(err(
+                            "PipelineVersionNotFoundException",
+                            format!("Pipeline {name} does not have a version {v}."),
+                        ))
+                    }
                 }
             }
-        } else {
-            st.pipelines.get(&name).cloned().unwrap()
+            None => st.pipelines.get(&name).cloned().unwrap(),
         };
         let meta = st
             .pipeline_meta
@@ -890,6 +927,8 @@ impl CodePipelineService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = req_pipeline_name(&b, "pipelineName")?;
+        // maxResults is `@range(1, 100)`; enforce it before paginating.
+        check_int_range(&b, "maxResults", 1, Some(100))?;
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -960,7 +999,17 @@ impl CodePipelineService {
             .as_ref()
             .and_then(|e| e.get("status").and_then(Value::as_str))
             .unwrap_or("");
-        if !belongs || exec.is_none() || !matches!(status, "InProgress" | "Stopping") {
+        // An already-`Stopping` execution has a stop in flight: a second stop is
+        // a DuplicatedStopRequestException, not a fresh stop. Only an
+        // `InProgress` execution is stoppable; anything else (terminal or
+        // unknown) is not stoppable.
+        if belongs && exec.is_some() && status == "Stopping" {
+            return Err(err(
+                "DuplicatedStopRequestException",
+                format!("Pipeline execution {exec_id} is already being stopped."),
+            ));
+        }
+        if !belongs || exec.is_none() || status != "InProgress" {
             return Err(err(
                 "PipelineExecutionNotStoppableException",
                 format!("Pipeline execution {exec_id} is not in a stoppable state."),
@@ -1066,6 +1115,9 @@ impl CodePipelineService {
     fn list_action_executions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = req_pipeline_name(&b, "pipelineName")?;
+        // maxResults is `@range(1, 100)`; route the (empty) list through
+        // paginate_body so a malformed nextToken -> InvalidNextTokenException.
+        check_int_range(&b, "maxResults", 1, Some(100))?;
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1075,7 +1127,12 @@ impl CodePipelineService {
                 format!("Account does not have a pipeline with name {name}."),
             ));
         }
-        ok(json!({ "actionExecutionDetails": [] }))
+        ok(paginate_body(
+            Vec::new(),
+            "actionExecutionDetails",
+            &b,
+            "nextToken",
+        )?)
     }
 
     fn list_deploy_action_execution_targets(
@@ -1105,6 +1162,9 @@ impl CodePipelineService {
     fn list_rule_executions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = req_pipeline_name(&b, "pipelineName")?;
+        // maxResults is `@range(1, 100)`; route the (empty) list through
+        // paginate_body so a malformed nextToken -> InvalidNextTokenException.
+        check_int_range(&b, "maxResults", 1, Some(100))?;
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
@@ -1114,8 +1174,26 @@ impl CodePipelineService {
                 format!("Account does not have a pipeline with name {name}."),
             ));
         }
-        ok(json!({ "ruleExecutionDetails": [] }))
+        ok(paginate_body(
+            Vec::new(),
+            "ruleExecutionDetails",
+            &b,
+            "nextToken",
+        )?)
     }
+}
+
+/// Whether the pipeline declaration `decl` currently declares a stage named
+/// `stage_name`.
+fn pipeline_has_stage(decl: &Value, stage_name: &str) -> bool {
+    decl.get("stages")
+        .and_then(Value::as_array)
+        .map(|stages| {
+            stages
+                .iter()
+                .any(|s| s.get("name").and_then(Value::as_str) == Some(stage_name))
+        })
+        .unwrap_or(false)
 }
 
 /// Map a `PipelineExecutionStatus` onto the closest `StageExecutionStatus`.
@@ -1160,10 +1238,17 @@ impl CodePipelineService {
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        if !st.pipelines.contains_key(&name) {
+        let Some(decl) = st.pipelines.get(&name) else {
             return Err(err(
                 "PipelineNotFoundException",
                 format!("Account does not have a pipeline with name {name}."),
+            ));
+        };
+        // The stage must be one of the pipeline's current stages.
+        if !pipeline_has_stage(decl, &stage_name) {
+            return Err(err(
+                "StageNotFoundException",
+                format!("Stage {stage_name} was not found in the pipeline {name}."),
             ));
         }
         // Re-enabling clears any recorded disabled state for this transition.
@@ -1189,10 +1274,18 @@ impl CodePipelineService {
         let account = self.account(req);
         let mut guard = self.state.write();
         let st = guard.get_or_create(&account);
-        if !st.pipelines.contains_key(&name) {
+        let Some(decl) = st.pipelines.get(&name) else {
             return Err(err(
                 "PipelineNotFoundException",
                 format!("Account does not have a pipeline with name {name}."),
+            ));
+        };
+        // The stage must be one of the pipeline's current stages; without this
+        // check a disabled-transition entry for an unknown stage is persisted.
+        if !pipeline_has_stage(decl, &stage_name) {
+            return Err(err(
+                "StageNotFoundException",
+                format!("Stage {stage_name} was not found in the pipeline {name}."),
             ));
         }
         let key = format!("{stage_name}/{transition_type}");
@@ -1788,22 +1881,24 @@ impl CodePipelineService {
         let b = body(req);
         opt_enum(&b, "ruleOwnerFilter", validate::RULE_OWNER)?;
         check_len(&b, "regionFilter", 4, 30)?;
-        // The predefined AWS-owned rule types, always resolvable.
-        let rule_types = json!([
-            {
+        // The predefined AWS-owned rule types, always resolvable. Routed through
+        // paginate_body so a malformed nextToken -> InvalidNextTokenException
+        // consistently with the other list ops.
+        let rule_types = vec![
+            json!({
                 "id": { "category": "Rule", "owner": "AWS", "provider": "DeploymentWindow", "version": "1" },
                 "inputArtifactDetails": { "minimumCount": 0, "maximumCount": 0 }
-            },
-            {
+            }),
+            json!({
                 "id": { "category": "Rule", "owner": "AWS", "provider": "LambdaInvoke", "version": "1" },
                 "inputArtifactDetails": { "minimumCount": 0, "maximumCount": 5 }
-            },
-            {
+            }),
+            json!({
                 "id": { "category": "Rule", "owner": "AWS", "provider": "VariableCheck", "version": "1" },
                 "inputArtifactDetails": { "minimumCount": 0, "maximumCount": 0 }
-            }
-        ]);
-        ok(json!({ "ruleTypes": rule_types }))
+            }),
+        ];
+        ok(paginate_body(rule_types, "ruleTypes", &b, "nextToken")?)
     }
 }
 
@@ -2249,5 +2344,230 @@ mod tests {
         )
         .unwrap();
         assert!(!changed2.get(), "settled read must not report a change");
+    }
+
+    async fn err_of(svc: &CodePipelineService, action: &str, body: Value) -> String {
+        match svc.handle(req(action, body)).await {
+            Ok(_) => panic!("expected an error from {action}"),
+            Err(e) => e.code().to_string(),
+        }
+    }
+
+    // M1: a garbage nextToken maps to InvalidNextTokenException, not
+    // ValidationException, on the shared paginate_body helper.
+    #[tokio::test]
+    async fn garbage_next_token_is_invalid_next_token_exception() {
+        let svc = svc();
+        for action in ["ListPipelines", "ListActionTypes"] {
+            assert_eq!(
+                err_of(&svc, action, json!({ "nextToken": "not-a-number" })).await,
+                "InvalidNextTokenException",
+                "{action}"
+            );
+        }
+        // ListWebhooks paginates on the capitalized `NextToken` member.
+        assert_eq!(
+            err_of(&svc, "ListWebhooks", json!({ "NextToken": "not-a-number" })).await,
+            "InvalidNextTokenException"
+        );
+        // Negative offsets are rejected too.
+        assert_eq!(
+            err_of(&svc, "ListPipelines", json!({ "nextToken": "-1" })).await,
+            "InvalidNextTokenException"
+        );
+    }
+
+    // M2: Enable/DisableStageTransition on an unknown stage -> StageNotFound.
+    #[tokio::test]
+    async fn stage_transition_unknown_stage_is_stage_not_found() {
+        let svc = svc();
+        create(&svc, "p", None).await;
+        assert_eq!(
+            err_of(
+                &svc,
+                "DisableStageTransition",
+                json!({ "pipelineName": "p", "stageName": "Ghost", "transitionType": "Inbound", "reason": "x" }),
+            )
+            .await,
+            "StageNotFoundException"
+        );
+        assert_eq!(
+            err_of(
+                &svc,
+                "EnableStageTransition",
+                json!({ "pipelineName": "p", "stageName": "Ghost", "transitionType": "Inbound" }),
+            )
+            .await,
+            "StageNotFoundException"
+        );
+        // A real stage still succeeds.
+        svc.handle(req(
+            "DisableStageTransition",
+            json!({ "pipelineName": "p", "stageName": "Build", "transitionType": "Inbound", "reason": "x" }),
+        ))
+        .await
+        .unwrap();
+    }
+
+    // L1: static/empty list ops still validate a malformed nextToken.
+    #[tokio::test]
+    async fn static_list_ops_validate_next_token() {
+        let svc = svc();
+        create(&svc, "p", None).await;
+        for action in ["ListActionExecutions", "ListRuleExecutions"] {
+            assert_eq!(
+                err_of(
+                    &svc,
+                    action,
+                    json!({ "pipelineName": "p", "nextToken": "bad" })
+                )
+                .await,
+                "InvalidNextTokenException",
+                "{action}"
+            );
+        }
+        assert_eq!(
+            err_of(&svc, "ListRuleTypes", json!({ "nextToken": "bad" })).await,
+            "InvalidNextTokenException"
+        );
+        // Happy path is unaffected: ListRuleTypes still returns its catalog.
+        let ok = body_of(&svc, "ListRuleTypes", json!({})).await;
+        assert_eq!(ok["ruleTypes"].as_array().unwrap().len(), 3);
+    }
+
+    // L2: maxResults @range(1,100) enforced on the execution list ops.
+    #[tokio::test]
+    async fn max_results_range_enforced() {
+        let svc = svc();
+        create(&svc, "p", None).await;
+        for action in [
+            "ListPipelineExecutions",
+            "ListActionExecutions",
+            "ListRuleExecutions",
+        ] {
+            assert_eq!(
+                err_of(
+                    &svc,
+                    action,
+                    json!({ "pipelineName": "p", "maxResults": 0 })
+                )
+                .await,
+                "ValidationException",
+                "{action} lower bound"
+            );
+            assert_eq!(
+                err_of(
+                    &svc,
+                    action,
+                    json!({ "pipelineName": "p", "maxResults": 101 })
+                )
+                .await,
+                "ValidationException",
+                "{action} upper bound"
+            );
+        }
+    }
+
+    // L3: re-stopping an already-Stopping execution is a duplicated request.
+    #[tokio::test]
+    async fn double_stop_is_duplicated_stop_request() {
+        let svc = svc();
+        create(&svc, "p", None).await;
+        let started = body_of(&svc, "StartPipelineExecution", json!({ "name": "p" })).await;
+        let exec_id = started["pipelineExecutionId"].as_str().unwrap().to_string();
+        // First stop (non-abandon) moves it to Stopping.
+        svc.handle(req(
+            "StopPipelineExecution",
+            json!({ "pipelineName": "p", "pipelineExecutionId": exec_id }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            err_of(
+                &svc,
+                "StopPipelineExecution",
+                json!({ "pipelineName": "p", "pipelineExecutionId": exec_id }),
+            )
+            .await,
+            "DuplicatedStopRequestException"
+        );
+    }
+
+    // L4: stage/action names are validated against @pattern; nameless actions
+    // are rejected rather than silently dropped.
+    #[test]
+    fn stage_and_action_names_validated() {
+        let mut nameless_stage = pipeline_decl("p", None);
+        nameless_stage["stages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        assert_eq!(
+            validate_pipeline_declaration(&nameless_stage)
+                .unwrap_err()
+                .code(),
+            "InvalidStageDeclarationException"
+        );
+
+        let mut bad_stage = pipeline_decl("p", None);
+        bad_stage["stages"][0]["name"] = json!("bad name!");
+        assert_eq!(
+            validate_pipeline_declaration(&bad_stage)
+                .unwrap_err()
+                .code(),
+            "InvalidStageDeclarationException"
+        );
+
+        let mut nameless_action = pipeline_decl("p", None);
+        nameless_action["stages"][0]["actions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("name");
+        assert_eq!(
+            validate_pipeline_declaration(&nameless_action)
+                .unwrap_err()
+                .code(),
+            "InvalidActionDeclarationException"
+        );
+
+        let mut bad_action = pipeline_decl("p", None);
+        bad_action["stages"][0]["actions"][0]["name"] = json!("bad name!");
+        assert_eq!(
+            validate_pipeline_declaration(&bad_action)
+                .unwrap_err()
+                .code(),
+            "InvalidActionDeclarationException"
+        );
+
+        // The well-formed happy path still validates.
+        assert!(validate_pipeline_declaration(&pipeline_decl("p", None)).is_ok());
+    }
+
+    // L5: a non-integer/non-positive version errors instead of falling back to
+    // the current version; a valid-but-missing version stays a version-not-found.
+    #[tokio::test]
+    async fn get_pipeline_version_validation() {
+        let svc = svc();
+        create(&svc, "p", None).await;
+        assert_eq!(
+            err_of(
+                &svc,
+                "GetPipeline",
+                json!({ "name": "p", "version": "abc" })
+            )
+            .await,
+            "ValidationException"
+        );
+        assert_eq!(
+            err_of(&svc, "GetPipeline", json!({ "name": "p", "version": 0 })).await,
+            "ValidationException"
+        );
+        assert_eq!(
+            err_of(&svc, "GetPipeline", json!({ "name": "p", "version": 99 })).await,
+            "PipelineVersionNotFoundException"
+        );
+        // No version -> current (version 1).
+        let got = body_of(&svc, "GetPipeline", json!({ "name": "p" })).await;
+        assert_eq!(got["pipeline"]["version"], json!(1));
     }
 }
