@@ -282,5 +282,9 @@
   "codedeploy": {
     "repo_dir": "codedeploy",
     "service_name": "codedeploy"
+  },
+  "codepipeline": {
+    "repo_dir": "codepipeline",
+    "service_name": "codepipeline"
   }
 }

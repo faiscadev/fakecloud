@@ -95,6 +95,7 @@ SERVICES=(
     "codebuild|AWS CodeBuild|codebuild"
     "codeconnections|AWS CodeConnections|codeconnections"
     "codedeploy|AWS CodeDeploy|codedeploy"
+    "codepipeline|AWS CodePipeline|codepipeline"
     "route53|Route 53|route53"
     "wafv2|WAF v2|wafv2"
     "application-autoscaling|Application Auto Scaling|application-autoscaling"

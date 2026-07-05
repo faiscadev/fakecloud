@@ -3454,6 +3454,7 @@ dependencies = [
  "fakecloud-codebuild",
  "fakecloud-codeconnections",
  "fakecloud-codedeploy",
+ "fakecloud-codepipeline",
  "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dms",
@@ -4044,6 +4045,25 @@ dependencies = [
 
 [[package]]
 name = "fakecloud-codedeploy"
+version = "0.37.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-codepipeline"
 version = "0.37.0"
 dependencies = [
  "async-trait",

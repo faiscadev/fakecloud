@@ -128,6 +128,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "codedeploy" => Protocol::Json {
             target_prefix: "CodeDeploy_20141006",
         },
+        // AWS CodePipeline: awsJson1.1.
+        "codepipeline" => Protocol::Json {
+            target_prefix: "CodePipeline_20150709",
+        },
         // CloudWatch Metrics & Alarms speaks the awsQuery protocol (sigv4
         // service name `monitoring`), distinct from CloudWatch Logs (`logs`,
         // awsJson1.1).

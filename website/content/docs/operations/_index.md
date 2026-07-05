@@ -3994,6 +3994,53 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateApplication`
 - `UpdateDeploymentGroup`
 
+## [AWS CodePipeline](@/docs/services/codepipeline.md)
+
+- `AcknowledgeJob`
+- `AcknowledgeThirdPartyJob`
+- `CreateCustomActionType`
+- `CreatePipeline`
+- `DeleteCustomActionType`
+- `DeletePipeline`
+- `DeleteWebhook`
+- `DeregisterWebhookWithThirdParty`
+- `DisableStageTransition`
+- `EnableStageTransition`
+- `GetActionType`
+- `GetJobDetails`
+- `GetPipeline`
+- `GetPipelineExecution`
+- `GetPipelineState`
+- `GetThirdPartyJobDetails`
+- `ListActionExecutions`
+- `ListActionTypes`
+- `ListDeployActionExecutionTargets`
+- `ListPipelineExecutions`
+- `ListPipelines`
+- `ListRuleExecutions`
+- `ListRuleTypes`
+- `ListTagsForResource`
+- `ListWebhooks`
+- `OverrideStageCondition`
+- `PollForJobs`
+- `PollForThirdPartyJobs`
+- `PutActionRevision`
+- `PutApprovalResult`
+- `PutJobFailureResult`
+- `PutJobSuccessResult`
+- `PutThirdPartyJobFailureResult`
+- `PutThirdPartyJobSuccessResult`
+- `PutWebhook`
+- `RegisterWebhookWithThirdParty`
+- `RetryStageExecution`
+- `RollbackStage`
+- `StartPipelineExecution`
+- `StopPipelineExecution`
+- `TagResource`
+- `UntagResource`
+- `UpdateActionType`
+- `UpdatePipeline`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

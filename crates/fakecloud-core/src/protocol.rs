@@ -492,8 +492,16 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "VerifiedPermissions" => "verifiedpermissions",
         // CodeConnections (successor to CodeStar Connections): awsJson1.0.
         "CodeConnections_20231201" => "codeconnections",
+        // Legacy CodeStar Connections API (same operations as CodeConnections);
+        // the terraform `aws_codestarconnections_connection` resource still
+        // signs with this dated prefix (note the lowercase `connections`, as
+        // emitted by the aws-sdk-go-v2 codestarconnections client), so route it
+        // to the same handler.
+        "CodeStar_connections_20191201" => "codeconnections",
         // AWS CodeDeploy: awsJson1.1, target prefix is the dated service shape.
         "CodeDeploy_20141006" => "codedeploy",
+        // AWS CodePipeline: awsJson1.1, target prefix is the dated service shape.
+        "CodePipeline_20150709" => "codepipeline",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with
