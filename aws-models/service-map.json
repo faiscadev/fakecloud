@@ -278,5 +278,9 @@
   "codeconnections": {
     "repo_dir": "codeconnections",
     "service_name": "codeconnections"
+  },
+  "codedeploy": {
+    "repo_dir": "codedeploy",
+    "service_name": "codedeploy"
   }
 }

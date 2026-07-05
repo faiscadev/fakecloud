@@ -3944,6 +3944,56 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateSyncBlocker`
 - `UpdateSyncConfiguration`
 
+## [AWS CodeDeploy](@/docs/services/codedeploy.md)
+
+- `AddTagsToOnPremisesInstances`
+- `BatchGetApplicationRevisions`
+- `BatchGetApplications`
+- `BatchGetDeploymentGroups`
+- `BatchGetDeploymentInstances`
+- `BatchGetDeploymentTargets`
+- `BatchGetDeployments`
+- `BatchGetOnPremisesInstances`
+- `ContinueDeployment`
+- `CreateApplication`
+- `CreateDeployment`
+- `CreateDeploymentConfig`
+- `CreateDeploymentGroup`
+- `DeleteApplication`
+- `DeleteDeploymentConfig`
+- `DeleteDeploymentGroup`
+- `DeleteGitHubAccountToken`
+- `DeleteResourcesByExternalId`
+- `DeregisterOnPremisesInstance`
+- `GetApplication`
+- `GetApplicationRevision`
+- `GetDeployment`
+- `GetDeploymentConfig`
+- `GetDeploymentGroup`
+- `GetDeploymentInstance`
+- `GetDeploymentTarget`
+- `GetOnPremisesInstance`
+- `ListApplicationRevisions`
+- `ListApplications`
+- `ListDeploymentConfigs`
+- `ListDeploymentGroups`
+- `ListDeploymentInstances`
+- `ListDeploymentTargets`
+- `ListDeployments`
+- `ListGitHubAccountTokenNames`
+- `ListOnPremisesInstances`
+- `ListTagsForResource`
+- `PutLifecycleEventHookExecutionStatus`
+- `RegisterApplicationRevision`
+- `RegisterOnPremisesInstance`
+- `RemoveTagsFromOnPremisesInstances`
+- `SkipWaitTimeForInstanceTermination`
+- `StopDeployment`
+- `TagResource`
+- `UntagResource`
+- `UpdateApplication`
+- `UpdateDeploymentGroup`
+
 ## [Route 53](@/docs/services/route53.md)
 
 - `ActivateKeySigningKey`

@@ -492,6 +492,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "VerifiedPermissions" => "verifiedpermissions",
         // CodeConnections (successor to CodeStar Connections): awsJson1.0.
         "CodeConnections_20231201" => "codeconnections",
+        // AWS CodeDeploy: awsJson1.1, target prefix is the dated service shape.
+        "CodeDeploy_20141006" => "codedeploy",
         // CloudWatch advertises awsJson1_0 (target service shape
         // `GraniteServiceVersion20100801`) alongside the legacy awsQuery
         // protocol. Newer SDKs (aws-sdk-rust / js-v3 / go-v2) POST with

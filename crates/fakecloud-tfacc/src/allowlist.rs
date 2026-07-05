@@ -1121,6 +1121,17 @@ pub const SERVICES: &[Service] = &[
             "^TestAccCodeBuild(Project|ReportGroup|SourceCredential|Fleet|ResourcePolicy)_basic$",
         deny: &[],
     },
+    Service {
+        // AWS CodeDeploy control plane. The upstream Go package is `deploy`
+        // (its resources are `aws_codedeploy_*`). Scoped to the `_basic`
+        // resources whose create/read/update/delete round-trips through the
+        // fakecloud control plane: `aws_codedeploy_app`,
+        // `aws_codedeploy_deployment_config`, and
+        // `aws_codedeploy_deployment_group`.
+        name: "deploy",
+        run_regex: "^TestAccDeploy(App|DeploymentConfig|DeploymentGroup)_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1717,6 +1728,12 @@ pub const SHARDS: &[Shard] = &[
         service: "codebuild",
         run_regex:
             "^TestAccCodeBuild(Project|ReportGroup|SourceCredential|Fleet|ResourcePolicy)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "codedeploy",
+        service: "deploy",
+        run_regex: "^TestAccDeploy(App|DeploymentConfig|DeploymentGroup)_basic$",
         extra_deny: &[],
     },
 ];
