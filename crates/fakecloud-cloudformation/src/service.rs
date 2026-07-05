@@ -56,6 +56,9 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::CodeArtifact::Domain" => &["Arn", "EncryptionKey", "Name", "Owner"],
         "AWS::CodeArtifact::Repository" => &["Arn", "DomainName", "DomainOwner", "Name"],
         "AWS::CodeCommit::Repository" => &["Arn", "CloneUrlHttp", "CloneUrlSsh", "Name"],
+        "AWS::EFS::FileSystem" => &["Arn", "FileSystemId"],
+        "AWS::EFS::MountTarget" => &["Id", "IpAddress"],
+        "AWS::EFS::AccessPoint" => &["Arn", "AccessPointId"],
         "AWS::ElasticBeanstalk::Environment" => &["EndpointURL"],
         _ => &[],
     }
@@ -133,6 +136,12 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Pipes" => "pipes",
         "CodeArtifact" => "codeartifact",
         "CodeCommit" => "codecommit",
+        // AWS::EFS::* provisioners mutate the snapshot-backed `elasticfilesystem`
+        // state directly; without this mapping a CFN-created (or CFN-deleted)
+        // file system / mount target / access point vanished on restart while
+        // its direct-API equivalent persisted (#1766 class). The server
+        // registers an `elasticfilesystem` snapshot hook.
+        "EFS" => "elasticfilesystem",
         // A single entry covers all four AWS::ElasticBeanstalk::* types
         // (Application / ApplicationVersion / Environment / ConfigurationTemplate)
         // since the mapping keys on the service segment.
@@ -370,6 +379,7 @@ pub struct CloudFormationDeps {
     pub servicediscovery: fakecloud_servicediscovery::state::SharedServiceDiscoveryState,
     pub codeartifact: fakecloud_codeartifact::SharedCodeArtifactState,
     pub codecommit: fakecloud_codecommit::SharedCodeCommitState,
+    pub efs: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk: fakecloud_elasticbeanstalk::SharedEbState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
@@ -821,6 +831,7 @@ impl CloudFormationService {
             servicediscovery_state: self.deps.servicediscovery.clone(),
             codeartifact_state: self.deps.codeartifact.clone(),
             codecommit_state: self.deps.codecommit.clone(),
+            efs_state: self.deps.efs.clone(),
             elasticbeanstalk_state: self.deps.elasticbeanstalk.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
@@ -3077,6 +3088,13 @@ mod tests {
                 ),
             )),
             codecommit: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            efs: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

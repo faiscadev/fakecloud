@@ -2733,6 +2733,7 @@ mod tests {
             servicediscovery: shared::<fakecloud_servicediscovery::state::ServiceDiscoveryState>(),
             codeartifact: shared::<fakecloud_codeartifact::CodeArtifactState>(),
             codecommit: shared::<fakecloud_codecommit::CodeCommitState>(),
+            efs: shared::<fakecloud_efs::EfsData>(),
             elasticbeanstalk: Arc::new(parking_lot::RwLock::new(
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
