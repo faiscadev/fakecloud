@@ -487,6 +487,8 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "TransferService" => "transfer",
         // AWS CodeBuild: awsJson1.1, target prefix is the dated service shape.
         "CodeBuild_20161006" => "codebuild",
+        // AWS CodeCommit: awsJson1.1, target prefix is the dated service shape.
+        "CodeCommit_20150413" => "codecommit",
         // IAM Identity Center Identity Store: awsJson1.1.
         "AWSIdentityStore" => "identitystore",
         // IAM Identity Center SSO Admin: awsJson1.1.

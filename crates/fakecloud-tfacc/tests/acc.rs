@@ -393,6 +393,11 @@ async fn codebuild_acceptance() {
 }
 
 #[tokio::test]
+async fn codecommit_acceptance() {
+    run_shard("codecommit").await;
+}
+
+#[tokio::test]
 async fn codedeploy_acceptance() {
     run_shard("codedeploy").await;
 }

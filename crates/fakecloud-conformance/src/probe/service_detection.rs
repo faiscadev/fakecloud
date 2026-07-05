@@ -108,6 +108,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "codebuild" => Protocol::Json {
             target_prefix: "CodeBuild_20161006",
         },
+        // AWS CodeCommit: awsJson1.1.
+        "codecommit" => Protocol::Json {
+            target_prefix: "CodeCommit_20150413",
+        },
         // IAM Identity Center Identity Store: awsJson1.1.
         "identitystore" => Protocol::Json {
             target_prefix: "AWSIdentityStore",

@@ -83,6 +83,7 @@ SERVICES=(
     "tagging:resource-groups-tagging-api"
     "lakeformation:lakeformation"
     "codebuild:codebuild"
+    "codecommit:codecommit"
     "s3tables:s3tables"
     "ram:ram"
     "codeconnections:codeconnections"

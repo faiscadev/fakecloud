@@ -608,6 +608,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let codecommit_state: fakecloud_codecommit::SharedCodeCommitState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let codedeploy_state: fakecloud_codedeploy::SharedCodeDeployState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4777,6 +4784,41 @@ async fn main() {
         cfn_snapshot_hooks.insert("codeartifact", h);
     }
     registry.register(Arc::new(codeartifact_service));
+
+    // AWS CodeCommit: awsJson1.1 git-repository control plane (repositories,
+    // branches, commits/files/blobs, pull requests, approval-rule templates,
+    // comments, triggers, tagging) over a real content-addressed object store.
+    let codecommit_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("codecommit").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_codecommit::persistence::load_into(&store, &codecommit_state) {
+                Ok(fakecloud_codecommit::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded codecommit persistence snapshot");
+                }
+                Ok(fakecloud_codecommit::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no codecommit persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut codecommit_service =
+        fakecloud_codecommit::CodeCommitService::new(codecommit_state.clone());
+    if let Some(store) = codecommit_snapshot_store {
+        codecommit_service = codecommit_service.with_snapshot_store(store);
+    }
+    if let Some(h) = codecommit_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("codecommit", h);
+    }
+    registry.register(Arc::new(codecommit_service));
 
     // Amazon OpenSearch Service + Amazon Elasticsearch Service (both `es`).
     let opensearch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
