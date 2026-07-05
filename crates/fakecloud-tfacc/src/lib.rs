@@ -427,6 +427,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_OPENSEARCH", "opensearch"),
     ("AWS_ENDPOINT_URL_ACCOUNT", "account"),
     ("AWS_ENDPOINT_URL_ACM_PCA", "acm-pca"),
+    ("AWS_ENDPOINT_URL_CONFIGSERVICE", "config"),
     ("AWS_ENDPOINT_URL_CLOUDFORMATION", "cloudformation"),
     ("AWS_ENDPOINT_URL_SESV2", "sesv2"),
     ("AWS_ENDPOINT_URL_SES", "ses"),

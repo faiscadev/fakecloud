@@ -3,6 +3,10 @@
     "repo_dir": "account",
     "service_name": "account"
   },
+  "config": {
+    "repo_dir": "config-service",
+    "service_name": "config"
+  },
   "sqs": {
     "repo_dir": "sqs",
     "service_name": "sqs"

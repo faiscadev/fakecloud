@@ -3633,6 +3633,7 @@ dependencies = [
  "fakecloud-codedeploy",
  "fakecloud-codepipeline",
  "fakecloud-cognito",
+ "fakecloud-config",
  "fakecloud-core",
  "fakecloud-dms",
  "fakecloud-dsql",
@@ -4103,6 +4104,7 @@ dependencies = [
  "fakecloud-codeartifact",
  "fakecloud-codecommit",
  "fakecloud-cognito",
+ "fakecloud-config",
  "fakecloud-core",
  "fakecloud-dynamodb",
  "fakecloud-ec2",
@@ -4364,6 +4366,29 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-config"
+version = "0.39.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-ec2",
+ "fakecloud-iam",
+ "fakecloud-lambda",
+ "fakecloud-persistence",
+ "fakecloud-s3",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

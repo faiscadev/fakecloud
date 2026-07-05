@@ -466,6 +466,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         "CertificateManager" => "acm",
         "ACMPrivateCA" => "acm-pca",
+        // AWS Config (config recorder / rules / compliance): awsJson1_1. The
+        // service shape short name is the target prefix.
+        "StarlingDoveService" => "config",
         "AnyScaleFrontendService" => "application-autoscaling",
         // Match the WAFv2 target version exactly so legacy WAF Classic
         // (`AWSWAF_*` without the `_20190729` suffix) doesn't get routed here.

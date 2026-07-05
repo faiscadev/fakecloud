@@ -891,6 +891,7 @@ pub struct ResourceProvisioner {
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub acmpca_state: SharedAcmPcaState,
+    pub config_state: fakecloud_config::SharedConfigState,
     pub elasticache_state: SharedElastiCacheState,
     pub route53_state: SharedRoute53State,
     pub cloudfront_state: SharedCloudFrontState,
@@ -1062,6 +1063,7 @@ mod cloudwatch;
 mod codeartifact;
 mod codecommit;
 mod cognito;
+mod config;
 mod dynamodb;
 mod ec2;
 mod ecr;
@@ -1244,6 +1246,13 @@ impl ResourceProvisioner {
                 self.create_acmpca_certificate_authority_activation(resource)
             }
             "AWS::ACMPCA::Permission" => self.create_acmpca_permission(resource),
+            "AWS::Config::ConfigurationRecorder"
+            | "AWS::Config::DeliveryChannel"
+            | "AWS::Config::ConfigRule"
+            | "AWS::Config::ConfigurationAggregator"
+            | "AWS::Config::AggregationAuthorization"
+            | "AWS::Config::ConformancePack"
+            | "AWS::Config::OrganizationConfigRule" => self.create_config_resource(resource),
             "AWS::ElastiCache::ParameterGroup" => self.create_ec_parameter_group(resource),
             "AWS::ElastiCache::SubnetGroup" => self.create_ec_subnet_group(resource),
             "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
@@ -2010,6 +2019,15 @@ impl ResourceProvisioner {
             "AWS::ACMPCA::Certificate" => Ok(()),
             "AWS::ACMPCA::CertificateAuthorityActivation" => Ok(()),
             "AWS::ACMPCA::Permission" => self.delete_acmpca_permission(&resource.physical_id),
+            "AWS::Config::ConfigurationRecorder"
+            | "AWS::Config::DeliveryChannel"
+            | "AWS::Config::ConfigRule"
+            | "AWS::Config::ConfigurationAggregator"
+            | "AWS::Config::AggregationAuthorization"
+            | "AWS::Config::ConformancePack"
+            | "AWS::Config::OrganizationConfigRule" => {
+                self.delete_config_resource(&resource.resource_type, &resource.physical_id)
+            }
             "AWS::ElastiCache::ParameterGroup" => {
                 self.delete_ec_parameter_group(&resource.physical_id)
             }
@@ -6506,6 +6524,7 @@ mod tests {
             )),
             acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             acmpca_state: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
+            config_state: Arc::new(RwLock::new(fakecloud_config::ConfigAccounts::new())),
             elasticache_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
@@ -8661,5 +8680,37 @@ mod tests {
                 .any(|h| h["id"].as_str() == Some(prior_id.as_str())),
             "prior current configuration is preserved in history"
         );
+    }
+
+    #[test]
+    fn config_rule_getatt_config_rule_id_resolves() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Config::ConfigRule",
+                "MyRule",
+                serde_json::json!({
+                    "ConfigRuleName": "s3-versioning",
+                    "Source": { "Owner": "AWS", "SourceIdentifier": "S3_BUCKET_VERSIONING_ENABLED" },
+                }),
+            ))
+            .expect("provision config rule");
+        // The real rule id stored in Config state.
+        let stored_id = prov
+            .config_state
+            .read()
+            .account("123456789012")
+            .and_then(|a| a.rules.get("s3-versioning").map(|r| r.rule_id.clone()))
+            .expect("rule stored");
+        // `!GetAtt MyRule.ConfigRuleId` resolves to that real id, not a
+        // placeholder, and `.ComplianceType` / `.Arn` are populated too.
+        let got = created.attributes.get("ConfigRuleId").cloned();
+        assert_eq!(got.as_deref(), Some(stored_id.as_str()));
+        assert!(!stored_id.is_empty());
+        assert_eq!(
+            created.attributes.get("ComplianceType").map(String::as_str),
+            Some("INSUFFICIENT_DATA")
+        );
+        assert!(created.attributes.contains_key("Arn"));
     }
 }

@@ -1,6 +1,6 @@
 {
-  "variants_passed": 180801,
-  "total_variants": 180801,
+  "variants_passed": 185391,
+  "total_variants": 185391,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -313,6 +313,10 @@
     "mq": {
       "passed": 703,
       "total": 703
+    },
+    "config": {
+      "passed": 4590,
+      "total": 4590
     }
   }
 }

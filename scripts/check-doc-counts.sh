@@ -174,6 +174,12 @@ EXCEPTIONS=(
     # vs/localstack.md aliases redirect legacy blog slugs that have "500ms" in
     # the URL itself. They're URLs we have to match verbatim, not performance claims.
     "website/content/vs/localstack.md:startup_ms:500"
+    # "AWS AppConfig: 58 operations" is a DIFFERENT service from AWS Config; the
+    # per-service regex matches the "Config" tail of "AppConfig". AppConfig's 58
+    # op count is correct in its own context.
+    "website/content/supported-services.md:ops_Config:58"
+    "website/static/llms.txt:ops_Config:58"
+    "website/static/llms-full.txt:ops_Config:58"
 )
 
 is_exception() {
