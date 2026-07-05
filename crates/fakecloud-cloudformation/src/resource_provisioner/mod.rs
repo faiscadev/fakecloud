@@ -9,6 +9,7 @@ use fakecloud_acm::{
     CertificateOptions as AcmCertificateOptions, DomainValidation as AcmDomainValidation,
     RenewalSummary as AcmRenewalSummary, SharedAcmState, StoredCertificate as AcmStoredCertificate,
 };
+use fakecloud_acmpca::SharedAcmPcaState;
 use fakecloud_apigateway::{
     make_id as apigw_make_id, ApiKey as ApiGwApiKey, Authorizer as ApiGwAuthorizer,
     Deployment as ApiGwDeployment, Integration as ApiGwIntegration, Method as ApiGwMethod,
@@ -889,6 +890,7 @@ pub struct ResourceProvisioner {
     pub pipes_state: fakecloud_pipes::SharedPipesState,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
+    pub acmpca_state: SharedAcmPcaState,
     pub elasticache_state: SharedElastiCacheState,
     pub route53_state: SharedRoute53State,
     pub cloudfront_state: SharedCloudFrontState,
@@ -1049,6 +1051,7 @@ pub struct CustomInvokeIntent {
 }
 
 mod acm;
+mod acmpca;
 mod apigw;
 mod apigwv2;
 mod athena;
@@ -1233,6 +1236,14 @@ impl ResourceProvisioner {
             "AWS::ECS::CapacityProvider" => self.create_ecs_capacity_provider(resource),
             "AWS::CertificateManager::Certificate" => self.create_acm_certificate(resource),
             "AWS::CertificateManager::Account" => self.create_acm_account(resource),
+            "AWS::ACMPCA::CertificateAuthority" => {
+                self.create_acmpca_certificate_authority(resource)
+            }
+            "AWS::ACMPCA::Certificate" => self.create_acmpca_certificate(resource),
+            "AWS::ACMPCA::CertificateAuthorityActivation" => {
+                self.create_acmpca_certificate_authority_activation(resource)
+            }
+            "AWS::ACMPCA::Permission" => self.create_acmpca_permission(resource),
             "AWS::ElastiCache::ParameterGroup" => self.create_ec_parameter_group(resource),
             "AWS::ElastiCache::SubnetGroup" => self.create_ec_subnet_group(resource),
             "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
@@ -1993,6 +2004,12 @@ impl ResourceProvisioner {
                 self.delete_acm_certificate(&resource.physical_id)
             }
             "AWS::CertificateManager::Account" => self.delete_acm_account(),
+            "AWS::ACMPCA::CertificateAuthority" => {
+                self.delete_acmpca_certificate_authority(&resource.physical_id)
+            }
+            "AWS::ACMPCA::Certificate" => Ok(()),
+            "AWS::ACMPCA::CertificateAuthorityActivation" => Ok(()),
+            "AWS::ACMPCA::Permission" => self.delete_acmpca_permission(&resource.physical_id),
             "AWS::ElastiCache::ParameterGroup" => {
                 self.delete_ec_parameter_group(&resource.physical_id)
             }
@@ -6488,6 +6505,7 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            acmpca_state: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
             elasticache_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),

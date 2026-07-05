@@ -95,6 +95,7 @@ impl ResourceProvisioner {
             pipes_state: self.pipes_state.clone(),
             ecs_state: self.ecs_state.clone(),
             acm_state: self.acm_state.clone(),
+            acmpca_state: self.acmpca_state.clone(),
             elasticache_state: self.elasticache_state.clone(),
             route53_state: self.route53_state.clone(),
             cloudfront_state: self.cloudfront_state.clone(),

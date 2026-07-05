@@ -56,6 +56,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "acm" => Protocol::Json {
             target_prefix: "CertificateManager",
         },
+        "acm-pca" => Protocol::Json {
+            target_prefix: "ACMPrivateCA",
+        },
         "application-autoscaling" => Protocol::Json {
             target_prefix: "AnyScaleFrontendService",
         },

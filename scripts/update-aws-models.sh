@@ -69,6 +69,7 @@ SERVICES=(
     "cloudfront:cloudfront"
     "route53:route-53"
     "acm:acm"
+    "acm-pca:acm-pca"
     "application-autoscaling:application-auto-scaling"
     "wafv2:wafv2"
     "athena:athena"

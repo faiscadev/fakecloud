@@ -107,6 +107,7 @@ SERVICES=(
     "batch|Batch|batch"
     "athena|Athena|athena"
     "acm|ACM|acm"
+    "acm-pca|ACM PCA|acm-pca"
     "cloudwatch|CloudWatch (Metrics & Alarms)|cloudwatch"
     "firehose|Firehose|firehose"
     "glue|Glue|glue"

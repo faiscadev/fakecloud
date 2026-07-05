@@ -60,6 +60,9 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::EFS::MountTarget" => &["Id", "IpAddress"],
         "AWS::EFS::AccessPoint" => &["Arn", "AccessPointId"],
         "AWS::ElasticBeanstalk::Environment" => &["EndpointURL"],
+        "AWS::ACMPCA::CertificateAuthority" => &["Arn", "CertificateSigningRequest"],
+        "AWS::ACMPCA::Certificate" => &["Arn", "Certificate"],
+        "AWS::ACMPCA::CertificateAuthorityActivation" => &["CompleteCertificateChain"],
         _ => &[],
     }
 }
@@ -115,6 +118,7 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         // direct-API equivalents persisted (#1766 class). Each has a registered
         // snapshot hook in the server.
         "CertificateManager" => "acm",
+        "ACMPCA" => "acm-pca",
         "ElasticLoadBalancingV2" => "elbv2",
         "CloudFront" => "cloudfront",
         "Route53" => "route53",
@@ -366,6 +370,7 @@ pub struct CloudFormationDeps {
     pub pipes: fakecloud_pipes::SharedPipesState,
     pub ecs: fakecloud_ecs::SharedEcsState,
     pub acm: fakecloud_acm::SharedAcmState,
+    pub acmpca: fakecloud_acmpca::SharedAcmPcaState,
     pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
@@ -820,6 +825,7 @@ impl CloudFormationService {
             pipes_state: self.deps.pipes.clone(),
             ecs_state: self.deps.ecs.clone(),
             acm_state: self.deps.acm.clone(),
+            acmpca_state: self.deps.acmpca.clone(),
             elasticache_state: self.deps.elasticache.clone(),
             route53_state: self.deps.route53.clone(),
             cloudfront_state: self.deps.cloudfront.clone(),
@@ -3024,6 +3030,7 @@ mod tests {
                 ),
             )),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            acmpca: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
             elasticache: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",

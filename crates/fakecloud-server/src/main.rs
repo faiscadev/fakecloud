@@ -402,6 +402,9 @@ async fn main() {
     ));
     let acm_state: fakecloud_acm::SharedAcmState =
         Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new()));
+    let acmpca_state: fakecloud_acmpca::SharedAcmPcaState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_acmpca::AcmPcaAccounts::new(),
+    ));
     let app_autoscaling_state: fakecloud_application_autoscaling::SharedApplicationAutoScalingState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
@@ -1052,6 +1055,7 @@ async fn main() {
         cloudfront: cloudfront_state.clone(),
         route53: route53_state.clone(),
         acm: acm_state.clone(),
+        acmpca: acmpca_state.clone(),
         firehose: firehose_state.clone(),
         glue: glue_state.clone(),
         cloudwatch: cloudwatch_state.clone(),
@@ -1168,6 +1172,7 @@ async fn main() {
             pipes: pipes_state.clone(),
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
+            acmpca: acmpca_state.clone(),
             elasticache: elasticache_state.clone(),
             route53: route53_state.clone(),
             cloudfront: cloudfront_state.clone(),
@@ -3054,6 +3059,65 @@ async fn main() {
     acm_inner.rearm_pending_validations();
     let acm_service = Arc::new(acm_inner);
     registry.register(acm_service.clone());
+    let acmpca_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("acm-pca").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_acmpca::AcmPcaSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_acmpca::ACM_PCA_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "acm-pca persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_acmpca::ACM_PCA_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *acmpca_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded acm-pca persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse acm-pca persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no acm-pca persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read acm-pca persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut acmpca_inner = fakecloud_acmpca::AcmPcaService::new(acmpca_state.clone());
+    if let Some(store) = acmpca_snapshot_store.clone() {
+        acmpca_inner = acmpca_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = acmpca_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("acm-pca", h);
+    }
+    // Re-arm key generation for any CA restored in CREATING (its key never
+    // persisted because the previous process exited mid-keygen).
+    acmpca_inner.rearm_pending_creations();
+    let acmpca_service = Arc::new(acmpca_inner);
+    registry.register(acmpca_service.clone());
     let firehose_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
