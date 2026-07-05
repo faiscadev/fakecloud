@@ -1177,6 +1177,7 @@ async fn main() {
             servicediscovery: servicediscovery_state.clone(),
             codeartifact: codeartifact_state.clone(),
             codecommit: codecommit_state.clone(),
+            efs: efs_state.clone(),
             elasticbeanstalk: beanstalk_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
@@ -4900,6 +4901,9 @@ async fn main() {
         fakecloud_efs::EfsService::new(efs_state.clone()).with_ec2_state(ec2_state.clone());
     if let Some(store) = efs_snapshot_store {
         efs_service = efs_service.with_snapshot_store(store);
+    }
+    if let Some(h) = efs_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("elasticfilesystem", h);
     }
     registry.register(Arc::new(efs_service));
 

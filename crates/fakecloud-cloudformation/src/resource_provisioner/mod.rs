@@ -905,6 +905,7 @@ pub struct ResourceProvisioner {
     pub servicediscovery_state: SharedServiceDiscoveryState,
     pub codeartifact_state: fakecloud_codeartifact::SharedCodeArtifactState,
     pub codecommit_state: fakecloud_codecommit::SharedCodeCommitState,
+    pub efs_state: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
@@ -1061,6 +1062,7 @@ mod dynamodb;
 mod ec2;
 mod ecr;
 mod ecs;
+mod efs;
 mod eks;
 mod elasticbeanstalk;
 mod eventbridge;
@@ -1201,6 +1203,9 @@ impl ResourceProvisioner {
             "AWS::CodeArtifact::Domain" => self.create_codeartifact_domain(resource),
             "AWS::CodeArtifact::Repository" => self.create_codeartifact_repository(resource),
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
+            "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
+            "AWS::EFS::MountTarget" => self.create_efs_mount_target(resource),
+            "AWS::EFS::AccessPoint" => self.create_efs_access_point(resource),
             "AWS::ElasticBeanstalk::Application" => self.create_eb_application(resource),
             "AWS::ElasticBeanstalk::ApplicationVersion" => {
                 self.create_eb_application_version(resource)
@@ -1542,6 +1547,9 @@ impl ResourceProvisioner {
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
+            "AWS::EFS::FileSystem" => Some(self.update_efs_file_system(existing, new_def)?),
+            "AWS::EFS::MountTarget" => Some(self.update_efs_mount_target(existing, new_def)?),
+            "AWS::EFS::AccessPoint" => Some(self.update_efs_access_point(existing, new_def)?),
             "AWS::ElasticBeanstalk::Application" => {
                 Some(self.update_eb_application(existing, new_def)?)
             }
@@ -1676,6 +1684,15 @@ impl ResourceProvisioner {
             }
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
+            }
+            "AWS::EFS::FileSystem" => {
+                self.get_att_efs_file_system(&resource.physical_id, attribute)
+            }
+            "AWS::EFS::MountTarget" => {
+                self.get_att_efs_mount_target(&resource.physical_id, attribute)
+            }
+            "AWS::EFS::AccessPoint" => {
+                self.get_att_efs_access_point(&resource.physical_id, attribute)
             }
             "AWS::ElasticBeanstalk::Environment" => {
                 self.get_att_eb_environment(&resource.physical_id, attribute)
@@ -1909,6 +1926,18 @@ impl ResourceProvisioner {
             }
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::EFS::FileSystem" => {
+                self.delete_efs_file_system(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::EFS::MountTarget" => {
+                self.delete_efs_mount_target(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::EFS::AccessPoint" => {
+                self.delete_efs_access_point(&resource.physical_id);
                 Ok(())
             }
             "AWS::ElasticBeanstalk::Application" => {
@@ -6493,6 +6522,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             codecommit_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            efs_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             elasticbeanstalk_state: Arc::new(parking_lot::RwLock::new(

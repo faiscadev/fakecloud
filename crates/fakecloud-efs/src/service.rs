@@ -115,6 +115,25 @@ impl EfsService {
         self
     }
 
+    /// A whole-state persist hook the CloudFormation service invokes after a
+    /// stack op that touched EFS, so a CFN-created (or CFN-deleted) file system /
+    /// mount target / access point is written through to disk the same way a
+    /// direct mutating API call would (#1766 phantom-resource class). `None`
+    /// when no snapshot store is configured (memory mode).
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                save_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
+    }
+
     /// Resolve a subnet's `(availability_zone, availability_zone_id, vpc_id)`
     /// from EC2 state when the subnet is real. Returns `None` when EC2 state is
     /// not wired or the subnet does not exist, so the caller falls back to
@@ -971,7 +990,7 @@ impl EfsService {
         let by_fs = query_one(q, "FileSystemId").map(normalize_fs_id);
         let by_mt = query_one(q, "MountTargetId");
         let by_ap = query_one(q, "AccessPointId");
-        // Real EFS requires EXACTLY ONE of these three filters — zero is a
+        // Real EFS requires EXACTLY ONE of these three filters. Zero is a
         // BadRequest, and so is supplying more than one.
         let filter_count = usize::from(by_fs.is_some())
             + usize::from(by_mt.is_some())
