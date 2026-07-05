@@ -405,6 +405,9 @@ async fn main() {
     let acmpca_state: fakecloud_acmpca::SharedAcmPcaState = Arc::new(parking_lot::RwLock::new(
         fakecloud_acmpca::AcmPcaAccounts::new(),
     ));
+    let config_state: fakecloud_config::SharedConfigState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_config::ConfigAccounts::new(),
+    ));
     let app_autoscaling_state: fakecloud_application_autoscaling::SharedApplicationAutoScalingState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
@@ -1056,6 +1059,7 @@ async fn main() {
         route53: route53_state.clone(),
         acm: acm_state.clone(),
         acmpca: acmpca_state.clone(),
+        config: config_state.clone(),
         firehose: firehose_state.clone(),
         glue: glue_state.clone(),
         cloudwatch: cloudwatch_state.clone(),
@@ -1173,6 +1177,7 @@ async fn main() {
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
             acmpca: acmpca_state.clone(),
+            config: config_state.clone(),
             elasticache: elasticache_state.clone(),
             route53: route53_state.clone(),
             cloudfront: cloudfront_state.clone(),
@@ -3118,6 +3123,68 @@ async fn main() {
     acmpca_inner.rearm_pending_creations();
     let acmpca_service = Arc::new(acmpca_inner);
     registry.register(acmpca_service.clone());
+    let config_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("config").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_config::ConfigSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_config::CONFIG_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "config persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_config::CONFIG_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.accounts.len();
+                                *config_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded config persistence snapshot"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse config persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no config persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read config persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut config_inner = fakecloud_config::ConfigService::new(config_state.clone())
+        .with_cross_service(fakecloud_config::CrossServiceStates {
+            s3: Some(s3_state.clone()),
+            iam: Some(iam_state.clone()),
+            ec2: Some(ec2_state.clone()),
+        })
+        .with_lambda(lambda_state.clone(), container_runtime.clone());
+    if let Some(store) = config_snapshot_store.clone() {
+        config_inner = config_inner.with_snapshot_store(store);
+    }
+    if let Some(h) = config_inner.snapshot_hook() {
+        cfn_snapshot_hooks.insert("config", h);
+    }
+    let config_service = Arc::new(config_inner);
+    registry.register(config_service.clone());
     let firehose_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

@@ -33,6 +33,7 @@ fakecloud-ec2 = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-acm = { workspace = true }
 fakecloud-acmpca = { workspace = true }
+fakecloud-config = { workspace = true }
 bytes = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-route53 = { workspace = true }

@@ -36,6 +36,7 @@ pub(crate) struct ResetState {
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
     pub acmpca: fakecloud_acmpca::SharedAcmPcaState,
+    pub config: fakecloud_config::SharedConfigState,
     pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub glue: fakecloud_glue::SharedGlueState,
     pub cloudwatch: fakecloud_cloudwatch::SharedCloudWatchState,
@@ -187,6 +188,9 @@ impl ResetState {
             }
             "acm-pca" | "acmpca" => {
                 *self.acmpca.write() = fakecloud_acmpca::AcmPcaAccounts::new();
+            }
+            "config" => {
+                *self.config.write() = fakecloud_config::ConfigAccounts::new();
             }
             "firehose" => {
                 *self.firehose.write() = fakecloud_firehose::FirehoseAccounts::new();
@@ -408,6 +412,10 @@ impl ResetState {
                 let mut state = self.acmpca.write();
                 state.accounts.remove(account_id);
             }
+            "config" => {
+                let mut state = self.config.write();
+                state.accounts.remove(account_id);
+            }
             "firehose" => {
                 let mut state = self.firehose.write();
                 state.accounts.remove(account_id);
@@ -505,6 +513,7 @@ impl ResetState {
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
         *self.acmpca.write() = fakecloud_acmpca::AcmPcaAccounts::new();
+        *self.config.write() = fakecloud_config::ConfigAccounts::new();
         *self.firehose.write() = fakecloud_firehose::FirehoseAccounts::new();
         *self.glue.write() = fakecloud_glue::GlueAccounts::new();
         *self.cloudwatch.write() = fakecloud_cloudwatch::CloudWatchAccounts::new();
@@ -865,6 +874,9 @@ mod tests {
             acm: Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new())),
             acmpca: Arc::new(parking_lot::RwLock::new(
                 fakecloud_acmpca::AcmPcaAccounts::new(),
+            )),
+            config: Arc::new(parking_lot::RwLock::new(
+                fakecloud_config::ConfigAccounts::new(),
             )),
             firehose: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),

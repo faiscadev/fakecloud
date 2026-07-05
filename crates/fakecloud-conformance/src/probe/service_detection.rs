@@ -59,6 +59,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "acm-pca" => Protocol::Json {
             target_prefix: "ACMPrivateCA",
         },
+        "config" => Protocol::Json {
+            target_prefix: "StarlingDoveService",
+        },
         "application-autoscaling" => Protocol::Json {
             target_prefix: "AnyScaleFrontendService",
         },

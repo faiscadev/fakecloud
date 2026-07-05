@@ -238,6 +238,20 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // correctly. Source: Elastic Beanstalk API "Common Errors" + the
         // per-op error text the live service returns for unknown resources.
         "elasticbeanstalk" => &["InvalidParameterValue", "MissingParameter"],
+        // AWS Config uses two service-wide client-error shapes that its per-op
+        // Smithy `errors:` lists do not enumerate on every operation:
+        //   - InvalidParameterValueException: Config's canonical response for a
+        //     missing required member or a malformed/invalid parameter value.
+        //     The model declares it on many ops (PutConfigRule, PutEvaluations,
+        //     etc.) but omits it from others that return it for the same reason
+        //     (recorder/channel/aggregator getters, tag ops, PutResourceConfig).
+        //   - ValidationException: the constraint-violation response newer Config
+        //     ops (resource evaluations, stored queries, select) return for a
+        //     value outside a member's `length`/`range`/`enum` bounds.
+        // Both are real Config shapes (defined in the model); a handler returning
+        // either to the probes' synthetic (missing / out-of-bounds) inputs ran
+        // correctly. Source: AWS Config API reference per-op "Errors".
+        "config" => &["InvalidParameterValueException", "ValidationException"],
         _ => &[],
     }
 }

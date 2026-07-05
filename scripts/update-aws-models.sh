@@ -21,6 +21,7 @@ cd repo
 # Service mapping: our_name:repo_dir
 SERVICES=(
     "account:account"
+    "config:config-service"
     "identitystore:identitystore"
     "ssoadmin:sso-admin"
     "verifiedpermissions:verifiedpermissions"

@@ -1247,6 +1247,16 @@ pub const SERVICES: &[Service] = &[
         run_regex: "^TestAccACMPCACertificateAuthority_basic$",
         deny: &[],
     },
+    Service {
+        // AWS Config. `aws_config_configuration_recorder` provisions a real
+        // configuration recorder (it references an IAM role, which fakecloud
+        // IAM provides). The `_basic` test creates the recorder, reads it back
+        // (name, role ARN, recording group), and destroys it. fakecloud stores
+        // the recorder in real, persisted Config state.
+        name: "config",
+        run_regex: "^TestAccConfigConfigurationRecorder_basic$",
+        deny: &[],
+    },
 ];
 
 /// CI matrix shards. One GitHub Actions job per entry.
@@ -1903,6 +1913,12 @@ pub const SHARDS: &[Shard] = &[
         name: "acmpca",
         service: "acmpca",
         run_regex: "^TestAccACMPCACertificateAuthority_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "config",
+        service: "config",
+        run_regex: "^TestAccConfigConfigurationRecorder_basic$",
         extra_deny: &[],
     },
 ];

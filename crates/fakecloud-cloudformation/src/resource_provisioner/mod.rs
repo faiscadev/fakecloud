@@ -891,6 +891,7 @@ pub struct ResourceProvisioner {
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
     pub acmpca_state: SharedAcmPcaState,
+    pub config_state: fakecloud_config::SharedConfigState,
     pub elasticache_state: SharedElastiCacheState,
     pub route53_state: SharedRoute53State,
     pub cloudfront_state: SharedCloudFrontState,
@@ -1062,6 +1063,7 @@ mod cloudwatch;
 mod codeartifact;
 mod codecommit;
 mod cognito;
+mod config;
 mod dynamodb;
 mod ec2;
 mod ecr;
@@ -1244,6 +1246,13 @@ impl ResourceProvisioner {
                 self.create_acmpca_certificate_authority_activation(resource)
             }
             "AWS::ACMPCA::Permission" => self.create_acmpca_permission(resource),
+            "AWS::Config::ConfigurationRecorder"
+            | "AWS::Config::DeliveryChannel"
+            | "AWS::Config::ConfigRule"
+            | "AWS::Config::ConfigurationAggregator"
+            | "AWS::Config::AggregationAuthorization"
+            | "AWS::Config::ConformancePack"
+            | "AWS::Config::OrganizationConfigRule" => self.create_config_resource(resource),
             "AWS::ElastiCache::ParameterGroup" => self.create_ec_parameter_group(resource),
             "AWS::ElastiCache::SubnetGroup" => self.create_ec_subnet_group(resource),
             "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
@@ -2010,6 +2019,15 @@ impl ResourceProvisioner {
             "AWS::ACMPCA::Certificate" => Ok(()),
             "AWS::ACMPCA::CertificateAuthorityActivation" => Ok(()),
             "AWS::ACMPCA::Permission" => self.delete_acmpca_permission(&resource.physical_id),
+            "AWS::Config::ConfigurationRecorder"
+            | "AWS::Config::DeliveryChannel"
+            | "AWS::Config::ConfigRule"
+            | "AWS::Config::ConfigurationAggregator"
+            | "AWS::Config::AggregationAuthorization"
+            | "AWS::Config::ConformancePack"
+            | "AWS::Config::OrganizationConfigRule" => {
+                self.delete_config_resource(&resource.resource_type, &resource.physical_id)
+            }
             "AWS::ElastiCache::ParameterGroup" => {
                 self.delete_ec_parameter_group(&resource.physical_id)
             }
@@ -6506,6 +6524,7 @@ mod tests {
             )),
             acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             acmpca_state: Arc::new(RwLock::new(fakecloud_acmpca::AcmPcaAccounts::new())),
+            config_state: Arc::new(RwLock::new(fakecloud_config::ConfigAccounts::new())),
             elasticache_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
