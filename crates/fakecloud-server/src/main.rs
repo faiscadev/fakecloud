@@ -761,6 +761,19 @@ async fn main() {
     } else {
         degraded_runtimes.push("MQ (control-plane-only brokers, no connectable broker data plane)");
     }
+    // Amazon MSK (Kafka) backing-broker runtime (Docker/Podman). Constructed
+    // here so the degraded-runtimes banner reports it; attached to the
+    // KafkaService further down where the service is built.
+    let kafka_runtime = fakecloud_kafka::KafkaRuntime::new().map(Arc::new);
+    if let Some(ref rt) = kafka_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "MSK Kafka broker execution enabled via container runtime"
+        );
+    } else {
+        degraded_runtimes
+            .push("MSK (control-plane-only clusters, no connectable Kafka broker data plane)");
+    }
     // ECS runtime is constructed below, after the EventBridge + CloudWatch
     // Logs wiring is in place. Placeholder kept here so downstream blocks
     // that reference `ecs_runtime` don't need reordering — see the
@@ -5218,6 +5231,18 @@ async fn main() {
     if let Some(store) = kafka_snapshot_store {
         kafka_service = kafka_service.with_snapshot_store(store);
     }
+    // MSK clusters are backed by REAL single-node Kafka broker containers so a
+    // client genuinely produces/consumes through them (the RDS/ElastiCache/MQ
+    // bar). Attach the runtime constructed earlier alongside the other backing
+    // runtimes.
+    if let Some(ref rt) = kafka_runtime {
+        kafka_service = kafka_service.with_runtime(rt.clone());
+    }
+    // Recreate backing containers for persisted clusters the snapshot claims
+    // should be running (same restart-recovery contract as RDS #1338 / MQ).
+    // Fire-and-forget: one task per cluster, so a slow broker bring-up doesn't
+    // block startup.
+    kafka_service.recover_persisted_containers().await;
     if let Some(h) = kafka_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("kafka", h);
     }
@@ -10425,6 +10450,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = mq_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = kafka_runtime {
         rt.stop_all().await;
     }
     if let Some(rt) = ec2_runtime {

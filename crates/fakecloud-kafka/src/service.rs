@@ -12,6 +12,7 @@
 //! read time from the cluster's `numberOfBrokerNodes`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{Method, StatusCode};
@@ -24,8 +25,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
+use crate::runtime::{KafkaRuntime, RunningBroker, TopicError};
 use crate::shared;
-use crate::state::{KafkaData, SharedKafkaState};
+use crate::state::{ClusterDataPlane, KafkaData, SharedKafkaState};
 
 /// Every operation name in the Amazon MSK Smithy model (59 operations).
 pub const KAFKA_ACTIONS: &[&str] = &[
@@ -130,6 +132,12 @@ pub struct KafkaService {
     state: SharedKafkaState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// The backing-container runtime. `None` in the degraded / control-plane-
+    /// only mode (no container CLI, or the backend disabled for tfacc). When
+    /// present, the runtime owns a PROVISIONED cluster's CREATING/DELETING and
+    /// broker-reboot transitions, and topic ops + `GetBootstrapBrokers` drive the
+    /// REAL Kafka broker.
+    runtime: Option<Arc<KafkaRuntime>>,
 }
 
 impl KafkaService {
@@ -138,12 +146,28 @@ impl KafkaService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            runtime: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Attach the backing-container runtime that spawns real single-node Kafka
+    /// brokers for provisioned clusters and drives topic operations against them.
+    pub fn with_runtime(mut self, runtime: Arc<KafkaRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Whether a container runtime is attached. When `true` the runtime's
+    /// background tasks own the container-backed lifecycle transitions; the
+    /// in-memory state-machine settles only the metadata-only / no-container
+    /// cases (mirrors the Amazon MQ `auto_settle` split).
+    fn runtime_present(&self) -> bool {
+        self.runtime.is_some()
     }
 
     async fn save(&self) {
@@ -302,7 +326,7 @@ impl AwsService for KafkaService {
                 format!("Unknown operation: {} {}", req.method, req.raw_path),
             ));
         };
-        let (result, settled) = self.dispatch(action, &labels, &req);
+        let (result, settled) = self.dispatch(action, &labels, &req).await;
         let success = matches!(result.as_ref(), Ok(resp) if resp.status.is_success());
         if settled || (MUTATING.contains(&action) && success) {
             self.save().await;
@@ -325,7 +349,7 @@ impl KafkaService {
     /// Returns the operation result plus a `settled` flag: `true` when a read
     /// settled a real lifecycle transition and the change must be persisted.
     #[allow(clippy::too_many_lines)]
-    fn dispatch(
+    async fn dispatch(
         &self,
         action: &str,
         labels: &[String],
@@ -347,13 +371,19 @@ impl KafkaService {
             return (Err(e), false);
         }
 
-        // Settle any in-flight lifecycle transition up front (batch 1 has no
-        // Kafka runtime, so the pure state-machine always auto-settles). A read
-        // that fires a transition reports `settled` so the handler persists.
+        // Settle any in-flight lifecycle transition up front. With a Kafka
+        // runtime attached the runtime's background tasks own the
+        // container-backed transitions, so reconcile settles only the
+        // metadata-only / no-container cases; without one it auto-settles the
+        // whole pure state-machine. A read that fires a transition reports
+        // `settled` so the handler persists.
         let mut settled = false;
         {
             let mut guard = self.state.write();
-            if guard.get_or_create(&ctx.account).reconcile() {
+            if guard
+                .get_or_create(&ctx.account)
+                .reconcile(self.runtime_present())
+            {
                 settled = true;
             }
         }
@@ -393,12 +423,12 @@ impl KafkaService {
             "DeleteClusterPolicy" => self.delete_cluster_policy(&ctx, a0),
             "ListClientVpcConnections" => self.list_client_vpc_connections(&ctx, a0, &q),
             "RejectClientVpcConnection" => self.reject_client_vpc_connection(&ctx, a0, &body),
-            "ListTopics" => self.list_topics(&ctx, a0, &q),
-            "CreateTopic" => self.create_topic(&ctx, a0, &body),
-            "DescribeTopic" => self.describe_topic(&ctx, a0, a1),
-            "UpdateTopic" => self.update_topic(&ctx, a0, a1, &body),
-            "DeleteTopic" => self.delete_topic(&ctx, a0, a1),
-            "DescribeTopicPartitions" => self.describe_topic_partitions(&ctx, a0, a1, &q),
+            "ListTopics" => self.list_topics(&ctx, a0, &q).await,
+            "CreateTopic" => self.create_topic(&ctx, a0, &body).await,
+            "DescribeTopic" => self.describe_topic(&ctx, a0, a1).await,
+            "UpdateTopic" => self.update_topic(&ctx, a0, a1, &body).await,
+            "DeleteTopic" => self.delete_topic(&ctx, a0, a1).await,
+            "DescribeTopicPartitions" => self.describe_topic_partitions(&ctx, a0, a1, &q).await,
             "CreateConfiguration" => self.create_configuration(&ctx, &body),
             "ListConfigurations" => self.list_configurations(&ctx, &q),
             "DescribeConfiguration" => self.describe_configuration(&ctx, a0),
@@ -596,6 +626,110 @@ fn cluster_kafka_version(cluster: &Value) -> String {
         .to_string()
 }
 
+/// Whether a stored cluster is serverless (no backing broker container).
+fn cluster_is_serverless(cluster: &Value) -> bool {
+    cluster.get("_clusterType").and_then(Value::as_str) == Some("SERVERLESS")
+}
+
+/// Project a `RunningBroker` into the persisted, describe-facing data-plane
+/// binding.
+fn running_to_dp(r: &RunningBroker) -> ClusterDataPlane {
+    ClusterDataPlane {
+        container_id: r.container_id.clone(),
+        host: r.host.clone(),
+        ports: r.ports.clone(),
+    }
+}
+
+/// Bounded bring-up attempts for restart-recovery, so a transient daemon or
+/// readiness hiccup never terminally fails a cluster that was healthy.
+const BRING_UP_ATTEMPTS: u32 = 3;
+
+/// Linear backoff between bring-up attempts (2s, 4s, ...), capped.
+async fn backoff(attempt: u32) {
+    let secs = (u64::from(attempt) + 1).saturating_mul(2).min(15);
+    tokio::time::sleep(Duration::from_secs(secs)).await;
+}
+
+/// Settle a cluster after a broker bring-up attempt: on success flip it to
+/// `ACTIVE` and record the real host/port binding (reaping the container if the
+/// cluster was deleted meanwhile); on failure mark it `FAILED` with a
+/// diagnosable `stateInfo`.
+async fn settle_cluster_up(
+    state: &SharedKafkaState,
+    account: &str,
+    arn: &str,
+    running: Result<RunningBroker, String>,
+    runtime: &Arc<KafkaRuntime>,
+) {
+    match running {
+        Ok(r) => {
+            let present = {
+                let mut guard = state.write();
+                let data = guard.get_or_create(account);
+                if let Some(obj) = data.clusters.get_mut(arn).and_then(Value::as_object_mut) {
+                    obj.insert("state".into(), json!("ACTIVE"));
+                    obj.insert("stateInfo".into(), json!({ "code": "NONE", "message": "" }));
+                    obj.remove("activeOperationArn");
+                    data.data_plane.insert(arn.to_string(), running_to_dp(&r));
+                    true
+                } else {
+                    false
+                }
+            };
+            if !present {
+                // Deleted mid-bring-up: don't leak the container.
+                runtime.stop_broker(arn).await;
+            }
+        }
+        Err(reason) => {
+            let mut guard = state.write();
+            let data = guard.get_or_create(account);
+            if let Some(obj) = data.clusters.get_mut(arn).and_then(Value::as_object_mut) {
+                obj.insert("state".into(), json!("FAILED"));
+                obj.insert(
+                    "stateInfo".into(),
+                    json!({ "code": "CREATION_FAILED", "message": reason }),
+                );
+            }
+        }
+    }
+}
+
+/// Bring a persisted cluster's broker back after a restart: re-attach the
+/// persisted container if it still exists (preserving the topic log), otherwise
+/// create a fresh one. Both phases retry with backoff so a transient failure
+/// doesn't lose a previously-ACTIVE cluster. `None` only after retries exhaust.
+async fn recover_bring_up(
+    runtime: &Arc<KafkaRuntime>,
+    arn: &str,
+    persisted_container_id: Option<&str>,
+) -> Option<RunningBroker> {
+    if let Some(cid) = persisted_container_id {
+        for attempt in 0..BRING_UP_ATTEMPTS {
+            match runtime.reattach_broker(arn, cid).await {
+                Ok(Some(r)) => return Some(r),
+                Ok(None) => break, // container is gone -> create fresh below
+                Err(error) => {
+                    tracing::warn!(%error, cluster_arn = %arn, attempt, "re-attach attempt failed; retrying");
+                    backoff(attempt).await;
+                }
+            }
+        }
+    }
+    for attempt in 0..BRING_UP_ATTEMPTS {
+        match runtime.ensure_broker(arn).await {
+            Ok(r) => return Some(r),
+            Err(error) => {
+                tracing::warn!(%error, cluster_arn = %arn, attempt, "respawn attempt failed; retrying");
+                backoff(attempt).await;
+            }
+        }
+    }
+    tracing::error!(cluster_arn = %arn, "gave up recovering broker container after retries");
+    None
+}
+
 // ===================== clusters =====================
 
 impl KafkaService {
@@ -733,6 +867,18 @@ impl KafkaService {
                 "PROVISIONED"
             });
         }
+
+        // Background-spawn the real backing Kafka broker container (never in the
+        // request handler -- a synchronous image pull/start would time the client
+        // out, #1539/#1730). The cluster stays CREATING and only settles to
+        // ACTIVE once the broker actually serves. Only PROVISIONED clusters get a
+        // container; a serverless cluster (no broker to run) and the no-runtime
+        // fallback settle via the in-memory reconcile instead.
+        if self.runtime.is_some() && !serverless {
+            drop(guard);
+            self.spawn_create(ctx.account.clone(), arn.clone());
+        }
+
         ok(out)
     }
 
@@ -818,11 +964,19 @@ impl KafkaService {
             .clusters
             .get_mut(arn)
             .ok_or_else(|| not_found(&format!("The cluster '{arn}' does not exist.")))?;
+        let serverless = cluster_is_serverless(cluster);
         cluster
             .as_object_mut()
             .expect("cluster is object")
             .insert("state".into(), json!("DELETING"));
-        // The DELETING cluster is reaped on the next reconcile (no runtime).
+        // With a runtime, tear the real broker container down and free state in a
+        // background task (a provisioned cluster only); a serverless cluster has
+        // no container, and the no-runtime path reaps the DELETING cluster on the
+        // next reconcile.
+        if self.runtime.is_some() && !serverless {
+            drop(guard);
+            self.spawn_delete(ctx.account.clone(), arn.to_string());
+        }
         ok(json!({ "clusterArn": arn, "state": "DELETING" }))
     }
 
@@ -836,7 +990,20 @@ impl KafkaService {
             .get(arn)
             .ok_or_else(|| bad_request(&format!("The cluster '{arn}' does not exist.")))?;
         let num = cluster_num_brokers(cluster);
-        // TODO(batch2): back with a real reachable Kafka broker endpoint.
+        // When a real single-node Kafka broker backs this cluster, return its
+        // reachable `host:port` as the PLAINTEXT `bootstrapBrokerString` -- a
+        // real Kafka client produces/consumes through it. The TLS/SASL variants
+        // are not configured for the PLAINTEXT broker, so they are omitted (AWS
+        // omits the variants a cluster's client-auth config does not enable).
+        // Without a live broker (no runtime, serverless, or still creating) fall
+        // back to the cosmetic multi-broker synthesis -- same response shape.
+        if let Some(bootstrap) = data
+            .data_plane
+            .get(arn)
+            .and_then(|dp| dp.bootstrap_string())
+        {
+            return ok(json!({ "bootstrapBrokerString": bootstrap }));
+        }
         ok(json!({
             "bootstrapBrokerString": shared::bootstrap_broker_string(arn, num, 9092),
             "bootstrapBrokerStringTls": shared::bootstrap_broker_string(arn, num, 9094),
@@ -859,13 +1026,226 @@ impl KafkaService {
             .ok_or_else(|| not_found(&format!("The cluster '{arn}' does not exist.")))?;
         let num = cluster_num_brokers(cluster);
         let kv = cluster_kafka_version(cluster);
-        let nodes = shared::synthesize_nodes(arn, num, &kv);
+        let mut nodes = shared::synthesize_nodes(arn, num, &kv);
+        // A real MSK cluster has N brokers; fakecloud backs it with a SINGLE
+        // Kafka container, so broker node 1 is the live one -- surface its
+        // reachable endpoint as node 1's endpoint when a broker is up. The
+        // remaining synthesized nodes keep the per-`numberOfBrokerNodes` view
+        // faithful (a single-container simplification, honestly labeled).
+        if let Some(bootstrap) = data
+            .data_plane
+            .get(arn)
+            .and_then(|dp| dp.bootstrap_string())
+        {
+            if let Some(n0) = nodes.first_mut() {
+                if let Some(bni) = n0.get_mut("brokerNodeInfo").and_then(Value::as_object_mut) {
+                    bni.insert("endpoints".into(), json!([bootstrap]));
+                }
+            }
+        }
         let (page, next) = paginate(&nodes, q);
         let mut out = json!({ "nodeInfoList": page });
         if let Some(n) = next {
             out["nextToken"] = json!(n);
         }
         ok(out)
+    }
+}
+
+// ===================== data-plane container lifecycle =====================
+
+impl KafkaService {
+    /// Resolve a cluster's running backing-container id from the live data-plane
+    /// binding, or `None` when no broker is up for it (no runtime, serverless,
+    /// still creating, or control-plane-only mode). Topic ops use this to decide
+    /// between driving the REAL broker and the in-memory fallback.
+    fn cluster_container(&self, account: &str, arn: &str) -> Option<String> {
+        self.runtime.as_ref()?;
+        self.state
+            .read()
+            .get(account)
+            .and_then(|d| d.data_plane.get(arn).map(|dp| dp.container_id.clone()))
+    }
+
+    /// Spawn the backing Kafka broker for a freshly-created cluster and settle it
+    /// to `ACTIVE` (recording the real host/port) once reachable, or to `FAILED`
+    /// if the broker can't come up. Reaps the container if the cluster was
+    /// deleted mid-create.
+    fn spawn_create(&self, account: String, arn: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let running = runtime.ensure_broker(&arn).await.map_err(|error| {
+                tracing::error!(%error, cluster_arn = %arn, "MSK Kafka broker container failed to start");
+                error.to_string()
+            });
+            settle_cluster_up(&state, &account, &arn, running, &runtime).await;
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Tear down a cluster's backing broker container and free its state. Removal
+    /// is time-bounded; state cleanup is GUARANTEED so a hung daemon can never
+    /// wedge the cluster in `DELETING` forever (issue #1338 sibling).
+    fn spawn_delete(&self, account: String, arn: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            if tokio::time::timeout(Duration::from_secs(30), runtime.stop_broker(&arn))
+                .await
+                .is_err()
+            {
+                tracing::warn!(cluster_arn = %arn, "broker container removal timed out; freeing cluster state anyway");
+            }
+            {
+                let mut guard = state.write();
+                let data = guard.get_or_create(&account);
+                data.clusters.remove(&arn);
+                data.topics.remove(&arn);
+                data.scram_secrets.remove(&arn);
+                data.policies.remove(&arn);
+                data.data_plane.remove(&arn);
+            }
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Restart a cluster's backing broker container in place (preserving the
+    /// topic log) and settle back to `ACTIVE` once it serves again.
+    fn spawn_reboot(&self, account: String, arn: String) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let running = runtime.reboot_broker(&arn).await.map_err(|error| {
+                tracing::error!(%error, cluster_arn = %arn, "MSK Kafka broker reboot failed");
+                error.to_string()
+            });
+            settle_cluster_up(&state, &account, &arn, running, &runtime).await;
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Recreate backing broker containers for persisted clusters the snapshot
+    /// claims should be running (same restart-recovery contract as RDS #1338 /
+    /// Amazon MQ). Every deserialized data-plane binding is dropped up front --
+    /// its host port referred to a container owned by the previous process and is
+    /// dead now. When a runtime is present, each recoverable PROVISIONED cluster
+    /// is re-driven through its PERSISTED container (re-attached, preserving the
+    /// topic log) or a fresh one if that container is gone; without a runtime the
+    /// cleared binding is all that is needed (bootstrap falls back to cosmetic).
+    pub async fn recover_persisted_containers(&self) {
+        let runtime_present = self.runtime.is_some();
+        struct Pending {
+            account: String,
+            arn: String,
+            container_id: Option<String>,
+        }
+        let (pending, changed) = {
+            let mut guard = self.state.write();
+            let mut out: Vec<Pending> = Vec::new();
+            let mut changed = false;
+            for (account_id, data) in guard.iter_mut() {
+                let account = account_id.to_string();
+                let arns: Vec<String> = data.clusters.keys().cloned().collect();
+                for arn in arns {
+                    let persisted_container_id =
+                        data.data_plane.remove(&arn).map(|dp| dp.container_id);
+                    if persisted_container_id.is_some() {
+                        changed = true;
+                    }
+                    let serverless = data
+                        .clusters
+                        .get(&arn)
+                        .map(cluster_is_serverless)
+                        .unwrap_or(false);
+                    let st = data
+                        .clusters
+                        .get(&arn)
+                        .and_then(|c| c.get("state"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if st == "DELETING" {
+                        data.clusters.remove(&arn);
+                        data.topics.remove(&arn);
+                        data.scram_secrets.remove(&arn);
+                        data.policies.remove(&arn);
+                        changed = true;
+                        continue;
+                    }
+                    // Only a runtime can re-drive a provisioned cluster's data
+                    // plane; serverless and control-plane-only mode just need the
+                    // cleared binding above.
+                    if !runtime_present || serverless {
+                        continue;
+                    }
+                    let recoverable =
+                        matches!(st.as_str(), "ACTIVE" | "CREATING" | "REBOOTING_BROKER");
+                    if !recoverable {
+                        continue;
+                    }
+                    // Mark CREATING so a describe during recovery doesn't advertise
+                    // a bootstrap endpoint before the broker is back up.
+                    if let Some(obj) = data.clusters.get_mut(&arn).and_then(Value::as_object_mut) {
+                        obj.insert("state".into(), json!("CREATING"));
+                    }
+                    changed = true;
+                    out.push(Pending {
+                        account: account.clone(),
+                        arn,
+                        container_id: persisted_container_id,
+                    });
+                }
+            }
+            (out, changed)
+        };
+        // Persist the cleared bindings / settled deletions so a subsequent restart
+        // starts clean even if nothing else mutates state (the control-plane-only
+        // path spawns no tasks).
+        if changed && !runtime_present {
+            save_snapshot(
+                &self.state,
+                self.snapshot_store.clone(),
+                &self.snapshot_lock,
+            )
+            .await;
+        }
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = pending.len(),
+            "recovering backing containers for persisted MSK clusters",
+        );
+        for p in pending {
+            let Some(runtime) = self.runtime.clone() else {
+                break;
+            };
+            let state = self.state.clone();
+            let store = self.snapshot_store.clone();
+            let lock = self.snapshot_lock.clone();
+            tokio::spawn(async move {
+                let running = recover_bring_up(&runtime, &p.arn, p.container_id.as_deref()).await;
+                if let Some(r) = running {
+                    settle_cluster_up(&state, &p.account, &p.arn, Ok(r), &runtime).await;
+                } else {
+                    tracing::error!(cluster_arn = %p.arn, "broker container recovery exhausted; will retry on next restart");
+                }
+                save_snapshot(&state, store, &lock).await;
+            });
+        }
     }
 }
 
@@ -1177,10 +1557,27 @@ impl KafkaService {
         if !data.clusters.contains_key(arn) {
             return Err(not_found(&format!("The cluster '{arn}' does not exist.")));
         }
+        let serverless = data
+            .clusters
+            .get(arn)
+            .map(cluster_is_serverless)
+            .unwrap_or(false);
         if let Some(obj) = data.clusters.get_mut(arn).and_then(Value::as_object_mut) {
             obj.insert("state".into(), json!("REBOOTING_BROKER"));
         }
         let op_arn = self.record_operation(data, arn, "REBOOT_NODE");
+        // record_operation flips the cluster to UPDATING; a reboot must stay
+        // REBOOTING_BROKER until the broker is back, so re-assert it.
+        if let Some(obj) = data.clusters.get_mut(arn).and_then(Value::as_object_mut) {
+            obj.insert("state".into(), json!("REBOOTING_BROKER"));
+        }
+        // With a runtime, restart the SAME broker container in place (preserving
+        // the topic log) and settle back to ACTIVE once it serves again. Without
+        // one, the in-memory reconcile settles it on the next read.
+        if self.runtime.is_some() && !serverless {
+            drop(guard);
+            self.spawn_reboot(ctx.account.clone(), arn.to_string());
+        }
         ok(json!({ "clusterArn": arn, "clusterOperationArn": op_arn }))
     }
 }
@@ -1454,9 +1851,25 @@ impl KafkaService {
 }
 
 // ===================== topics =====================
+//
+// When a real single-node Kafka broker backs the cluster (a runtime is attached
+// AND the cluster's broker is up), topic operations are driven against that
+// live broker with its own `/opt/kafka/bin/*.sh` tools -- a topic the API
+// creates is genuinely created on Kafka, and a real client can produce/consume
+// through it. Without a live broker (no runtime, serverless, or still creating)
+// the ops fall back to the in-memory control-plane behavior (a write reflected
+// by its read), returning the SAME response shapes so conformance is unchanged.
+//
+// SINGLE-BROKER SIMPLIFICATION: a real MSK cluster has >=3 brokers, but
+// fakecloud runs ONE Kafka container, which can only satisfy replication factor
+// 1. A requested `ReplicationFactor > 1` is therefore CLAMPED to 1 when creating
+// on the broker (and the stored/described value reflects what the broker
+// actually applied, so state never lies about the topic). Internal Kafka topics
+// (`__consumer_offsets` etc.) are hidden from `ListTopics`, matching the
+// user-topic view MSK presents.
 
 impl KafkaService {
-    fn create_topic(
+    async fn create_topic(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
@@ -1467,20 +1880,89 @@ impl KafkaService {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
-        // CreateTopic declares no NotFoundException.
-        if !data.clusters.contains_key(cluster_arn) {
-            return Err(bad_request(&format!(
-                "The cluster '{cluster_arn}' does not exist."
-            )));
+        let partition_count = b.get("partitionCount").and_then(Value::as_i64).unwrap_or(1);
+        let requested_rf = b
+            .get("replicationFactor")
+            .and_then(Value::as_i64)
+            .unwrap_or(1);
+        let configs_str = b
+            .get("configs")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let topic_arn = format!("{cluster_arn}/topic/{name}");
+
+        // CreateTopic declares no NotFoundException; a missing cluster surfaces as
+        // its (declared) BadRequestException.
+        {
+            let mut guard = self.state.write();
+            let data = guard.get_or_create(&ctx.account);
+            if !data.clusters.contains_key(cluster_arn) {
+                return Err(bad_request(&format!(
+                    "The cluster '{cluster_arn}' does not exist."
+                )));
+            }
+            if data
+                .topics
+                .get(cluster_arn)
+                .is_some_and(|m| m.contains_key(&name))
+            {
+                return Err(conflict(&format!("Topic '{name}' already exists.")));
+            }
         }
-        let topics = data.topics.entry(cluster_arn.to_string()).or_default();
-        if topics.contains_key(&name) {
-            return Err(conflict(&format!("Topic '{name}' already exists.")));
+
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            // Single-node broker -> replication factor 1 (clamped from request).
+            let rf = requested_rf.clamp(1, 1);
+            let configs = parse_topic_configs(&configs_str);
+            match runtime
+                .create_topic(&cid, &name, partition_count, rf, &configs)
+                .await
+            {
+                Ok(()) => {}
+                Err(TopicError::AlreadyExists) => {
+                    return Err(conflict(&format!("Topic '{name}' already exists.")));
+                }
+                Err(TopicError::NotFound) => {
+                    return Err(bad_request(&format!(
+                        "Topic '{name}' could not be created."
+                    )));
+                }
+                Err(TopicError::Broker(msg)) => {
+                    return Err(bad_request(&format!(
+                        "The broker rejected the topic '{name}': {msg}"
+                    )));
+                }
+            }
+            let topic = json!({
+                "topicArn": topic_arn,
+                "topicName": name,
+                "partitionCount": partition_count.max(1),
+                "replicationFactor": rf,
+                "configs": configs_str,
+                "outOfSyncReplicaCount": 0,
+                "status": "ACTIVE",
+            });
+            let mut guard = self.state.write();
+            guard
+                .get_or_create(&ctx.account)
+                .topics
+                .entry(cluster_arn.to_string())
+                .or_default()
+                .insert(name.clone(), topic);
+            return ok(json!({
+                "topicArn": topic_arn,
+                "topicName": name,
+                "status": "ACTIVE",
+            }));
         }
+
+        // Control-plane-only fallback (no live broker): async CREATING settle.
         let topic = json!({
-            "topicArn": format!("{cluster_arn}/topic/{name}"),
+            "topicArn": topic_arn,
             "topicName": name,
             "partitionCount": b.get("partitionCount").cloned().unwrap_or(json!(1)),
             "replicationFactor": b.get("replicationFactor").cloned().unwrap_or(json!(1)),
@@ -1488,20 +1970,46 @@ impl KafkaService {
             "outOfSyncReplicaCount": 0,
             "status": "CREATING",
         });
-        topics.insert(name.clone(), topic.clone());
+        let mut guard = self.state.write();
+        guard
+            .get_or_create(&ctx.account)
+            .topics
+            .entry(cluster_arn.to_string())
+            .or_default()
+            .insert(name.clone(), topic);
         ok(json!({
-            "topicArn": topic["topicArn"],
+            "topicArn": topic_arn,
             "topicName": name,
             "status": "CREATING",
         }))
     }
 
-    fn describe_topic(
+    async fn describe_topic(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
         name: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            let meta = match runtime.describe_topic(&cid, name).await {
+                Ok(m) => m,
+                Err(TopicError::NotFound) => {
+                    return Err(not_found(&format!("Topic '{name}' does not exist.")));
+                }
+                Err(e) => return Err(bad_request(&e.to_string())),
+            };
+            return ok(json!({
+                "topicArn": format!("{cluster_arn}/topic/{name}"),
+                "topicName": name,
+                "partitionCount": meta.partition_count,
+                "replicationFactor": meta.replication_factor,
+                "configs": meta.configs,
+                "status": "ACTIVE",
+            }));
+        }
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         let topic = data
@@ -1520,13 +2028,61 @@ impl KafkaService {
         }))
     }
 
-    fn update_topic(
+    async fn update_topic(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
         name: &str,
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let topic_arn = format!("{cluster_arn}/topic/{name}");
+        let new_partitions = b.get("partitionCount").and_then(Value::as_i64);
+        let new_configs = b.get("configs").and_then(Value::as_str).map(str::to_string);
+
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            if let Some(p) = new_partitions {
+                match runtime.alter_partitions(&cid, name, p).await {
+                    Ok(()) => {}
+                    Err(TopicError::NotFound) => {
+                        return Err(not_found(&format!("Topic '{name}' does not exist.")));
+                    }
+                    Err(e) => return Err(bad_request(&e.to_string())),
+                }
+            }
+            if let Some(cfg) = &new_configs {
+                let parsed = parse_topic_configs(cfg);
+                match runtime.alter_configs(&cid, name, &parsed).await {
+                    Ok(()) => {}
+                    Err(TopicError::NotFound) => {
+                        return Err(not_found(&format!("Topic '{name}' does not exist.")));
+                    }
+                    Err(e) => return Err(bad_request(&e.to_string())),
+                }
+            }
+            // Mirror the applied change into state (source of truth stays the
+            // broker; this keeps the fallback view and snapshot consistent).
+            let mut guard = self.state.write();
+            let data = guard.get_or_create(&ctx.account);
+            if let Some(obj) = data
+                .topics
+                .get_mut(cluster_arn)
+                .and_then(|m| m.get_mut(name))
+                .and_then(Value::as_object_mut)
+            {
+                if let Some(p) = new_partitions {
+                    obj.insert("partitionCount".into(), json!(p));
+                }
+                if let Some(cfg) = &new_configs {
+                    obj.insert("configs".into(), json!(cfg));
+                }
+                obj.insert("status".into(), json!("ACTIVE"));
+            }
+            return ok(json!({ "topicArn": topic_arn, "topicName": name, "status": "ACTIVE" }));
+        }
+
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         let topic = data
@@ -1546,12 +2102,36 @@ impl KafkaService {
         ok(json!({ "topicArn": arn, "topicName": name, "status": "UPDATING" }))
     }
 
-    fn delete_topic(
+    async fn delete_topic(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
         name: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let topic_arn = format!("{cluster_arn}/topic/{name}");
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            match runtime.delete_topic(&cid, name).await {
+                Ok(()) => {}
+                Err(TopicError::NotFound) => {
+                    return Err(not_found(&format!("Topic '{name}' does not exist.")));
+                }
+                Err(e) => return Err(bad_request(&e.to_string())),
+            }
+            // The broker deleted it synchronously, so free the state entry now
+            // (reconcile does not settle topics in runtime mode).
+            let mut guard = self.state.write();
+            if let Some(m) = guard
+                .get_or_create(&ctx.account)
+                .topics
+                .get_mut(cluster_arn)
+            {
+                m.remove(name);
+            }
+            return ok(json!({ "topicArn": topic_arn, "topicName": name, "status": "DELETING" }));
+        }
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         let topic = data
@@ -1567,13 +2147,44 @@ impl KafkaService {
         ok(json!({ "topicArn": arn, "topicName": name, "status": "DELETING" }))
     }
 
-    fn describe_topic_partitions(
+    async fn describe_topic_partitions(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
         name: &str,
         q: &[(String, String)],
     ) -> Result<AwsResponse, AwsServiceError> {
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            let meta = match runtime.describe_topic(&cid, name).await {
+                Ok(m) => m,
+                Err(TopicError::NotFound) => {
+                    return Err(not_found(&format!("Topic '{name}' does not exist.")));
+                }
+                Err(e) => return Err(bad_request(&e.to_string())),
+            };
+            let items: Vec<Value> = meta
+                .partitions
+                .iter()
+                .map(|p| {
+                    json!({
+                        "partition": p.partition,
+                        "leader": p.leader,
+                        "replicas": p.replicas,
+                        "isr": p.isr,
+                    })
+                })
+                .collect();
+            let (page, next) = paginate(&items, q);
+            let mut out = json!({ "partitions": page });
+            if let Some(n) = next {
+                out["nextToken"] = json!(n);
+            }
+            return ok(out);
+        }
+
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         let topic = data
@@ -1592,7 +2203,6 @@ impl KafkaService {
             .map(cluster_num_brokers)
             .unwrap_or(3)
             .max(1);
-        // TODO(batch2): back with real partition metadata from a Kafka broker.
         let items: Vec<Value> = (0..partitions)
             .map(|p| {
                 let leader = (p % brokers) + 1;
@@ -1615,29 +2225,68 @@ impl KafkaService {
         ok(out)
     }
 
-    fn list_topics(
+    async fn list_topics(
         &self,
         ctx: &Ctx,
         cluster_arn: &str,
         q: &[(String, String)],
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name_filter = query_one(q, "topicNameFilter");
+        let name_filter = query_one(q, "topicNameFilter").map(str::to_string);
+
+        // A missing cluster surfaces as the (declared) BadRequestException.
+        {
+            let mut guard = self.state.write();
+            if !guard
+                .get_or_create(&ctx.account)
+                .clusters
+                .contains_key(cluster_arn)
+            {
+                return Err(bad_request(&format!(
+                    "The cluster '{cluster_arn}' does not exist."
+                )));
+            }
+        }
+
+        if let (Some(cid), Some(runtime)) = (
+            self.cluster_container(&ctx.account, cluster_arn),
+            self.runtime.clone(),
+        ) {
+            let topics = runtime
+                .list_topics(&cid)
+                .await
+                .map_err(|e| bad_request(&e.to_string()))?;
+            let items: Vec<Value> = topics
+                .iter()
+                // Hide internal Kafka topics (`__consumer_offsets`, etc.).
+                .filter(|t| !t.name.starts_with("__"))
+                .filter(|t| name_filter.as_deref().is_none_or(|f| t.name.starts_with(f)))
+                .map(|t| {
+                    json!({
+                        "topicArn": format!("{cluster_arn}/topic/{}", t.name),
+                        "topicName": t.name,
+                        "partitionCount": t.partition_count,
+                        "replicationFactor": t.replication_factor,
+                        "outOfSyncReplicaCount": 0,
+                    })
+                })
+                .collect();
+            let (page, next) = paginate(&items, q);
+            let mut out = json!({ "topics": page });
+            if let Some(n) = next {
+                out["nextToken"] = json!(n);
+            }
+            return ok(out);
+        }
+
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        // No NotFoundException declared: a missing cluster surfaces as the
-        // (declared) BadRequestException.
-        if !data.clusters.contains_key(cluster_arn) {
-            return Err(bad_request(&format!(
-                "The cluster '{cluster_arn}' does not exist."
-            )));
-        }
         let items: Vec<Value> = data
             .topics
             .get(cluster_arn)
             .map(|m| {
                 m.values()
                     .filter(|t| {
-                        name_filter.is_none_or(|f| {
+                        name_filter.as_deref().is_none_or(|f| {
                             t.get("topicName")
                                 .and_then(Value::as_str)
                                 .is_some_and(|n| n.starts_with(f))
@@ -1662,6 +2311,23 @@ impl KafkaService {
         }
         ok(out)
     }
+}
+
+/// Parse an MSK `Configs` string into Kafka topic config `(key, value)` pairs.
+/// Tolerates comma / semicolon / newline separators and `key=value` entries
+/// (whitespace-trimmed; blank and malformed entries are dropped).
+fn parse_topic_configs(s: &str) -> Vec<(String, String)> {
+    s.split([',', ';', '\n'])
+        .filter_map(|entry| {
+            let (k, v) = entry.split_once('=')?;
+            let (k, v) = (k.trim(), v.trim());
+            if k.is_empty() {
+                None
+            } else {
+                Some((k.to_string(), v.to_string()))
+            }
+        })
+        .collect()
 }
 
 // ===================== configurations =====================
@@ -2283,7 +2949,8 @@ mod tests {
     }
 
     fn settle(s: &KafkaService, c: &Ctx) {
-        s.state.write().get_or_create(&c.account).reconcile();
+        // No runtime attached in unit tests, so the full state-machine settles.
+        s.state.write().get_or_create(&c.account).reconcile(false);
     }
 
     #[test]
@@ -2393,8 +3060,9 @@ mod tests {
         assert_eq!(rev["serverProperties"].as_str(), Some("eA=="));
     }
 
-    #[test]
-    fn topic_round_trip() {
+    #[tokio::test]
+    async fn topic_round_trip() {
+        // No runtime attached -> control-plane-only fallback (in-memory topics).
         let s = svc();
         let c = ctx("us-east-1");
         let cluster = json_of(s.create_cluster(&c, &cluster_body("t"), false).unwrap());
@@ -2404,14 +3072,63 @@ mod tests {
             &arn,
             &json!({ "topicName": "events", "partitionCount": 3, "replicationFactor": 2 }),
         )
+        .await
         .unwrap();
-        let d = json_of(s.describe_topic(&c, &arn, "events").unwrap());
+        let d = json_of(s.describe_topic(&c, &arn, "events").await.unwrap());
         assert_eq!(d["partitionCount"], json!(3));
+        // The fallback echoes the requested replication factor (no broker to
+        // clamp against in control-plane-only mode).
+        assert_eq!(d["replicationFactor"], json!(2));
         let parts = json_of(
             s.describe_topic_partitions(&c, &arn, "events", &[])
+                .await
                 .unwrap(),
         );
         assert_eq!(parts["partitions"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_brokers_without_runtime_is_cosmetic_multi_broker() {
+        // With no data-plane binding, GetBootstrapBrokers falls back to the
+        // cosmetic multi-broker synthesis (all four listener variants present).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let cluster = json_of(s.create_cluster(&c, &cluster_body("nb"), false).unwrap());
+        let arn = cluster["clusterArn"].as_str().unwrap().to_string();
+        let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
+        assert!(bb["bootstrapBrokerString"]
+            .as_str()
+            .unwrap()
+            .contains(".amazonaws.com:9092"));
+        assert!(bb.get("bootstrapBrokerStringTls").is_some());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_brokers_with_data_plane_returns_real_endpoint() {
+        // A recorded data-plane binding makes GetBootstrapBrokers return the
+        // REAL reachable host:port as the single plaintext bootstrap string.
+        let s = svc();
+        let c = ctx("us-east-1");
+        let cluster = json_of(s.create_cluster(&c, &cluster_body("rp"), false).unwrap());
+        let arn = cluster["clusterArn"].as_str().unwrap().to_string();
+        {
+            let mut guard = s.state.write();
+            guard.get_or_create(&c.account).data_plane.insert(
+                arn.clone(),
+                crate::state::ClusterDataPlane {
+                    container_id: "cid".into(),
+                    host: "127.0.0.1".into(),
+                    ports: std::collections::BTreeMap::from([("plaintext".to_string(), 51234)]),
+                },
+            );
+        }
+        let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
+        assert_eq!(
+            bb["bootstrapBrokerString"].as_str(),
+            Some("127.0.0.1:51234")
+        );
+        // The TLS/SASL variants are omitted for the PLAINTEXT broker.
+        assert!(bb.get("bootstrapBrokerStringTls").is_none());
     }
 
     #[test]

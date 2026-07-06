@@ -14,13 +14,40 @@ is reflected by its `Describe`/`List`, every `Delete` deletes, and AWS's async
 cluster lifecycle is modelled by returning the transient state and settling on
 the next describe (an interrupted transition reconciles on restart).
 
-The real Apache Kafka **broker data plane** - topics created on a running Kafka
-container and `GetBootstrapBrokers` returning a genuinely reachable endpoint - is
-a later batch. In this release the topic operations and bootstrap-broker strings
-are real *control-plane* behavior: `CreateTopic` persists a topic that
+MSK on fakecloud also has a real, Docker-backed **broker data plane**. When a
+container runtime (Docker/Podman) is available, each provisioned cluster is
+backed by a **real single-node Apache Kafka broker** (`apache/kafka:3.8.0`, KRaft
+combined mode). `CreateCluster` background-spawns the broker container and the
+cluster settles `CREATING` -> `ACTIVE` only once the broker actually serves;
+`GetBootstrapBrokers` then returns a **genuinely reachable `host:port`** a real
+Kafka client produces and consumes through, and topic operations
+(`CreateTopic`/`DeleteTopic`/`ListTopics`/`DescribeTopic`/`UpdateTopic`/
+`DescribeTopicPartitions`) are driven against the live broker with its own
+`kafka-topics.sh` / `kafka-configs.sh` tools -- a topic the API creates is
+genuinely created on Kafka. `RebootBroker` restarts the container in place
+(preserving the topic log), `DeleteCluster` tears it down, and an `ACTIVE`
+cluster reconciles on restart by re-attaching its persisted container (or
+respawning if it is gone). This is exactly the Docker-backed bar the Amazon MQ
+data plane meets.
+
+**Single-broker simplification** (honestly labeled): a real MSK cluster has
+three or more brokers, but fakecloud runs ONE Kafka container, which only
+satisfies replication factor 1. A requested `ReplicationFactor > 1` is clamped
+to 1 when the topic is created on the broker (the described value reflects what
+the broker actually applied), and `ListNodes` surfaces broker node 1 as the live
+node. Internal Kafka topics (`__consumer_offsets`, etc.) are hidden from
+`ListTopics`.
+
+**Degraded / control-plane-only mode.** When no container runtime is available
+(and for serverless clusters, which have no broker to run), the topic operations
+and bootstrap-broker strings fall back to real *control-plane* behavior with the
+**same response shapes**: `CreateTopic` persists a topic that
 `DescribeTopic`/`ListTopics` reflect, and `GetBootstrapBrokers` returns broker
 endpoint strings synthesized from the cluster's broker nodes (well-formed
-`b-N.<cluster>...kafka.<region>.amazonaws.com:9092` forms).
+`b-N.<cluster>...kafka.<region>.amazonaws.com:9092` forms). The real broker
+round trip is proven end to end by the `msk-broker` CI job (gated behind
+`FAKECLOUD_E2E_MSK=1`), which produces and consumes a message through the live
+broker.
 
 ## Resources
 

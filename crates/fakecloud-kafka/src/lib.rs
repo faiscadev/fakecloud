@@ -21,17 +21,25 @@
 //! deletes, and AWS's async cluster lifecycle is modelled by returning the
 //! transient state and settling on the next describe (reconciled on restart).
 //!
-//! The REAL Kafka-broker data plane (topics created on a running Kafka
-//! container, `GetBootstrapBrokers` returning a reachable endpoint) is a later
-//! batch; this batch's topic ops and bootstrap-broker synthesis are real
-//! control-plane behavior (a write is reflected by its read) derived from the
-//! cluster's broker nodes.
+//! The REAL Kafka-broker data plane is Docker-backed: each PROVISIONED cluster
+//! gets a real single-node Apache Kafka broker container (KRaft combined mode),
+//! topics are actually created/deleted/described/altered on that broker via its
+//! own `/opt/kafka/bin/*.sh` tools, and `GetBootstrapBrokers` returns a
+//! reachable `host:port` a real Kafka client produces and consumes through.
+//! When no container runtime is available (or for serverless clusters) the topic
+//! ops and bootstrap-broker synthesis degrade to the control-plane-only
+//! behavior (a write is reflected by its read) derived from the cluster's broker
+//! nodes -- the same response shapes either way.
 
 pub mod persistence;
+pub mod runtime;
 pub mod service;
 pub mod shared;
 pub mod state;
 mod validate;
 
+pub use runtime::KafkaRuntime;
 pub use service::{KafkaService, KAFKA_ACTIONS};
-pub use state::{KafkaData, KafkaSnapshot, SharedKafkaState, KAFKA_SNAPSHOT_SCHEMA_VERSION};
+pub use state::{
+    ClusterDataPlane, KafkaData, KafkaSnapshot, SharedKafkaState, KAFKA_SNAPSHOT_SCHEMA_VERSION,
+};

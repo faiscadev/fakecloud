@@ -4,6 +4,15 @@
 //! -> tag -> update (records a cluster operation) -> delete lifecycle against a
 //! spawned fakecloud server via the AWS Rust SDK, which speaks the real MSK
 //! restJson1 wire format (camelCase `jsonName` bodies, ARN path labels).
+//!
+//! This runs in the shared partition with `FAKECLOUD_KAFKA_DISABLE_BACKEND=1`,
+//! so it is a pure CONTROL-PLANE test: no real Kafka container is spawned and
+//! the lifecycle auto-settles in memory (CREATING -> ACTIVE on the first
+//! describe). The real Docker-backed broker + produce/consume round trip lives
+//! in `msk_dataplane.rs`, which runs ONLY in the dedicated `msk-broker` CI job.
+//! Without the flag, a docker-capable shared runner would attach the live
+//! runtime and spawn a heavy Kafka broker here (and the cluster would not be
+//! instantly ACTIVE) -- exactly what the dedicated job exists to isolate.
 
 mod helpers;
 
@@ -17,7 +26,7 @@ async fn kafka_client(server: &TestServer) -> aws_sdk_kafka::Client {
 
 #[tokio::test]
 async fn cluster_lifecycle_create_describe_list_tag_update_delete() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_with_env(&[("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1")]).await;
     let kafka = kafka_client(&server).await;
 
     let bngi = BrokerNodeGroupInfo::builder()
@@ -192,7 +201,7 @@ async fn cluster_lifecycle_create_describe_list_tag_update_delete() {
 
 #[tokio::test]
 async fn list_kafka_versions_are_active() {
-    let server = TestServer::start().await;
+    let server = TestServer::start_with_env(&[("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1")]).await;
     let kafka = kafka_client(&server).await;
     let versions = kafka
         .list_kafka_versions()
