@@ -10,16 +10,23 @@ version.workspace = true
 [dependencies]
 fakecloud-core = { workspace = true }
 fakecloud-persistence = { workspace = true }
+fakecloud-logs = { workspace = true }
+fakecloud-ssm = { workspace = true }
+fakecloud-secretsmanager = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+glob = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

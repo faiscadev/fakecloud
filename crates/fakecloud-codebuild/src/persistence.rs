@@ -31,13 +31,19 @@ pub fn load_into(
     let Some(bytes) = store.load().map_err(|e| LoadError::Io(e.to_string()))? else {
         return Ok(LoadOutcome::Empty);
     };
-    let snapshot: CodeBuildSnapshot =
+    let mut snapshot: CodeBuildSnapshot =
         serde_json::from_slice(&bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
     if snapshot.schema_version > CODEBUILD_SNAPSHOT_SCHEMA_VERSION {
         return Err(LoadError::SchemaTooNew {
             on_disk: snapshot.schema_version,
             supported: CODEBUILD_SNAPSHOT_SCHEMA_VERSION,
         });
+    }
+    // Restart reconcile: a build/build-batch backed by a real container that
+    // was persisted `IN_PROGRESS` can never settle (its container died with the
+    // previous process), so flip each orphan to `FAILED`.
+    for (_account_id, account) in snapshot.accounts.iter_mut() {
+        account.reconcile_builds();
     }
     let accounts = snapshot.accounts.account_count();
     *state.write() = snapshot.accounts;

@@ -160,19 +160,22 @@ pub struct TestServer(fakecloud_testkit::TestServer);
 impl TestServer {
     pub async fn start() -> Self {
         // tfacc asserts the terraform provider's AWS response *contract*
-        // (attribute formats), not data-plane behaviour. For Amazon MQ that
-        // means the cosmetic `*.amazonaws.com` broker endpoints (e.g. the
-        // provider's `^https://…\.mq\.<region>\.amazonaws.com:8162$`
-        // console-URL regex). Disable ONLY MQ's real broker backend here so it
-        // returns those AWS-format endpoints instead of a real
-        // `http://127.0.0.1:<port>` from a spawned container -- the MQ data
-        // plane is proven separately by the Docker E2E suite. This is scoped to
-        // MQ (not a global container-CLI disable) because other container-backed
-        // services -- e.g. RDS, whose `CreateDBInstance` errors without a
-        // runtime -- must keep their real backends for their tfacc format tests.
+        // (attribute formats), not data-plane behaviour. Disable the real
+        // container backends for the data-plane services whose spawned
+        // containers would either return non-AWS-format endpoints (Amazon MQ's
+        // `*.amazonaws.com` broker/console URLs vs a real `http://127.0.0.1:<port>`)
+        // or race the Go provider's format/attribute assertions with async
+        // settling (CodeBuild). Their data planes are proven separately by the
+        // Docker E2E suites. Scoped to these services (not a global container-CLI
+        // disable) because other container-backed services -- e.g. RDS, whose
+        // `CreateDBInstance` errors without a runtime -- must keep their real
+        // backends for their tfacc format tests.
         Self(
-            fakecloud_testkit::TestServer::start_with_env(&[("FAKECLOUD_MQ_DISABLE_BACKEND", "1")])
-                .await,
+            fakecloud_testkit::TestServer::start_with_env(&[
+                ("FAKECLOUD_MQ_DISABLE_BACKEND", "1"),
+                ("FAKECLOUD_CODEBUILD_DISABLE_BACKEND", "1"),
+            ])
+            .await,
         )
     }
 
