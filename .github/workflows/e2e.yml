@@ -443,3 +443,71 @@ jobs:
       - name: Prune container state after tests
         if: always()
         run: docker system prune -af --volumes || true
+
+  # Dedicated, resourced job for the Amazon MSK (Kafka) broker data-plane E2E.
+  # This test spawns a REAL single-node Apache Kafka container (a JVM broker in
+  # KRaft mode), far heavier than the images in the shared partition matrix, so
+  # it is gated behind FAKECLOUD_E2E_MSK=1 (skipped loudly everywhere else) and
+  # run here with docker, a generous timeout for the slow broker boot + the
+  # librdkafka source build, and a test-step retry that absorbs genuine
+  # cold-pull/first-connection flake WITHOUT masking a real regression (a
+  # persistently failing test still fails the job).
+  msk-broker:
+    name: MSK Kafka data plane
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # Broker boot is slow (JVM/KRaft start + first cold image pull), and the
+    # rdkafka `cmake-build` feature compiles librdkafka from source; allow ample
+    # headroom over the test's own 300s cluster-readiness window plus retries.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Prune container state before tests
+        run: docker system prune -af --volumes || true
+
+      # Pre-pull the Kafka image (with retry) so the first CreateCluster doesn't
+      # pay a cold pull inside the readiness window. Retries absorb a flaky
+      # registry; a persistent pull failure is surfaced (the test would fail
+      # anyway). The image ref matches the runtime default; keep it in sync with
+      # KafkaRuntime::image (FAKECLOUD_KAFKA_IMAGE).
+      - name: Pre-pull Kafka image
+        run: |
+          for i in 1 2 3; do
+            if docker pull apache/kafka:3.8.0; then break; fi
+            echo "docker pull apache/kafka:3.8.0 attempt $i failed; retrying"; sleep $((i * 5))
+            [ "$i" = 3 ] && { echo "::error::could not pull apache/kafka:3.8.0"; exit 1; }
+          done
+
+      # The testkit boots this binary via its workspace-relative path, so a plain
+      # debug build in place is all the test needs.
+      - name: Build fakecloud
+        run: cargo build --bin fakecloud
+
+      # Run ONLY the MSK data-plane round-trip test. FAKECLOUD_E2E_MSK=1 flips it
+      # from skip to run; CI=1 makes a missing docker a hard failure rather than a
+      # silent skip. --retries 2 reruns only a failed test (up to 2 extra times)
+      # to ride out cold-pull / first-connection flake; a test that fails every
+      # attempt still fails the job red.
+      - name: Run MSK broker E2E
+        env:
+          FAKECLOUD_E2E_MSK: "1"
+          CI: "1"
+        run: |
+          cargo nextest run -P ci -p fakecloud-e2e --retries 2 \
+            -E 'test(msk_cluster_delivers_a_message_through_a_real_kafka_broker)'
+
+      - name: Broker container diagnostics
+        if: always()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a || true
+
+      - name: Prune container state after tests
+        if: always()
+        run: docker system prune -af --volumes || true

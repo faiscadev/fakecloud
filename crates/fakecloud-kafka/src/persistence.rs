@@ -44,8 +44,11 @@ pub fn load_into(
     // stopped: creating/updating clusters settle to ACTIVE, deleting clusters
     // are removed, replicators/VPC-connections/topics/operations settle. There
     // is no timer to resume, so the in-memory state-machine reconciles here.
+    // Passing `false` (no runtime owns the lifecycle) does the full pure
+    // state-machine settle, exactly as before; `recover_persisted_containers`
+    // then re-drives any cluster whose backing Kafka container must come back.
     for (_account_id, account) in snapshot.accounts.iter_mut() {
-        account.reconcile();
+        account.reconcile(false);
     }
     let accounts = snapshot.accounts.account_count();
     *state.write() = snapshot.accounts;

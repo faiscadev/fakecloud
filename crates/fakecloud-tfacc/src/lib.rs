@@ -173,6 +173,11 @@ impl TestServer {
         Self(
             fakecloud_testkit::TestServer::start_with_env(&[
                 ("FAKECLOUD_MQ_DISABLE_BACKEND", "1"),
+                // Amazon MSK: a real Kafka broker makes GetBootstrapBrokers return
+                // `127.0.0.1:<port>` instead of the AWS-format
+                // `*.amazonaws.com:9092` the provider asserts; the data plane is
+                // proven separately by the msk-broker Docker E2E.
+                ("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1"),
                 ("FAKECLOUD_CODEBUILD_DISABLE_BACKEND", "1"),
             ])
             .await,

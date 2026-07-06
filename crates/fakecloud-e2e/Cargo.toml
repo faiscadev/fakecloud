@@ -65,6 +65,11 @@ aws-sdk-efs = "1"
 aws-sdk-elasticbeanstalk = "1"
 aws-sdk-mq = "1"
 aws-sdk-kafka = "1"
+# `cmake-build` statically links librdkafka (compiled from source) so the MSK
+# data-plane test's real produce/consume round trip has no system librdkafka
+# dependency -- portable across the dev machine and the dedicated msk-broker CI
+# job (which only needs cmake + a C toolchain, both present on ubuntu-latest).
+rdkafka = { version = "0.36", features = ["cmake-build"] }
 aws-sdk-cloudwatch = "=1.61.0"
 tokio-postgres = "0.7"
 mysql_async = "0.34"

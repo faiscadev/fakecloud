@@ -103,7 +103,8 @@ pub const DEFAULT_KAFKA_VERSION: &str = "3.6.0";
 
 /// Synthesize the `BrokerNodeInfo`-shaped `NodeInfoList` for a provisioned
 /// cluster with `num_brokers` broker nodes, deriving stable ids/IPs/endpoints
-/// from the cluster ARN. // TODO(batch2): back with real Kafka container nodes.
+/// from the cluster ARN. The control-plane view; when a real Kafka broker backs
+/// the cluster, the service overrides node 1's endpoint with the live one.
 pub fn synthesize_nodes(cluster_arn: &str, num_brokers: i64, kafka_version: &str) -> Vec<Value> {
     let name = cluster_name_from_arn(cluster_arn).unwrap_or("cluster");
     let region = arn_region(cluster_arn).unwrap_or("us-east-1");
@@ -142,8 +143,9 @@ pub fn synthesize_nodes(cluster_arn: &str, num_brokers: i64, kafka_version: &str
 }
 
 /// The comma-joined bootstrap-broker connection string for `num_brokers` nodes
-/// on the given `port`, derived from the cluster ARN.
-/// // TODO(batch2): back with a real reachable Kafka broker endpoint.
+/// on the given `port`, derived from the cluster ARN. The control-plane-only
+/// fallback used when no real Kafka broker backs the cluster (no runtime, or a
+/// serverless cluster); a live broker returns its real reachable `host:port`.
 pub fn bootstrap_broker_string(cluster_arn: &str, num_brokers: i64, port: u16) -> String {
     let name = cluster_name_from_arn(cluster_arn).unwrap_or("cluster");
     let region = arn_region(cluster_arn).unwrap_or("us-east-1");

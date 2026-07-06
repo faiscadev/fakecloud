@@ -24,6 +24,36 @@ use fakecloud_core::multi_account::{AccountState, MultiAccountState};
 
 pub const KAFKA_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
+/// The live data-plane binding for a cluster whose backing single-node Kafka
+/// broker container is running. Recorded when the broker becomes reachable and
+/// used to project the REAL bootstrap `host:port` into `GetBootstrapBrokers`
+/// (and to drive topic CRUD against the live broker), replacing the cosmetic
+/// `*.amazonaws.com` synthesis. Persisted so a restart can tell which clusters
+/// had a backing container and reconcile them (re-attach the persisted
+/// container, preserving the topic log, or respawn if it is gone, #1338), and
+/// so the mapped host port survives a snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClusterDataPlane {
+    /// The backing Kafka broker container id.
+    pub container_id: String,
+    /// Host clients reach the published PLAINTEXT port at: `127.0.0.1` on the
+    /// host, or `host.docker.internal` / `host.containers.internal` when
+    /// fakecloud is itself containerized (issue #1539).
+    pub host: String,
+    /// Protocol label (`plaintext`) -> the published host port.
+    #[serde(default)]
+    pub ports: BTreeMap<String, u16>,
+}
+
+impl ClusterDataPlane {
+    /// The reachable `host:port` PLAINTEXT bootstrap string, if a port is bound.
+    pub fn bootstrap_string(&self) -> Option<String> {
+        self.ports
+            .get("plaintext")
+            .map(|p| format!("{}:{}", self.host, p))
+    }
+}
+
 /// Per-account Amazon MSK state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KafkaData {
@@ -65,6 +95,13 @@ pub struct KafkaData {
     /// Monotonic counter for the `-N` ARN suffix and cluster `CurrentVersion`s.
     #[serde(default)]
     pub seq: u64,
+    /// Live data-plane binding keyed by `clusterArn`, present only while a
+    /// backing single-node Kafka broker container is running. Kept OUT of the
+    /// cluster wire object so a describe never leaks a non-AWS field; the
+    /// bootstrap/topic paths read it to reach the REAL broker and the restart
+    /// path reads it to reconcile the backing container.
+    #[serde(default)]
+    pub data_plane: BTreeMap<String, ClusterDataPlane>,
 }
 
 impl KafkaData {
@@ -82,10 +119,19 @@ impl KafkaData {
     /// cluster operation settles to `UPDATE_COMPLETE`. Used both on the next
     /// read and on restart. Returns `true` if anything changed.
     ///
-    /// Batch 1 has no backing Kafka runtime, so this always auto-settles (the
-    /// pure state-machine the control-plane models). // TODO(batch2): gate on a
-    /// runtime the way Amazon MQ does once a real broker backs the data plane.
-    pub fn reconcile(&mut self) -> bool {
+    /// `runtime_owns_lifecycle` controls who owns the CONTAINER-BACKED
+    /// transitions. It is `false` in the in-memory / degraded path (no Kafka
+    /// runtime): the lifecycle is a pure state-machine that settles here on the
+    /// next read, exactly as the control-plane-only cluster always did. It is
+    /// `true` when a real Kafka-broker runtime is attached: the runtime's
+    /// background tasks own a PROVISIONED cluster's CREATING/DELETING and a
+    /// broker REBOOTING (a cluster is only `ACTIVE` once its broker actually
+    /// serves), so this must NOT flip those states out from under the tasks.
+    /// Everything with no data plane -- serverless clusters, metadata-only
+    /// `UPDATING`/`HEALING`/`MAINTENANCE`, cluster operations, VPC connections,
+    /// replicators, and topics in the control-plane-only fallback -- always
+    /// settles here regardless, so a runtime never wedges them.
+    pub fn reconcile(&mut self, runtime_owns_lifecycle: bool) -> bool {
         let mut changed = false;
 
         // Clusters.
@@ -98,8 +144,20 @@ impl KafkaData {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // A PROVISIONED cluster with a runtime attached has its container
+            // lifecycle driven by background tasks; a SERVERLESS cluster (or the
+            // no-runtime fallback) has no container, so it settles here.
+            let serverless = self
+                .clusters
+                .get(&arn)
+                .and_then(|c| c.get("_clusterType"))
+                .and_then(Value::as_str)
+                == Some("SERVERLESS");
+            let runtime_backed = runtime_owns_lifecycle && !serverless;
             match state.as_str() {
-                "CREATING" | "UPDATING" | "REBOOTING_BROKER" | "HEALING" | "MAINTENANCE" => {
+                // Metadata-only transitions never touch the broker container, so
+                // they settle even when a runtime owns the container lifecycle.
+                "UPDATING" | "HEALING" | "MAINTENANCE" => {
                     if let Some(obj) = self.clusters.get_mut(&arn).and_then(Value::as_object_mut) {
                         obj.insert("state".into(), Value::String("ACTIVE".into()));
                         if let Some(si) = obj.get_mut("stateInfo").and_then(Value::as_object_mut) {
@@ -110,11 +168,25 @@ impl KafkaData {
                     }
                     changed = true;
                 }
-                "DELETING" => {
+                // Container-backed transitions: settle here ONLY when no runtime
+                // task owns them (serverless, or control-plane-only mode).
+                "CREATING" | "REBOOTING_BROKER" if !runtime_backed => {
+                    if let Some(obj) = self.clusters.get_mut(&arn).and_then(Value::as_object_mut) {
+                        obj.insert("state".into(), Value::String("ACTIVE".into()));
+                        if let Some(si) = obj.get_mut("stateInfo").and_then(Value::as_object_mut) {
+                            si.insert("code".into(), Value::String("NONE".into()));
+                            si.insert("message".into(), Value::String(String::new()));
+                        }
+                        obj.remove("activeOperationArn");
+                    }
+                    changed = true;
+                }
+                "DELETING" if !runtime_backed => {
                     self.clusters.remove(&arn);
                     self.topics.remove(&arn);
                     self.scram_secrets.remove(&arn);
                     self.policies.remove(&arn);
+                    self.data_plane.remove(&arn);
                     changed = true;
                 }
                 _ => {}
@@ -202,8 +274,15 @@ impl KafkaData {
             }
         }
 
-        // Topics settle CREATING/UPDATING -> ACTIVE; DELETING removed.
-        let topic_clusters: Vec<String> = self.topics.keys().cloned().collect();
+        // Topics settle CREATING/UPDATING -> ACTIVE; DELETING removed. With a
+        // Kafka runtime attached the topic ops drive the REAL broker
+        // synchronously and record the final state directly, so this pure
+        // state-machine settle is the control-plane-only fallback.
+        let topic_clusters: Vec<String> = if runtime_owns_lifecycle {
+            Vec::new()
+        } else {
+            self.topics.keys().cloned().collect()
+        };
         for carn in topic_clusters {
             if let Some(map) = self.topics.get_mut(&carn) {
                 let names: Vec<String> = map.keys().cloned().collect();
@@ -266,7 +345,7 @@ mod tests {
     #[test]
     fn reconcile_settles_creating_to_active() {
         let mut d = data_with_cluster("CREATING");
-        assert!(d.reconcile());
+        assert!(d.reconcile(false));
         let c = d.clusters.values().next().unwrap();
         assert_eq!(c["state"], json!("ACTIVE"));
     }
@@ -274,14 +353,55 @@ mod tests {
     #[test]
     fn reconcile_removes_deleting_cluster() {
         let mut d = data_with_cluster("DELETING");
-        assert!(d.reconcile());
+        assert!(d.reconcile(false));
         assert!(d.clusters.is_empty());
     }
 
     #[test]
     fn reconcile_stable_cluster_is_noop() {
         let mut d = data_with_cluster("ACTIVE");
-        assert!(!d.reconcile());
+        assert!(!d.reconcile(false));
+    }
+
+    #[test]
+    fn reconcile_runtime_owned_does_not_settle_provisioned_creating() {
+        // With a Kafka runtime attached, a PROVISIONED cluster's CREATING is
+        // owned by the background container task; reconcile must NOT flip it.
+        let mut d = data_with_cluster("CREATING");
+        d.clusters.values_mut().next().unwrap()["_clusterType"] = json!("PROVISIONED");
+        assert!(!d.reconcile(true));
+        let c = d.clusters.values().next().unwrap();
+        assert_eq!(c["state"], json!("CREATING"));
+    }
+
+    #[test]
+    fn reconcile_runtime_owned_still_settles_serverless_creating() {
+        // A SERVERLESS cluster has no container, so it settles even with a
+        // runtime attached (nothing else would ever flip it to ACTIVE).
+        let mut d = data_with_cluster("CREATING");
+        d.clusters.values_mut().next().unwrap()["_clusterType"] = json!("SERVERLESS");
+        assert!(d.reconcile(true));
+        let c = d.clusters.values().next().unwrap();
+        assert_eq!(c["state"], json!("ACTIVE"));
+    }
+
+    #[test]
+    fn reconcile_runtime_owned_still_settles_metadata_updating() {
+        // A metadata-only UPDATING never touches the broker, so it settles
+        // regardless of the runtime.
+        let mut d = data_with_cluster("UPDATING");
+        d.clusters.values_mut().next().unwrap()["_clusterType"] = json!("PROVISIONED");
+        assert!(d.reconcile(true));
+        let c = d.clusters.values().next().unwrap();
+        assert_eq!(c["state"], json!("ACTIVE"));
+    }
+
+    #[test]
+    fn reconcile_runtime_owned_leaves_deleting_provisioned_for_the_task() {
+        let mut d = data_with_cluster("DELETING");
+        d.clusters.values_mut().next().unwrap()["_clusterType"] = json!("PROVISIONED");
+        assert!(!d.reconcile(true));
+        assert!(!d.clusters.is_empty());
     }
 
     #[test]
