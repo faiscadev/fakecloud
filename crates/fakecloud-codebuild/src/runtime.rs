@@ -81,6 +81,11 @@ fn env_truthy(name: &str) -> bool {
 /// the deterministic settle path.
 pub struct CodeBuildBackend {
     cli: String,
+    /// Container-to-host networking (add-host injection + the alias a build
+    /// uses to reach the fakecloud endpoint), resolved once per the shared
+    /// helper so a buildspec that calls back to fakecloud works and so
+    /// `FAKECLOUD_IN_CONTAINER` sibling-host resolution matches Lambda/ECS.
+    host_net: fakecloud_core::container_net::HostNetworking,
 }
 
 impl CodeBuildBackend {
@@ -94,13 +99,37 @@ impl CodeBuildBackend {
             return None;
         }
         let cli = fakecloud_core::container_net::detect_container_cli()?;
+        let host_net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         tracing::info!(%cli, "CodeBuild real build backend enabled");
-        Some(Arc::new(Self { cli }))
+        Some(Arc::new(Self { cli, host_net }))
     }
 
     /// The resolved container CLI (`docker`/`podman`).
     pub fn cli(&self) -> &str {
         &self.cli
+    }
+
+    /// Resolved container-to-host networking for this backend.
+    pub fn host_net(&self) -> &fakecloud_core::container_net::HostNetworking {
+        &self.host_net
+    }
+}
+
+/// Rewrite `localhost`/`127.0.0.1` in the host portion of `http(s)://` URLs in
+/// build env values to `target_host`, so a buildspec that calls back to the
+/// fakecloud endpoint reaches the host from inside the build container. Mirrors
+/// Lambda's `rewrite_localhost_envs`; other occurrences of "localhost" pass
+/// through unchanged.
+fn rewrite_localhost_env(env: &mut [(String, String)], target_host: &str) {
+    if target_host == "127.0.0.1" || target_host == "localhost" {
+        return;
+    }
+    for (_k, v) in env.iter_mut() {
+        *v = v
+            .replace("http://127.0.0.1:", &format!("http://{target_host}:"))
+            .replace("https://127.0.0.1:", &format!("https://{target_host}:"))
+            .replace("http://localhost:", &format!("http://{target_host}:"))
+            .replace("https://localhost:", &format!("https://{target_host}:"));
     }
 }
 
@@ -183,6 +212,58 @@ pub async fn kill_container(cli: &str, container_id: &str) {
         .args(["rm", "-f", container_id])
         .output()
         .await;
+}
+
+/// The `fakecloud-instance` label value for the current process. Build
+/// containers are tagged with it so the restart sweep can tell its own live
+/// containers apart from a previous (crashed) process's leaked ones.
+fn current_instance_label() -> String {
+    format!("fakecloud-{}", std::process::id())
+}
+
+/// Remove build containers leaked by a previous fakecloud process. On a hard
+/// restart (SIGKILL, OOM, `docker kill` of the server) the detached `sleep`
+/// build containers survive: `reconcile_builds` flips the persisted
+/// `IN_PROGRESS` builds to `FAILED`, but nothing reaps the containers, so the
+/// daemon slowly leaks them. Sweep every container tagged `fakecloud-codebuild`
+/// whose `fakecloud-instance` label is not the current process. Best-effort:
+/// any daemon error is ignored (the backend stays usable). Containers owned by
+/// the live process are left untouched so a concurrent build is never killed.
+pub async fn sweep_orphan_containers(cli: &str) {
+    let current = current_instance_label();
+    let out = Command::new(cli)
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            "label=fakecloud-codebuild",
+            "--format",
+            "{{.ID}} {{.Label \"fakecloud-instance\"}}",
+        ])
+        .output()
+        .await;
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let mut orphans: Vec<String> = Vec::new();
+    for line in listing.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(id) = parts.next() else {
+            continue;
+        };
+        let instance = parts.next().unwrap_or("");
+        if instance != current {
+            orphans.push(id.to_string());
+        }
+    }
+    for id in &orphans {
+        kill_container(cli, id).await;
+    }
+    if !orphans.is_empty() {
+        tracing::info!(count = orphans.len(), "swept orphaned codebuild containers");
+    }
 }
 
 /// Blocking container removal for the Drop-guard cleanup path (no async runtime
@@ -797,6 +878,9 @@ pub async fn run_build(job: BuildJob) {
     // Build-level env = base env + buildspec env.variables (buildspec wins).
     let mut env = job.base_env.clone();
     env.extend(spec.env_vars.iter().cloned());
+    // Rewrite localhost/127.0.0.1 endpoints so a buildspec that calls back to
+    // fakecloud reaches the host from inside the build container.
+    rewrite_localhost_env(&mut env, &job.backend.host_net.host_alias);
 
     // Run ALL phases in ONE continuous shell so cd/export persist across phases.
     let script = build_script(&spec);
@@ -978,10 +1062,15 @@ async fn start_container(
         .arg("--label")
         .arg(format!("fakecloud-codebuild={}", job.project_name))
         .arg("--label")
-        .arg(format!(
-            "fakecloud-instance=fakecloud-{}",
-            std::process::id()
-        ));
+        .arg(format!("fakecloud-instance={}", current_instance_label()));
+    // Wire container-to-host networking so a buildspec can reach the fakecloud
+    // endpoint at `host.docker.internal`/`host.containers.internal` (no-op for
+    // podman, which provides the alias natively).
+    let mut add_host_args: Vec<String> = Vec::new();
+    job.backend.host_net.push_add_host_args(&mut add_host_args);
+    for arg in &add_host_args {
+        cmd.arg(arg);
+    }
     // Override the entrypoint so an image with its own ENTRYPOINT still just
     // sleeps; size the sleep to the build timeout (plus a teardown buffer) so a
     // long build's container never exits mid-run (AWS allows up to 8h).
@@ -1193,27 +1282,41 @@ async fn upload_artifacts(
         ));
     }
 
-    let matched = match_artifact_files(tmp.path(), &spec.artifacts_files)
-        .map_err(|e| format!("failed to enumerate artifacts: {e}"))?;
-    if matched.is_empty() {
-        return Err(format!(
-            "no matching artifact files for patterns {:?}",
-            spec.artifacts_files
-        ));
-    }
-
-    // Read each matched file's bytes.
-    let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
-    for rel in &matched {
-        let bytes = std::fs::read(tmp.path().join(rel))
-            .map_err(|e| format!("failed to read artifact {rel}: {e}"))?;
-        let stored = if spec.artifacts_discard_paths {
-            rel.rsplit('/').next().unwrap_or(rel).to_string()
+    // Enumerate, read, and (for ZIP packaging) compress artifacts off the async
+    // runtime: `match_artifact_files`, `std::fs::read`, and `zip_files` are all
+    // blocking std::fs / CPU work that must not stall the Tokio worker thread.
+    let patterns = spec.artifacts_files.clone();
+    let discard_paths = spec.artifacts_discard_paths;
+    let want_zip = packaging.eq_ignore_ascii_case("ZIP");
+    let payload = tokio::task::spawn_blocking(move || -> Result<ArtifactPayload, String> {
+        let matched = match_artifact_files(tmp.path(), &patterns)
+            .map_err(|e| format!("failed to enumerate artifacts: {e}"))?;
+        if matched.is_empty() {
+            return Err(format!(
+                "no matching artifact files for patterns {patterns:?}"
+            ));
+        }
+        let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
+        for rel in &matched {
+            let bytes = std::fs::read(tmp.path().join(rel))
+                .map_err(|e| format!("failed to read artifact {rel}: {e}"))?;
+            let stored = if discard_paths {
+                rel.rsplit('/').next().unwrap_or(rel).to_string()
+            } else {
+                rel.clone()
+            };
+            collected.push((stored, bytes));
+        }
+        if want_zip {
+            let zip_bytes =
+                zip_files(&collected).map_err(|e| format!("failed to zip artifacts: {e}"))?;
+            Ok(ArtifactPayload::Zip(zip_bytes))
         } else {
-            rel.clone()
-        };
-        collected.push((stored, bytes));
-    }
+            Ok(ArtifactPayload::Files(collected))
+        }
+    })
+    .await
+    .map_err(|e| format!("artifact staging task failed: {e}"))??;
 
     let prefix = match (art_path.is_empty(), art_name.is_empty()) {
         (true, true) => String::new(),
@@ -1223,38 +1326,47 @@ async fn upload_artifacts(
     };
 
     let mut written = 0usize;
-    if packaging.eq_ignore_ascii_case("ZIP") {
-        let zip_bytes =
-            zip_files(&collected).map_err(|e| format!("failed to zip artifacts: {e}"))?;
-        let key = if prefix.is_empty() {
-            format!("{art_name}.zip")
-        } else {
-            prefix.clone()
-        };
-        delivery
-            .put_object(
-                &job.account,
-                &bucket,
-                &key,
-                zip_bytes,
-                Some("application/zip"),
-            )
-            .map_err(|e| format!("failed to upload artifact zip: {e}"))?;
-        written += 1;
-    } else {
-        for (rel, bytes) in collected {
+    match payload {
+        ArtifactPayload::Zip(zip_bytes) => {
             let key = if prefix.is_empty() {
-                rel.clone()
+                format!("{art_name}.zip")
             } else {
-                format!("{prefix}/{rel}")
+                prefix.clone()
             };
             delivery
-                .put_object(&job.account, &bucket, &key, bytes, None)
-                .map_err(|e| format!("failed to upload artifact {rel}: {e}"))?;
+                .put_object(
+                    &job.account,
+                    &bucket,
+                    &key,
+                    zip_bytes,
+                    Some("application/zip"),
+                )
+                .map_err(|e| format!("failed to upload artifact zip: {e}"))?;
             written += 1;
+        }
+        ArtifactPayload::Files(collected) => {
+            for (rel, bytes) in collected {
+                let key = if prefix.is_empty() {
+                    rel.clone()
+                } else {
+                    format!("{prefix}/{rel}")
+                };
+                delivery
+                    .put_object(&job.account, &bucket, &key, bytes, None)
+                    .map_err(|e| format!("failed to upload artifact {rel}: {e}"))?;
+                written += 1;
+            }
         }
     }
     Ok(written)
+}
+
+/// Collected artifact bytes ready for S3 upload, produced on the blocking pool.
+enum ArtifactPayload {
+    /// A single zip archive (`packaging: ZIP`).
+    Zip(Vec<u8>),
+    /// Individual `(key-relative-path, bytes)` files (`packaging: NONE`).
+    Files(Vec<(String, Vec<u8>)>),
 }
 
 /// Recursively list files under `root` (relative, `/`-separated) and return
@@ -1496,5 +1608,43 @@ mod tests {
     #[test]
     fn disabled_env_recognized() {
         assert!(!env_truthy("FAKECLOUD_CODEBUILD_DISABLE_BACKEND_UNSET_XYZ"));
+    }
+
+    #[test]
+    fn rewrite_localhost_env_targets_only_urls() {
+        let mut env = vec![
+            (
+                "FAKECLOUD_ENDPOINT".to_string(),
+                "http://localhost:4566".to_string(),
+            ),
+            (
+                "AWS_URL".to_string(),
+                "https://127.0.0.1:4566/x".to_string(),
+            ),
+            ("MSG".to_string(), "connect to localhost later".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ];
+        rewrite_localhost_env(&mut env, "host.docker.internal");
+        assert_eq!(env[0].1, "http://host.docker.internal:4566");
+        assert_eq!(env[1].1, "https://host.docker.internal:4566/x");
+        // A bare "localhost" word outside an http(s):// URL is untouched.
+        assert_eq!(env[2].1, "connect to localhost later");
+        assert_eq!(env[3].1, "");
+    }
+
+    #[test]
+    fn rewrite_localhost_env_noop_on_host() {
+        // When fakecloud runs on the host the alias is 127.0.0.1: no rewrite.
+        let mut env = vec![("U".to_string(), "http://localhost:4566".to_string())];
+        rewrite_localhost_env(&mut env, "127.0.0.1");
+        assert_eq!(env[0].1, "http://localhost:4566");
+    }
+
+    #[test]
+    fn instance_label_is_process_scoped() {
+        assert_eq!(
+            current_instance_label(),
+            format!("fakecloud-{}", std::process::id())
+        );
     }
 }
