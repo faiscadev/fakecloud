@@ -194,7 +194,31 @@ pub async fn wait_for_serverless_cache_available(
 /// This exists so a broker that fails to become ready in CI is DIAGNOSABLE: the
 /// container's recent logs reveal the real reason (OOM kill, Erlang node/cookie
 /// error, slow boot, crash loop) instead of a bare "CREATION_FAILED".
-pub fn dump_mq_broker_diagnostics(broker_id: &str) {
+pub async fn dump_mq_broker_diagnostics(server: &TestServer, broker_id: &str) {
+    // The broker's persisted `statusReason` carries the REAL cause a bring-up
+    // failed (docker stderr + the failed container's logs), captured by the mq
+    // runtime and stored on the CREATION_FAILED record. The typed AWS SDK drops
+    // this non-modeled field, so read it straight off the raw restJson1
+    // DescribeBroker body (`GET /v1/brokers/{id}`). Best-effort: a fetch failure
+    // just prints a note rather than masking the docker diagnostics below.
+    println!("\n===== MQ broker statusReason for {broker_id} =====");
+    match reqwest::Client::new()
+        .get(format!("{}/v1/brokers/{broker_id}", server.endpoint()))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(body) => println!(
+                "statusReason: {}",
+                body.get("statusReason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<none set>")
+            ),
+            Err(e) => println!("<could not parse DescribeBroker body: {e}>"),
+        },
+        Err(e) => println!("<could not fetch DescribeBroker: {e}>"),
+    }
+
     fn docker(args: &[&str]) -> String {
         match std::process::Command::new("docker").args(args).output() {
             Ok(o) => {

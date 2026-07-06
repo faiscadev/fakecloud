@@ -526,11 +526,11 @@ pub(crate) async fn settle_broker_up(
     state: &SharedMqState,
     account: &str,
     id: &str,
-    running: Option<crate::runtime::RunningBroker>,
+    running: Result<crate::runtime::RunningBroker, String>,
     runtime: &Arc<MqRuntime>,
 ) {
     match running {
-        Some(r) => {
+        Ok(r) => {
             let present = {
                 let mut guard = state.write();
                 let data = guard.get_or_create(account);
@@ -547,11 +547,16 @@ pub(crate) async fn settle_broker_up(
                 runtime.stop_broker(id).await;
             }
         }
-        None => {
+        Err(reason) => {
             let mut guard = state.write();
             let data = guard.get_or_create(account);
             if let Some(obj) = data.brokers.get_mut(id).and_then(Value::as_object_mut) {
                 obj.insert("brokerState".into(), json!("CREATION_FAILED"));
+                // Persist the real reason (docker stderr + the failed container's
+                // logs) so a CREATION_FAILED broker says WHY it failed rather than
+                // being a black box. Surfaces in the raw DescribeBroker body and
+                // the persisted snapshot; the E2E diagnostics dump prints it too.
+                obj.insert("statusReason".into(), json!(reason));
             }
         }
     }
@@ -721,10 +726,10 @@ impl MqService {
             let running = runtime
                 .ensure_broker(&id, spec.engine, &spec.users, spec.user_config.as_deref())
                 .await
-                .map_err(
-                    |error| tracing::error!(%error, broker_id = %id, "MQ broker container failed to start"),
-                )
-                .ok();
+                .map_err(|error| {
+                    tracing::error!(%error, broker_id = %id, "MQ broker container failed to start");
+                    error.to_string()
+                });
             settle_broker_up(&state, &account, &id, running, &runtime).await;
             save_snapshot(&state, store, &lock).await;
         });
@@ -752,8 +757,8 @@ impl MqService {
         tokio::spawn(async move {
             let running =
                 recover_bring_up(&runtime, &id, &spec, persisted_container_id.as_deref()).await;
-            if running.is_some() {
-                settle_broker_up(&state, &account, &id, running, &runtime).await;
+            if let Some(r) = running {
+                settle_broker_up(&state, &account, &id, Ok(r), &runtime).await;
             } else {
                 // Recovery exhausted its retries. Leave the broker
                 // CREATION_IN_PROGRESS (set during recovery setup) rather than a

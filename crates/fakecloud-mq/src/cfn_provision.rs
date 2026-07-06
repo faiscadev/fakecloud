@@ -44,10 +44,10 @@ pub async fn cfn_ensure_broker_container(
             spec.user_config.as_deref(),
         )
         .await
-        .map_err(
-            |error| tracing::error!(%error, broker_id = %broker_id, "CFN MQ broker container failed to start"),
-        )
-        .ok();
+        .map_err(|error| {
+            tracing::error!(%error, broker_id = %broker_id, "CFN MQ broker container failed to start");
+            error.to_string()
+        });
     settle_broker_up(&state, &account_id, &broker_id, running, &runtime).await;
 }
 
