@@ -223,7 +223,6 @@ jobs:
           publish fakecloud-s3tables          # only core/persistence/aws deps
           publish fakecloud-lakeformation     # only core/persistence/aws deps
           publish fakecloud-codeconnections   # only core/persistence/aws deps
-          publish fakecloud-codebuild         # only core/persistence/aws deps
           publish fakecloud-codecommit        # only core/persistence/aws deps
           publish fakecloud-codedeploy        # only core/persistence/aws deps
           publish fakecloud-codepipeline      # only core/persistence/aws deps
@@ -254,6 +253,7 @@ jobs:
           publish fakecloud-s3             # depends on kms
           publish fakecloud-ecr            # depends on iam, kms
           publish fakecloud-ssm            # depends on secretsmanager
+          publish fakecloud-codebuild      # depends on secretsmanager, ssm, logs (real buildspec exec)
           publish fakecloud-apigateway     # depends on elbv2, wafv2
 
           # Layer 5: depend on layer 4
