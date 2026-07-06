@@ -203,7 +203,6 @@ jobs:
           publish fakecloud-memorydb         # only core/persistence/aws deps
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
-          publish fakecloud-route53resolver  # depends on ec2 (VPC/subnet/SG validation)
           publish fakecloud-mq               # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
@@ -251,6 +250,7 @@ jobs:
 
           # Layer 4: depend on layer 3a/3b crates
           publish fakecloud-s3             # depends on kms
+          publish fakecloud-route53resolver  # depends on ec2, s3 (ImportFirewallDomains)
           publish fakecloud-ecr            # depends on iam, kms
           publish fakecloud-ssm            # depends on secretsmanager
           publish fakecloud-codebuild      # depends on secretsmanager, ssm, logs (real buildspec exec)

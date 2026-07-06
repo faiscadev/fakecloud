@@ -20,8 +20,9 @@ use crate::state::{
     Route53ResolverAccounts, SharedRoute53ResolverState,
 };
 use crate::validate::{
-    arn, conflict, hex17, invalid_parameter, invalid_request, not_found, now_rfc3339, parse_tags,
-    parse_target_ips, required_str, resource_in_use, unknown_resource, validation,
+    arn, conflict, fnv1a, hex17, invalid_next_token, invalid_parameter, invalid_request, not_found,
+    now_rfc3339, parse_tags, parse_target_ips, required_str, resource_in_use, synth_vpc,
+    unknown_resource, validation,
 };
 
 /// How long a resource takes to settle from its transient creation state to its
@@ -121,6 +122,7 @@ enum Settle {
 pub struct Route53ResolverService {
     state: SharedRoute53ResolverState,
     ec2_state: Option<fakecloud_ec2::SharedEc2State>,
+    s3_state: Option<fakecloud_s3::SharedS3State>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -130,6 +132,7 @@ impl Route53ResolverService {
         Self {
             state,
             ec2_state: None,
+            s3_state: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -137,6 +140,13 @@ impl Route53ResolverService {
 
     pub fn with_ec2_state(mut self, ec2_state: fakecloud_ec2::SharedEc2State) -> Self {
         self.ec2_state = Some(ec2_state);
+        self
+    }
+
+    /// Wire S3 state so `ImportFirewallDomains` can read the domains file the
+    /// caller stored in S3 (the operation's only domain source).
+    pub fn with_s3_state(mut self, s3_state: fakecloud_s3::SharedS3State) -> Self {
+        self.s3_state = Some(s3_state);
         self
     }
 
@@ -502,11 +512,18 @@ impl Route53ResolverService {
         }
         self.validate_security_groups(&account, &security_group_ids)?;
 
+        // A Resolver endpoint requires at least two IP addresses (the DNS
+        // service is highly available across two subnets); the model bounds
+        // `IpAddresses` to [2, 20].
         let ip_reqs = body
             .get("IpAddresses")
             .and_then(Value::as_array)
-            .filter(|a| !a.is_empty())
-            .ok_or_else(|| invalid_parameter("At least one IpAddress is required"))?;
+            .ok_or_else(|| invalid_parameter("IpAddresses is required"))?;
+        if ip_reqs.len() < 2 {
+            return Err(invalid_request(
+                "Resolver endpoints must have at least two IP addresses in two different subnets",
+            ));
+        }
 
         // When EC2 state is wired, every subnet must exist and share one VPC.
         // In standalone mode (no EC2 state) there are no real subnets, so a
@@ -676,6 +693,16 @@ impl Route53ResolverService {
             .get(&account_id(req))
             .map(|a| a.endpoints.values().map(|r| to_val(&r.endpoint)).collect())
             .unwrap_or_default();
+        let all = apply_filters(all, &body, |name| match name {
+            "CreatorRequestId" => Some("CreatorRequestId"),
+            "Direction" => Some("Direction"),
+            "HostVPCId" => Some("HostVPCId"),
+            "IpAddressCount" => Some("IpAddressCount"),
+            "Name" => Some("Name"),
+            "SecurityGroupIds" => Some("SecurityGroupIds"),
+            "Status" => Some("Status"),
+            _ => None,
+        })?;
         let (page, next) = paginate(&body, all);
         Ok(list_response(
             json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverEndpoints": page }),
@@ -825,8 +852,14 @@ impl Route53ResolverService {
             .and_then(Value::as_str)
             .map(str::to_string);
         let target_ips = parse_target_ips(body.get("TargetIps"))?;
-        // A FORWARD rule must target an OUTBOUND resolver endpoint.
+        // A FORWARD rule forwards queries to specific target IPs via an OUTBOUND
+        // resolver endpoint, so both TargetIps and the endpoint are required.
         if rule_type == "FORWARD" {
+            if target_ips.is_empty() {
+                return Err(invalid_request(
+                    "TargetIps is required for a rule of type FORWARD",
+                ));
+            }
             let ep_id = resolver_endpoint_id
                 .clone()
                 .ok_or_else(|| invalid_parameter("A FORWARD rule requires a ResolverEndpointId"))?;
@@ -952,6 +985,15 @@ impl Route53ResolverService {
             .get(&account_id(req))
             .map(|a| a.rules.values().map(to_val).collect())
             .unwrap_or_default();
+        let all = apply_filters(all, &body, |name| match name {
+            "CreatorRequestId" => Some("CreatorRequestId"),
+            "DomainName" => Some("DomainName"),
+            "Name" => Some("Name"),
+            "ResolverEndpointId" => Some("ResolverEndpointId"),
+            "Status" => Some("Status"),
+            "Type" => Some("RuleType"),
+            _ => None,
+        })?;
         let (page, next) = paginate(&body, all);
         Ok(list_response(
             json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverRules": page }),
@@ -1061,6 +1103,13 @@ impl Route53ResolverService {
             .get(&account_id(req))
             .map(|a| a.rule_associations.values().map(to_val).collect())
             .unwrap_or_default();
+        let all = apply_filters(all, &body, |name| match name {
+            "Name" => Some("Name"),
+            "ResolverRuleId" => Some("ResolverRuleId"),
+            "Status" => Some("Status"),
+            "VPCId" => Some("VPCId"),
+            _ => None,
+        })?;
         let (page, next) = paginate(&body, all);
         Ok(list_response(
             json!({ "MaxResults": echoed_max(&body, page.len()), "ResolverRuleAssociations": page }),
@@ -1156,12 +1205,25 @@ impl Route53ResolverService {
             .get(&account_id(req))
             .map(|a| a.query_log_configs.values().map(to_val).collect())
             .unwrap_or_default();
-        let n = all.len();
+        let total = all.len();
+        let all = apply_filters(all, &body, |name| match name {
+            "Arn" => Some("Arn"),
+            "AssociationCount" => Some("AssociationCount"),
+            "CreationTime" => Some("CreationTime"),
+            "CreatorRequestId" => Some("CreatorRequestId"),
+            "Destination" | "DestinationArn" => Some("DestinationArn"),
+            "Id" => Some("Id"),
+            "Name" => Some("Name"),
+            "OwnerId" => Some("OwnerId"),
+            "Status" => Some("Status"),
+            _ => None,
+        })?;
+        let filtered = all.len();
         let (list, next) = paginate(&body, all);
         Ok(list_response(
             json!({
-                "TotalCount": n,
-                "TotalFilteredCount": n,
+                "TotalCount": total,
+                "TotalFilteredCount": filtered,
                 "ResolverQueryLogConfigs": list,
             }),
             next,
@@ -1282,12 +1344,22 @@ impl Route53ResolverService {
             .get(&account_id(req))
             .map(|a| a.query_log_associations.values().map(to_val).collect())
             .unwrap_or_default();
-        let n = all.len();
+        let total = all.len();
+        let all = apply_filters(all, &body, |name| match name {
+            "CreationTime" => Some("CreationTime"),
+            "Error" => Some("Error"),
+            "Id" => Some("Id"),
+            "ResolverQueryLogConfigId" => Some("ResolverQueryLogConfigId"),
+            "ResourceId" => Some("ResourceId"),
+            "Status" => Some("Status"),
+            _ => None,
+        })?;
+        let filtered = all.len();
         let (list, next) = paginate(&body, all);
         Ok(list_response(
             json!({
-                "TotalCount": n,
-                "TotalFilteredCount": n,
+                "TotalCount": total,
+                "TotalFilteredCount": filtered,
                 "ResolverQueryLogConfigAssociations": list,
             }),
             next,
@@ -1697,32 +1769,77 @@ impl Route53ResolverService {
     }
 
     fn import_firewall_domains(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // Route 53 Resolver imports domains from an S3 object URL. We do not
-        // fetch the object; instead we accept the request and mark the list
-        // COMPLETE (the domains land empty). Real import content is a data-plane
-        // concern out of scope for the control plane.
+        // Route 53 Resolver's ImportFirewallDomains reads a plain-text file (one
+        // domain per line) that the caller stored in S3, then REPLACEs the
+        // domain list with its contents. When S3 state is wired and the object
+        // is present we perform the real import; otherwise the list is left
+        // unchanged and the response says so (rather than fabricating a
+        // successful import of zero domains).
         let body = req.json_body();
         let account = account_id(req);
         let id = required_str(&body, "FirewallDomainListId")?;
         let _op = required_str(&body, "Operation")?;
-        let _url = required_str(&body, "DomainFileUrl")?;
+        let url = required_str(&body, "DomainFileUrl")?;
+        let imported = self.fetch_domain_file(&account, &url);
         let mut st = self.state.write();
         let acc = st
             .accounts
             .get_mut(&account)
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
-        let list = acc
-            .firewall_domain_lists
-            .get_mut(&id)
-            .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
+        if !acc.firewall_domain_lists.contains_key(&id) {
+            return Err(not_found(format!("Firewall domain list '{id}' not found")));
+        }
+        let (count, status_message) = match imported {
+            Some(domains) => {
+                let n = domains.len() as i64;
+                acc.firewall_domains.insert(id.clone(), domains);
+                (n, "Successfully imported domains from the file".to_string())
+            }
+            None => {
+                let n = acc
+                    .firewall_domains
+                    .get(&id)
+                    .map(|d| d.len() as i64)
+                    .unwrap_or(0);
+                (
+                    n,
+                    "The domains file could not be retrieved; the domain list is unchanged"
+                        .to_string(),
+                )
+            }
+        };
+        let list = acc.firewall_domain_lists.get_mut(&id).unwrap();
+        list.domain_count = count;
         list.status = "COMPLETE".to_string();
         list.modification_time = now_rfc3339();
         Ok(AwsResponse::ok_json(json!({
             "Id": list.id,
             "Name": list.name,
             "Status": list.status,
-            "StatusMessage": "Import complete",
+            "StatusMessage": status_message,
         })))
+    }
+
+    /// Read the domains file referenced by an S3 URL and return one trimmed,
+    /// non-empty domain per line. Returns `None` when S3 state is not wired, the
+    /// URL is unparseable, or the object is absent/unreadable.
+    fn fetch_domain_file(&self, account: &str, url: &str) -> Option<Vec<String>> {
+        let s3 = self.s3_state.as_ref()?;
+        let (bucket, key) = parse_s3_url(url)?;
+        let bytes = {
+            let guard = s3.read();
+            let s3_state = guard.get(account)?;
+            let obj = s3_state.buckets.get(&bucket)?.objects.get(&key)?;
+            s3_state.read_body(&obj.body).ok()?
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        Some(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
     }
 
     fn update_firewall_domains(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1963,6 +2080,21 @@ impl Route53ResolverService {
         if let Some(b) = body.get("BlockResponse").and_then(Value::as_str) {
             rule.block_response = Some(b.to_string());
         }
+        if let Some(d) = body.get("BlockOverrideDomain").and_then(Value::as_str) {
+            rule.block_override_domain = Some(d.to_string());
+        }
+        if let Some(t) = body.get("BlockOverrideDnsType").and_then(Value::as_str) {
+            rule.block_override_dns_type = Some(t.to_string());
+        }
+        if let Some(ttl) = body.get("BlockOverrideTtl").and_then(Value::as_i64) {
+            rule.block_override_ttl = Some(ttl);
+        }
+        if let Some(a) = body
+            .get("FirewallDomainRedirectionAction")
+            .and_then(Value::as_str)
+        {
+            rule.firewall_domain_redirection_action = Some(a.to_string());
+        }
         rule.modification_time = now_rfc3339();
         let out = rule.clone();
         Ok(AwsResponse::ok_json(
@@ -2104,6 +2236,24 @@ impl Route53ResolverService {
             }
             if let Some(n) = e.get("Name").and_then(Value::as_str) {
                 rule.name = n.to_string();
+            }
+            if let Some(b) = e.get("BlockResponse").and_then(Value::as_str) {
+                rule.block_response = Some(b.to_string());
+            }
+            if let Some(d) = e.get("BlockOverrideDomain").and_then(Value::as_str) {
+                rule.block_override_domain = Some(d.to_string());
+            }
+            if let Some(t) = e.get("BlockOverrideDnsType").and_then(Value::as_str) {
+                rule.block_override_dns_type = Some(t.to_string());
+            }
+            if let Some(ttl) = e.get("BlockOverrideTtl").and_then(Value::as_i64) {
+                rule.block_override_ttl = Some(ttl);
+            }
+            if let Some(a) = e
+                .get("FirewallDomainRedirectionAction")
+                .and_then(Value::as_str)
+            {
+                rule.firewall_domain_redirection_action = Some(a.to_string());
             }
             rule.modification_time = now_rfc3339();
             updated.push(to_val(&rule.clone()));
@@ -2298,6 +2448,13 @@ impl Route53ResolverService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
+        // Unlike the resolver-* lists, ListFirewallRuleGroupAssociations narrows
+        // by dedicated top-level request parameters (not a `Filters` list): an
+        // association is kept only when it matches every supplied parameter.
+        let f_group = body.get("FirewallRuleGroupId").and_then(Value::as_str);
+        let f_vpc = body.get("VpcId").and_then(Value::as_str);
+        let f_priority = body.get("Priority").and_then(Value::as_i64);
+        let f_status = body.get("Status").and_then(Value::as_str);
         let all: Vec<Value> = self
             .state
             .read()
@@ -2306,6 +2463,12 @@ impl Route53ResolverService {
             .map(|a| {
                 a.firewall_rule_group_associations
                     .values()
+                    .filter(|assoc| {
+                        f_group.is_none_or(|g| g == assoc.firewall_rule_group_id)
+                            && f_vpc.is_none_or(|v| v == assoc.vpc_id)
+                            && f_priority.is_none_or(|p| p == assoc.priority)
+                            && f_status.is_none_or(|s| s == assoc.status)
+                    })
                     .map(to_val)
                     .collect()
             })
@@ -2720,6 +2883,36 @@ fn validate_constraints(action: &str, body: &Value) -> Result<(), AwsServiceErro
         Ok(())
     };
 
+    // A `NextToken` is an opaque page-offset this service minted; a present,
+    // non-empty token that does not parse as an offset was never issued by us
+    // and is rejected (rather than silently restarting at page 1, which would
+    // loop the caller forever). Use the error each operation actually declares:
+    // most resolver list ops declare `InvalidNextTokenException`,
+    // `ListResolverQueryLogConfigAssociations` declares `InvalidParameterException`,
+    // and the DNS Firewall + Outpost list ops declare `ValidationException`.
+    if let Some(tok) = body.get("NextToken").and_then(Value::as_str) {
+        if !tok.is_empty() && tok.parse::<usize>().is_err() {
+            const NEXT_TOKEN_OPS: &[&str] = &[
+                "ListResolverConfigs",
+                "ListResolverDnssecConfigs",
+                "ListResolverEndpointIpAddresses",
+                "ListResolverEndpoints",
+                "ListResolverQueryLogConfigs",
+                "ListResolverRuleAssociations",
+                "ListResolverRules",
+                "ListTagsForResource",
+            ];
+            let msg = "Invalid value for parameter NextToken";
+            return Err(if NEXT_TOKEN_OPS.contains(&action) {
+                invalid_next_token(msg)
+            } else if action == "ListResolverQueryLogConfigAssociations" {
+                invalid_parameter(msg)
+            } else {
+                validation(msg)
+            });
+        }
+    }
+
     match action {
         "CreateResolverEndpoint" => {
             slen("CreatorRequestId", 1, 255)?;
@@ -2813,6 +3006,10 @@ fn required_str_v(body: &Value, field: &str) -> Result<String, AwsServiceError> 
 /// result set. The token is a plain start offset (opaque to callers) that
 /// round-trips: the returned `Some(token)` fed back as `NextToken` yields the
 /// next page, and `None` marks the last page. Returns `(page, next_token)`.
+///
+/// A malformed `NextToken` (one this service never minted) is rejected up front
+/// by [`validate_constraints`], so by the time it reaches here the token either
+/// parses as an offset or is treated as the start.
 fn paginate(body: &Value, items: Vec<Value>) -> (Vec<Value>, Option<String>) {
     let total = items.len();
     let start = body
@@ -2832,6 +3029,67 @@ fn paginate(body: &Value, items: Vec<Value>) -> (Vec<Value>, Option<String>) {
         None
     };
     (page, next)
+}
+
+/// Narrow a serialized-resource list by the request's `Filters`. Each filter is
+/// `{Name, Values}`; an item is kept only when it satisfies **every** filter,
+/// and a filter is satisfied when the item's mapped field equals **one** of the
+/// filter's values (AWS Route 53 Resolver filter semantics: AND across filters,
+/// OR within a filter's values).
+///
+/// `field_of` maps a filter `Name` to the JSON key on the serialized item —
+/// Route 53 Resolver filter names largely match the response field names, with
+/// a few aliases (e.g. resolver-rule `Type` -> `RuleType`). An unrecognized
+/// filter name is rejected with `InvalidParameterException`, matching AWS.
+///
+/// Number fields (e.g. `IpAddressCount`) are compared by their decimal string,
+/// and list fields (e.g. `SecurityGroupIds`) match when any element equals a
+/// value.
+fn apply_filters(
+    items: Vec<Value>,
+    body: &Value,
+    field_of: impl Fn(&str) -> Option<&'static str>,
+) -> Result<Vec<Value>, AwsServiceError> {
+    let filters = match body.get("Filters").and_then(Value::as_array) {
+        Some(f) if !f.is_empty() => f,
+        _ => return Ok(items),
+    };
+    // Resolve every filter's field up front so an unknown name fails once,
+    // before scanning any items.
+    let mut resolved: Vec<(&'static str, Vec<String>)> = Vec::with_capacity(filters.len());
+    for f in filters {
+        let name = f
+            .get("Name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_parameter("Each filter requires a Name"))?;
+        let key = field_of(name)
+            .ok_or_else(|| invalid_parameter(format!("The filter '{name}' is invalid")))?;
+        let values: Vec<String> = f
+            .get("Values")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        resolved.push((key, values));
+    }
+    let kept = items
+        .into_iter()
+        .filter(|item| {
+            resolved.iter().all(|(key, values)| match item.get(*key) {
+                Some(Value::String(s)) => values.iter().any(|v| v == s),
+                Some(Value::Number(n)) => values.iter().any(|v| *v == n.to_string()),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|s| values.iter().any(|v| v == s)),
+                _ => false,
+            })
+        })
+        .collect();
+    Ok(kept)
 }
 
 /// The `MaxResults` value a paginated list echoes back: the request's page size
@@ -2865,22 +3123,6 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Deterministically synthesize a VPC id for a subnet when EC2 state is not
-/// wired, so `HostVPCId` is stable across calls for the same subnet.
-fn synth_vpc(subnet_id: &str) -> String {
-    format!("vpc-{:017x}", fnv1a(subnet_id) & 0x000f_ffff_ffff_ffff)
-}
-
-/// FNV-1a hash of a string, used to derive stable deterministic ids/suffixes.
-fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 1469598103934665603;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211);
-    }
-    h
-}
-
 /// A stable 17-hex-character id suffix derived from a seed (e.g. a VPC id), so
 /// the config singletons (`rslvr-rc-*`/`rslvr-ds-*`/`rslvr-fc-*`) synthesized
 /// for an unconfigured resource return the same id on every `Get`, matching AWS.
@@ -2903,6 +3145,37 @@ fn transient_terminal(status: &str) -> Option<String> {
 /// Synthesize a private IP for an endpoint IP address when the caller omits one.
 fn synth_ip(existing: &[IpAddressResponse]) -> String {
     format!("10.0.0.{}", 10 + existing.len())
+}
+
+/// Parse an S3 object URL into `(bucket, key)`, accepting the forms AWS and the
+/// SDKs emit: `s3://bucket/key`, path-style `https://host/bucket/key`, and
+/// virtual-hosted `https://bucket.s3.<...>/key`. Any query string or fragment
+/// is stripped. Returns `None` when the URL does not name both a bucket and a
+/// key.
+fn parse_s3_url(url: &str) -> Option<(String, String)> {
+    if let Some(rest) = url.strip_prefix("s3://") {
+        let (bucket, key) = rest.split_once('/')?;
+        return non_empty_pair(bucket, key);
+    }
+    let after_scheme = url.split_once("://").map(|(_, r)| r)?;
+    let (host, rest) = after_scheme.split_once('/')?;
+    let path = rest.split(['?', '#']).next().unwrap_or(rest);
+    // Virtual-hosted style: the bucket is the label before `.s3.`/`.s3-`.
+    if let Some(idx) = host.find(".s3.").or_else(|| host.find(".s3-")) {
+        return non_empty_pair(&host[..idx], path);
+    }
+    // Path-style: the first path segment is the bucket.
+    let (bucket, key) = path.split_once('/')?;
+    non_empty_pair(bucket, key)
+}
+
+/// `Some((bucket, key))` only when neither part is empty.
+fn non_empty_pair(bucket: &str, key: &str) -> Option<(String, String)> {
+    if bucket.is_empty() || key.is_empty() {
+        None
+    } else {
+        Some((bucket.to_string(), key.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -3096,5 +3369,295 @@ mod tests {
         let st = state.read();
         let c = st.accounts["123456789012"].dnssec_configs["rslvr-ds-abc"].clone();
         assert_eq!(c.validation_status, "ENABLED");
+    }
+
+    async fn call_err(svc: &Route53ResolverService, action: &str, body: Value) -> AwsServiceError {
+        match svc.handle(req(action, body)).await {
+            Ok(_) => panic!("{action} should have failed"),
+            Err(e) => e,
+        }
+    }
+
+    async fn make_endpoint(svc: &Route53ResolverService, req_id: &str, direction: &str) {
+        let (status, body) = call(
+            svc,
+            "CreateResolverEndpoint",
+            json!({
+                "CreatorRequestId": req_id,
+                "Direction": direction,
+                "SecurityGroupIds": ["sg-1"],
+                "IpAddresses": [ { "SubnetId": "subnet-a" }, { "SubnetId": "subnet-b" } ],
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    // Finding 1: a List with Filters actually narrows the result set (AND across
+    // filters, OR within a filter's values), instead of returning everything.
+    #[tokio::test]
+    async fn filters_narrow_resolver_endpoints() {
+        let svc = Route53ResolverService::default();
+        make_endpoint(&svc, "in", "INBOUND").await;
+        make_endpoint(&svc, "out", "OUTBOUND").await;
+
+        let (_, all) = call(&svc, "ListResolverEndpoints", json!({})).await;
+        assert_eq!(all["ResolverEndpoints"].as_array().unwrap().len(), 2);
+
+        let (_, only_out) = call(
+            &svc,
+            "ListResolverEndpoints",
+            json!({ "Filters": [ { "Name": "Direction", "Values": ["OUTBOUND"] } ] }),
+        )
+        .await;
+        let eps = only_out["ResolverEndpoints"].as_array().unwrap();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0]["Direction"], "OUTBOUND");
+    }
+
+    // Finding 1: an unrecognized filter name is rejected, matching AWS.
+    #[tokio::test]
+    async fn invalid_filter_name_rejected() {
+        let svc = Route53ResolverService::default();
+        make_endpoint(&svc, "in", "INBOUND").await;
+        let err = call_err(
+            &svc,
+            "ListResolverEndpoints",
+            json!({ "Filters": [ { "Name": "Nope", "Values": ["x"] } ] }),
+        )
+        .await;
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    // Finding 2: UpdateFirewallRule persists the BlockOverride* and
+    // FirewallDomainRedirectionAction fields, which round-trip on List.
+    #[tokio::test]
+    async fn firewall_rule_override_fields_round_trip() {
+        let svc = Route53ResolverService::default();
+        let (_, g) = call(
+            &svc,
+            "CreateFirewallRuleGroup",
+            json!({ "CreatorRequestId": "c", "Name": "g" }),
+        )
+        .await;
+        let group_id = g["FirewallRuleGroup"]["Id"].as_str().unwrap().to_string();
+        let (_, dl) = call(
+            &svc,
+            "CreateFirewallDomainList",
+            json!({ "CreatorRequestId": "c", "Name": "dl" }),
+        )
+        .await;
+        let dl_id = dl["FirewallDomainList"]["Id"].as_str().unwrap().to_string();
+        let (s, _) = call(
+            &svc,
+            "CreateFirewallRule",
+            json!({
+                "FirewallRuleGroupId": group_id,
+                "FirewallDomainListId": dl_id,
+                "Name": "r",
+                "Priority": 10,
+                "Action": "BLOCK",
+                "BlockResponse": "OVERRIDE",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200);
+        let (s, upd) = call(
+            &svc,
+            "UpdateFirewallRule",
+            json!({
+                "FirewallRuleGroupId": group_id,
+                "FirewallDomainListId": dl_id,
+                "BlockResponse": "OVERRIDE",
+                "BlockOverrideDomain": "safe.example.com",
+                "BlockOverrideDnsType": "CNAME",
+                "BlockOverrideTtl": 42,
+                "FirewallDomainRedirectionAction": "TRUST_REDIRECTION_DOMAIN",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert_eq!(
+            upd["FirewallRule"]["BlockOverrideDomain"],
+            "safe.example.com"
+        );
+
+        let (_, listed) = call(
+            &svc,
+            "ListFirewallRules",
+            json!({ "FirewallRuleGroupId": group_id }),
+        )
+        .await;
+        let rule = &listed["FirewallRules"][0];
+        assert_eq!(rule["BlockOverrideDomain"], "safe.example.com");
+        assert_eq!(rule["BlockOverrideDnsType"], "CNAME");
+        assert_eq!(rule["BlockOverrideTtl"], 42);
+        assert_eq!(
+            rule["FirewallDomainRedirectionAction"],
+            "TRUST_REDIRECTION_DOMAIN"
+        );
+    }
+
+    // Finding 5: a NextToken that this service never minted is rejected with
+    // InvalidNextTokenException instead of silently restarting at page 1.
+    #[tokio::test]
+    async fn bad_next_token_rejected() {
+        let svc = Route53ResolverService::default();
+        make_endpoint(&svc, "in", "INBOUND").await;
+        let err = call_err(
+            &svc,
+            "ListResolverEndpoints",
+            json!({ "NextToken": "not-a-number" }),
+        )
+        .await;
+        assert_eq!(err.code(), "InvalidNextTokenException");
+    }
+
+    // Finding 7: a Resolver endpoint requires at least two IP addresses.
+    #[tokio::test]
+    async fn endpoint_requires_two_ips() {
+        let svc = Route53ResolverService::default();
+        let err = call_err(
+            &svc,
+            "CreateResolverEndpoint",
+            json!({
+                "CreatorRequestId": "c",
+                "Direction": "INBOUND",
+                "SecurityGroupIds": ["sg-1"],
+                "IpAddresses": [ { "SubnetId": "subnet-a" } ],
+            }),
+        )
+        .await;
+        assert_eq!(err.code(), "InvalidRequestException");
+    }
+
+    // Finding 7: a FORWARD rule requires TargetIps.
+    #[tokio::test]
+    async fn forward_rule_requires_targets() {
+        let svc = Route53ResolverService::default();
+        make_endpoint(&svc, "out", "OUTBOUND").await;
+        let (_, eps) = call(&svc, "ListResolverEndpoints", json!({})).await;
+        let ep_id = eps["ResolverEndpoints"][0]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let err = call_err(
+            &svc,
+            "CreateResolverRule",
+            json!({
+                "CreatorRequestId": "c",
+                "RuleType": "FORWARD",
+                "DomainName": "example.com",
+                "ResolverEndpointId": ep_id,
+            }),
+        )
+        .await;
+        assert_eq!(err.code(), "InvalidRequestException");
+    }
+
+    // Finding 6: ImportFirewallDomains reads the domain file from wired S3 state
+    // and REPLACEs the list (one trimmed, non-empty domain per line).
+    #[tokio::test]
+    async fn import_firewall_domains_from_s3() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        use fakecloud_s3::{memory_body, S3Bucket, S3Object};
+
+        let s3: fakecloud_s3::SharedS3State = Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost",
+        )));
+        {
+            let mut g = s3.write();
+            let st = g.get_or_create("123456789012");
+            let mut bucket = S3Bucket::new("my-bucket", "us-east-1", "123456789012");
+            bucket.objects.insert(
+                "domains.txt".to_string(),
+                S3Object {
+                    key: "domains.txt".to_string(),
+                    body: memory_body(Bytes::from("example.com\n  bad.example.org \n\nfoo.test\n")),
+                    ..Default::default()
+                },
+            );
+            st.buckets.insert("my-bucket".to_string(), bucket);
+        }
+        let svc = Route53ResolverService::default().with_s3_state(s3);
+        let (_, dl) = call(
+            &svc,
+            "CreateFirewallDomainList",
+            json!({ "CreatorRequestId": "c", "Name": "list" }),
+        )
+        .await;
+        let id = dl["FirewallDomainList"]["Id"].as_str().unwrap().to_string();
+        let (s, r) = call(
+            &svc,
+            "ImportFirewallDomains",
+            json!({
+                "FirewallDomainListId": id,
+                "Operation": "REPLACE",
+                "DomainFileUrl": "s3://my-bucket/domains.txt",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200, "{r}");
+        assert_eq!(r["Status"], "COMPLETE");
+
+        let (_, ld) = call(
+            &svc,
+            "ListFirewallDomains",
+            json!({ "FirewallDomainListId": id }),
+        )
+        .await;
+        let domains: Vec<String> = ld["Domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(domains, ["example.com", "bad.example.org", "foo.test"]);
+    }
+
+    // Finding 6: without S3 wired the import leaves the list unchanged and says
+    // so, rather than fabricating a successful import.
+    #[tokio::test]
+    async fn import_firewall_domains_without_s3_is_honest() {
+        let svc = Route53ResolverService::default();
+        let (_, dl) = call(
+            &svc,
+            "CreateFirewallDomainList",
+            json!({ "CreatorRequestId": "c", "Name": "list" }),
+        )
+        .await;
+        let id = dl["FirewallDomainList"]["Id"].as_str().unwrap().to_string();
+        let (s, r) = call(
+            &svc,
+            "ImportFirewallDomains",
+            json!({
+                "FirewallDomainListId": id,
+                "Operation": "REPLACE",
+                "DomainFileUrl": "s3://my-bucket/domains.txt",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200, "{r}");
+        assert!(r["StatusMessage"].as_str().unwrap().contains("unchanged"));
+    }
+
+    #[test]
+    fn parse_s3_url_forms() {
+        assert_eq!(
+            parse_s3_url("s3://bucket/path/to/key.txt"),
+            Some(("bucket".to_string(), "path/to/key.txt".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("https://s3.us-east-1.amazonaws.com/bucket/key.txt"),
+            Some(("bucket".to_string(), "key.txt".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("https://bucket.s3.us-east-1.amazonaws.com/key.txt?X-Amz-Signature=abc"),
+            Some(("bucket".to_string(), "key.txt".to_string()))
+        );
+        assert_eq!(parse_s3_url("s3://bucket-only"), None);
+        assert_eq!(parse_s3_url("not a url"), None);
     }
 }

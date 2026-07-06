@@ -17,7 +17,7 @@ use fakecloud_route53resolver::state::{
     ResolverEndpoint, ResolverQueryLogConfig, ResolverQueryLogConfigAssociation, ResolverRule,
     ResolverRuleAssociation, Tag, TargetAddress,
 };
-use fakecloud_route53resolver::validate::{arn as r53r_arn, hex17, now_rfc3339};
+use fakecloud_route53resolver::validate::{arn as r53r_arn, hex17, now_rfc3339, synth_vpc};
 
 impl ResourceProvisioner {
     /// Live-state `Fn::GetAtt` fallback for `AWS::Route53Resolver::*`. Captured
@@ -211,11 +211,14 @@ impl ResourceProvisioner {
             // Resolve the endpoint's HostVPCId from the subnet's real VPC in EC2
             // state (the same source the direct-API path uses), so a
             // CFN-provisioned endpoint carries the real VPC id — not an empty
-            // string — and `Fn::GetAtt HostVPCId` resolves correctly.
-            if host_vpc.is_empty() {
-                if let Some(vpc) = self.r53r_subnet_vpc(&subnet_id) {
-                    host_vpc = vpc;
-                }
+            // string — and `Fn::GetAtt HostVPCId` resolves correctly. When the
+            // subnet is not present in EC2 state, synthesize a stable VPC id
+            // from the subnet just like the direct-API path, rather than leaving
+            // HostVPCId empty.
+            if host_vpc.is_empty() && !subnet_id.is_empty() {
+                host_vpc = self
+                    .r53r_subnet_vpc(&subnet_id)
+                    .unwrap_or_else(|| synth_vpc(&subnet_id));
             }
             let ip = ipr
                 .get("Ip")
@@ -809,7 +812,21 @@ impl ResourceProvisioner {
             .with("ResourceId", resource_id))
     }
 
-    pub(super) fn delete_r53r_firewall_config(&self, _physical_id: &str) -> Result<(), String> {
+    pub(super) fn delete_r53r_firewall_config(&self, physical_id: &str) -> Result<(), String> {
+        // The firewall-config map is keyed by VPC (resource) id, while the CFN
+        // physical id is the config's own `rslvr-fc-*` id; drop the singleton
+        // whose id matches so a stack teardown does not leave it behind.
+        let mut st = self.route53resolver_state.write();
+        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+            let key = acc
+                .firewall_configs
+                .iter()
+                .find(|(_, c)| c.id == physical_id)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = key {
+                acc.firewall_configs.remove(&key);
+            }
+        }
         Ok(())
     }
 
@@ -852,7 +869,20 @@ impl ResourceProvisioner {
             .with("ResourceId", resource_id))
     }
 
-    pub(super) fn delete_r53r_resolver_config(&self, _physical_id: &str) -> Result<(), String> {
+    pub(super) fn delete_r53r_resolver_config(&self, physical_id: &str) -> Result<(), String> {
+        // Keyed by VPC (resource) id; the physical id is the `rslvr-rc-*` config
+        // id. Remove the singleton whose id matches on stack teardown.
+        let mut st = self.route53resolver_state.write();
+        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+            let key = acc
+                .resolver_configs
+                .iter()
+                .find(|(_, c)| c.id == physical_id)
+                .map(|(k, _)| k.clone());
+            if let Some(key) = key {
+                acc.resolver_configs.remove(&key);
+            }
+        }
         Ok(())
     }
 

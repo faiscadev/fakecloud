@@ -3197,7 +3197,8 @@ async fn main() {
         };
     let mut route53resolver_inner =
         fakecloud_route53resolver::Route53ResolverService::new(route53resolver_state.clone())
-            .with_ec2_state(ec2_state.clone());
+            .with_ec2_state(ec2_state.clone())
+            .with_s3_state(s3_state.clone());
     if let Some(store) = route53resolver_snapshot_store.clone() {
         route53resolver_inner = route53resolver_inner.with_snapshot_store(store);
     }
