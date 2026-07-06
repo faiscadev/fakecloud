@@ -3781,10 +3781,12 @@ version = "0.40.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-persistence",
+ "fakecloud-s3",
  "hex",
  "http 1.4.0",
  "parking_lot",
