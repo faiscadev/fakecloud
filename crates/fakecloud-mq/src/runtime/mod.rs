@@ -194,9 +194,14 @@ impl MqRuntime {
         Ok(running)
     }
 
-    /// Reboot a broker: tear the container down and bring a fresh one up with
-    /// the (post-pending) users + configuration, mirroring AWS applying
-    /// staged changes on `RebootBroker`.
+    /// Reboot a broker, mirroring AWS: a reboot RESTARTS the broker in place and
+    /// preserves durable messages. The SAME backing container is stopped, the
+    /// (post-pending) engine configuration is re-staged so a config change
+    /// staged for the reboot takes effect, and the container is started again --
+    /// its data directory (KahaDB / Mnesia) is never touched, so persisted
+    /// messages survive. Only if the tracked container is truly gone does this
+    /// fall back to spawning a fresh one (an empty broker being strictly better
+    /// than a wedged one).
     pub async fn reboot_broker(
         &self,
         broker_id: &str,
@@ -204,7 +209,25 @@ impl MqRuntime {
         users: &[BrokerUser],
         user_config: Option<&str>,
     ) -> Result<RunningBroker, RuntimeError> {
-        self.stop_broker(broker_id).await;
+        let existing = self.containers.read().get(broker_id).cloned();
+        if let Some(existing) = existing {
+            match self
+                .restart_container(engine, users, user_config, &existing.container_id)
+                .await?
+            {
+                Some(running) => {
+                    self.containers
+                        .write()
+                        .insert(broker_id.to_string(), running.clone());
+                    return Ok(running);
+                }
+                None => {
+                    // The tracked container vanished between reboots -> drop the
+                    // stale tracking entry and spawn a fresh one below.
+                    self.containers.write().remove(broker_id);
+                }
+            }
+        }
         let running = self
             .spawn_container(broker_id, engine, users, user_config)
             .await?;
@@ -212,6 +235,76 @@ impl MqRuntime {
             .write()
             .insert(broker_id.to_string(), running.clone());
         Ok(running)
+    }
+
+    /// Restart an EXISTING backing container in place for a reboot, re-staging
+    /// the (post-pending) engine configuration first so a staged config change
+    /// takes effect while the data directory (KahaDB / Mnesia) survives intact.
+    /// Returns `Ok(None)` when the container is gone (the caller spawns fresh),
+    /// `Err` on a real daemon/readiness failure, and `Ok(Some(..))` once it is
+    /// running again and its (possibly re-assigned) host ports have been re-read.
+    async fn restart_container(
+        &self,
+        engine: MqEngine,
+        users: &[BrokerUser],
+        user_config: Option<&str>,
+        container_id: &str,
+    ) -> Result<Option<RunningBroker>, RuntimeError> {
+        // Does the container still exist? A non-zero `inspect` means it is gone.
+        let inspect = tokio::process::Command::new(&self.cli)
+            .args(["inspect", "--format", "{{.State.Status}}", container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !inspect.status.success() {
+            return Ok(None);
+        }
+        // Stop it so the config re-stage lands before the broker boots again.
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["stop", container_id])
+            .output()
+            .await;
+        // Re-stage the (possibly changed) engine configuration. The data
+        // directory is a separate volume path the broker owns and `docker cp` of
+        // the config file never touches it, so durable messages survive.
+        self.stage_config(container_id, engine, users, user_config)
+            .await?;
+        let start = tokio::process::Command::new(&self.cli)
+            .args(["start", container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !start.status.success() {
+            let stderr = String::from_utf8_lossy(&start.stderr);
+            if stderr.contains("No such container") || stderr.contains("no such container") {
+                return Ok(None);
+            }
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "reboot restart failed: {}",
+                stderr.trim()
+            )));
+        }
+        // Re-read the host->container port mapping (a restarted container with
+        // ephemeral publishing may be assigned different host ports).
+        let mut ports = BTreeMap::new();
+        for (label, cport) in engine.published_ports() {
+            let hp = self.lookup_port(container_id, *cport).await?;
+            ports.insert((*label).to_string(), hp);
+        }
+        self.wait_for_broker_ready(engine, container_id, &ports)
+            .await?;
+        // RabbitMQ users are applied live (they persist in Mnesia across the
+        // restart, so re-applying is idempotent and covers any staged additions).
+        if engine == MqEngine::RabbitMq {
+            for u in users.iter().skip(1) {
+                let _ = self.rabbit_apply_user_to_container(container_id, u).await;
+            }
+        }
+        Ok(Some(RunningBroker {
+            container_id: container_id.to_string(),
+            host: self.net.sibling_host.clone(),
+            ports,
+        }))
     }
 
     /// Re-attach to a broker's PERSISTED backing container after a fakecloud

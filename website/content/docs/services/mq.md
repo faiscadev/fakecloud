@@ -47,16 +47,20 @@ lifecycle, but no real broker container is spawned.
   to the well-formed cosmetic `*.amazonaws.com` forms - identical response shape,
   synthetic values.)
 - **Broker lifecycle** - `RebootBroker` moves the broker to
-  `REBOOT_IN_PROGRESS`, restarts the real container applying every staged
-  pending change (engine version, host instance type, security groups,
-  authentication strategy, logs, and the pending configuration - the old current
-  configuration is pushed to `history`, and the injected users / uploaded config
-  are re-applied to the fresh container), then returns to `RUNNING`.
-  `UpdateBroker` stages those pending changes. `DeleteBroker` moves the broker to
-  `DELETION_IN_PROGRESS` and stops + removes its backing container. `Promote` is
-  accepted for a broker (the cross-region-data-replication promotion). A broker
-  persisted as `RUNNING` reconciles its backing container on restart (respawning
-  it if it is gone), so its endpoint is never advertised dead.
+  `REBOOT_IN_PROGRESS` and restarts the **same** backing container in place -
+  preserving durable messages (ActiveMQ KahaDB / RabbitMQ Mnesia survive the
+  reboot exactly as they do on AWS) - re-staging every pending change (engine
+  version, host instance type, security groups, authentication strategy, logs,
+  and the pending configuration; the old current configuration is pushed to
+  `history`), then returns to `RUNNING`. Only if the container is truly gone is a
+  fresh one spawned. `UpdateBroker` stages those pending changes (for ActiveMQ; a
+  RabbitMQ broker has no configuration to stage). `DeleteBroker` moves the broker
+  to `DELETION_IN_PROGRESS` and stops + removes its backing container. `Promote`
+  is a Cross-Region Data Replication (CRDR) failover / switchover; fakecloud
+  models a single standalone broker with no CRDR replica, so it returns a
+  `BadRequestException` rather than a fake success. A broker persisted as
+  `RUNNING` reconciles its backing container on restart (respawning it if it is
+  gone), so its endpoint is never advertised dead.
 - **Configurations** - `CreateConfiguration` returns a `c-`-prefixed id and its
   ARN with revision 1; `UpdateConfiguration` appends a new revision carrying the
   base64 `Data` and description. `DescribeConfiguration`,
@@ -117,10 +121,12 @@ accepts connections (a stack delete stops + removes the container). `Ref`
 resolves to the broker / configuration id, and `Fn::GetAtt` exposes the broker's
 `Arn`, `IpAddresses`, `OpenWireEndpoints`, `AmqpEndpoints`, `StompEndpoints`,
 `MqttEndpoints`, `WssEndpoints`, `ConfigurationId`, and `ConfigurationRevision`,
-and the configuration's `Arn`, `Id`, and `Revision`. (The `Fn::GetAtt` endpoint
-lists are resolved synchronously at provision time and so carry the cosmetic
-forms; `DescribeBroker` returns the real connectable endpoints once the broker is
-`RUNNING`.)
+and the configuration's `Arn`, `Id`, and `Revision`. The `Fn::GetAtt` endpoint /
+IP lists resolve **live** from the same backing-container binding
+`DescribeBroker` reads, so once the broker is `RUNNING` they return the real
+connectable `tcp://`/`amqp://<host>:<port>` endpoints (they carry the cosmetic
+forms only before the container has bound, matching `DescribeBroker` at that same
+moment).
 
 ## Known limitations
 
