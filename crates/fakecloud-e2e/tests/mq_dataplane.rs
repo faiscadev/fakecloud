@@ -34,11 +34,22 @@ fn docker_available() -> bool {
 }
 
 fn require_docker_or_skip(test: &str) -> bool {
+    // The real broker containers (JVM ActiveMQ / Erlang RabbitMQ) are heavy and
+    // strain the shared E2E partition's runner, so this suite runs ONLY in the
+    // dedicated, resourced `mq-broker` CI job, which sets FAKECLOUD_E2E_MQ_BROKER=1.
+    // In the shared partition the flag is unset and we skip loudly (by design),
+    // rather than hard-failing an environment that was never meant to spawn brokers.
+    if std::env::var("FAKECLOUD_E2E_MQ_BROKER").as_deref() != Ok("1") {
+        eprintln!(
+            "Skipping {test}: FAKECLOUD_E2E_MQ_BROKER!=1 (runs in the dedicated mq-broker CI job)"
+        );
+        return false;
+    }
     if docker_available() {
         return true;
     }
     if std::env::var("CI").is_ok() {
-        panic!("docker is required for {test} in CI");
+        panic!("docker is required for {test} in the mq-broker CI job");
     }
     eprintln!("Skipping {test}: docker not available");
     false
