@@ -3134,7 +3134,8 @@ async fn main() {
         } else {
             None
         };
-    let mut acmpca_inner = fakecloud_acmpca::AcmPcaService::new(acmpca_state.clone());
+    let mut acmpca_inner =
+        fakecloud_acmpca::AcmPcaService::new(acmpca_state.clone()).with_s3(s3_state.clone());
     if let Some(store) = acmpca_snapshot_store.clone() {
         acmpca_inner = acmpca_inner.with_snapshot_store(store);
     }

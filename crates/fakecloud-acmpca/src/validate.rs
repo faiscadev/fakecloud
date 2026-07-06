@@ -238,15 +238,33 @@ fn random_serial() -> Vec<u8> {
     bytes.to_vec()
 }
 
-/// Largest validity fakecloud will resolve, in days (~10,000 years). Keeps the
-/// date arithmetic well inside `chrono`'s representable range so a hostile
-/// `Validity.Value` produces a `ValidationException`, never an overflow panic.
-const MAX_VALIDITY_DAYS: i64 = 3_650_000;
+/// Largest validity fakecloud will resolve, in days. This keeps the DAYS/MONTHS/
+/// YEARS arithmetic inside a range whose resulting `not_after` an X.509
+/// certificate can actually represent (see [`ensure_representable`]). ~7,900
+/// years is comfortably beyond any real certificate lifetime yet stays under the
+/// year-9999 ceiling the `time` crate (and therefore the issued cert) enforces.
+const MAX_VALIDITY_DAYS: i64 = 2_900_000;
+
+/// Reject a resolved validity whose `not_after` an X.509 certificate cannot
+/// represent. The `time` crate — which `rcgen` uses to encode `not_after` — caps
+/// at year 9999; a larger timestamp would otherwise be silently clamped to the
+/// Unix epoch by [`to_offset`], producing a certificate whose validity window
+/// runs backwards (`not_after` in 1970, before `not_before` = now). Surfaced to
+/// the caller as a `ValidationException` instead.
+fn ensure_representable(dt: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+    OffsetDateTime::from_unix_timestamp(dt.timestamp())
+        .map(|_| dt)
+        .map_err(|_| {
+            "The requested validity exceeds the maximum certificate expiry that can be represented"
+                .to_string()
+        })
+}
 
 /// Resolve a `Validity` (Value + Type) into an absolute expiry timestamp using
 /// checked arithmetic. Returns `Err` (surfaced as `ValidationException`) for a
-/// non-positive value, an out-of-range/overflowing duration, or a malformed
-/// `END_DATE`, rather than overflowing or panicking on hostile input.
+/// non-positive value, an out-of-range/overflowing duration, a value past the
+/// representable certificate-expiry ceiling, or a malformed `END_DATE`, rather
+/// than overflowing, panicking, or silently producing a backwards certificate.
 pub fn resolve_validity(
     from: DateTime<Utc>,
     value: i64,
@@ -270,14 +288,17 @@ pub fn resolve_validity(
             if days > MAX_VALIDITY_DAYS {
                 return Err("Validity Value is too large".to_string());
             }
-            from.checked_add_signed(chrono::Duration::days(days))
-                .ok_or_else(|| "Validity Value is out of range".to_string())
+            let end = from
+                .checked_add_signed(chrono::Duration::days(days))
+                .ok_or_else(|| "Validity Value is out of range".to_string())?;
+            ensure_representable(end)
         }
         // ABSOLUTE: seconds since the Unix epoch.
         "ABSOLUTE" => DateTime::from_timestamp(value, 0)
-            .ok_or_else(|| "Validity ABSOLUTE value is out of range".to_string()),
+            .ok_or_else(|| "Validity ABSOLUTE value is out of range".to_string())
+            .and_then(ensure_representable),
         // END_DATE: a UTC timestamp encoded as the integer YYYYMMDDHHMMSS.
-        "END_DATE" => parse_end_date(value),
+        "END_DATE" => parse_end_date(value).and_then(ensure_representable),
         other => Err(format!("Invalid Validity Type: {other}")),
     }
 }
