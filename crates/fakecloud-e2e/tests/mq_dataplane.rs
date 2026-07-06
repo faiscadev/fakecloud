@@ -62,6 +62,7 @@ async fn mq_client(server: &TestServer) -> aws_sdk_mq::Client {
 /// Poll DescribeBroker until the broker reaches `RUNNING`, returning the
 /// broker's `brokerInstances` endpoints. Fails loudly on `CREATION_FAILED`.
 async fn wait_for_running(
+    server: &TestServer,
     client: &aws_sdk_mq::Client,
     broker_id: &str,
     timeout_secs: u64,
@@ -89,11 +90,11 @@ async fn wait_for_running(
             return endpoints;
         }
         if state == "CREATION_FAILED" {
-            helpers::dump_mq_broker_diagnostics(broker_id);
+            helpers::dump_mq_broker_diagnostics(server, broker_id).await;
             panic!("broker container failed to start (data plane could not come up)");
         }
         if std::time::Instant::now() >= deadline {
-            helpers::dump_mq_broker_diagnostics(broker_id);
+            helpers::dump_mq_broker_diagnostics(server, broker_id).await;
             panic!("broker {broker_id} did not reach RUNNING within {timeout_secs}s (last state: {state})");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -142,7 +143,7 @@ async fn activemq_broker_delivers_a_message_over_stomp() {
 
     // The container starts in the background (image pull + JVM boot), so allow
     // a generous window before the broker accepts connections.
-    let endpoints = wait_for_running(&client, &broker_id, 300).await;
+    let endpoints = wait_for_running(&server, &client, &broker_id, 300).await;
 
     // The STOMP endpoint must be a REAL reachable address, not *.amazonaws.com.
     let stomp = endpoints
@@ -228,7 +229,7 @@ async fn rabbitmq_broker_speaks_amqp() {
         .expect("create broker");
     let broker_id = created.broker_id().expect("broker id").to_string();
 
-    let endpoints = wait_for_running(&client, &broker_id, 300).await;
+    let endpoints = wait_for_running(&server, &client, &broker_id, 300).await;
     let amqp = endpoints
         .iter()
         .find(|e| e.starts_with("amqp://"))

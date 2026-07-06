@@ -306,6 +306,14 @@ impl MqRuntime {
         users: &[BrokerUser],
         user_config: Option<&str>,
     ) -> Result<RunningBroker, RuntimeError> {
+        // Reap a leaked container left by a PRIOR failed bring-up of THIS broker.
+        // A failed attempt is intentionally left un-reaped for post-mortem (see
+        // the failure paths below), so bound accumulation across the recover /
+        // reboot retry loop to a single most-recent failed container. Scoped to
+        // this broker AND this fakecloud instance, so it never disturbs another
+        // broker or another process's containers.
+        self.reap_stale_broker_containers(broker_id).await;
+
         let mut args: Vec<String> = vec!["create".to_string()];
         for (_, cport) in engine.published_ports() {
             args.push("-p".to_string());
@@ -377,9 +385,12 @@ impl MqRuntime {
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         if !start.status.success() {
-            self.remove_container(&container_id).await;
+            // Leave the container un-reaped for post-mortem (the E2E diagnostics
+            // dump finds it by label and prints its logs); the next bring-up
+            // attempt's stale-reap and the server-shutdown sweep clean it up.
+            let diag = self.capture_container_diagnostics(&container_id).await;
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "container start failed: {}",
+                "container start failed: {}; {diag}",
                 String::from_utf8_lossy(&start.stderr).trim()
             )));
         }
@@ -391,8 +402,8 @@ impl MqRuntime {
                     ports.insert((*label).to_string(), hp);
                 }
                 Err(e) => {
-                    self.remove_container(&container_id).await;
-                    return Err(e);
+                    let diag = self.capture_container_diagnostics(&container_id).await;
+                    return Err(RuntimeError::ContainerStartFailed(format!("{e}; {diag}")));
                 }
             }
         }
@@ -401,8 +412,8 @@ impl MqRuntime {
             .wait_for_broker_ready(engine, &container_id, &ports)
             .await
         {
-            self.remove_container(&container_id).await;
-            return Err(e);
+            let diag = self.capture_container_diagnostics(&container_id).await;
+            return Err(RuntimeError::ContainerStartFailed(format!("{e}; {diag}")));
         }
 
         // RabbitMQ users beyond the create-time env user are applied live,
@@ -809,6 +820,62 @@ impl MqRuntime {
             .output()
             .await;
     }
+
+    /// Remove any container labeled for THIS broker AND this fakecloud instance.
+    /// Used to sweep a leaked container left un-reaped by a prior failed bring-up
+    /// before a fresh attempt, without disturbing other brokers or another
+    /// fakecloud process's containers.
+    async fn reap_stale_broker_containers(&self, broker_id: &str) {
+        let Ok(out) = tokio::process::Command::new(&self.cli)
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=fakecloud-mq={broker_id}"),
+                "--filter",
+                &format!("label=fakecloud-instance={}", self.instance_id),
+            ])
+            .output()
+            .await
+        else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            self.remove_container(id).await;
+        }
+    }
+
+    /// Capture a failed container's terminal state + recent logs for a
+    /// CREATION_FAILED reason, so the failure surfaces WHY the broker didn't come
+    /// up (in the broker's `statusReason` and the E2E diagnostics dump) instead
+    /// of a bare "did not become ready" timeout.
+    async fn capture_container_diagnostics(&self, container_id: &str) -> String {
+        let state = tokio::process::Command::new(&self.cli)
+            .args([
+                "inspect",
+                "--format",
+                "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}",
+                container_id,
+            ])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let logs = tokio::process::Command::new(&self.cli)
+            .args(["logs", "--tail", "80", container_id])
+            .output()
+            .await
+            .map(|o| {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+                s.trim().to_string()
+            })
+            .unwrap_or_else(|e| format!("<docker logs failed: {e}>"));
+        format!("container state [{state}]; recent container logs:\n{logs}")
+    }
 }
 
 /// A STABLE, valid DNS-label container hostname for a RabbitMQ broker.
@@ -944,6 +1011,19 @@ pub fn activemq_config(users: &[BrokerUser], user_config: Option<&str>) -> Strin
         </shutdownHooks>
 
     </broker>
+
+    <!--
+      Start the Jetty web console (the `apache/activemq-classic` image's stock
+      activemq.xml ends with exactly this import). Broker readiness is gated on
+      the console answering HTTP on 8161, which starts LAST in the boot sequence
+      -- once it responds every transport connector is bound and accepting. When
+      this generated config REPLACES the image's default activemq.xml the import
+      must be carried over, or the console never binds, readiness times out after
+      180s, and the (otherwise fully-working) broker is reaped and marked
+      CREATION_FAILED. The Jetty connectors themselves live in the image's
+      conf/jetty.xml, which we don't touch.
+    -->
+    <import resource="jetty.xml"/>
 </beans>
 "#
     )
@@ -983,6 +1063,38 @@ mod tests {
         assert!(xml.contains("tcp://0.0.0.0:61616"));
         assert!(xml.contains("stomp://0.0.0.0:61613"));
         assert!(xml.contains("amqp://0.0.0.0:5672"));
+    }
+
+    #[test]
+    fn activemq_config_imports_jetty_so_the_console_starts() {
+        // Readiness is gated on the ActiveMQ web console (Jetty on 8161). The
+        // generated config REPLACES the image's stock activemq.xml, so it must
+        // carry over the `<import resource="jetty.xml"/>` that starts the console
+        // -- otherwise the console never binds, readiness times out after 180s,
+        // and the otherwise-healthy broker is reaped as CREATION_FAILED.
+        let xml = activemq_config(&[user("app", "s3cr3t", true)], None);
+        assert!(
+            xml.contains(r#"<import resource="jetty.xml"/>"#),
+            "generated activemq.xml must import jetty.xml to start the web console"
+        );
+        // The import is a sibling of </broker>, inside <beans> -- i.e. after the
+        // broker element closes, before the document ends.
+        let import_at = xml.find("import resource").expect("import present");
+        let broker_close = xml.find("</broker>").expect("broker closes");
+        assert!(
+            import_at > broker_close,
+            "jetty import must come after the broker element closes"
+        );
+    }
+
+    #[test]
+    fn activemq_config_verbatim_user_config_is_untouched() {
+        // A complete standalone config is applied byte-for-byte; we must NOT
+        // inject the jetty import into a user's verbatim broker config.
+        let user_cfg = "<broker><transportConnectors><transportConnector uri=\"tcp://0.0.0.0:61616\"/></transportConnectors></broker>";
+        let xml = activemq_config(&[user("app", "pw", true)], Some(user_cfg));
+        assert_eq!(xml, user_cfg);
+        assert!(!xml.contains("jetty.xml"));
     }
 
     #[test]

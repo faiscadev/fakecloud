@@ -373,3 +373,73 @@ jobs:
       - name: nft ruleset diagnostics
         if: always()
         run: sudo nft list ruleset || true
+
+  # Dedicated, resourced job for the Amazon MQ broker data-plane E2E. These
+  # tests spawn REAL broker containers (a JVM ActiveMQ and an Erlang RabbitMQ),
+  # which are far heavier than the images in the shared partition matrix, so they
+  # are gated behind FAKECLOUD_E2E_MQ_BROKER=1 (skipped loudly everywhere else)
+  # and run here with docker, a generous timeout for the slow broker boot, and a
+  # test-step retry that absorbs genuine cold-pull/first-connection flake WITHOUT
+  # masking a real regression (a persistently failing test still fails the job).
+  mq-broker:
+    name: MQ broker data plane
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # Broker boot is slow (JVM/Erlang start + first cold image pull); allow ample
+    # headroom over the tests' own 300s per-broker readiness windows plus retries.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/free-disk
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Prune container state before tests
+        run: docker system prune -af --volumes || true
+
+      # Pre-pull the broker images (with retry) so the first CreateBroker doesn't
+      # pay a cold pull inside the readiness window. Retries absorb a flaky
+      # registry; a persistent pull failure is surfaced (the tests would fail
+      # anyway). The image refs match the runtime defaults; keep them in sync with
+      # MqEngine::image (FAKECLOUD_MQ_ACTIVEMQ_IMAGE / _RABBITMQ_IMAGE).
+      - name: Pre-pull broker images
+        run: |
+          for img in apache/activemq-classic rabbitmq:3.13-alpine; do
+            for i in 1 2 3; do
+              if docker pull "$img"; then break; fi
+              echo "docker pull $img attempt $i failed; retrying"; sleep $((i * 5))
+              [ "$i" = 3 ] && { echo "::error::could not pull $img"; exit 1; }
+            done
+          done
+
+      # The testkit boots this binary via its workspace-relative path, so a plain
+      # debug build in place is all the tests need.
+      - name: Build fakecloud
+        run: cargo build --bin fakecloud
+
+      # Run ONLY the two broker E2E tests: the data-plane round-trips
+      # (mq_dataplane: ActiveMQ STOMP + RabbitMQ AMQP) and the CFN provisioner
+      # (cloudformation_mq: cfn_provisions_mq_broker_and_configuration). FAKECLOUD_
+      # E2E_MQ_BROKER=1 flips them from skip to run; CI=1 makes a missing docker a
+      # hard failure rather than a silent skip. --retries 2 reruns only a failed
+      # test (up to 2 extra times) to ride out cold-pull / first-connection flake;
+      # a test that fails every attempt still fails the job red.
+      - name: Run MQ broker E2E
+        env:
+          FAKECLOUD_E2E_MQ_BROKER: "1"
+          CI: "1"
+        run: |
+          cargo nextest run -P ci -p fakecloud-e2e --retries 2 \
+            -E 'test(activemq_broker_delivers_a_message_over_stomp) + test(rabbitmq_broker_speaks_amqp) + test(cfn_provisions_mq_broker_and_configuration)'
+
+      - name: Broker container diagnostics
+        if: always()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a || true
+
+      - name: Prune container state after tests
+        if: always()
+        run: docker system prune -af --volumes || true
