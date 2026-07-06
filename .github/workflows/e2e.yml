@@ -499,7 +499,7 @@ jobs:
           CI: "1"
         run: |
           cargo nextest run -P ci -p fakecloud-e2e --retries 2 \
-            -E 'test(msk_cluster_delivers_a_message_through_a_real_kafka_broker)'
+            -E 'test(msk_cluster_delivers_a_message_through_a_real_kafka_broker) + test(cfn_provisions_msk_broker_cluster)'
 
       - name: Broker container diagnostics
         if: always()

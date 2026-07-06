@@ -912,6 +912,7 @@ pub struct ResourceProvisioner {
     pub efs_state: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
     pub mq_state: fakecloud_mq::SharedMqState,
+    pub kafka_state: fakecloud_kafka::SharedKafkaState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -926,6 +927,7 @@ pub struct ResourceProvisioner {
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
+    pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
     /// Intents queued by container-backed provisioners during the synchronous
     /// provisioning pass. After provisioning, `CreateStack` drains these and
     /// backs each freshly-inserted record with a real container in the
@@ -1015,6 +1017,10 @@ pub enum ContainerSpawnIntent {
     /// ActiveMQ/RabbitMQ container via the MQ runtime, matching the direct
     /// `CreateBroker` path.
     MqBroker { broker_id: String },
+    /// `AWS::MSK::Cluster` — back the inserted PROVISIONED cluster with a real
+    /// Apache Kafka container via the Kafka runtime, matching the direct
+    /// `CreateCluster` path.
+    MskCluster { cluster_arn: String },
 }
 
 /// A container-backed resource the synchronous delete pass removed from memory
@@ -1047,6 +1053,8 @@ pub enum ContainerTeardownIntent {
     Ec2Instance { instance_id: String },
     /// `AWS::AmazonMQ::Broker` -- stop + remove the ActiveMQ/RabbitMQ container.
     MqBroker { broker_id: String },
+    /// `AWS::MSK::Cluster` -- stop + remove the backing Apache Kafka container.
+    MskCluster { cluster_arn: String },
 }
 
 /// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
@@ -1083,6 +1091,7 @@ mod eventbridge;
 mod firehose;
 mod glue;
 mod iam;
+mod kafka;
 mod kinesis;
 mod kms;
 mod lambda;
@@ -1223,6 +1232,13 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::ConfigurationAssociation" => {
                 self.create_mq_configuration_association(resource)
             }
+            "AWS::MSK::Cluster" => self.create_msk_cluster(resource),
+            "AWS::MSK::ServerlessCluster" => self.create_msk_serverless_cluster(resource),
+            "AWS::MSK::Configuration" => self.create_msk_configuration(resource),
+            "AWS::MSK::ClusterPolicy" => self.create_msk_cluster_policy(resource),
+            "AWS::MSK::BatchScramSecret" => self.create_msk_batch_scram_secret(resource),
+            "AWS::MSK::VpcConnection" => self.create_msk_vpc_connection(resource),
+            "AWS::MSK::Replicator" => self.create_msk_replicator(resource),
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
             "AWS::EFS::MountTarget" => self.create_efs_mount_target(resource),
@@ -1614,6 +1630,15 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::ConfigurationAssociation" => {
                 Some(self.create_mq_configuration_association(new_def)?)
             }
+            "AWS::MSK::Cluster" => Some(self.update_msk_cluster(existing, new_def)?),
+            "AWS::MSK::ServerlessCluster" => Some(self.update_msk_cluster(existing, new_def)?),
+            "AWS::MSK::Configuration" => Some(self.update_msk_configuration(existing, new_def)?),
+            "AWS::MSK::ClusterPolicy" => Some(self.update_msk_cluster_policy(existing, new_def)?),
+            "AWS::MSK::BatchScramSecret" => {
+                Some(self.update_msk_batch_scram_secret(existing, new_def)?)
+            }
+            "AWS::MSK::VpcConnection" => Some(self.update_msk_vpc_connection(existing, new_def)?),
+            "AWS::MSK::Replicator" => Some(self.update_msk_replicator(existing, new_def)?),
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
@@ -1777,6 +1802,19 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::Configuration" => {
                 self.get_att_mq_configuration(&resource.physical_id, attribute)
             }
+            "AWS::MSK::Cluster" | "AWS::MSK::ServerlessCluster" => {
+                self.get_att_msk_cluster(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::Configuration" => {
+                self.get_att_msk_configuration(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::ClusterPolicy" => {
+                self.get_att_msk_cluster_policy(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::VpcConnection" => {
+                self.get_att_msk_vpc_connection(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::Replicator" => self.get_att_msk_replicator(&resource.physical_id, attribute),
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
             }
@@ -2031,6 +2069,30 @@ impl ResourceProvisioner {
                 Ok(())
             }
             "AWS::AmazonMQ::ConfigurationAssociation" => Ok(()),
+            "AWS::MSK::Cluster" | "AWS::MSK::ServerlessCluster" => {
+                self.delete_msk_cluster(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::Configuration" => {
+                self.delete_msk_configuration(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::ClusterPolicy" => {
+                self.delete_msk_cluster_policy(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::BatchScramSecret" => {
+                self.delete_msk_batch_scram_secret(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::VpcConnection" => {
+                self.delete_msk_vpc_connection(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::Replicator" => {
+                self.delete_msk_replicator(&resource.physical_id);
+                Ok(())
+            }
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
                 Ok(())
@@ -6693,6 +6755,9 @@ mod tests {
             mq_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
+            kafka_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -6700,6 +6765,7 @@ mod tests {
             ecs_runtime: None,
             elasticache_runtime: None,
             mq_runtime: None,
+            kafka_runtime: None,
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),

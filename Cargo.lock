@@ -4171,6 +4171,7 @@ dependencies = [
  "fakecloud-firehose",
  "fakecloud-glue",
  "fakecloud-iam",
+ "fakecloud-kafka",
  "fakecloud-kinesis",
  "fakecloud-kms",
  "fakecloud-lambda",
