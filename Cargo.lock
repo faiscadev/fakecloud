@@ -3671,6 +3671,7 @@ dependencies = [
  "fakecloud-resource-groups",
  "fakecloud-resource-groups-tagging",
  "fakecloud-route53",
+ "fakecloud-route53resolver",
  "fakecloud-s3",
  "fakecloud-s3tables",
  "fakecloud-scheduler",
@@ -4129,6 +4130,7 @@ dependencies = [
  "fakecloud-pipes",
  "fakecloud-rds",
  "fakecloud-route53",
+ "fakecloud-route53resolver",
  "fakecloud-s3",
  "fakecloud-secretsmanager",
  "fakecloud-servicediscovery",
@@ -5403,6 +5405,26 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-route53resolver"
+version = "0.39.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-ec2",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

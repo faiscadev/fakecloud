@@ -466,6 +466,10 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         "CertificateManager" => "acm",
         "ACMPrivateCA" => "acm-pca",
+        // Amazon Route 53 Resolver (resolver endpoints/rules, query logging, DNS
+        // Firewall): awsJson1_1. The service shape short name is the target
+        // prefix. Distinct from Route 53 (`route53`, a REST-XML service).
+        "Route53Resolver" => "route53resolver",
         // AWS Config (config recorder / rules / compliance): awsJson1_1. The
         // service shape short name is the target prefix.
         "StarlingDoveService" => "config",

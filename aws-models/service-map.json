@@ -155,6 +155,10 @@
     "repo_dir": "route-53",
     "service_name": "route53"
   },
+  "route53resolver": {
+    "repo_dir": "route53resolver",
+    "service_name": "route53resolver"
+  },
   "acm": {
     "repo_dir": "acm",
     "service_name": "acm"

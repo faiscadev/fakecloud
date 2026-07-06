@@ -34,6 +34,7 @@ fakecloud-ecs = { workspace = true }
 fakecloud-acm = { workspace = true }
 fakecloud-acmpca = { workspace = true }
 fakecloud-config = { workspace = true }
+fakecloud-route53resolver = { workspace = true }
 bytes = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-route53 = { workspace = true }

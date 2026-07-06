@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 185,391 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 187,837 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-78 services, 5,533 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+79 services, 5,605 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
@@ -101,6 +101,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 | Elastic Load Balancing v2 | 51  | ALB/NLB/GWLB control plane, mTLS trust stores, in-process HTTP data plane for ALBs |
 | CloudFront                | 147 | Distributions, functions, policies, KVS, FLE, connection groups; full config round-trip |
 | Route 53                  | 71  | Full control plane: zones, RRsets, health checks, traffic policies, DNSSEC, VPC assoc |
+| Route 53 Resolver         | 72  | Resolver endpoints (real VPC/subnet/SG validation), rules, query logging, DNS Firewall |
 | WAF v2                    | 55  | Full control plane: WebACLs/RuleGroups/IPSets, CheckCapacity, managed rule catalog |
 | Application Auto Scaling  | 14  | Scalable targets + step/target/predictive policies + scheduled actions, 13 namespaces |
 | Athena                    | 70  | Workgroups, data catalogs, query executions (synthesized results), notebooks, sessions |
