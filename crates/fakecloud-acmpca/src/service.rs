@@ -580,18 +580,13 @@ impl AcmPcaService {
             ));
         }
         if let Some(s) = new_status {
-            // Only a CA that already holds a certificate can have its status
-            // toggled: AWS permits UpdateCertificateAuthority(Status) only from
-            // ACTIVE or DISABLED. A PENDING_CERTIFICATE CA (no certificate yet),
-            // EXPIRED, or FAILED CA cannot be enabled/disabled — it is activated
-            // via the certificate-install flow, not this call.
-            if ca.status != "ACTIVE" && ca.status != "DISABLED" {
-                return Err(invalid_state(format!(
-                    "The certificate authority status cannot be updated from its current state ({})",
-                    ca.status
-                )));
-            }
             // A CA can only be activated once it actually holds a certificate.
+            // Setting DISABLED, by contrast, is permitted from ACTIVE, DISABLED
+            // AND PENDING_CERTIFICATE: the terraform-provider-aws destroy path
+            // disables a CA before deleting it even when the CA never had a
+            // certificate installed, and real AWS accepts that transition. The
+            // top-of-handler guard already rejects the genuinely terminal
+            // CREATING/DELETED states.
             if s == "ACTIVE" && ca.ca_cert_pem.is_none() {
                 return Err(invalid_state(
                     "A certificate authority without an installed certificate cannot be set to ACTIVE",
@@ -2297,16 +2292,37 @@ mod tests {
         assert_eq!(err.code(), "InvalidArgsException");
     }
 
-    /// Finding 5: UpdateCertificateAuthority(Status) is rejected while the CA is
-    /// still PENDING_CERTIFICATE — only ACTIVE/DISABLED CAs can toggle status.
+    /// UpdateCertificateAuthority(Status): a PENDING_CERTIFICATE CA can be moved
+    /// to DISABLED (the terraform destroy path relies on this — it disables a CA
+    /// before deleting it even when no certificate was ever installed), but it
+    /// cannot be set to ACTIVE without an installed certificate.
     #[tokio::test]
-    async fn update_status_on_pending_ca_is_rejected() {
+    async fn update_status_transitions_from_pending_ca() {
         let svc = AcmPcaService::default();
         let arn = create_ca(&svc, "pending.example.com", json!({}));
-        // The CA is PENDING_CERTIFICATE (no certificate installed yet).
-        let err = expect_err(svc.update_certificate_authority(&req(
+
+        // PENDING_CERTIFICATE -> DISABLED is allowed.
+        svc.update_certificate_authority(&req(
             "UpdateCertificateAuthority",
             json!({ "CertificateAuthorityArn": arn, "Status": "DISABLED" }),
+        ))
+        .unwrap();
+        let status = body_json(
+            &svc.describe_certificate_authority(&req(
+                "DescribeCertificateAuthority",
+                json!({ "CertificateAuthorityArn": arn }),
+            ))
+            .unwrap(),
+        )["CertificateAuthority"]["Status"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(status, "DISABLED");
+
+        // But it cannot be set ACTIVE without an installed certificate.
+        let err = expect_err(svc.update_certificate_authority(&req(
+            "UpdateCertificateAuthority",
+            json!({ "CertificateAuthorityArn": arn, "Status": "ACTIVE" }),
         )));
         assert_eq!(err.code(), "InvalidStateException");
     }
