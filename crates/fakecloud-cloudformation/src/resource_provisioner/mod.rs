@@ -1656,6 +1656,27 @@ impl ResourceProvisioner {
     /// attributes that change after creation (e.g. Lambda `FunctionUrl`)
     /// resolve correctly even when the URL was added in a separate pass.
     pub fn get_att(&self, resource: &StackResource, attribute: &str) -> Option<String> {
+        // Amazon MQ broker endpoint / IP attributes are the ONE captured set that
+        // legitimately goes stale: at create time the backing container is not up
+        // yet, so they are the cosmetic `*.amazonaws.com` synthesis, but they
+        // become the REAL bound `tcp://127.0.0.1:<port>` once the container
+        // settles. Resolve them LIVE so CFN GetAtt / outputs match what the direct
+        // DescribeBroker returns rather than serving the frozen cosmetic values.
+        const MQ_BROKER_LIVE_ATTRS: &[&str] = &[
+            "IpAddresses",
+            "OpenWireEndpoints",
+            "AmqpEndpoints",
+            "StompEndpoints",
+            "MqttEndpoints",
+            "WssEndpoints",
+        ];
+        if resource.resource_type == "AWS::AmazonMQ::Broker"
+            && MQ_BROKER_LIVE_ATTRS.contains(&attribute)
+        {
+            if let Some(v) = self.get_att_mq_broker(&resource.physical_id, attribute) {
+                return Some(v);
+            }
+        }
         // Captured attributes are the source of truth — they were computed
         // at create time and never go stale for the resources we ship today.
         if let Some(v) = resource.attributes.get(attribute) {
@@ -8080,6 +8101,68 @@ mod tests {
         assert_eq!(
             prov.get_att(&stack_resource, "TopicArn"),
             Some("captured-arn".to_string())
+        );
+    }
+
+    #[test]
+    fn getatt_mq_broker_endpoints_track_the_live_data_plane() {
+        // An MQ broker's endpoint attributes are captured cosmetic at create
+        // time (no container yet), but once a backing container binds they must
+        // resolve to the REAL `tcp://`/`amqp://<host>:<port>` the direct
+        // DescribeBroker returns -- CFN GetAtt is NOT frozen to the cosmetic set.
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::AmazonMQ::Broker",
+                "MyBroker",
+                serde_json::json!({
+                    "BrokerName": "cfn-live-ep",
+                    "EngineType": "ACTIVEMQ",
+                    "HostInstanceType": "mq.m5.large",
+                    "DeploymentMode": "SINGLE_INSTANCE",
+                    "PubliclyAccessible": false
+                }),
+            ))
+            .expect("create broker");
+        let broker_id = created.physical_id.clone();
+        // The captured attribute is the cosmetic amazonaws endpoint.
+        assert!(
+            created.attributes["AmqpEndpoints"].contains("amazonaws.com"),
+            "create-time capture is cosmetic: {}",
+            created.attributes["AmqpEndpoints"]
+        );
+        // Bind a live data plane, as settle_broker_up does once the container is up.
+        {
+            let mut g = prov.mq_state.write();
+            let acct = g.get_or_create("123456789012");
+            let mut ports = std::collections::BTreeMap::new();
+            ports.insert("amqp".to_string(), 15672u16);
+            ports.insert("openwire".to_string(), 15616u16);
+            acct.data_plane.insert(
+                broker_id.clone(),
+                fakecloud_mq::BrokerDataPlane {
+                    container_id: "c-live".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    ports,
+                },
+            );
+        }
+        // GetAtt now returns the REAL bound endpoints, not the cosmetic capture.
+        let amqp = prov
+            .get_att(&created, "AmqpEndpoints")
+            .expect("AmqpEndpoints");
+        assert!(
+            amqp.contains("amqp://127.0.0.1:15672") && !amqp.contains("amazonaws.com"),
+            "GetAtt must project the live data plane, got: {amqp}"
+        );
+        let ips = prov.get_att(&created, "IpAddresses").expect("IpAddresses");
+        assert!(ips.contains("127.0.0.1"), "IpAddresses live: {ips}");
+        let openwire = prov
+            .get_att(&created, "OpenWireEndpoints")
+            .expect("OpenWireEndpoints");
+        assert!(
+            openwire.contains("tcp://127.0.0.1:15616"),
+            "OpenWireEndpoints live: {openwire}"
         );
     }
 

@@ -83,14 +83,17 @@ impl ResourceProvisioner {
                     broker_id: id.clone(),
                 });
         }
+        // A freshly-created broker has no backing container yet (it is spawned
+        // in the background after provisioning), so its endpoints are cosmetic
+        // here; `get_att` resolves them live once the container binds.
         Ok(broker_attributes(
             id,
             arn,
             &engine,
             &region,
             &deployment,
-            &config_id,
-            config_rev,
+            Some((&config_id, config_rev)),
+            None,
         ))
     }
 
@@ -196,14 +199,17 @@ impl ResourceProvisioner {
         } else {
             acct.tags.insert(arn.clone(), tags);
         }
+        // Project the REAL bound endpoints when a backing container is live, so
+        // the update's returned attributes match DescribeBroker.
+        let dp = acct.data_plane.get(&id).cloned();
         Ok(broker_attributes(
             id,
             arn,
             &old_engine,
             &region,
             &old_deployment,
-            &config_id,
-            config_rev,
+            Some((&config_id, config_rev)),
+            dp.as_ref(),
         ))
     }
 
@@ -235,6 +241,10 @@ impl ResourceProvisioner {
             .and_then(|c| c.get("revision"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // Project the REAL bound host/ports when a backing container is live
+        // (the same `data_plane` source DescribeBroker reads), so CFN GetAtt /
+        // outputs match the direct API instead of the cosmetic create-time set.
+        let dp = acct.data_plane.get(physical_id);
         let res = broker_attributes(
             physical_id.to_string(),
             b.get("brokerArn")
@@ -244,8 +254,8 @@ impl ResourceProvisioner {
             engine,
             &self.region,
             deployment,
-            &cid,
-            crev,
+            Some((&cid, crev)),
+            dp,
         );
         res.attributes.get(attribute).cloned()
     }
@@ -474,10 +484,10 @@ fn broker_attributes(
     engine: &str,
     region: &str,
     deployment_mode: &str,
-    config_id: &str,
-    config_revision: i64,
+    config: Option<(&str, i64)>,
+    data_plane: Option<&fakecloud_mq::BrokerDataPlane>,
 ) -> ProvisionResult {
-    let e = mq_shared::broker_endpoints(&id, engine, region, deployment_mode, None);
+    let e = mq_shared::broker_endpoints(&id, engine, region, deployment_mode, data_plane);
     let mut res = ProvisionResult::new(id)
         .with("Arn", arn)
         .with("IpAddresses", json_list(&e.ips))
@@ -486,7 +496,7 @@ fn broker_attributes(
         .with("StompEndpoints", json_list(&e.stomp))
         .with("MqttEndpoints", json_list(&e.mqtt))
         .with("WssEndpoints", json_list(&e.wss));
-    if !config_id.is_empty() {
+    if let Some((config_id, config_revision)) = config.filter(|(id, _)| !id.is_empty()) {
         res = res
             .with("ConfigurationId", config_id.to_string())
             .with("ConfigurationRevision", config_revision.to_string());
