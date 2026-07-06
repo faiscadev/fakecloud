@@ -344,6 +344,27 @@ impl MqRuntime {
             // alarm that refuses connections.
             args.push("-e".to_string());
             args.push("RABBITMQ_VM_MEMORY_HIGH_WATERMARK_ABSOLUTE=384MiB".to_string());
+            // Pin the Erlang distribution cookie via `-setcookie` on BOTH the
+            // server node and the ctl/diagnostics tooling, instead of letting
+            // Erlang read `$HOME/.erlang.cookie`. On some container hosts the
+            // rabbitmq user cannot read that cookie file (it can be created
+            // owned by another uid with mode 0400, or the data dir is provided
+            // with perms the rabbitmq user can't use), and boot dies with
+            // `Error when reading /var/lib/rabbitmq/.erlang.cookie: eacces`
+            // ({failed_to_start_child,auth,...} -> the whole node terminates).
+            // With `-setcookie` present Erlang uses the supplied value directly
+            // and never reads the cookie file, so the eacces path can't happen.
+            // Setting it on RABBITMQ_CTL_ERL_ARGS too keeps `rabbitmqctl` /
+            // `rabbitmq-diagnostics` (readiness gate + live user provisioning)
+            // on the SAME cookie as the server, so they still connect. A single
+            // SingleInstance broker never clusters, so a fixed cookie is safe;
+            // it just has to be STABLE across reboot/reattach, which a constant
+            // baked into the container at create time is.
+            const COOKIE: &str = "-setcookie fakecloudmqerlangcookie";
+            args.push("-e".to_string());
+            args.push(format!("RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS={COOKIE}"));
+            args.push("-e".to_string());
+            args.push(format!("RABBITMQ_CTL_ERL_ARGS={COOKIE}"));
             // Provision the create-time user via env (the env-created user is
             // tagged `administrator` with full `/` permissions), available the
             // instant the broker boots -- no post-start exec race.
@@ -408,13 +429,11 @@ impl MqRuntime {
             }
         }
 
-        if let Err(e) = self
-            .wait_for_broker_ready(engine, &container_id, &ports)
-            .await
-        {
-            let diag = self.capture_container_diagnostics(&container_id).await;
-            return Err(RuntimeError::ContainerStartFailed(format!("{e}; {diag}")));
-        }
+        // `wait_for_broker_ready` already produces a self-describing reason on
+        // timeout (which check failed, whether the container crashed, and its
+        // log tail), so propagate it verbatim rather than double-wrapping it.
+        self.wait_for_broker_ready(engine, &container_id, &ports)
+            .await?;
 
         // RabbitMQ users beyond the create-time env user are applied live,
         // straight against the just-created container id (its tracking entry
@@ -684,14 +703,14 @@ impl MqRuntime {
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-                self.log_readiness_timeout(
-                    container_id,
-                    "ActiveMQ web console never answered HTTP",
-                    start,
-                )
-                .await;
                 Err(RuntimeError::ContainerStartFailed(
-                    "ActiveMQ broker did not become protocol-ready within 180 seconds".to_string(),
+                    self.readiness_timeout_reason(
+                        engine,
+                        container_id,
+                        "web console never answered HTTP on 8161",
+                        start,
+                    )
+                    .await,
                 ))
             }
             MqEngine::RabbitMq => {
@@ -717,13 +736,13 @@ impl MqRuntime {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 let why = if app_ok {
-                    "RabbitMQ app is running but the AMQP listener never accepted a handshake"
+                    "app reported running but the AMQP listener never accepted a handshake"
                 } else {
-                    "RabbitMQ application never reported running (check_running)"
+                    "application never reported running (rabbitmq-diagnostics check_running)"
                 };
-                self.log_readiness_timeout(container_id, why, start).await;
                 Err(RuntimeError::ContainerStartFailed(
-                    "RabbitMQ broker did not become protocol-ready within 180 seconds".to_string(),
+                    self.readiness_timeout_reason(engine, container_id, why, start)
+                        .await,
                 ))
             }
         }
@@ -786,15 +805,42 @@ impl MqRuntime {
             .unwrap_or(false)
     }
 
-    /// Log a readiness timeout with the failing check, elapsed time, and the
-    /// container's recent `docker logs`, so a CI failure is diagnosable instead
-    /// of a black box.
-    async fn log_readiness_timeout(
+    /// Build the self-describing `statusReason` for a readiness timeout AND log
+    /// it. The returned string is what lands in the broker's `statusReason`, so
+    /// it must say WHY on its own -- which readiness check never passed, whether
+    /// the backing container actually CRASHED during boot (vs. merely booting
+    /// slowly), and the tail of its `docker logs` -- so a CREATION_FAILED broker
+    /// is diagnosable straight from DescribeBroker without any log spelunking.
+    ///
+    /// The exit detection is the important half: an app that crashes on boot
+    /// (e.g. an invalid generated config) leaves the container `exited` with a
+    /// non-zero code, which we surface as "application exited during boot"
+    /// rather than a bare "did not become ready" that reads like a slow start.
+    async fn readiness_timeout_reason(
         &self,
+        engine: MqEngine,
         container_id: &str,
-        reason: &str,
+        why_check_failed: &str,
         started: std::time::Instant,
-    ) {
+    ) -> String {
+        let engine_label = match engine {
+            MqEngine::ActiveMq => "ActiveMQ",
+            MqEngine::RabbitMq => "RabbitMQ",
+        };
+        // Read the container's terminal state so we can tell an app crash
+        // ("exited" with a code) apart from a still-booting container.
+        let state = tokio::process::Command::new(&self.cli)
+            .args([
+                "inspect",
+                "--format",
+                "status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}",
+                container_id,
+            ])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let exited = state.contains("status=exited");
         let logs = tokio::process::Command::new(&self.cli)
             .args(["logs", "--tail", "60", container_id])
             .output()
@@ -802,16 +848,29 @@ impl MqRuntime {
             .map(|o| {
                 let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
                 s.push_str(&String::from_utf8_lossy(&o.stderr));
-                s
+                s.trim().to_string()
             })
             .unwrap_or_else(|e| format!("<docker logs failed: {e}>"));
+        let headline = if exited {
+            format!(
+                "{engine_label} broker application exited during boot before becoming ready ({why_check_failed})"
+            )
+        } else {
+            format!(
+                "{engine_label} broker did not become protocol-ready within 180 seconds ({why_check_failed}); the container is still running"
+            )
+        };
+        let reason =
+            format!("{headline}; container state [{state}]; recent container logs:\n{logs}");
         tracing::error!(
             container_id = %container_id,
             elapsed_secs = started.elapsed().as_secs(),
-            reason = %reason,
+            container_state = %state,
+            reason = %headline,
             container_logs = %logs,
             "MQ broker readiness timed out",
         );
+        reason
     }
 
     async fn remove_container(&self, container_id: &str) {
@@ -1013,15 +1072,17 @@ pub fn activemq_config(users: &[BrokerUser], user_config: Option<&str>) -> Strin
     </broker>
 
     <!--
-      Start the Jetty web console (the `apache/activemq-classic` image's stock
+      Start the Jetty web console (the apache/activemq-classic image's stock
       activemq.xml ends with exactly this import). Broker readiness is gated on
-      the console answering HTTP on 8161, which starts LAST in the boot sequence
-      -- once it responds every transport connector is bound and accepting. When
+      the console answering HTTP on 8161, which starts LAST in the boot sequence;
+      once it responds every transport connector is bound and accepting. When
       this generated config REPLACES the image's default activemq.xml the import
       must be carried over, or the console never binds, readiness times out after
-      180s, and the (otherwise fully-working) broker is reaped and marked
+      180s, and the (otherwise fully working) broker is reaped and marked
       CREATION_FAILED. The Jetty connectors themselves live in the image's
-      conf/jetty.xml, which we don't touch.
+      conf/jetty.xml, which we don't touch. NOTE: keep this comment free of the
+      "double-hyphen" string, which is illegal inside an XML comment and makes
+      ActiveMQ's Spring XML parser reject the whole activemq.xml on boot.
     -->
     <import resource="jetty.xml"/>
 </beans>
@@ -1084,6 +1145,22 @@ mod tests {
         assert!(
             import_at > broker_close,
             "jetty import must come after the broker element closes"
+        );
+    }
+
+    #[test]
+    fn activemq_config_has_no_illegal_double_hyphen_in_comments() {
+        // `--` is illegal INSIDE an XML comment (only the `<!--`/`-->` delimiters
+        // may contain it). ActiveMQ's Spring XML parser rejects the whole
+        // activemq.xml on boot ("The string \"--\" is not permitted within
+        // comments") if a generated comment body carries a double hyphen -- the
+        // exact bug that crashed every ActiveMQ broker. Guard the generated
+        // document: strip the legal delimiters, then assert no `--` remains.
+        let xml = activemq_config(&[user("app", "s3cr3t", true)], None);
+        let body = xml.replace("<!--", "").replace("-->", "");
+        assert!(
+            !body.contains("--"),
+            "generated activemq.xml must not contain a `--` inside a comment body (illegal XML)"
         );
     }
 

@@ -202,8 +202,23 @@ pub async fn dump_mq_broker_diagnostics(server: &TestServer, broker_id: &str) {
     // DescribeBroker body (`GET /v1/brokers/{id}`). Best-effort: a fetch failure
     // just prints a note rather than masking the docker diagnostics below.
     println!("\n===== MQ broker statusReason for {broker_id} =====");
+    // The broker lives under the ACCOUNT the SDK's access key resolves to, so
+    // this raw read MUST be authenticated with the same credential the test
+    // client uses (`AKIAIOSFODNN7EXAMPLE`, per TestServer::aws_config). An
+    // unauthenticated GET resolves to a different account and never finds the
+    // broker -- which is exactly why this dump used to print `<none set>` even
+    // though the server had recorded a real statusReason. fakecloud resolves the
+    // account from the Credential's access key (the signature is not verified in
+    // the default single-account mode), so a minimal SigV4 authorization header
+    // is enough to land on the right account.
     match reqwest::Client::new()
         .get(format!("{}/v1/brokers/{broker_id}", server.endpoint()))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 \
+             Credential=AKIAIOSFODNN7EXAMPLE/20250101/us-east-1/mq/aws4_request, \
+             SignedHeaders=host, Signature=fakecloud",
+        )
         .send()
         .await
     {
