@@ -207,6 +207,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
         // brokers, configurations, users, and tags). Signs as `mq`.
         "mq" => Protocol::Rest,
+        // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control
+        // plane (path-labelled `@http` URIs over clusters, configurations,
+        // operations, replicators, VPC connections, and topics). Signs as `kafka`.
+        "kafka" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

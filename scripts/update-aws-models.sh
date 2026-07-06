@@ -96,6 +96,7 @@ SERVICES=(
     "codeartifact:codeartifact"
     "efs:efs"
     "mq:mq"
+    "kafka:kafka"
 )
 
 # Sparse checkout only the models we need

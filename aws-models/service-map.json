@@ -318,5 +318,9 @@
   "mq": {
     "repo_dir": "mq",
     "service_name": "mq"
+  },
+  "kafka": {
+    "repo_dir": "kafka",
+    "service_name": "kafka"
   }
 }

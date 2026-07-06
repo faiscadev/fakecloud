@@ -2271,6 +2271,68 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateConfiguration`
 - `UpdateUser`
 
+## [Amazon MSK](@/docs/services/kafka.md)
+
+- `BatchAssociateScramSecret`
+- `BatchDisassociateScramSecret`
+- `CreateCluster`
+- `CreateClusterV2`
+- `CreateConfiguration`
+- `CreateReplicator`
+- `CreateTopic`
+- `CreateVpcConnection`
+- `DeleteCluster`
+- `DeleteClusterPolicy`
+- `DeleteConfiguration`
+- `DeleteReplicator`
+- `DeleteTopic`
+- `DeleteVpcConnection`
+- `DescribeCluster`
+- `DescribeClusterOperation`
+- `DescribeClusterOperationV2`
+- `DescribeClusterV2`
+- `DescribeConfiguration`
+- `DescribeConfigurationRevision`
+- `DescribeReplicator`
+- `DescribeTopic`
+- `DescribeTopicPartitions`
+- `DescribeVpcConnection`
+- `GetBootstrapBrokers`
+- `GetClusterPolicy`
+- `GetCompatibleKafkaVersions`
+- `ListClientVpcConnections`
+- `ListClusterOperations`
+- `ListClusterOperationsV2`
+- `ListClusters`
+- `ListClustersV2`
+- `ListConfigurationRevisions`
+- `ListConfigurations`
+- `ListKafkaVersions`
+- `ListNodes`
+- `ListReplicators`
+- `ListScramSecrets`
+- `ListTagsForResource`
+- `ListTopics`
+- `ListVpcConnections`
+- `PutClusterPolicy`
+- `RebootBroker`
+- `RejectClientVpcConnection`
+- `TagResource`
+- `UntagResource`
+- `UpdateBrokerCount`
+- `UpdateBrokerStorage`
+- `UpdateBrokerType`
+- `UpdateClusterConfiguration`
+- `UpdateClusterKafkaVersion`
+- `UpdateConfiguration`
+- `UpdateConnectivity`
+- `UpdateMonitoring`
+- `UpdateRebalancing`
+- `UpdateReplicationInfo`
+- `UpdateSecurity`
+- `UpdateStorage`
+- `UpdateTopic`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`

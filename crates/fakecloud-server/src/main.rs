@@ -636,6 +636,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let kafka_state: fakecloud_kafka::SharedKafkaState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let codecommit_state: fakecloud_codecommit::SharedCodeCommitState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5181,6 +5188,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("mq", h);
     }
     registry.register(Arc::new(mq_service));
+
+    // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control plane.
+    // Full 59-op control plane with persistence; the real Kafka-broker data
+    // plane is a later batch.
+    let kafka_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("kafka").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_kafka::persistence::load_into(&store, &kafka_state) {
+                Ok(fakecloud_kafka::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded kafka persistence snapshot");
+                }
+                Ok(fakecloud_kafka::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no kafka persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut kafka_service = fakecloud_kafka::KafkaService::new(kafka_state.clone());
+    if let Some(store) = kafka_snapshot_store {
+        kafka_service = kafka_service.with_snapshot_store(store);
+    }
+    if let Some(h) = kafka_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kafka", h);
+    }
+    registry.register(Arc::new(kafka_service));
 
     // AWS CodeCommit: awsJson1.1 git-repository control plane (repositories,
     // branches, commits/files/blobs, pull requests, approval-rule templates,
