@@ -1084,6 +1084,10 @@ async fn bedrock_converse_with_tool_config() {
     let server = TestServer::start().await;
     let http_client = reqwest::Client::new();
 
+    // A bare toolConfig (no toolChoice / implicit "auto") lets the model
+    // decide whether to call a tool. Offline we reply with plain text and
+    // must NOT fabricate an empty-arg toolUse — that used to derail agent /
+    // LangChain tool-loops.
     let body = serde_json::json!({
         "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
         "messages": [
@@ -1121,14 +1125,68 @@ async fn bedrock_converse_with_tool_config() {
 
     assert_eq!(resp.status(), 200);
     let result: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(result["stopReason"], "end_turn");
+
+    let content = result["output"]["message"]["content"].as_array().unwrap();
+    assert!(
+        content.iter().all(|c| c.get("toolUse").is_none()),
+        "bare toolConfig must not emit a toolUse block"
+    );
+}
+
+#[tokio::test]
+async fn bedrock_converse_with_forced_tool_choice() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    // toolChoice `any` forces the model to call a tool.
+    let body = serde_json::json!({
+        "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "messages": [
+            {"role": "user", "content": [{"text": "What's the weather?"}]}
+        ],
+        "toolConfig": {
+            "tools": [
+                {
+                    "toolSpec": {
+                        "name": "get_weather",
+                        "description": "Get weather for a location",
+                        "inputSchema": {
+                            "json": {"type": "object", "properties": {}}
+                        }
+                    }
+                }
+            ],
+            "toolChoice": {"any": {}}
+        }
+    });
+
+    let resp = http_client
+        .post(format!(
+            "{}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/converse",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::to_string(&body).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let result: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(result["stopReason"], "tool_use");
 
     let content = result["output"]["message"]["content"].as_array().unwrap();
     assert!(content.len() >= 2, "should have text and tool_use blocks");
-    assert!(
-        content.iter().any(|c| c.get("toolUse").is_some()),
-        "should have a toolUse block"
-    );
+    let tool_use = content
+        .iter()
+        .find_map(|c| c.get("toolUse"))
+        .expect("should have a toolUse block");
+    assert_eq!(tool_use["name"], "get_weather");
 }
 
 // CountTokens (Runtime)
