@@ -13,6 +13,9 @@ pub(crate) mod service;
 pub mod state;
 pub mod validate;
 
+#[cfg(test)]
+mod e2e_tests;
+
 pub use persistence::save_config_snapshot;
 pub use service::ConfigService;
 pub use state::{

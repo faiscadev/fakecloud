@@ -4409,6 +4409,7 @@ name = "fakecloud-config"
 version = "0.40.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
@@ -4421,6 +4422,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
