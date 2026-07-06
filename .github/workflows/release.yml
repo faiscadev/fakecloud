@@ -231,7 +231,6 @@ jobs:
           publish fakecloud-bedrock
           publish fakecloud-cloudfront
           publish fakecloud-acm
-          publish fakecloud-acmpca
           publish fakecloud-application-autoscaling
           publish fakecloud-autoscaling
           publish fakecloud-wafv2
@@ -251,6 +250,7 @@ jobs:
           # Layer 4: depend on layer 3a/3b crates
           publish fakecloud-s3             # depends on kms
           publish fakecloud-route53resolver  # depends on ec2, s3 (ImportFirewallDomains)
+          publish fakecloud-acmpca         # depends on s3 (audit-report delivery), acm, kms
           publish fakecloud-ecr            # depends on iam, kms
           publish fakecloud-ssm            # depends on secretsmanager
           publish fakecloud-codebuild      # depends on secretsmanager, ssm, logs (real buildspec exec)
