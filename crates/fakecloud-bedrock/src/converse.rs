@@ -52,47 +52,48 @@ pub(crate) fn converse(
         }
     };
 
-    // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars)
-    let truncated_text = if max_tokens < u64::MAX {
-        let char_limit = (max_tokens as usize) * 4;
+    // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars).
+    // `saturating_mul` keeps a hostile `maxTokens` (e.g. `u64::MAX - 1` sent
+    // over raw HTTP) from overflowing `usize` — a debug-build panic (dropped
+    // connection / 500) or a release-build wrap to a tiny garbage limit.
+    let (truncated_text, truncated) = if max_tokens < u64::MAX {
+        let char_limit = (max_tokens as usize).saturating_mul(4);
         if response_text.chars().count() > char_limit {
-            response_text.chars().take(char_limit).collect::<String>()
+            (
+                response_text.chars().take(char_limit).collect::<String>(),
+                true,
+            )
         } else {
-            response_text
+            (response_text, false)
         }
     } else {
-        response_text
+        (response_text, false)
     };
 
     // Build content blocks
     let mut content = vec![json!({"text": truncated_text})];
 
-    // If toolConfig is provided with tools, include a toolUse block
-    if let Some(tc) = tool_config {
-        if let Some(tools) = tc["tools"].as_array() {
-            if let Some(first_tool) = tools.first() {
-                if let Some(tool_spec) = first_tool.get("toolSpec") {
-                    let tool_name = tool_spec["name"].as_str().unwrap_or("tool");
-                    content.push(json!({
-                        "toolUse": {
-                            "toolUseId": "tooluse_fakecloud_01",
-                            "name": tool_name,
-                            "input": {}
-                        }
-                    }));
-                }
+    // Only emit a toolUse block when the caller's `toolChoice` actually
+    // requires one. A bare `toolConfig` (or `toolChoice:{auto:{}}`) leaves the
+    // decision to the model, and offline we choose a plain text reply — forcing
+    // an empty-arg tool call here derails LangChain / agent tool-loops.
+    let forced_tool = forced_tool_name(tool_config);
+    if let Some(tool_name) = &forced_tool {
+        content.push(json!({
+            "toolUse": {
+                "toolUseId": "tooluse_fakecloud_01",
+                "name": tool_name,
+                "input": {}
             }
-        }
+        }));
     }
 
-    let stop_reason = if tool_config.is_some()
-        && content.len() > 1
-        && content
-            .last()
-            .map(|c| c.get("toolUse").is_some())
-            .unwrap_or(false)
-    {
+    let stop_reason = if forced_tool.is_some() {
         "tool_use"
+    } else if truncated {
+        // Report the real reason the reply ended so tool/agent loops see the
+        // truncation, matching the upstream path's `normalize_stop`.
+        "max_tokens"
     } else {
         "end_turn"
     };
@@ -134,6 +135,43 @@ pub(crate) fn converse(
     }
 
     Ok(AwsResponse::json(StatusCode::OK, response_str))
+}
+
+/// Resolve the tool the caller *forced* the model to call via the Converse
+/// `toolConfig.toolChoice`, if any.
+///
+/// Bedrock's `toolChoice` is one of `{auto:{}}`, `{any:{}}` or
+/// `{tool:{name:...}}`. Only `any` (call some tool) and `tool` (call this
+/// specific tool) force a tool call; `auto` — and an absent `toolChoice` —
+/// let the model decide, which offline means a normal text reply. Returns the
+/// tool name to invoke, or `None` when no tool is forced or no tools are
+/// available. Shared by `Converse` and `ConverseStream` so both agree.
+pub(crate) fn forced_tool_name(tool_config: Option<&Value>) -> Option<String> {
+    let tc = tool_config?;
+    let tools = tc.get("tools").and_then(|t| t.as_array())?;
+    match tc.get("toolChoice") {
+        // Force a specific named tool.
+        Some(choice) if choice.get("tool").is_some() => {
+            if let Some(name) = choice["tool"]["name"].as_str() {
+                return Some(name.to_string());
+            }
+            // Malformed `{tool:{}}` with no name: fall back to the first tool.
+            first_tool_name(tools)
+        }
+        // Force any tool: pick the first advertised one.
+        Some(choice) if choice.get("any").is_some() => first_tool_name(tools),
+        // `auto` or absent: the model decides; offline we reply with text.
+        _ => None,
+    }
+}
+
+fn first_tool_name(tools: &[Value]) -> Option<String> {
+    tools
+        .first()?
+        .get("toolSpec")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 fn estimate_tokens(input: &Value) -> u64 {
@@ -253,7 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn converse_tool_config_adds_tool_use_block_and_stop_reason() {
+    fn converse_tool_config_without_choice_does_not_force_tool() {
+        // A bare toolConfig (no toolChoice / implicit "auto") must NOT emit a
+        // spurious empty-arg toolUse — that used to break agent tool-loops.
         let s = shared();
         let body = br#"{
             "messages": [],
@@ -262,10 +302,110 @@ mod tests {
         let resp = converse(&s, &req(), "m", body).unwrap();
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        assert_eq!(v["stopReason"], "end_turn");
+        let content = v["output"]["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert!(content[0].get("toolUse").is_none());
+    }
+
+    #[test]
+    fn converse_tool_choice_any_forces_first_tool() {
+        let s = shared();
+        let body = br#"{
+            "messages": [],
+            "toolConfig": {
+                "tools": [{"toolSpec": {"name": "calculator"}}],
+                "toolChoice": {"any": {}}
+            }
+        }"#;
+        let resp = converse(&s, &req(), "m", body).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
         assert_eq!(v["stopReason"], "tool_use");
         let content = v["output"]["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[1]["toolUse"]["name"], "calculator");
+    }
+
+    #[test]
+    fn converse_tool_choice_named_tool_is_honored() {
+        let s = shared();
+        let body = br#"{
+            "messages": [],
+            "toolConfig": {
+                "tools": [
+                    {"toolSpec": {"name": "calculator"}},
+                    {"toolSpec": {"name": "weather"}}
+                ],
+                "toolChoice": {"tool": {"name": "weather"}}
+            }
+        }"#;
+        let resp = converse(&s, &req(), "m", body).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        assert_eq!(v["stopReason"], "tool_use");
+        assert_eq!(
+            v["output"]["message"]["content"][1]["toolUse"]["name"],
+            "weather"
+        );
+    }
+
+    #[test]
+    fn converse_huge_max_tokens_does_not_overflow() {
+        // maxTokens just below u64::MAX would overflow `(x as usize) * 4`;
+        // saturating arithmetic must keep this a normal, un-truncated reply.
+        let s = shared();
+        let body = format!(
+            r#"{{"messages":[],"inferenceConfig":{{"maxTokens":{}}}}}"#,
+            u64::MAX - 1
+        );
+        let resp = converse(&s, &req(), "m", body.as_bytes()).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        // No truncation happened, so it's a normal end_turn reply.
+        assert_eq!(v["stopReason"], "end_turn");
+        assert!(!v["output"]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn converse_reports_max_tokens_stop_reason_on_truncation() {
+        let s = shared();
+        let body = br#"{"messages":[], "inferenceConfig": {"maxTokens": 1}}"#;
+        let resp = converse(&s, &req(), "m", body).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        // The canned reply is longer than 1*4 chars, so it was truncated.
+        assert_eq!(v["stopReason"], "max_tokens");
+        let text = v["output"]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.chars().count() <= 4);
+    }
+
+    #[test]
+    fn forced_tool_name_respects_tool_choice() {
+        let cfg = json!({
+            "tools": [{"toolSpec": {"name": "a"}}, {"toolSpec": {"name": "b"}}]
+        });
+        // No toolChoice -> not forced.
+        assert_eq!(forced_tool_name(Some(&cfg)), None);
+        // auto -> not forced.
+        let mut auto = cfg.clone();
+        auto["toolChoice"] = json!({"auto": {}});
+        assert_eq!(forced_tool_name(Some(&auto)), None);
+        // any -> first tool.
+        let mut any = cfg.clone();
+        any["toolChoice"] = json!({"any": {}});
+        assert_eq!(forced_tool_name(Some(&any)), Some("a".to_string()));
+        // named tool -> that tool.
+        let mut named = cfg.clone();
+        named["toolChoice"] = json!({"tool": {"name": "b"}});
+        assert_eq!(forced_tool_name(Some(&named)), Some("b".to_string()));
+        // No config at all -> None.
+        assert_eq!(forced_tool_name(None), None);
     }
 
     #[test]

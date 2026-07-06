@@ -736,10 +736,12 @@ async fn converse_with_tool_config() {
     let state = make_state();
     let svc = BedrockService::new(state);
 
+    // toolChoice `any` forces the model to call a tool.
     let body = serde_json::json!({
         "messages": [{"role": "user", "content": [{"text": "Use the tool"}]}],
         "toolConfig": {
-            "tools": [{"toolSpec": {"name": "calculator", "description": "calc"}}]
+            "tools": [{"toolSpec": {"name": "calculator", "description": "calc"}}],
+            "toolChoice": {"any": {}}
         },
     });
     let req = make_request(
@@ -752,6 +754,31 @@ async fn converse_with_tool_config() {
     assert_eq!(b["stopReason"], "tool_use");
     let content = b["output"]["message"]["content"].as_array().unwrap();
     assert!(content.iter().any(|c| c.get("toolUse").is_some()));
+}
+
+#[tokio::test]
+async fn converse_with_tool_config_without_choice_does_not_force_tool() {
+    // A bare toolConfig (no toolChoice) must not push a spurious empty-arg
+    // toolUse — that used to derail agent tool-loops.
+    let state = make_state();
+    let svc = BedrockService::new(state);
+
+    let body = serde_json::json!({
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "toolConfig": {
+            "tools": [{"toolSpec": {"name": "calculator", "description": "calc"}}]
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        "/model/anthropic.claude-v2/converse",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["stopReason"], "end_turn");
+    let content = b["output"]["message"]["content"].as_array().unwrap();
+    assert!(content.iter().all(|c| c.get("toolUse").is_none()));
 }
 
 // ── CountTokens ──
@@ -893,6 +920,62 @@ async fn converse_stream() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.content_type, "application/vnd.amazon.eventstream");
     assert!(!resp.body.expect_bytes().is_empty());
+}
+
+#[tokio::test]
+async fn converse_stream_matches_converse_for_forced_tool() {
+    // Converse and ConverseStream must agree for identical input: a forced
+    // toolChoice yields a tool call in both; a bare toolConfig yields neither.
+    let state = make_state();
+    let svc = BedrockService::new(state);
+
+    let forced = serde_json::json!({
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "toolConfig": {
+            "tools": [{"toolSpec": {"name": "calculator"}}],
+            "toolChoice": {"any": {}}
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        "/model/anthropic.claude-v2/converse-stream",
+        &forced.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let bytes = resp.body.expect_bytes();
+    let s = String::from_utf8_lossy(bytes);
+    assert!(
+        s.contains("tool_use"),
+        "forced stream should stop with tool_use"
+    );
+    assert!(
+        s.contains("calculator"),
+        "forced stream should name the tool"
+    );
+
+    // Bare toolConfig (no toolChoice): no tool, ends with end_turn.
+    let bare = serde_json::json!({
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "toolConfig": {
+            "tools": [{"toolSpec": {"name": "calculator"}}]
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        "/model/anthropic.claude-v2/converse-stream",
+        &bare.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let bytes = resp.body.expect_bytes();
+    let s = String::from_utf8_lossy(bytes);
+    assert!(
+        s.contains("end_turn"),
+        "bare stream should end with end_turn"
+    );
+    assert!(
+        !s.contains("toolUse"),
+        "bare stream must not emit a toolUse block"
+    );
 }
 
 // ── Unknown route ──

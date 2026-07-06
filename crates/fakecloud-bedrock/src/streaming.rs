@@ -121,8 +121,16 @@ pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) 
 /// `input_tokens` and `output_tokens` are surfaced verbatim in the
 /// terminating `metadata` event so callers see real, prompt-derived
 /// usage figures instead of the historical 10/20 placeholder.
+///
+/// `stop_reason` and `forced_tool` are computed by the handler from the same
+/// inference config / `toolChoice` the non-streaming `Converse` path reads, so
+/// both operations return a consistent shape for identical input. When
+/// `forced_tool` is set, a second `toolUse` content block is streamed after
+/// the text block and `stop_reason` is `tool_use`.
 pub(crate) fn build_converse_stream_response(
     response_text: &str,
+    stop_reason: &str,
+    forced_tool: Option<&str>,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Vec<u8> {
@@ -134,7 +142,7 @@ pub(crate) fn build_converse_stream_response(
         .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event("messageStart", "application/json", &payload));
 
-    // contentBlockStart event
+    // Text content block (index 0).
     let block_start = json!({ "contentBlockIndex": 0, "start": {} });
     let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
         .expect("serde_json::Value serialization is infallible");
@@ -169,9 +177,45 @@ pub(crate) fn build_converse_stream_response(
         &payload,
     ));
 
+    // Optional forced toolUse content block (index 1), mirroring Converse.
+    if let Some(tool_name) = forced_tool {
+        let tool_start = json!({
+            "contentBlockIndex": 1,
+            "start": { "toolUse": { "toolUseId": "tooluse_fakecloud_01", "name": tool_name } }
+        });
+        let payload = serde_json::to_vec(&json!({ "contentBlockStart": tool_start }))
+            .expect("serde_json::Value serialization is infallible");
+        body.extend(encode_event(
+            "contentBlockStart",
+            "application/json",
+            &payload,
+        ));
+
+        let tool_delta = json!({
+            "contentBlockIndex": 1,
+            "delta": { "toolUse": { "input": "{}" } }
+        });
+        let payload = serde_json::to_vec(&json!({ "contentBlockDelta": tool_delta }))
+            .expect("serde_json::Value serialization is infallible");
+        body.extend(encode_event(
+            "contentBlockDelta",
+            "application/json",
+            &payload,
+        ));
+
+        let tool_stop = json!({ "contentBlockIndex": 1 });
+        let payload = serde_json::to_vec(&json!({ "contentBlockStop": tool_stop }))
+            .expect("serde_json::Value serialization is infallible");
+        body.extend(encode_event(
+            "contentBlockStop",
+            "application/json",
+            &payload,
+        ));
+    }
+
     // messageStop event
     let stop = json!({
-        "stopReason": "end_turn"
+        "stopReason": stop_reason
     });
     let payload = serde_json::to_vec(&json!({ "messageStop": stop }))
         .expect("serde_json::Value serialization is infallible");
@@ -570,7 +614,7 @@ mod tests {
 
     #[test]
     fn build_converse_stream_emits_all_events() {
-        let out = build_converse_stream_response("hello world", 5, 7);
+        let out = build_converse_stream_response("hello world", "end_turn", None, 5, 7);
         let s = String::from_utf8_lossy(&out);
         for marker in [
             "messageStart",
@@ -587,6 +631,18 @@ mod tests {
         assert!(s.contains("\"inputTokens\":5"));
         assert!(s.contains("\"outputTokens\":7"));
         assert!(s.contains("\"totalTokens\":12"));
+    }
+
+    #[test]
+    fn build_converse_stream_emits_forced_tool_block() {
+        let out = build_converse_stream_response("", "tool_use", Some("calculator"), 3, 0);
+        let s = String::from_utf8_lossy(&out);
+        // A second (index 1) toolUse content block is streamed and the message
+        // stops with tool_use — matching non-streaming Converse.
+        assert!(s.contains("\"contentBlockIndex\":1"));
+        assert!(s.contains("calculator"));
+        assert!(s.contains("tooluse_fakecloud_01"));
+        assert!(s.contains("tool_use"));
     }
 
     #[test]
@@ -702,7 +758,7 @@ mod tests {
 
     #[test]
     fn build_converse_stream_response_emits_dynamic_token_counts() {
-        let out = build_converse_stream_response("text", 42, 7);
+        let out = build_converse_stream_response("text", "end_turn", None, 42, 7);
         let s = String::from_utf8_lossy(&out);
         assert!(s.contains("\"inputTokens\":42"));
         assert!(s.contains("\"outputTokens\":7"));

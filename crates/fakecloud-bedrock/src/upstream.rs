@@ -1115,11 +1115,11 @@ async fn call_chat_stream(
 // ---------------------------------------------------------------------------
 
 fn is_embedding_model(model_id: &str) -> bool {
-    model_id.starts_with("amazon.titan-embed") || model_id.starts_with("cohere.embed")
-}
-
-fn deterministic_embedding(dim: usize) -> Vec<f64> {
-    (0..dim).map(|i| (i as f64 * 0.001).sin()).collect()
+    // Strip any `us.` / `eu.` / cross-region inference-profile prefix first so
+    // `us.amazon.titan-embed-text-v2` still routes to the embeddings path
+    // instead of misrouting through chat.
+    let id = strip_region_prefix(model_id);
+    id.starts_with("amazon.titan-embed") || id.starts_with("cohere.embed")
 }
 
 fn build_embedding_response(
@@ -1128,7 +1128,7 @@ fn build_embedding_response(
     input_tokens: u64,
     text: &str,
 ) -> String {
-    let value = if model_id.starts_with("cohere.") {
+    let value = if strip_region_prefix(model_id).starts_with("cohere.") {
         json!({
             "embeddings": [embedding],
             "id": "fakecloud-upstream-embed",
@@ -1144,21 +1144,6 @@ fn build_embedding_response(
     serde_json::to_string(&value).expect("serde_json::Value serialization is infallible")
 }
 
-/// Deterministic offline embedding body, used both as the no-upstream
-/// default and when the configured protocol can't do embeddings.
-fn deterministic_embedding_response(model_id: &str, input_tokens: u64, text: &str) -> String {
-    let dim = if model_id.starts_with("cohere.") {
-        1024
-    } else {
-        256
-    };
-    let emb: Vec<Value> = deterministic_embedding(dim)
-        .into_iter()
-        .map(|f| json!(f))
-        .collect();
-    build_embedding_response(model_id, emb, input_tokens, text)
-}
-
 /// Returns `(response_body, input_tokens, output_tokens)`. Embeddings have
 /// no generated output tokens, so `output_tokens` is always `0`.
 async fn invoke_embedding_upstream(
@@ -1171,13 +1156,14 @@ async fn invoke_embedding_upstream(
     let embed_model = cfg.resolve_embed_model(model_id);
 
     match cfg.protocol {
-        // The Anthropic Messages protocol has no embeddings endpoint;
-        // fall back to the deterministic vector.
-        Protocol::Anthropic => Ok((
-            deterministic_embedding_response(model_id, fallback_tokens, &text),
-            fallback_tokens,
-            0,
-        )),
+        // The Anthropic Messages protocol has no embeddings endpoint. Rather
+        // than fabricate a vector (the real-inference path must never invent
+        // data), surface an honest error so callers know the configured
+        // upstream can't serve this embedding model.
+        Protocol::Anthropic => Err(model_error(format!(
+            "embedding model {model_id} is not supported by the configured \
+             anthropic upstream protocol (no embeddings endpoint)"
+        ))),
         Protocol::OpenAi => {
             let client = http_client();
             let body = json!({ "model": embed_model, "input": text });
@@ -1845,16 +1831,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn embedding_anthropic_protocol_falls_back_to_deterministic_vector() {
+    async fn embedding_anthropic_protocol_returns_honest_error() {
+        // The anthropic Messages protocol has no embeddings endpoint. Rather
+        // than fabricate a vector, the real-inference path must surface an
+        // honest error. No server is needed: the error is raised before any
+        // HTTP call.
         let c = cfg("http://127.0.0.1:1".to_string(), Protocol::Anthropic);
         let s = shared();
         let body = br#"{"inputText":"embed me"}"#;
-        let resp = invoke_model_upstream(&s, &req(), "amazon.titan-embed-text-v1", body, &c)
+        let err = invoke_model_upstream(&s, &req(), "amazon.titan-embed-text-v1", body, &c)
             .await
-            .unwrap();
-        let v: Value = serde_json::from_slice(&body_bytes(&resp)).unwrap();
-        assert!(v["embedding"].is_array());
-        assert_eq!(v["embedding"].as_array().unwrap().len(), 256);
+            .err()
+            .expect("anthropic embeddings should error, not fabricate a vector");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not supported") || msg.contains("embeddings"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -2146,5 +2139,43 @@ mod tests {
             strip_region_prefix("anthropic.claude-3"),
             "anthropic.claude-3"
         );
+    }
+
+    #[test]
+    fn is_embedding_model_strips_region_prefix() {
+        // Bare embedding ids.
+        assert!(is_embedding_model("amazon.titan-embed-text-v2:0"));
+        assert!(is_embedding_model("cohere.embed-english-v3"));
+        // Cross-region inference-profile prefixes must still route to embeddings.
+        assert!(is_embedding_model("us.amazon.titan-embed-text-v2:0"));
+        assert!(is_embedding_model("eu.cohere.embed-multilingual-v3"));
+        // Chat models are not embedding models.
+        assert!(!is_embedding_model("anthropic.claude-3"));
+        assert!(!is_embedding_model("us.amazon.titan-text-express-v1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn region_prefixed_embedding_routes_to_embeddings_upstream() {
+        // A region-prefixed titan-embed id must hit the /v1/embeddings path,
+        // not the chat completions path.
+        let app = Router::new().route(
+            "/v1/embeddings",
+            post(|| async {
+                axum::Json(json!({
+                    "data": [{ "embedding": [0.1, 0.2, 0.3] }],
+                    "usage": { "prompt_tokens": 4 }
+                }))
+            }),
+        );
+        let url = spawn(app).await;
+        let c = cfg(url, Protocol::OpenAi);
+        let s = shared();
+        let body = br#"{"inputText":"embed me"}"#;
+        let resp = invoke_model_upstream(&s, &req(), "us.amazon.titan-embed-text-v2:0", body, &c)
+            .await
+            .expect("region-prefixed embed model should route to embeddings");
+        let v: Value = serde_json::from_slice(&body_bytes(&resp)).unwrap();
+        assert_eq!(v["embedding"], json!([0.1, 0.2, 0.3]));
+        assert_eq!(v["inputTextTokenCount"], 4);
     }
 }
