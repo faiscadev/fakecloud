@@ -7,7 +7,7 @@
 //! asks `GetBootstrapBrokers` for the real `host:port`, creates a topic through
 //! the MSK API (which drives `kafka-topics.sh` on the live broker), then
 //! PRODUCES and CONSUMES a real message through that bootstrap endpoint with a
-//! genuine Kafka client (`rdkafka`). A message round trip is the only thing that
+//! genuine pure-Rust Kafka client (`rskafka`). A message round trip is the only thing that
 //! proves the data plane works. Finally it confirms `ListTopics` /
 //! `DescribeTopicPartitions` reflect the REAL broker's topic + partition count.
 //!
@@ -21,10 +21,9 @@ mod helpers;
 use std::time::Duration;
 
 use helpers::TestServer;
-use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
+use rskafka::client::partition::{Compression, UnknownTopicHandling};
+use rskafka::client::ClientBuilder;
+use rskafka::record::Record;
 
 fn docker_available() -> bool {
     std::process::Command::new("docker")
@@ -158,37 +157,47 @@ async fn msk_cluster_delivers_a_message_through_a_real_kafka_broker() {
         .expect("create topic");
 
     // 4. Produce and consume a real message through the broker at the bootstrap
-    //    endpoint. This round trip is the proof the data plane actually works.
-    let body = b"HELLO_FROM_FAKECLOUD_MSK";
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", &bootstrap)
-        .set("message.timeout.ms", "15000")
-        .create()
-        .expect("kafka producer");
-    producer
-        .send(
-            FutureRecord::to(topic).payload(body).key("k0"),
-            Duration::from_secs(15),
-        )
+    //    endpoint with a pure-Rust Kafka client (rskafka). This round trip is the
+    //    proof the data plane actually works.
+    let body = b"HELLO_FROM_FAKECLOUD_MSK".to_vec();
+    let kafka = ClientBuilder::new(vec![bootstrap.clone()])
+        .build()
+        .await
+        .expect("connect to the live kafka broker");
+    let partition = kafka
+        .partition_client(topic.to_string(), 0, UnknownTopicHandling::Retry)
+        .await
+        .expect("partition client");
+
+    let record = Record {
+        key: Some(b"k0".to_vec()),
+        value: Some(body.clone()),
+        headers: std::collections::BTreeMap::new(),
+        timestamp: chrono::Utc::now(),
+    };
+    partition
+        .produce(vec![record], Compression::NoCompression)
         .await
         .expect("produce message to the live broker");
 
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &bootstrap)
-        .set("group.id", "fc-msk-e2e")
-        .set("auto.offset.reset", "earliest")
-        .set("enable.auto.commit", "false")
-        .create()
-        .expect("kafka consumer");
-    consumer.subscribe(&[topic]).expect("subscribe");
-
-    let msg = tokio::time::timeout(Duration::from_secs(30), consumer.recv())
-        .await
-        .expect("timed out awaiting the produced message")
-        .expect("consume message from the live broker");
+    // Fetch from offset 0 (the message we just produced), waiting up to 30s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let consumed = loop {
+        let (records, _high_watermark) = partition
+            .fetch_records(0, 1..1_000_000, 30_000)
+            .await
+            .expect("fetch from the live broker");
+        if let Some(first) = records.into_iter().next() {
+            break first.record.value.expect("record value");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out awaiting the produced message from the live broker"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
     assert_eq!(
-        msg.payload(),
-        Some(body.as_slice()),
+        consumed, body,
         "the consumed message must equal the produced one"
     );
 

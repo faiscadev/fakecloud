@@ -448,17 +448,16 @@ jobs:
   # This test spawns a REAL single-node Apache Kafka container (a JVM broker in
   # KRaft mode), far heavier than the images in the shared partition matrix, so
   # it is gated behind FAKECLOUD_E2E_MSK=1 (skipped loudly everywhere else) and
-  # run here with docker, a generous timeout for the slow broker boot + the
-  # librdkafka source build, and a test-step retry that absorbs genuine
-  # cold-pull/first-connection flake WITHOUT masking a real regression (a
-  # persistently failing test still fails the job).
+  # run here with docker, a generous timeout for the slow broker boot, and a
+  # test-step retry that absorbs genuine cold-pull/first-connection flake WITHOUT
+  # masking a real regression (a persistently failing test still fails the job).
+  # The client is pure-Rust (rskafka), so there is no native/cmake build step.
   msk-broker:
     name: MSK Kafka data plane
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # Broker boot is slow (JVM/KRaft start + first cold image pull), and the
-    # rdkafka `cmake-build` feature compiles librdkafka from source; allow ample
+    # Broker boot is slow (JVM/KRaft start + first cold image pull); allow ample
     # headroom over the test's own 300s cluster-readiness window plus retries.
     timeout-minutes: 45
     steps:
