@@ -40,7 +40,9 @@ fn require_docker_or_skip(test: &str) -> bool {
     // In the shared partition the flag is unset and we skip loudly (by design),
     // rather than hard-failing an environment that was never meant to spawn brokers.
     if std::env::var("FAKECLOUD_E2E_MQ_BROKER").as_deref() != Ok("1") {
-        eprintln!("Skipping {test}: FAKECLOUD_E2E_MQ_BROKER!=1 (runs in the dedicated mq-broker CI job)");
+        eprintln!(
+            "Skipping {test}: FAKECLOUD_E2E_MQ_BROKER!=1 (runs in the dedicated mq-broker CI job)"
+        );
         return false;
     }
     if docker_available() {
