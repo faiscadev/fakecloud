@@ -180,6 +180,11 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         // AWS::AmazonMQ::Configuration since the mapping keys on the service
         // segment.
         "AmazonMQ" => "mq",
+        // A single entry covers every AWS::MSK::* type (Cluster,
+        // ServerlessCluster, Configuration, ClusterPolicy, BatchScramSecret,
+        // VpcConnection, Replicator) since the mapping keys on the service
+        // segment. The server registers a `kafka` snapshot hook.
+        "MSK" => "kafka",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
         _ => return None,
@@ -419,6 +424,7 @@ pub struct CloudFormationDeps {
     pub efs: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk: fakecloud_elasticbeanstalk::SharedEbState,
     pub mq: fakecloud_mq::SharedMqState,
+    pub kafka: fakecloud_kafka::SharedKafkaState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -439,6 +445,7 @@ pub struct CloudFormationDeps {
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
+    pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
 }
 
 pub struct CloudFormationService {
@@ -503,6 +510,8 @@ pub(crate) struct ContainerBackingHandles {
     ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     mq_state: fakecloud_mq::SharedMqState,
     mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
+    kafka_state: fakecloud_kafka::SharedKafkaState,
+    kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
 }
 
 impl ContainerBackingHandles {
@@ -521,6 +530,8 @@ impl ContainerBackingHandles {
             ecs_runtime: p.ecs_runtime.clone(),
             mq_state: p.mq_state.clone(),
             mq_runtime: p.mq_runtime.clone(),
+            kafka_state: p.kafka_state.clone(),
+            kafka_runtime: p.kafka_runtime.clone(),
         }
     }
 
@@ -642,6 +653,21 @@ impl ContainerBackingHandles {
                         });
                     }
                 }
+                ContainerSpawnIntent::MskCluster { cluster_arn } => {
+                    if let Some(runtime) = self.kafka_runtime.clone() {
+                        let kafka_state = self.kafka_state.clone();
+                        let account = self.account_id.clone();
+                        tokio::spawn(async move {
+                            fakecloud_kafka::cfn_provision::cfn_ensure_cluster_container(
+                                kafka_state,
+                                runtime,
+                                cluster_arn,
+                                account,
+                            )
+                            .await;
+                        });
+                    }
+                }
             }
         }
     }
@@ -750,6 +776,17 @@ impl ContainerBackingHandles {
                         tokio::spawn(async move {
                             fakecloud_mq::cfn_provision::cfn_teardown_broker_container(
                                 runtime, broker_id,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                ContainerTeardownIntent::MskCluster { cluster_arn } => {
+                    if let Some(runtime) = self.kafka_runtime.clone() {
+                        tokio::spawn(async move {
+                            fakecloud_kafka::cfn_provision::cfn_teardown_cluster_container(
+                                runtime,
+                                cluster_arn,
                             )
                             .await;
                         });
@@ -902,6 +939,7 @@ impl CloudFormationService {
             efs_state: self.deps.efs.clone(),
             elasticbeanstalk_state: self.deps.elasticbeanstalk.clone(),
             mq_state: self.deps.mq.clone(),
+            kafka_state: self.deps.kafka.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -910,6 +948,7 @@ impl CloudFormationService {
             ecs_runtime: self.deps.ecs_runtime.clone(),
             elasticache_runtime: self.deps.elasticache_runtime.clone(),
             mq_runtime: self.deps.mq_runtime.clone(),
+            kafka_runtime: self.deps.kafka_runtime.clone(),
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -3186,6 +3225,13 @@ mod tests {
                     "",
                 ),
             )),
+            kafka: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -3193,6 +3239,7 @@ mod tests {
             ecs_runtime: None,
             elasticache_runtime: None,
             mq_runtime: None,
+            kafka_runtime: None,
         };
         CloudFormationService::new(cf_state, deps)
     }

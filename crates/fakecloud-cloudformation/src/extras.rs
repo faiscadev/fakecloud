@@ -2743,6 +2743,7 @@ mod tests {
                 fakecloud_elasticbeanstalk::EbAccounts::new(),
             )),
             mq: shared::<fakecloud_mq::MqData>(),
+            kafka: shared::<fakecloud_kafka::KafkaData>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -2750,6 +2751,7 @@ mod tests {
             ecs_runtime: None,
             elasticache_runtime: None,
             mq_runtime: None,
+            kafka_runtime: None,
         }
     }
 

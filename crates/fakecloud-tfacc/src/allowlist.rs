@@ -732,6 +732,55 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "kafka",
+        // Amazon MSK is a real, persisted control plane (the Kafka broker data
+        // plane is disabled for tfacc via FAKECLOUD_KAFKA_DISABLE_BACKEND=1, so a
+        // real broker's `127.0.0.1:<port>` bootstrap endpoints don't race the
+        // provider's AWS-format `*.amazonaws.com:9092` assertions -- the data
+        // plane is proven separately by the msk-broker Docker E2E). This first
+        // wave selects the resources + data sources that round-trip cleanly
+        // against the auto-settling control plane:
+        //   - `aws_msk_configuration` (create/read/update-revision/delete, base64
+        //     ServerProperties, KafkaVersions, description; DescribeConfiguration
+        //     reports the AWS `BadRequestException` not-found shape the provider's
+        //     delete waiter keys on) + its data source,
+        //   - a provisioned cluster with an explicit instance type
+        //     (`Cluster_BrokerNodeGroupInfo_instanceType`) and the cluster
+        //     `_disappears` lifecycle,
+        //   - a serverless cluster (security-group VpcConfig + `_disappears`),
+        //   - SCRAM-secret associations (`_disappears` / `Disappears_cluster` /
+        //     single-secret `_disappears`, which stand up a real KMS key +
+        //     Secrets Manager secret and the batch-associate/list round-trip),
+        //   - the broker-nodes and bootstrap-brokers data sources.
+        //
+        // Deferred to a later widening batch (NOT env-impossible, but needing
+        // deeper cluster describe/GetBootstrapBrokers fidelity than the current
+        // control plane): the full `Cluster_basic`/tags/monitoring/storage/
+        // version-upgrade suite, the cluster + configuration-with-cluster data
+        // sources, cluster policies, replicators, and standalone VPC connections
+        // all drift on cluster attributes the control plane does not yet
+        // synthesize (encryption-in-transit-gated bootstrap-broker strings,
+        // `connectivity_info` / `client_authentication` / `logging_info` /
+        // `open_monitoring` defaults, serverless default security group). The
+        // Kafka-version data source needs a fuller ListKafkaVersions catalogue.
+        // These grow as the MSK control-plane fidelity does; they are selected
+        // out by the narrow positive regex rather than enumerated as denies.
+        run_regex: concat!(
+            "^TestAccKafka(",
+            "Configuration_(basic|description|disappears|kafkaVersions|serverProperties)",
+            "|ConfigurationDataSource_name",
+            "|Cluster_disappears",
+            "|Cluster_BrokerNodeGroupInfo_instanceType",
+            "|BrokerNodesDataSource_basic",
+            "|BootstrapBrokersDataSource_basic",
+            "|ServerlessCluster_(disappears|securityGroup)",
+            "|SCRAMSecretAssociation_(disappears|Disappears_cluster)",
+            "|SingleSCRAMSecretAssociation_disappears",
+            ")$",
+        ),
+        deny: &[],
+    },
+    Service {
         name: "glacier",
         // Amazon S3 Glacier stores real archive bytes and computes a real
         // SHA-256 tree hash, so the standalone vault resource round-trips
@@ -1660,6 +1709,24 @@ pub const SHARDS: &[Shard] = &[
         name: "mq",
         service: "mq",
         run_regex: "^TestAccMQ(Broker|Configuration)_basic$",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kafka",
+        service: "kafka",
+        run_regex: concat!(
+            "^TestAccKafka(",
+            "Configuration_(basic|description|disappears|kafkaVersions|serverProperties)",
+            "|ConfigurationDataSource_name",
+            "|Cluster_disappears",
+            "|Cluster_BrokerNodeGroupInfo_instanceType",
+            "|BrokerNodesDataSource_basic",
+            "|BootstrapBrokersDataSource_basic",
+            "|ServerlessCluster_(disappears|securityGroup)",
+            "|SCRAMSecretAssociation_(disappears|Disappears_cluster)",
+            "|SingleSCRAMSecretAssociation_disappears",
+            ")$",
+        ),
         extra_deny: &[],
     },
     Shard {

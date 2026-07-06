@@ -109,13 +109,38 @@ MSK-faithful error shapes: `BadRequestException` (400), `NotFoundException`
 `Forbidden` / `TooManyRequests` / `InternalServerError` / `ServiceUnavailable`
 family, each matching the model's per-operation error list.
 
-## Not yet implemented
+## CloudFormation
 
-- The real Apache Kafka broker data plane (topics created on a running Kafka
-  container; `GetBootstrapBrokers` returning a genuinely connectable endpoint).
-  A later batch backs the control plane with a real broker container the way RDS
-  and ElastiCache do.
-- CloudFormation `AWS::MSK::*` resource provisioning (a later batch).
+fakecloud provisions every `AWS::MSK::*` resource type through CloudFormation:
+`AWS::MSK::Cluster`, `AWS::MSK::ServerlessCluster`, `AWS::MSK::Configuration`,
+`AWS::MSK::ClusterPolicy`, `AWS::MSK::BatchScramSecret`,
+`AWS::MSK::VpcConnection`, and `AWS::MSK::Replicator`. Each is written through to
+the `kafka` service via the same shared record builders the direct API uses, so
+a CFN-provisioned resource reads back identically on `Describe*` and persists
+across a restart (it survives just like its direct-API equivalent).
+
+`Ref` and `Fn::GetAtt` follow the AWS resource spec: a cluster / serverless
+cluster / configuration / VPC connection / replicator `Ref` resolves to the
+resource ARN; a cluster policy and batch SCRAM secret `Ref` resolve to the
+cluster ARN. `Fn::GetAtt` resolves `Arn` (cluster, configuration, VPC
+connection), `ReplicatorArn` (replicator), and `CurrentVersion` (cluster
+policy). A provisioned `AWS::MSK::Cluster` is backed by the same real Apache
+Kafka container the direct `CreateCluster` path spawns (the container is started
+in the background so `CreateStack` never blocks on a broker boot), settling
+`CREATING` -> `ACTIVE` once it serves; deleting the stack tears the container
+down. Without a container runtime the cluster settles `ACTIVE` through the
+in-memory control plane, the same as the direct API.
+
+## Terraform
+
+fakecloud is exercised by the upstream `terraform-provider-aws` MSK acceptance
+tests (`internal/service/kafka`) in the `kafka` tfacc job -- clusters,
+configurations, cluster policies, serverless clusters, SCRAM-secret
+associations, and the Kafka-version / cluster / broker-nodes / bootstrap-brokers
+data sources round-trip against the auto-settling control plane. Tests that need
+a real in-transit TLS/SASL broker handshake, real CloudWatch/S3/Firehose log
+destinations that MSK validates, or real multi-VPC/public connectivity the
+provider verifies against EC2 are out of scope for a control-plane emulator.
 
 ## Persistence
 

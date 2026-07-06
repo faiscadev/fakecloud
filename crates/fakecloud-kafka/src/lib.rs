@@ -31,6 +31,8 @@
 //! behavior (a write is reflected by its read) derived from the cluster's broker
 //! nodes -- the same response shapes either way.
 
+pub mod builders;
+pub mod cfn_provision;
 pub mod persistence;
 pub mod runtime;
 pub mod service;

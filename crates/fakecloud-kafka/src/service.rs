@@ -24,6 +24,7 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
+use crate::builders::{self, default_bngi, gen_version};
 use crate::persistence::save_snapshot;
 use crate::runtime::{KafkaRuntime, RunningBroker, TopicError};
 use crate::shared;
@@ -542,47 +543,6 @@ fn render_tags(tags: &std::collections::BTreeMap<String, String>) -> Value {
     Value::Object(tags.iter().map(|(k, v)| (k.clone(), json!(v))).collect())
 }
 
-/// A synthesized cluster `currentVersion` token (MSK's opaque `K...` form).
-fn gen_version(seq: u64) -> String {
-    format!("K{:013X}", 0x1_0000_0000_u64 + seq)
-}
-
-/// The default `BrokerNodeGroupInfo` MSK fills in when the caller supplies none.
-fn default_bngi() -> Value {
-    json!({
-        "brokerAZDistribution": "DEFAULT",
-        "clientSubnets": ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"],
-        "instanceType": "kafka.m5.large",
-        "securityGroups": ["sg-0123456789abcdef0"],
-        "storageInfo": { "ebsStorageInfo": { "volumeSize": 100 } },
-    })
-}
-
-fn default_encryption(ctx: &Ctx) -> Value {
-    json!({
-        "encryptionAtRest": {
-            "dataVolumeKMSKeyId": format!(
-                "arn:aws:kms:{}:{}:key/msk-default-key", ctx.region, ctx.account
-            )
-        },
-        "encryptionInTransit": { "clientBroker": "TLS", "inCluster": true },
-    })
-}
-
-/// The ZooKeeper connect strings synthesized for a provisioned cluster.
-fn zk_strings(cluster_arn: &str) -> (String, String) {
-    let name = shared::cluster_name_from_arn(cluster_arn).unwrap_or("cluster");
-    let region = shared::arn_region(cluster_arn).unwrap_or("us-east-1");
-    let h = shared::hash_str(cluster_arn) & 0xffff_ffff;
-    let mk = |port: u16| {
-        (1..=3)
-            .map(|z| format!("z-{z}.{name}.{h:x}.c2.kafka.{region}.amazonaws.com:{port}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    (mk(2181), mk(2182))
-}
-
 /// Strip internal `_`-prefixed helper keys from a stored wire object and add the
 /// resource's tags (rendered from the single ARN-keyed tag map at read time).
 fn public_view(data: &KafkaData, arn: &str, obj: &Value) -> Value {
@@ -655,7 +615,7 @@ async fn backoff(attempt: u32) {
 /// `ACTIVE` and record the real host/port binding (reaping the container if the
 /// cluster was deleted meanwhile); on failure mark it `FAILED` with a
 /// diagnosable `stateInfo`.
-async fn settle_cluster_up(
+pub(crate) async fn settle_cluster_up(
     state: &SharedKafkaState,
     account: &str,
     arn: &str,
@@ -744,116 +704,16 @@ impl KafkaService {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-
-        // A serverless V2 request carries a `serverless` block; otherwise the
-        // cluster is provisioned (from `provisioned` in V2, or the flat fields
-        // in V1).
         let serverless = v2 && b.get("serverless").is_some();
-        let provisioned_src = if v2 {
-            b.get("provisioned").cloned().unwrap_or_else(|| b.clone())
-        } else {
-            b.clone()
-        };
 
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
 
-        // Cluster names are unique within an account + region.
-        if data.clusters.values().any(|c| {
-            c.get("clusterName").and_then(Value::as_str) == Some(name.as_str())
-                && c.get("clusterArn")
-                    .and_then(Value::as_str)
-                    .and_then(shared::arn_region)
-                    == Some(ctx.region.as_str())
-        }) {
-            return Err(conflict(&format!(
-                "A cluster with the name '{name}' already exists in this account and region."
-            )));
-        }
-
-        let n = data.next_seq();
-        let uuid = Uuid::new_v4().to_string();
-        let arn = shared::cluster_arn(&ctx.region, &ctx.account, &name, &uuid, n);
-        let version = gen_version(n);
-        let (zk, zk_tls) = zk_strings(&arn);
-
-        let mut cluster = Map::new();
-        cluster.insert("clusterArn".into(), json!(arn));
-        cluster.insert("clusterName".into(), json!(name));
-        cluster.insert("state".into(), json!("CREATING"));
-        cluster.insert("stateInfo".into(), json!({ "code": "NONE", "message": "" }));
-        cluster.insert("creationTime".into(), json!(now_iso()));
-        cluster.insert("currentVersion".into(), json!(version));
-
-        if serverless {
-            cluster.insert("_clusterType".into(), json!("SERVERLESS"));
-            cluster.insert(
-                "_serverless".into(),
-                b.get("serverless")
-                    .cloned()
-                    .unwrap_or(json!({ "vpcConfigs": [] })),
-            );
-        } else {
-            let kv = provisioned_src
-                .get("kafkaVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(shared::DEFAULT_KAFKA_VERSION)
-                .to_string();
-            let num = provisioned_src
-                .get("numberOfBrokerNodes")
-                .and_then(Value::as_i64)
-                .unwrap_or(3);
-            cluster.insert("_clusterType".into(), json!("PROVISIONED"));
-            cluster.insert("numberOfBrokerNodes".into(), json!(num));
-            cluster.insert(
-                "brokerNodeGroupInfo".into(),
-                provisioned_src
-                    .get("brokerNodeGroupInfo")
-                    .cloned()
-                    .unwrap_or_else(default_bngi),
-            );
-            cluster.insert(
-                "currentBrokerSoftwareInfo".into(),
-                json!({ "kafkaVersion": kv }),
-            );
-            cluster.insert(
-                "enhancedMonitoring".into(),
-                provisioned_src
-                    .get("enhancedMonitoring")
-                    .cloned()
-                    .unwrap_or(json!("DEFAULT")),
-            );
-            cluster.insert(
-                "encryptionInfo".into(),
-                provisioned_src
-                    .get("encryptionInfo")
-                    .cloned()
-                    .unwrap_or_else(|| default_encryption(ctx)),
-            );
-            cluster.insert(
-                "storageMode".into(),
-                provisioned_src
-                    .get("storageMode")
-                    .cloned()
-                    .unwrap_or(json!("LOCAL")),
-            );
-            cluster.insert("zookeeperConnectString".into(), json!(zk));
-            cluster.insert("zookeeperConnectStringTls".into(), json!(zk_tls));
-        }
-
-        data.clusters.insert(arn.clone(), Value::Object(cluster));
-
-        if let Some(tags) = b.get("tags").and_then(Value::as_object) {
-            let mut map = std::collections::BTreeMap::new();
-            for (k, val) in tags {
-                if let Some(s) = val.as_str() {
-                    map.insert(k.clone(), s.to_string());
-                }
-            }
-            if !map.is_empty() {
-                data.tags.insert(arn.clone(), map);
-            }
-        }
+        // Build + insert the record through the SHARED builder (the same path the
+        // CloudFormation `AWS::MSK::*` provisioner uses, so the two paths cannot
+        // diverge). Returns the ARN, or a name-conflict message.
+        let arn = builders::insert_cluster(data, &ctx.region, &ctx.account, b, v2)
+            .map_err(|msg| conflict(&msg))?;
 
         let mut out = json!({
             "clusterArn": arn,
@@ -2334,60 +2194,20 @@ fn parse_topic_configs(s: &str) -> Vec<(String, String)> {
 
 impl KafkaService {
     fn create_configuration(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
-        let name = b
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let description = b
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let server_properties = b
-            .get("serverProperties")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let kafka_versions: Vec<Value> = b
-            .get("kafkaVersions")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_else(|| shared::KAFKA_VERSIONS.iter().map(|v| json!(v)).collect());
-
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        let n = data.next_seq();
-        let uuid = Uuid::new_v4().to_string();
-        let arn = shared::config_arn(&ctx.region, &ctx.account, &name, &uuid, n);
-        let created = now_iso();
-        let rev = json!({ "creationTime": created, "description": description, "revision": 1 });
-        data.configurations.insert(
-            arn.clone(),
-            json!({
-                "arn": arn,
-                "creationTime": created,
-                "description": description,
-                "kafkaVersions": kafka_versions,
-                "latestRevision": rev,
-                "name": name,
-                "state": "ACTIVE",
-            }),
-        );
-        data.configuration_revisions.insert(
-            arn.clone(),
-            vec![json!({
-                "creationTime": created,
-                "description": description,
-                "revision": 1,
-                "serverProperties": server_properties,
-            })],
-        );
+        // Shared builder: same insert path the CloudFormation
+        // `AWS::MSK::Configuration` provisioner uses.
+        let arn = builders::insert_configuration(data, &ctx.region, &ctx.account, b);
+        let cfg = data
+            .configurations
+            .get(&arn)
+            .expect("configuration was just inserted");
         ok(json!({
             "arn": arn,
-            "creationTime": created,
-            "latestRevision": rev,
-            "name": name,
+            "creationTime": cfg.get("creationTime").cloned().unwrap_or(json!("")),
+            "latestRevision": cfg.get("latestRevision").cloned().unwrap_or(json!(null)),
+            "name": cfg.get("name").cloned().unwrap_or(json!("")),
             "state": "ACTIVE",
         }))
     }
@@ -2395,11 +2215,15 @@ impl KafkaService {
     fn describe_configuration(&self, ctx: &Ctx, arn: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
+        // AWS MSK reports a missing configuration as a `BadRequestException`
+        // whose message contains "Configuration ARN does not exist" (NOT a 404) --
+        // the terraform provider keys its not-found detection on exactly that,
+        // so its delete/read waiters depend on this shape.
         let cfg = data
             .configurations
             .get(arn)
             .cloned()
-            .ok_or_else(|| not_found(&format!("The configuration '{arn}' does not exist.")))?;
+            .ok_or_else(|| bad_request(&format!("Configuration ARN does not exist : {arn}")))?;
         ok(cfg)
     }
 
@@ -2479,9 +2303,12 @@ impl KafkaService {
     fn delete_configuration(&self, ctx: &Ctx, arn: &str) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
+        // A missing configuration surfaces as MSK's `BadRequestException`
+        // ("Configuration ARN does not exist"), matching DescribeConfiguration --
+        // the terraform provider treats exactly this shape as already-deleted.
         if !data.configurations.contains_key(arn) {
-            return Err(not_found(&format!(
-                "The configuration '{arn}' does not exist."
+            return Err(bad_request(&format!(
+                "Configuration ARN does not exist : {arn}"
             )));
         }
         data.configurations.remove(arn);
@@ -2589,45 +2416,21 @@ impl KafkaService {
     fn create_vpc_connection(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        let n = data.next_seq();
-        let uuid = Uuid::new_v4().to_string();
-        let arn = shared::vpc_connection_arn(&ctx.region, &ctx.account, &uuid, n);
-        let created = now_iso();
-        let subnets = b.get("clientSubnets").cloned().unwrap_or(json!([]));
-        let sgs = b.get("securityGroups").cloned().unwrap_or(json!([]));
-        let auth = b.get("authentication").cloned().unwrap_or(json!(""));
-        let vpc_id = b.get("vpcId").cloned().unwrap_or(json!(""));
-        let target = b.get("targetClusterArn").cloned().unwrap_or(json!(""));
-        let record = json!({
-            "vpcConnectionArn": arn,
-            "targetClusterArn": target,
-            "state": "CREATING",
-            "authentication": auth,
-            "vpcId": vpc_id,
-            "subnets": subnets,
-            "securityGroups": sgs,
-            "creationTime": created,
-        });
-        data.vpc_connections.insert(arn.clone(), record);
-        if let Some(tags) = b.get("tags").and_then(Value::as_object) {
-            let mut map = std::collections::BTreeMap::new();
-            for (k, v) in tags {
-                if let Some(s) = v.as_str() {
-                    map.insert(k.clone(), s.to_string());
-                }
-            }
-            if !map.is_empty() {
-                data.tags.insert(arn.clone(), map);
-            }
-        }
+        // Shared builder: same insert path the CloudFormation
+        // `AWS::MSK::VpcConnection` provisioner uses.
+        let arn = builders::insert_vpc_connection(data, &ctx.region, &ctx.account, b);
+        let rec = data
+            .vpc_connections
+            .get(&arn)
+            .expect("vpc connection was just inserted");
         ok(json!({
             "vpcConnectionArn": arn,
             "state": "CREATING",
-            "authentication": auth,
-            "vpcId": vpc_id,
-            "clientSubnets": subnets,
-            "securityGroups": sgs,
-            "creationTime": created,
+            "authentication": rec.get("authentication").cloned().unwrap_or(json!("")),
+            "vpcId": rec.get("vpcId").cloned().unwrap_or(json!("")),
+            "clientSubnets": rec.get("subnets").cloned().unwrap_or(json!([])),
+            "securityGroups": rec.get("securityGroups").cloned().unwrap_or(json!([])),
+            "creationTime": rec.get("creationTime").cloned().unwrap_or(json!("")),
             "tags": b.get("tags").cloned().unwrap_or(json!({})),
         }))
     }
@@ -2705,56 +2508,19 @@ impl KafkaService {
 
 impl KafkaService {
     fn create_replicator(&self, ctx: &Ctx, b: &Value) -> Result<AwsResponse, AwsServiceError> {
-        let name = b
-            .get("replicatorName")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        if data.replicators.values().any(|r| {
-            r.get("replicatorName").and_then(Value::as_str) == Some(name.as_str())
-                && r.get("replicatorArn")
-                    .and_then(Value::as_str)
-                    .and_then(shared::arn_region)
-                    == Some(ctx.region.as_str())
-        }) {
-            return Err(conflict(&format!(
-                "A replicator with the name '{name}' already exists."
-            )));
-        }
-        let n = data.next_seq();
-        let uuid = Uuid::new_v4().to_string();
-        let arn = shared::replicator_arn(&ctx.region, &ctx.account, &name, &uuid, n);
-        let created = now_iso();
-        let record = json!({
-            "replicatorArn": arn,
-            "replicatorName": name,
-            "replicatorState": "CREATING",
-            "replicatorResourceArn": arn,
-            "creationTime": created,
-            "currentVersion": gen_version(n),
-            "isReplicatorReference": false,
-            "serviceExecutionRoleArn": b.get("serviceExecutionRoleArn").cloned().unwrap_or(json!("")),
-            "kafkaClusters": b.get("kafkaClusters").cloned().unwrap_or(json!([])),
-            "replicationInfoList": b.get("replicationInfoList").cloned().unwrap_or(json!([])),
-            "replicatorDescription": b.get("description").cloned().unwrap_or(json!("")),
-        });
-        data.replicators.insert(arn.clone(), record);
-        if let Some(tags) = b.get("tags").and_then(Value::as_object) {
-            let mut map = std::collections::BTreeMap::new();
-            for (k, v) in tags {
-                if let Some(s) = v.as_str() {
-                    map.insert(k.clone(), s.to_string());
-                }
-            }
-            if !map.is_empty() {
-                data.tags.insert(arn.clone(), map);
-            }
-        }
+        // Shared builder: same insert path the CloudFormation
+        // `AWS::MSK::Replicator` provisioner uses.
+        let arn = builders::insert_replicator(data, &ctx.region, &ctx.account, b)
+            .map_err(|msg| conflict(&msg))?;
+        let rec = data
+            .replicators
+            .get(&arn)
+            .expect("replicator was just inserted");
         ok(json!({
             "replicatorArn": arn,
-            "replicatorName": name,
+            "replicatorName": rec.get("replicatorName").cloned().unwrap_or(json!("")),
             "replicatorState": "CREATING",
         }))
     }

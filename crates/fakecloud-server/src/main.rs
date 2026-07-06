@@ -1239,6 +1239,7 @@ async fn main() {
             efs: efs_state.clone(),
             elasticbeanstalk: beanstalk_state.clone(),
             mq: mq_state.clone(),
+            kafka: kafka_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -1246,6 +1247,7 @@ async fn main() {
             ecs_runtime: ecs_runtime.clone(),
             elasticache_runtime: elasticache_runtime.clone(),
             mq_runtime: mq_runtime.clone(),
+            kafka_runtime: kafka_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {

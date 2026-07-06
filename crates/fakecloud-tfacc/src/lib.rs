@@ -420,6 +420,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_KMS", "kms"),
     ("AWS_ENDPOINT_URL_LOGS", "logs"),
     ("AWS_ENDPOINT_URL_KINESIS", "kinesis"),
+    ("AWS_ENDPOINT_URL_KAFKA", "kafka"),
     ("AWS_ENDPOINT_URL_RDS", "rds"),
     ("AWS_ENDPOINT_URL_DMS", "dms"),
     ("AWS_ENDPOINT_URL_DATABASE_MIGRATION_SERVICE", "dms"),
