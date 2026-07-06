@@ -67,6 +67,10 @@ const REST_JSON_SERVICES: &[&str] = &[
     // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
     // brokers, configurations, users, and tags; JSON bodies). Signs as `mq`.
     "mq",
+    // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control plane
+    // (path-labelled `@http` URIs over clusters, configurations, operations,
+    // replicators, VPC connections, and topics; JSON bodies). Signs as `kafka`.
+    "kafka",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

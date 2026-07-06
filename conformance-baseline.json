@@ -1,6 +1,6 @@
 {
-  "variants_passed": 187837,
-  "total_variants": 187837,
+  "variants_passed": 189392,
+  "total_variants": 189392,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -321,6 +321,10 @@
     "config": {
       "passed": 4590,
       "total": 4590
+    },
+    "kafka": {
+      "passed": 1555,
+      "total": 1555
     }
   }
 }
