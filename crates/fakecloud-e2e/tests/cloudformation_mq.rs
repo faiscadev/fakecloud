@@ -59,6 +59,13 @@ fn output<'a>(stack: &'a aws_sdk_cloudformation::types::Stack, key: &str) -> &'a
 
 #[tokio::test]
 async fn cfn_provisions_mq_broker_and_configuration() {
+    // Spawns a real broker container -> runs only in the dedicated, resourced
+    // `mq-broker` CI job (which sets FAKECLOUD_E2E_MQ_BROKER=1), not the shared
+    // E2E partition. See mq_dataplane.rs::require_docker_or_skip.
+    if std::env::var("FAKECLOUD_E2E_MQ_BROKER").as_deref() != Ok("1") {
+        eprintln!("Skipping cfn_provisions_mq_broker_and_configuration: FAKECLOUD_E2E_MQ_BROKER!=1 (runs in the dedicated mq-broker CI job)");
+        return;
+    }
     let s = TestServer::start().await;
     let cfg = s.aws_config().await;
     let cfn = s.cloudformation_client().await;
