@@ -74,13 +74,7 @@ jobs:
     needs: [changes, tfacc-matrix]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # 90, not 60: the heaviest shards (the kinesisanalyticsv2 flink/sql suites,
-    # whose acc tests upload the 66MB app JAR and drive a full app lifecycle) run
-    # ~5-6min per test on the 2-core runner and need ~60-70min even split in half.
-    # A 60min cap cancelled them mid-run, which ALSO skips the cache-save step, so
-    # reruns never warmed. 90min lets them finish and persist the build cache.
-    # Light shards finish in minutes and exit well under the cap regardless.
-    timeout-minutes: 90
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
