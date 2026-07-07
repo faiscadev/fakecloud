@@ -67,20 +67,24 @@ pub const KA2_ACTIONS: &[&str] = &[
     "UpdateApplicationMaintenanceConfiguration",
 ];
 
+// The AWS wire values for RuntimeEnvironment are hyphenated (`FLINK-1_20`,
+// `SQL-1_0`, `ZEPPELIN-FLINK-1_0`) — the Smithy enum NAME is `FLINK-1_20` but
+// its serialized `value` is `FLINK-1_20`, which is what the AWS SDKs and the
+// terraform provider send. Validate against the wire values, not the names.
 const RUNTIME_ENVIRONMENTS: &[&str] = &[
-    "SQL_1_0",
-    "FLINK_1_6",
-    "FLINK_1_8",
-    "ZEPPELIN_FLINK_1_0",
-    "FLINK_1_11",
-    "FLINK_1_13",
-    "ZEPPELIN_FLINK_2_0",
-    "FLINK_1_15",
-    "ZEPPELIN_FLINK_3_0",
-    "FLINK_1_18",
-    "FLINK_1_19",
-    "FLINK_1_20",
-    "FLINK_2_2",
+    "SQL-1_0",
+    "FLINK-1_6",
+    "FLINK-1_8",
+    "ZEPPELIN-FLINK-1_0",
+    "FLINK-1_11",
+    "FLINK-1_13",
+    "ZEPPELIN-FLINK-2_0",
+    "FLINK-1_15",
+    "ZEPPELIN-FLINK-3_0",
+    "FLINK-1_18",
+    "FLINK-1_19",
+    "FLINK-1_20",
+    "FLINK-2_2",
 ];
 const APPLICATION_MODES: &[&str] = &["STREAMING", "INTERACTIVE"];
 const URL_TYPES: &[&str] = &["FLINK_DASHBOARD_URL", "ZEPPELIN_UI_URL"];
@@ -2350,11 +2354,11 @@ impl Ka2Service {
 }
 
 /// Whether an application is a REAL-runtime-managed Flink app: a Flink-flavor
-/// runtime environment (`FLINK_1_x`, excluding SQL and Zeppelin) AND a code JAR
+/// runtime environment (`FLINK-1_x`, excluding SQL and Zeppelin) AND a code JAR
 /// in S3 to submit. Only these get the Docker-backed Flink job; everything else
 /// stays on the control-plane state machine.
 fn is_real_flink(app: &Application) -> bool {
-    app.runtime_environment.starts_with("FLINK_") && flink_code_location(app).is_some()
+    app.runtime_environment.starts_with("FLINK-") && flink_code_location(app).is_some()
 }
 
 /// Extract the `(bucket, key)` of an application's code JAR from its
@@ -2638,7 +2642,7 @@ mod tests {
                 "CreateApplication",
                 json!({
                     "ApplicationName": "app1",
-                    "RuntimeEnvironment": "FLINK_1_20",
+                    "RuntimeEnvironment": "FLINK-1_20",
                     "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
                     "ApplicationDescription": "hello"
                 }),
@@ -2655,7 +2659,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         )));
@@ -2669,7 +2673,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2703,7 +2707,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2739,7 +2743,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2788,7 +2792,7 @@ mod tests {
             name: "flinkapp".into(),
             arn: arn("us-east-1", "000000000000", "flinkapp"),
             description: None,
-            runtime_environment: "FLINK_1_19".into(),
+            runtime_environment: "FLINK-1_19".into(),
             service_execution_role: Some("arn:aws:iam::000000000000:role/r".into()),
             application_mode: Some("STREAMING".into()),
             status: "READY".into(),
@@ -2829,7 +2833,7 @@ mod tests {
     #[test]
     fn sql_app_is_not_real_flink() {
         let mut app = flink_app_with_jar();
-        app.runtime_environment = "SQL_1_0".into();
+        app.runtime_environment = "SQL-1_0".into();
         // SQL flavor -> control-plane only, never the real Docker Flink job.
         assert!(!is_real_flink(&app));
     }
@@ -2854,7 +2858,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_19",
+                "RuntimeEnvironment": "FLINK-1_19",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
                 "ApplicationConfiguration": {
                     "ApplicationCodeConfiguration": {
@@ -2902,7 +2906,7 @@ mod tests {
                 "CreateApplication",
                 json!({
                     "ApplicationName": format!("app{i}"),
-                    "RuntimeEnvironment": "FLINK_1_20",
+                    "RuntimeEnvironment": "FLINK-1_20",
                     "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
                 }),
             ))

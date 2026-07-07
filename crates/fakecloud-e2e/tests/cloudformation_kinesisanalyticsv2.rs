@@ -30,7 +30,7 @@ const TEMPLATE: &str = r#"{
       "Type": "AWS::KinesisAnalyticsV2::Application",
       "Properties": {
         "ApplicationName": "cfn-ka2-app",
-        "RuntimeEnvironment": "SQL_1_0",
+        "RuntimeEnvironment": "SQL-1_0",
         "ServiceExecutionRole": "arn:aws:iam::123456789012:role/service-role/kinesis-analytics",
         "ApplicationDescription": "provisioned by cloudformation",
         "Tags": [{ "Key": "env", "Value": "test" }]
@@ -120,7 +120,7 @@ async fn cfn_provisions_kinesisanalyticsv2_resources_control_plane() {
         .await
         .expect("describe application");
     let detail = desc.application_detail().expect("application detail");
-    assert_eq!(detail.runtime_environment().as_str(), "SQL_1_0");
+    assert_eq!(detail.runtime_environment().as_str(), "SQL-1_0");
     assert_eq!(detail.service_execution_role(), Some(ROLE));
     assert_eq!(
         detail.application_description(),
