@@ -1695,10 +1695,46 @@ pub const SHARDS: &[Shard] = &[
         run_regex: "^TestAccMQ(Broker|Configuration)_basic$",
         extra_deny: &[],
     },
+    // The full ^TestAccKafka suite (59 tests) exceeds a single 60-min runner's
+    // wall clock (each terraform apply/destroy cycle is slow in CI), so it is
+    // split into three resource-family shards whose union is the whole suite and
+    // whose run_regexes do not overlap. `^TestAccKafkaCluster_` captures only the
+    // cluster *resource* tests (the `_` after `Cluster` excludes ClusterPolicy /
+    // ClusterDataSource, which are claimed by the second shard).
     Shard {
-        name: "kafka",
+        name: "kafka-cluster",
         service: "kafka",
-        run_regex: "^TestAccKafka",
+        run_regex: "^TestAccKafkaCluster_",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kafka-config-serverless",
+        service: "kafka",
+        run_regex: concat!(
+            "^TestAccKafka(",
+            "Configuration",
+            "|ConfigurationDataSource",
+            "|ClusterDataSource",
+            "|ClusterPolicy",
+            "|ServerlessCluster",
+            "|BootstrapBrokersDataSource",
+            "|BrokerNodesDataSource",
+            "|KafkaVersionDataSource",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kafka-scram-repl-vpc",
+        service: "kafka",
+        run_regex: concat!(
+            "^TestAccKafka(",
+            "SCRAMSecretAssociation",
+            "|SingleSCRAMSecretAssociation",
+            "|Replicator",
+            "|VPCConnection",
+            ")",
+        ),
         extra_deny: &[],
     },
     Shard {
