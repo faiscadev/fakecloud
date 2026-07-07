@@ -591,6 +591,118 @@ fn cluster_is_serverless(cluster: &Value) -> bool {
     cluster.get("_clusterType").and_then(Value::as_str) == Some("SERVERLESS")
 }
 
+/// Merge an `UpdateReplicationInfo` sub-object (`topicReplication` /
+/// `consumerGroupReplication`) field-wise onto the stored replication-info
+/// description, so create-only members not present in the update payload (e.g.
+/// `startingPosition`, `topicNameConfiguration`) survive while the updated
+/// lists / flags are overwritten.
+fn merge_replication_sub(info: &mut Map<String, Value>, key: &str, incoming: Option<Value>) {
+    let Some(incoming) = incoming.as_ref().and_then(Value::as_object) else {
+        return;
+    };
+    let target = info
+        .entry(key.to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("replication sub-object");
+    for (k, v) in incoming {
+        target.insert(k.clone(), v.clone());
+    }
+}
+
+/// Whether a nested `{ enabled: bool }` sub-object is present and enabled.
+fn sub_enabled(v: Option<&Value>) -> bool {
+    v.and_then(|x| x.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The set of bootstrap-broker connection strings MSK advertises for a cluster,
+/// gated on its encryption-in-transit `ClientBroker` and enabled client-auth
+/// schemes (private + public + VPC-connectivity). Only the applicable variants
+/// are present; the disabled ones are omitted (the SDK reads a missing field as
+/// empty, which the provider asserts). Every present string is the same
+/// deterministic multi-broker synthesis on the per-variant port.
+fn gated_bootstrap_brokers(arn: &str, cluster: &Value) -> Map<String, Value> {
+    let num = cluster_num_brokers(cluster);
+    let client_broker = cluster
+        .get("encryptionInfo")
+        .and_then(|e| e.get("encryptionInTransit"))
+        .and_then(|t| t.get("clientBroker"))
+        .and_then(Value::as_str)
+        .unwrap_or("TLS");
+    let allows_plaintext = matches!(client_broker, "PLAINTEXT" | "TLS_PLAINTEXT");
+    let allows_tls = matches!(client_broker, "TLS" | "TLS_PLAINTEXT");
+
+    let sasl = cluster
+        .get("clientAuthentication")
+        .and_then(|c| c.get("sasl"));
+    let sasl_scram = sub_enabled(sasl.and_then(|s| s.get("scram")));
+    let sasl_iam = sub_enabled(sasl.and_then(|s| s.get("iam")));
+    let any_sasl = sasl_scram || sasl_iam;
+
+    let connectivity = cluster
+        .get("brokerNodeGroupInfo")
+        .and_then(|b| b.get("connectivityInfo"));
+    let public_enabled = connectivity
+        .and_then(|c| c.get("publicAccess"))
+        .and_then(|p| p.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|t| t != "DISABLED");
+    let vpc_auth = connectivity
+        .and_then(|c| c.get("vpcConnectivity"))
+        .and_then(|v| v.get("clientAuthentication"));
+    let vpc_sasl = vpc_auth.and_then(|c| c.get("sasl"));
+    let vpc_sasl_iam = sub_enabled(vpc_sasl.and_then(|s| s.get("iam")));
+    let vpc_sasl_scram = sub_enabled(vpc_sasl.and_then(|s| s.get("scram")));
+    let vpc_tls = sub_enabled(vpc_auth.and_then(|c| c.get("tls")));
+
+    let mut out = Map::new();
+    let mut put = |key: &str, present: bool, port: u16| {
+        if present {
+            out.insert(
+                key.to_string(),
+                json!(shared::bootstrap_broker_string(arn, num, port)),
+            );
+        }
+    };
+    // Private (in-VPC) endpoints. The plaintext-cert TLS endpoint is offered only
+    // when NO SASL scheme is enabled (SASL clients use the SASL port instead).
+    put("bootstrapBrokerString", allows_plaintext, 9092);
+    put("bootstrapBrokerStringTls", allows_tls && !any_sasl, 9094);
+    put("bootstrapBrokerStringSaslScram", sasl_scram, 9096);
+    put("bootstrapBrokerStringSaslIam", sasl_iam, 9098);
+    // Public-access endpoints (only when public access is enabled).
+    put(
+        "bootstrapBrokerStringPublicTls",
+        public_enabled && allows_tls && !any_sasl,
+        9194,
+    );
+    put(
+        "bootstrapBrokerStringPublicSaslScram",
+        public_enabled && sasl_scram,
+        9196,
+    );
+    put(
+        "bootstrapBrokerStringPublicSaslIam",
+        public_enabled && sasl_iam,
+        9198,
+    );
+    // VPC-connectivity (PrivateLink) endpoints.
+    put("bootstrapBrokerStringVpcConnectivityTls", vpc_tls, 9094);
+    put(
+        "bootstrapBrokerStringVpcConnectivitySaslScram",
+        vpc_sasl_scram,
+        9096,
+    );
+    put(
+        "bootstrapBrokerStringVpcConnectivitySaslIam",
+        vpc_sasl_iam,
+        9098,
+    );
+    out
+}
+
 /// Project a `RunningBroker` into the persisted, describe-facing data-plane
 /// binding.
 fn running_to_dp(r: &RunningBroker) -> ClusterDataPlane {
@@ -849,27 +961,25 @@ impl KafkaService {
             .clusters
             .get(arn)
             .ok_or_else(|| bad_request(&format!("The cluster '{arn}' does not exist.")))?;
-        let num = cluster_num_brokers(cluster);
-        // When a real single-node Kafka broker backs this cluster, return its
-        // reachable `host:port` as the PLAINTEXT `bootstrapBrokerString` -- a
-        // real Kafka client produces/consumes through it. The TLS/SASL variants
-        // are not configured for the PLAINTEXT broker, so they are omitted (AWS
-        // omits the variants a cluster's client-auth config does not enable).
-        // Without a live broker (no runtime, serverless, or still creating) fall
-        // back to the cosmetic multi-broker synthesis -- same response shape.
+        // Synthesize exactly the encryption-in-transit + client-auth-gated set of
+        // bootstrap-broker strings MSK would advertise for this cluster's config
+        // (AWS omits every variant the cluster does not enable; the provider
+        // asserts the disabled ones are empty).
+        let mut out = gated_bootstrap_brokers(arn, cluster);
+        // When a real single-node Kafka broker backs this cluster (data plane on),
+        // its reachable `host:port` IS the real PLAINTEXT endpoint a Kafka client
+        // produces/consumes through, so surface it as `bootstrapBrokerString`
+        // regardless of the cosmetic gating (the single local broker is PLAINTEXT;
+        // the TLS/SASL variants stay format-synthesized). tfacc disables the
+        // backend, so there it is pure gating.
         if let Some(bootstrap) = data
             .data_plane
             .get(arn)
             .and_then(|dp| dp.bootstrap_string())
         {
-            return ok(json!({ "bootstrapBrokerString": bootstrap }));
+            out.insert("bootstrapBrokerString".into(), json!(bootstrap));
         }
-        ok(json!({
-            "bootstrapBrokerString": shared::bootstrap_broker_string(arn, num, 9092),
-            "bootstrapBrokerStringTls": shared::bootstrap_broker_string(arn, num, 9094),
-            "bootstrapBrokerStringSaslScram": shared::bootstrap_broker_string(arn, num, 9096),
-            "bootstrapBrokerStringSaslIam": shared::bootstrap_broker_string(arn, num, 9098),
-        }))
+        ok(Value::Object(out))
     }
 
     fn list_nodes(
@@ -1137,14 +1247,24 @@ fn render_cluster_v2(data: &KafkaData, arn: &str, cluster: &Value) -> Value {
             .cloned()
             .unwrap_or(json!({ "vpcConfigs": [] }));
     } else {
-        out["provisioned"] = json!({
+        let mut prov = json!({
             "brokerNodeGroupInfo": cluster.get("brokerNodeGroupInfo").cloned().unwrap_or_else(default_bngi),
             "numberOfBrokerNodes": cluster.get("numberOfBrokerNodes").cloned().unwrap_or(json!(3)),
             "currentBrokerSoftwareInfo": cluster.get("currentBrokerSoftwareInfo").cloned().unwrap_or(json!({})),
             "enhancedMonitoring": cluster.get("enhancedMonitoring").cloned().unwrap_or(json!("DEFAULT")),
+            "encryptionInfo": cluster.get("encryptionInfo").cloned().unwrap_or(json!({})),
             "storageMode": cluster.get("storageMode").cloned().unwrap_or(json!("LOCAL")),
             "zookeeperConnectString": cluster.get("zookeeperConnectString").cloned().unwrap_or(json!("")),
+            "zookeeperConnectStringTls": cluster.get("zookeeperConnectStringTls").cloned().unwrap_or(json!("")),
         });
+        // Echo the optional client-auth / logging / monitoring sub-objects only
+        // when the cluster carries them (same as the V1 view).
+        for key in ["clientAuthentication", "loggingInfo", "openMonitoring"] {
+            if let Some(v) = cluster.get(key) {
+                prov[key] = v.clone();
+            }
+        }
+        out["provisioned"] = prov;
     }
     out
 }
@@ -1240,9 +1360,44 @@ impl KafkaService {
         &self,
         ctx: &Ctx,
         arn: &str,
-        _b: &Value,
+        b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.cluster_update(ctx, arn, "UPDATE_BROKER_STORAGE", false, |_| {})
+        // `UpdateBrokerStorage` carries the per-broker target EBS volume info
+        // (a uniform `volumeSizeGB` + optional `provisionedThroughput`); reflect
+        // it onto the cluster's `storageInfo.ebsStorageInfo` so a describe echoes
+        // the resized volume + provisioned-throughput toggle.
+        let target = b
+            .get("targetBrokerEBSVolumeInfo")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .cloned();
+        self.cluster_update(ctx, arn, "UPDATE_BROKER_STORAGE", false, |obj| {
+            let Some(target) = target else { return };
+            let Some(ebs) = obj
+                .get_mut("brokerNodeGroupInfo")
+                .and_then(Value::as_object_mut)
+                .and_then(|bngi| {
+                    bngi.entry("storageInfo")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                })
+                .and_then(|si| {
+                    si.entry("ebsStorageInfo")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                })
+            else {
+                return;
+            };
+            if let Some(vs) = target.get("volumeSizeGB") {
+                ebs.insert("volumeSize".into(), vs.clone());
+            }
+            // Echo the provisioned-throughput toggle verbatim (present once
+            // configured; enabled=false when disabled/removed).
+            if let Some(pt) = target.get("provisionedThroughput") {
+                ebs.insert("provisionedThroughput".into(), pt.clone());
+            }
+        })
     }
 
     fn update_broker_type(
@@ -1299,13 +1454,24 @@ impl KafkaService {
             .get("targetKafkaVersion")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // `UpdateClusterKafkaVersion` optionally carries a new configuration to
+        // apply alongside the version bump (upgrade-with-info).
+        let info = b.get("configurationInfo").cloned();
         self.cluster_update(ctx, arn, "UPDATE_CLUSTER_KAFKA_VERSION", true, |obj| {
-            if let Some(t) = target {
-                let sw = obj
-                    .entry("currentBrokerSoftwareInfo")
-                    .or_insert_with(|| json!({}));
-                if let Some(swo) = sw.as_object_mut() {
+            let sw = obj
+                .entry("currentBrokerSoftwareInfo")
+                .or_insert_with(|| json!({}));
+            if let Some(swo) = sw.as_object_mut() {
+                if let Some(t) = target {
                     swo.insert("kafkaVersion".into(), json!(t));
+                }
+                if let Some(ci) = info {
+                    if let Some(a) = ci.get("arn") {
+                        swo.insert("configurationArn".into(), a.clone());
+                    }
+                    if let Some(r) = ci.get("revision") {
+                        swo.insert("configurationRevision".into(), r.clone());
+                    }
                 }
             }
         })
@@ -1318,9 +1484,23 @@ impl KafkaService {
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let em = b.get("enhancedMonitoring").cloned();
+        let li = b.get("loggingInfo").cloned();
+        let om = b.get("openMonitoring").cloned();
         self.cluster_update(ctx, arn, "UPDATE_MONITORING", false, |obj| {
             if let Some(v) = em {
                 obj.insert("enhancedMonitoring".into(), v);
+            }
+            // `UpdateMonitoring` also carries the logging + open-monitoring config
+            // (the provider batches all three into one call); reflect them so a
+            // describe echoes the enabled/disabled state.
+            if let Some(v) = li {
+                obj.insert("loggingInfo".into(), v);
+            }
+            if let Some(v) = om {
+                obj.insert(
+                    "openMonitoring".into(),
+                    builders::normalize_open_monitoring(&v),
+                );
             }
         })
     }
@@ -1337,8 +1517,36 @@ impl KafkaService {
             if let Some(v) = ca {
                 obj.insert("clientAuthentication".into(), v);
             }
-            if let Some(v) = ei {
-                obj.insert("encryptionInfo".into(), v);
+            // MSK's UpdateSecurity does NOT change the at-rest key or the
+            // inter-broker (`inCluster`) encryption setting (the provider strips
+            // both from the request), so merge the incoming `encryptionInfo` onto
+            // the existing one field-wise instead of replacing it -- otherwise the
+            // preserved `inCluster` / `dataVolumeKMSKeyId` would be dropped.
+            if let Some(incoming) = ei.as_ref().and_then(Value::as_object) {
+                let existing = obj
+                    .get("encryptionInfo")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut merged = existing.clone();
+                if let Some(transit) = incoming
+                    .get("encryptionInTransit")
+                    .and_then(Value::as_object)
+                {
+                    let mut t = existing
+                        .get("encryptionInTransit")
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    for (k, v) in transit {
+                        t.insert(k.clone(), v.clone());
+                    }
+                    merged.insert("encryptionInTransit".into(), Value::Object(t));
+                }
+                if let Some(at_rest) = incoming.get("encryptionAtRest") {
+                    merged.insert("encryptionAtRest".into(), at_rest.clone());
+                }
+                obj.insert("encryptionInfo".into(), Value::Object(merged));
             }
         })
     }
@@ -1351,12 +1559,28 @@ impl KafkaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let ci = b.get("connectivityInfo").cloned();
         self.cluster_update(ctx, arn, "UPDATE_CONNECTIVITY", true, |obj| {
-            if let Some(v) = ci {
+            if let Some(incoming) = ci.as_ref().and_then(Value::as_object) {
                 if let Some(bngi) = obj
                     .get_mut("brokerNodeGroupInfo")
                     .and_then(Value::as_object_mut)
                 {
-                    bngi.insert("connectivityInfo".into(), v);
+                    // Merge the incoming `connectivityInfo` onto the existing one
+                    // (the provider sends only the sub-object it is changing --
+                    // `publicAccess` on a public-access change, `vpcConnectivity`
+                    // on the post-create vpc-connectivity apply), then re-normalize
+                    // so both sub-objects stay present with AWS defaults.
+                    let mut merged = bngi
+                        .get("connectivityInfo")
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    for (k, v) in incoming {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    bngi.insert(
+                        "connectivityInfo".into(),
+                        builders::normalize_connectivity_info(Some(&Value::Object(merged))),
+                    );
                 }
             }
         })
@@ -2601,7 +2825,7 @@ impl KafkaService {
         &self,
         ctx: &Ctx,
         arn: &str,
-        _b: &Value,
+        b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
@@ -2613,6 +2837,22 @@ impl KafkaService {
         let obj = r.as_object_mut().expect("replicator is object");
         obj.insert("replicatorState".into(), json!("UPDATING"));
         obj.insert("currentVersion".into(), json!(gen_version(n)));
+        // Reflect the topic / consumer-group replication changes onto the stored
+        // (description-shaped) replication info so a re-describe echoes them. The
+        // Update shapes carry the same member jsonNames as the description ones,
+        // so a field-wise merge preserves create-only members (e.g.
+        // `startingPosition`) the update payload does not include.
+        let topic = b.get("topicReplication").cloned();
+        let consumer = b.get("consumerGroupReplication").cloned();
+        if let Some(info) = obj
+            .get_mut("replicationInfoList")
+            .and_then(Value::as_array_mut)
+            .and_then(|l| l.first_mut())
+            .and_then(Value::as_object_mut)
+        {
+            merge_replication_sub(info, "topicReplication", topic);
+            merge_replication_sub(info, "consumerGroupReplication", consumer);
+        }
         ok(json!({ "replicatorArn": arn, "replicatorState": "UPDATING" }))
     }
 }
@@ -2854,25 +3094,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_brokers_without_runtime_is_cosmetic_multi_broker() {
-        // With no data-plane binding, GetBootstrapBrokers falls back to the
-        // cosmetic multi-broker synthesis (all four listener variants present).
+    async fn bootstrap_brokers_default_tls_only() {
+        // A default cluster (client_broker=TLS, no SASL) advertises ONLY the TLS
+        // variant; the plaintext + SASL + public + vpc variants are omitted (the
+        // provider asserts those are empty).
         let s = svc();
         let c = ctx("us-east-1");
         let cluster = json_of(s.create_cluster(&c, &cluster_body("nb"), false).unwrap());
         let arn = cluster["clusterArn"].as_str().unwrap().to_string();
         let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
+        assert!(bb.get("bootstrapBrokerString").is_none());
+        assert!(bb["bootstrapBrokerStringTls"]
+            .as_str()
+            .unwrap()
+            .contains(".amazonaws.com:9094"));
+        assert!(bb.get("bootstrapBrokerStringSaslScram").is_none());
+        assert!(bb.get("bootstrapBrokerStringSaslIam").is_none());
+        assert!(bb.get("bootstrapBrokerStringPublicSaslIam").is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_brokers_gated_on_client_auth_and_encryption() {
+        // client_broker=PLAINTEXT offers the plaintext string and omits TLS;
+        // enabling SASL/SCRAM offers the scram string and, being SASL, drops TLS.
+        let s = svc();
+        let c = ctx("us-east-1");
+        // PLAINTEXT-only cluster.
+        let mut body = cluster_body("pt");
+        body["encryptionInfo"] = json!({ "encryptionInTransit": { "clientBroker": "PLAINTEXT" } });
+        let arn = json_of(s.create_cluster(&c, &body, false).unwrap())["clusterArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
         assert!(bb["bootstrapBrokerString"]
             .as_str()
             .unwrap()
-            .contains(".amazonaws.com:9092"));
-        assert!(bb.get("bootstrapBrokerStringTls").is_some());
+            .contains(":9092"));
+        assert!(bb.get("bootstrapBrokerStringTls").is_none());
+
+        // SASL/SCRAM cluster (default TLS in transit).
+        let mut body = cluster_body("sc");
+        body["clientAuthentication"] = json!({ "sasl": { "scram": { "enabled": true } } });
+        let arn = json_of(s.create_cluster(&c, &body, false).unwrap())["clusterArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
+        assert!(bb["bootstrapBrokerStringSaslScram"]
+            .as_str()
+            .unwrap()
+            .contains(":9096"));
+        assert!(bb.get("bootstrapBrokerStringTls").is_none());
+        assert!(bb.get("bootstrapBrokerStringSaslIam").is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_brokers_public_gated_on_public_access() {
+        // Public-access + SASL/IAM advertises both the private and the public
+        // SASL/IAM strings (on their distinct ports).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let mut body = cluster_body("pub");
+        body["clientAuthentication"] = json!({ "sasl": { "iam": { "enabled": true } } });
+        body["brokerNodeGroupInfo"]["connectivityInfo"] =
+            json!({ "publicAccess": { "type": "SERVICE_PROVIDED_EIPS" } });
+        let arn = json_of(s.create_cluster(&c, &body, false).unwrap())["clusterArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
+        assert!(bb["bootstrapBrokerStringSaslIam"]
+            .as_str()
+            .unwrap()
+            .contains(":9098"));
+        assert!(bb["bootstrapBrokerStringPublicSaslIam"]
+            .as_str()
+            .unwrap()
+            .contains(":9198"));
     }
 
     #[tokio::test]
     async fn bootstrap_brokers_with_data_plane_returns_real_endpoint() {
         // A recorded data-plane binding makes GetBootstrapBrokers return the
-        // REAL reachable host:port as the single plaintext bootstrap string.
+        // REAL reachable host:port as the plaintext bootstrap string, on top of
+        // the cluster's gated (synthesized) TLS/SASL variants.
         let s = svc();
         let c = ctx("us-east-1");
         let cluster = json_of(s.create_cluster(&c, &cluster_body("rp"), false).unwrap());
@@ -2893,16 +3199,25 @@ mod tests {
             bb["bootstrapBrokerString"].as_str(),
             Some("127.0.0.1:51234")
         );
-        // The TLS/SASL variants are omitted for the PLAINTEXT broker.
-        assert!(bb.get("bootstrapBrokerStringTls").is_none());
+        // The cluster's TLS variant is still synthesized (default TLS in transit).
+        assert!(bb["bootstrapBrokerStringTls"]
+            .as_str()
+            .unwrap()
+            .contains(":9094"));
     }
 
     #[test]
     fn bootstrap_brokers_derived_from_broker_count() {
         let s = svc();
         let c = ctx("us-east-1");
-        let cluster = json_of(s.create_cluster(&c, &cluster_body("bb"), false).unwrap());
-        let arn = cluster["clusterArn"].as_str().unwrap().to_string();
+        // TLS_PLAINTEXT surfaces both plaintext and TLS strings, one per broker.
+        let mut body = cluster_body("bb");
+        body["encryptionInfo"] =
+            json!({ "encryptionInTransit": { "clientBroker": "TLS_PLAINTEXT" } });
+        let arn = json_of(s.create_cluster(&c, &body, false).unwrap())["clusterArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let bb = json_of(s.get_bootstrap_brokers(&c, &arn).unwrap());
         let s9092 = bb["bootstrapBrokerString"].as_str().unwrap();
         assert_eq!(s9092.split(',').count(), 3, "one endpoint per broker node");
@@ -2911,6 +3226,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(":9094"));
+    }
+
+    #[test]
+    fn describe_cluster_echoes_connectivity_and_storage_defaults() {
+        // A minimal provisioned create round-trips the connectivity_info +
+        // storage_info sub-objects with AWS defaults (the deferred-tfacc gap).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let arn = json_of(s.create_cluster(&c, &cluster_body("df"), false).unwrap())["clusterArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        settle(&s, &c);
+        let d = json_of(s.describe_cluster(&c, &arn, false).unwrap());
+        let bngi = &d["clusterInfo"]["brokerNodeGroupInfo"];
+        assert_eq!(bngi["brokerAZDistribution"], json!("DEFAULT"));
+        assert_eq!(
+            bngi["connectivityInfo"]["publicAccess"]["type"],
+            json!("DISABLED")
+        );
+        assert_eq!(
+            bngi["connectivityInfo"]["vpcConnectivity"]["clientAuthentication"]["sasl"]["iam"]
+                ["enabled"],
+            json!(false)
+        );
+        assert_eq!(
+            bngi["connectivityInfo"]["vpcConnectivity"]["clientAuthentication"]["tls"]["enabled"],
+            json!(false)
+        );
+        // No provisioned throughput on a cluster that never enabled it.
+        assert!(bngi["storageInfo"]["ebsStorageInfo"]
+            .get("provisionedThroughput")
+            .is_none());
+        // Encryption defaults + a synthesized KMS key ARN.
+        let ei = &d["clusterInfo"]["encryptionInfo"];
+        assert_eq!(ei["encryptionInTransit"]["clientBroker"], json!("TLS"));
+        assert_eq!(ei["encryptionInTransit"]["inCluster"], json!(true));
+        assert!(ei["encryptionAtRest"]["dataVolumeKMSKeyId"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:kms:"));
+        // No client_authentication is echoed for an auth-less cluster.
+        assert!(d["clusterInfo"].get("clientAuthentication").is_none());
     }
 
     #[test]

@@ -737,47 +737,31 @@ pub const SERVICES: &[Service] = &[
         // plane is disabled for tfacc via FAKECLOUD_KAFKA_DISABLE_BACKEND=1, so a
         // real broker's `127.0.0.1:<port>` bootstrap endpoints don't race the
         // provider's AWS-format `*.amazonaws.com:9092` assertions -- the data
-        // plane is proven separately by the msk-broker Docker E2E). This first
-        // wave selects the resources + data sources that round-trip cleanly
-        // against the auto-settling control plane:
-        //   - `aws_msk_configuration` (create/read/update-revision/delete, base64
-        //     ServerProperties, KafkaVersions, description; DescribeConfiguration
-        //     reports the AWS `BadRequestException` not-found shape the provider's
-        //     delete waiter keys on) + its data source,
-        //   - a provisioned cluster with an explicit instance type
-        //     (`Cluster_BrokerNodeGroupInfo_instanceType`) and the cluster
-        //     `_disappears` lifecycle,
-        //   - a serverless cluster (security-group VpcConfig + `_disappears`),
-        //   - SCRAM-secret associations (`_disappears` / `Disappears_cluster` /
-        //     single-secret `_disappears`, which stand up a real KMS key +
-        //     Secrets Manager secret and the batch-associate/list round-trip),
-        //   - the broker-nodes and bootstrap-brokers data sources.
-        //
-        // Deferred to a later widening batch (NOT env-impossible, but needing
-        // deeper cluster describe/GetBootstrapBrokers fidelity than the current
-        // control plane): the full `Cluster_basic`/tags/monitoring/storage/
-        // version-upgrade suite, the cluster + configuration-with-cluster data
-        // sources, cluster policies, replicators, and standalone VPC connections
-        // all drift on cluster attributes the control plane does not yet
-        // synthesize (encryption-in-transit-gated bootstrap-broker strings,
-        // `connectivity_info` / `client_authentication` / `logging_info` /
-        // `open_monitoring` defaults, serverless default security group). The
-        // Kafka-version data source needs a fuller ListKafkaVersions catalogue.
-        // These grow as the MSK control-plane fidelity does; they are selected
-        // out by the narrow positive regex rather than enumerated as denies.
-        run_regex: concat!(
-            "^TestAccKafka(",
-            "Configuration_(basic|description|disappears|kafkaVersions|serverProperties)",
-            "|ConfigurationDataSource_name",
-            "|Cluster_disappears",
-            "|Cluster_BrokerNodeGroupInfo_instanceType",
-            "|BrokerNodesDataSource_basic",
-            "|BootstrapBrokersDataSource_basic",
-            "|ServerlessCluster_(disappears|securityGroup)",
-            "|SCRAMSecretAssociation_(disappears|Disappears_cluster)",
-            "|SingleSCRAMSecretAssociation_disappears",
-            ")$",
-        ),
+        // plane is proven separately by the msk-broker Docker E2E). The whole
+        // upstream `internal/service/kafka` acceptance suite passes against the
+        // auto-settling control plane, so the entire `TestAccKafka*` set runs
+        // with NO denies:
+        //   - provisioned + serverless clusters (create/describe/update/delete,
+        //     tags, ImportStateVerify), with DescribeCluster round-tripping the
+        //     full `broker_node_group_info` (connectivity_info public-access +
+        //     vpc-connectivity defaults, storage_info + provisioned-throughput),
+        //     `client_authentication`, `encryption_info` (in-transit +
+        //     synthesized at-rest KMS key), `logging_info`, `open_monitoring`,
+        //     `enhanced_monitoring`, and `configuration_info`,
+        //   - GetBootstrapBrokers gated on encryption-in-transit `client_broker`
+        //     + the enabled private/public/vpc-connectivity auth schemes, so the
+        //     right `bootstrap_brokers_*` variants are present/empty,
+        //   - the cluster / cluster-policy / configuration / broker-nodes /
+        //     bootstrap-brokers / kafka-version / vpc-connection data sources,
+        //   - cluster policies, SCRAM-secret associations (single + batch),
+        //     standalone VPC connections, and replicators (the request->
+        //     description shape transform with alias mapping + computed
+        //     topic-replication defaults),
+        //   - TLS client-auth with an ACM PCA certificate-authority ARN.
+        // The Kafka-broker data plane's real in-transit produce/consume path is
+        // still proven only by the dedicated msk-broker Docker E2E (not tfacc),
+        // which is why the backend stays disabled here.
+        run_regex: "^TestAccKafka",
         deny: &[],
     },
     Service {
@@ -1711,21 +1695,45 @@ pub const SHARDS: &[Shard] = &[
         run_regex: "^TestAccMQ(Broker|Configuration)_basic$",
         extra_deny: &[],
     },
+    // The full ^TestAccKafka suite (59 tests) exceeds a single 60-min runner's
+    // wall clock (each terraform apply/destroy cycle is slow in CI), so it is
+    // split into three resource-family shards whose union is the whole suite and
+    // whose run_regexes do not overlap. `^TestAccKafkaCluster_` captures only the
+    // cluster *resource* tests (the `_` after `Cluster` excludes ClusterPolicy /
+    // ClusterDataSource, which are claimed by the second shard).
     Shard {
-        name: "kafka",
+        name: "kafka-cluster",
+        service: "kafka",
+        run_regex: "^TestAccKafkaCluster_",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kafka-config-serverless",
         service: "kafka",
         run_regex: concat!(
             "^TestAccKafka(",
-            "Configuration_(basic|description|disappears|kafkaVersions|serverProperties)",
-            "|ConfigurationDataSource_name",
-            "|Cluster_disappears",
-            "|Cluster_BrokerNodeGroupInfo_instanceType",
-            "|BrokerNodesDataSource_basic",
-            "|BootstrapBrokersDataSource_basic",
-            "|ServerlessCluster_(disappears|securityGroup)",
-            "|SCRAMSecretAssociation_(disappears|Disappears_cluster)",
-            "|SingleSCRAMSecretAssociation_disappears",
-            ")$",
+            "Configuration",
+            "|ConfigurationDataSource",
+            "|ClusterDataSource",
+            "|ClusterPolicy",
+            "|ServerlessCluster",
+            "|BootstrapBrokersDataSource",
+            "|BrokerNodesDataSource",
+            "|KafkaVersionDataSource",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kafka-scram-repl-vpc",
+        service: "kafka",
+        run_regex: concat!(
+            "^TestAccKafka(",
+            "SCRAMSecretAssociation",
+            "|SingleSCRAMSecretAssociation",
+            "|Replicator",
+            "|VPCConnection",
+            ")",
         ),
         extra_deny: &[],
     },

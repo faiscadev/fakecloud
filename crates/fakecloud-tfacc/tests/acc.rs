@@ -138,6 +138,21 @@ async fn mq_acceptance() {
 }
 
 #[tokio::test]
+async fn kafka_cluster_acceptance() {
+    run_shard("kafka-cluster").await;
+}
+
+#[tokio::test]
+async fn kafka_config_serverless_acceptance() {
+    run_shard("kafka-config-serverless").await;
+}
+
+#[tokio::test]
+async fn kafka_scram_repl_vpc_acceptance() {
+    run_shard("kafka-scram-repl-vpc").await;
+}
+
+#[tokio::test]
 async fn glacier_acceptance() {
     run_shard("glacier").await;
 }

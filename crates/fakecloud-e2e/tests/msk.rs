@@ -64,16 +64,26 @@ async fn cluster_lifecycle_create_describe_list_tag_update_delete() {
     assert_eq!(info.number_of_broker_nodes(), Some(3));
     let current_version = info.current_version().expect("current version").to_string();
 
-    // GetBootstrapBrokers is synthesized from the broker nodes.
+    // GetBootstrapBrokers is synthesized from the broker nodes, gated on the
+    // cluster's in-transit encryption + client auth. This cluster took the MSK
+    // default (client_broker=TLS, no SASL), so it advertises ONLY the TLS
+    // variant (:9094) -- the plaintext / SASL / public / vpc variants are omitted
+    // exactly as real MSK omits the schemes a cluster does not enable.
     let bb = kafka
         .get_bootstrap_brokers()
         .cluster_arn(&arn)
         .send()
         .await
         .expect("bootstrap brokers");
-    let plaintext = bb.bootstrap_broker_string().expect("plaintext brokers");
-    assert_eq!(plaintext.split(',').count(), 3, "one endpoint per broker");
-    assert!(plaintext.contains(":9092"));
+    assert!(
+        bb.bootstrap_broker_string().is_none(),
+        "a TLS cluster advertises no plaintext bootstrap string"
+    );
+    let tls = bb
+        .bootstrap_broker_string_tls()
+        .expect("tls bootstrap brokers");
+    assert_eq!(tls.split(',').count(), 3, "one endpoint per broker");
+    assert!(tls.contains(":9094"));
 
     // ListNodes synthesizes one node per broker.
     let nodes = kafka
