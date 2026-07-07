@@ -1777,13 +1777,51 @@ pub const SHARDS: &[Shard] = &[
     // cancels before the build cache saves, so reruns stay slow). Halving each
     // suite keeps every shard well under the cap. Regexes are exhaustive +
     // pairwise-disjoint over the enumerated provider test names.
+    // The JAR-heavy Flink-flavor application tests are split into small
+    // per-family shards (<=3 tests each) rather than one 11-test shard. These
+    // tests START the application and drive update/VPC lifecycles; on a 2-core
+    // CI runner a shared fakecloud server that has serviced ~6-8 such
+    // started-app lifecycles intermittently stops advancing a status waiter and
+    // the shard stalls to the job-timeout. The suite passes at every
+    // parallelism on a many-core box and each test passes in isolation, so it
+    // is a runner-contention stall, not a correctness bug (root cause not yet
+    // pinned; it does not reproduce off a genuinely 2-core host). Keeping each
+    // long-lived server under ~4 started-app lifecycles avoids the stall. The
+    // config-only `flink-misc` / `sql-rest` shards stay larger (they pass at 7-8
+    // because they do not start applications). Regexes below are exhaustive +
+    // pairwise-disjoint over the enumerated provider test names.
     Shard {
-        name: "kinesisanalyticsv2-flink-core",
+        name: "kinesisanalyticsv2-flink-lifecycle",
         service: "kinesisanalyticsv2",
-        // The JAR-heavy Flink-flavor application tests: basic, snapshot-restore,
-        // update / runtime-update / update-running, environment-properties,
-        // start-on-create/update, and the three VPC variants (all `FlinkApplication*`).
-        run_regex: "^TestAccKinesisAnalyticsV2Application_(basicFlink|FlinkApplication)",
+        // basic + start-on-create/update (3).
+        run_regex:
+            "^TestAccKinesisAnalyticsV2Application_(basicFlink|FlinkApplicationStartApplication)",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-flink-update",
+        service: "kinesisanalyticsv2",
+        // update / runtime-update / update-running (3).
+        run_regex: "^TestAccKinesisAnalyticsV2Application_FlinkApplication_update",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-flink-restore",
+        service: "kinesisanalyticsv2",
+        // restore-from-snapshot + environment-properties update (2).
+        run_regex: concat!(
+            "^TestAccKinesisAnalyticsV2Application_(",
+            "FlinkApplication_restoreFromSnapshot",
+            "|FlinkApplicationEnvironmentProperties",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-flink-vpc",
+        service: "kinesisanalyticsv2",
+        // the three VPC variants (3).
+        run_regex: "^TestAccKinesisAnalyticsV2Application_FlinkApplicationVPC",
         extra_deny: &[],
     },
     Shard {
@@ -1808,13 +1846,26 @@ pub const SHARDS: &[Shard] = &[
     Shard {
         name: "kinesisanalyticsv2-sql-input",
         service: "kinesisanalyticsv2",
-        // SQL basic + input / input-processing tests, start-on-create/update,
-        // and update-running.
+        // SQL basic + input add/update (3). `SQLApplicationInput_` excludes the
+        // `SQLApplicationInputProcessing*` tests (no `_` there), which the
+        // `sql-inputproc` shard claims.
+        run_regex: "^TestAccKinesisAnalyticsV2Application_(basicSQL|SQLApplicationInput_)",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-sql-inputproc",
+        service: "kinesisanalyticsv2",
+        // SQL input-processing add/delete/update (3).
+        run_regex: "^TestAccKinesisAnalyticsV2Application_SQLApplicationInputProcessing",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-sql-start",
+        service: "kinesisanalyticsv2",
+        // SQL start-on-create/update + update-running (3).
         run_regex: concat!(
             "^TestAccKinesisAnalyticsV2Application_(",
-            "basicSQL",
-            "|SQLApplicationInput",
-            "|SQLApplicationStartApplication",
+            "SQLApplicationStartApplication",
             "|SQLApplication_updateRunning",
             ")",
         ),
