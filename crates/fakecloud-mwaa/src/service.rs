@@ -927,7 +927,7 @@ mod tests {
         assert!(s.create_cli_token(&c, "ghost").is_err());
         s.create_environment(&c, "tok-env", &create_body()).unwrap();
         let out = body_json(&s.create_cli_token(&c, "tok-env").unwrap());
-        assert!(out["CliToken"].as_str().unwrap().len() > 0);
+        assert!(!out["CliToken"].as_str().unwrap().is_empty());
         assert!(out["WebServerHostname"]
             .as_str()
             .unwrap()
