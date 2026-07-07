@@ -118,6 +118,7 @@ impl ResourceProvisioner {
             elasticbeanstalk_state: self.elasticbeanstalk_state.clone(),
             mq_state: self.mq_state.clone(),
             kafka_state: self.kafka_state.clone(),
+            ka2_state: self.ka2_state.clone(),
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),

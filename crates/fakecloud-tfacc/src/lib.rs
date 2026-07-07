@@ -178,6 +178,11 @@ impl TestServer {
                 // `*.amazonaws.com:9092` the provider asserts; the data plane is
                 // proven separately by the msk-broker Docker E2E.
                 ("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1"),
+                // Amazon Managed Service for Apache Flink: a real Flink-job
+                // container would race the provider's status/attribute
+                // assertions with async job settling; the data plane is proven
+                // separately by the kinesisanalyticsv2 Docker E2E.
+                ("FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND", "1"),
                 ("FAKECLOUD_CODEBUILD_DISABLE_BACKEND", "1"),
             ])
             .await,

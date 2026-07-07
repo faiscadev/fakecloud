@@ -153,6 +153,21 @@ async fn kafka_scram_repl_vpc_acceptance() {
 }
 
 #[tokio::test]
+async fn kinesisanalyticsv2_flink_acceptance() {
+    run_shard("kinesisanalyticsv2-flink").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_acceptance() {
+    run_shard("kinesisanalyticsv2-sql").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_snapshot_acceptance() {
+    run_shard("kinesisanalyticsv2-snapshot").await;
+}
+
+#[tokio::test]
 async fn glacier_acceptance() {
     run_shard("glacier").await;
 }

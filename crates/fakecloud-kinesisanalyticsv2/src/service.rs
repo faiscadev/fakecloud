@@ -86,8 +86,8 @@ const APPLICATION_MODES: &[&str] = &["STREAMING", "INTERACTIVE"];
 const URL_TYPES: &[&str] = &["FLINK_DASHBOARD_URL", "ZEPPELIN_UI_URL"];
 const OPERATION_STATUSES: &[&str] = &["IN_PROGRESS", "CANCELLED", "SUCCESSFUL", "FAILED"];
 
-const DEFAULT_MAINTENANCE_START: &str = "06:00";
-const DEFAULT_MAINTENANCE_END: &str = "14:00";
+pub(crate) const DEFAULT_MAINTENANCE_START: &str = "06:00";
+pub(crate) const DEFAULT_MAINTENANCE_END: &str = "14:00";
 
 pub struct Ka2Service {
     state: SharedKa2State,
@@ -141,6 +141,26 @@ impl Ka2Service {
             &self.snapshot_lock,
         )
         .await;
+    }
+
+    /// Persist hook for the CloudFormation provisioner (registered by name in
+    /// the server). The CFN `AWS::KinesisAnalyticsV2::*` provisioner mutates the
+    /// shared `Ka2State` directly and never triggers this service's own save
+    /// path, so CloudFormation invokes this hook after a stack op to write the
+    /// state through to disk -- the same persistence a direct mutating API call
+    /// gets. `None` in memory mode (no snapshot store configured).
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                crate::persistence::save_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 }
 
@@ -365,11 +385,11 @@ fn int_range(
     }
 }
 
-fn arn(region: &str, account: &str, name: &str) -> String {
+pub(crate) fn arn(region: &str, account: &str, name: &str) -> String {
     format!("arn:aws:kinesisanalytics:{region}:{account}:application/{name}")
 }
 
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
@@ -544,7 +564,7 @@ fn str_of(v: &Value, k: &str) -> Option<String> {
 /// `ApplicationConfiguration`, assigning ids to inputs/outputs/reference data
 /// sources/VPC configurations. Only members present in the input are emitted;
 /// every emitted member matches the output shape exactly.
-fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value {
+pub(crate) fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value {
     let mut out = serde_json::Map::new();
     let mut next = || {
         *id += 1;
@@ -747,7 +767,11 @@ fn input_desc(input: &Value, next: &mut impl FnMut() -> String, role: Option<&st
     Value::Object(d)
 }
 
-fn output_desc(output: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+pub(crate) fn output_desc(
+    output: &Value,
+    next: &mut impl FnMut() -> String,
+    role: Option<&str>,
+) -> Value {
     let mut d = serde_json::Map::new();
     d.insert("OutputId".into(), json!(next()));
     if let Some(n) = str_of(output, "Name") {
@@ -777,7 +801,11 @@ fn output_desc(output: &Value, next: &mut impl FnMut() -> String, role: Option<&
     Value::Object(d)
 }
 
-fn reference_desc(r: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+pub(crate) fn reference_desc(
+    r: &Value,
+    next: &mut impl FnMut() -> String,
+    role: Option<&str>,
+) -> Value {
     let mut d = serde_json::Map::new();
     d.insert("ReferenceId".into(), json!(next()));
     d.insert(
@@ -833,7 +861,7 @@ fn vpc_desc(v: &Value, next: &mut impl FnMut() -> String) -> Value {
     })
 }
 
-fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
+pub(crate) fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
     let mut m = serde_json::Map::new();
     m.insert("CloudWatchLoggingOptionId".into(), json!(id));
     m.insert(
@@ -848,7 +876,7 @@ fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
 
 // ===== version + operation recording =====
 
-fn record_version(app: &mut Application) {
+pub(crate) fn record_version(app: &mut Application) {
     let detail = build_application_detail(app);
     app.versions.insert(
         app.version_id,
@@ -883,7 +911,7 @@ fn record_operation(
 
 /// Bump the application version for a config-changing operation, refresh the
 /// conditional token, and record the new version snapshot.
-fn bump_version(app: &mut Application) {
+pub(crate) fn bump_version(app: &mut Application) {
     let from = app.version_id;
     app.version_id += 1;
     app.version_updated_from = Some(from);
@@ -934,68 +962,24 @@ impl Ka2Service {
 
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        if st.applications.contains_key(&name) {
-            return Err(fault(
-                "ResourceInUseException",
-                &format!("Application {name} already exists."),
-            ));
-        }
-        let now = Utc::now();
-        let application_arn = arn(&req.region, &req.account_id, &name);
-        let mut id_counter = 0u64;
-        let config_description = match b.get("ApplicationConfiguration") {
-            Some(cfg) if cfg.is_object() => {
-                config_to_description(cfg, Some(&role), &mut id_counter)
-            }
-            _ => Value::Object(serde_json::Map::new()),
-        };
-        let cloudwatch: Vec<Value> = b
-            .get("CloudWatchLoggingOptions")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .map(|o| {
-                        id_counter += 1;
-                        cloudwatch_desc(o, &id_counter.to_string(), Some(&role))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut app = Application {
-            name: name.clone(),
-            arn: application_arn.clone(),
+        // Build + insert through the shared builder so a CFN-provisioned
+        // `AWS::KinesisAnalyticsV2::Application` stores byte-identical wire state
+        // and cannot diverge from this path (#1766).
+        crate::builders::insert_application(
+            st,
+            &req.region,
+            &req.account_id,
+            &name,
             description,
-            runtime_environment: runtime,
-            service_execution_role: Some(role),
-            application_mode: mode,
-            status: "READY".to_string(),
-            version_id: 1,
-            create_timestamp: now,
-            last_update_timestamp: now,
-            conditional_token: new_token(),
-            config_description,
-            cloudwatch_logging_options: cloudwatch,
-            maintenance_start: DEFAULT_MAINTENANCE_START.to_string(),
-            maintenance_end: DEFAULT_MAINTENANCE_END.to_string(),
-            snapshots: BTreeMap::new(),
-            operations: Vec::new(),
-            versions: BTreeMap::new(),
-            id_counter,
-            version_updated_from: None,
-            version_rolled_back_from: None,
-            version_rolled_back_to: None,
-            flink_binding: None,
-        };
-        record_version(&mut app);
-        let detail = build_application_detail(&app);
-
-        let tags = parse_tags(&b);
-        if !tags.is_empty() {
-            st.tags.insert(application_arn.clone(), tags);
-        }
-        st.applications.insert(name, app);
-
+            &runtime,
+            &role,
+            mode,
+            b.get("ApplicationConfiguration"),
+            b.get("CloudWatchLoggingOptions"),
+            parse_tags(&b),
+        )
+        .map_err(|m| fault("ResourceInUseException", &m))?;
+        let detail = build_application_detail(st.applications.get(&name).expect("just inserted"));
         ok(json!({ "ApplicationDetail": detail }))
     }
 
@@ -1540,16 +1524,13 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "CloudWatchLoggingOption is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        check_concurrency(app, &b)?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        app.cloudwatch_logging_options
-            .push(cloudwatch_desc(&opt, &id, role.as_deref()));
-        bump_version(app);
+        {
+            let app = st.applications.get(&name).ok_or_else(|| not_found(&name))?;
+            check_concurrency(app, &b)?;
+        }
+        crate::builders::insert_cloudwatch_logging_option(st, &name, &opt)
+            .map_err(|_| not_found(&name))?;
+        let app = st.applications.get_mut(&name).expect("just updated");
         let op_id = record_operation(
             app,
             "UpdateApplication",
@@ -1793,15 +1774,8 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "Output is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        let desc = output_desc(&output, &mut || id.clone(), role.as_deref());
-        sql_array_push(&mut app.config_description, "OutputDescriptions", desc);
-        bump_version(app);
+        crate::builders::insert_output(st, &name, &output).map_err(|_| not_found(&name))?;
+        let app = st.applications.get(&name).expect("just updated");
         let descs = sql_array_get(&app.config_description, "OutputDescriptions");
         ok(json!({
             "ApplicationARN": app.arn,
@@ -1846,19 +1820,9 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "ReferenceDataSource is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        let desc = reference_desc(&rds, &mut || id.clone(), role.as_deref());
-        sql_array_push(
-            &mut app.config_description,
-            "ReferenceDataSourceDescriptions",
-            desc,
-        );
-        bump_version(app);
+        crate::builders::insert_reference_data_source(st, &name, &rds)
+            .map_err(|_| not_found(&name))?;
+        let app = st.applications.get(&name).expect("just updated");
         let descs = sql_array_get(&app.config_description, "ReferenceDataSourceDescriptions");
         ok(json!({
             "ApplicationARN": app.arn,
@@ -2530,7 +2494,7 @@ fn config_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
 
 /// Push into `SqlApplicationConfigurationDescription.<key>`, creating the
 /// nested structure as needed.
-fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
+pub(crate) fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
     let obj = ensure_object(cfg);
     let sql = obj
         .entry("SqlApplicationConfigurationDescription")
@@ -2542,7 +2506,7 @@ fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
     }
 }
 
-fn sql_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
+pub(crate) fn sql_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
     if let Some(arr) = cfg
         .get_mut("SqlApplicationConfigurationDescription")
         .and_then(|s| s.get_mut(key))

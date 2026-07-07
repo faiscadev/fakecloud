@@ -4198,6 +4198,7 @@ dependencies = [
  "fakecloud-iam",
  "fakecloud-kafka",
  "fakecloud-kinesis",
+ "fakecloud-kinesisanalyticsv2",
  "fakecloud-kms",
  "fakecloud-lambda",
  "fakecloud-logs",

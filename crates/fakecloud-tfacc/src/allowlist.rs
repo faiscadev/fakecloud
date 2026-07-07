@@ -765,6 +765,34 @@ pub const SERVICES: &[Service] = &[
         deny: &[],
     },
     Service {
+        name: "kinesisanalyticsv2",
+        // Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2) is
+        // a real, persisted control plane. The real Flink-job data plane is
+        // disabled for tfacc via FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND=1
+        // (set in `TestServer::start`), so an application's StartApplication
+        // settles STARTING->RUNNING through the in-memory state machine instead
+        // of racing the provider's status assertions with a real container boot
+        // -- the data plane is proven separately by the kinesisanalyticsv2
+        // Docker E2E. The whole upstream `internal/service/kinesisanalyticsv2`
+        // acceptance suite runs against the auto-settling control plane:
+        //   - SQL + Flink flavor applications (create/describe/update/delete,
+        //     tags, ImportStateVerify, disappears), application_mode,
+        //     application code + environment properties + run configuration +
+        //     service_execution_role updates, and runtime-environment updates,
+        //   - SQL application inputs / input-processing (Lambda) / outputs /
+        //     reference data sources (add/update/delete) -- the request ->
+        //     `*Description` shape transform with minted ids + role propagation,
+        //   - CloudWatch logging options (add/update/delete) and VPC
+        //     configurations (add/update/delete),
+        //   - StartApplication on create + on update (SQL + Flink), restore from
+        //     a snapshot, and the standalone application snapshot resource
+        //     (create/describe/delete + disappears).
+        // The whole `TestAccKinesisAnalyticsV2*` set runs with NO denies, split
+        // into three resource-family shards for the CI wall-clock budget.
+        run_regex: "^TestAccKinesisAnalyticsV2",
+        deny: &[],
+    },
+    Service {
         name: "glacier",
         // Amazon S3 Glacier stores real archive bytes and computes a real
         // SHA-256 tree hash, so the standalone vault resource round-trips
@@ -1735,6 +1763,56 @@ pub const SHARDS: &[Shard] = &[
             "|VPCConnection",
             ")",
         ),
+        extra_deny: &[],
+    },
+    // Amazon Managed Service for Apache Flink: the `kinesisanalyticsv2` suite
+    // (38 tests) is split into three resource-family shards whose union is the
+    // whole suite and whose run_regexes are pairwise disjoint. The `_` after
+    // `Application` in the flink/sql shards excludes the `ApplicationSnapshot`
+    // resource tests, which the third shard claims.
+    Shard {
+        name: "kinesisanalyticsv2-flink",
+        service: "kinesisanalyticsv2",
+        // Flink-flavor application tests + the flavor-agnostic application tests
+        // (basic flink, application mode, application code, environment
+        // properties, run configuration, service execution role, tags,
+        // disappears). `Flink` also captures the Flink VPC / start / snapshot-
+        // restore / runtime-update / environment-property variants.
+        run_regex: concat!(
+            "^TestAccKinesisAnalyticsV2Application_(",
+            "basicFlink",
+            "|Flink",
+            "|applicationMode",
+            "|ApplicationCode",
+            "|EnvironmentProperties",
+            "|RunConfiguration",
+            "|ServiceExecutionRole",
+            "|tags",
+            "|disappears",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-sql",
+        service: "kinesisanalyticsv2",
+        // SQL-flavor application tests (inputs, input-processing, outputs,
+        // reference data sources, multiple, updateRunning, start-on-
+        // create/update) + the CloudWatch logging option tests.
+        run_regex: concat!(
+            "^TestAccKinesisAnalyticsV2Application_(",
+            "basicSQL",
+            "|SQL",
+            "|CloudWatchLoggingOptions",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-snapshot",
+        service: "kinesisanalyticsv2",
+        // The standalone application snapshot resource tests.
+        run_regex: "^TestAccKinesisAnalyticsV2ApplicationSnapshot",
         extra_deny: &[],
     },
     Shard {

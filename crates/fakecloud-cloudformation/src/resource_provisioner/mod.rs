@@ -913,6 +913,7 @@ pub struct ResourceProvisioner {
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
     pub mq_state: fakecloud_mq::SharedMqState,
     pub kafka_state: fakecloud_kafka::SharedKafkaState,
+    pub ka2_state: fakecloud_kinesisanalyticsv2::SharedKa2State,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1093,6 +1094,7 @@ mod glue;
 mod iam;
 mod kafka;
 mod kinesis;
+mod kinesisanalyticsv2;
 mod kms;
 mod lambda;
 mod logs;
@@ -1239,6 +1241,16 @@ impl ResourceProvisioner {
             "AWS::MSK::BatchScramSecret" => self.create_msk_batch_scram_secret(resource),
             "AWS::MSK::VpcConnection" => self.create_msk_vpc_connection(resource),
             "AWS::MSK::Replicator" => self.create_msk_replicator(resource),
+            "AWS::KinesisAnalyticsV2::Application" => self.create_ka2_application(resource),
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                self.create_ka2_application_output(resource)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                self.create_ka2_reference_data_source(resource)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                self.create_ka2_cloudwatch_logging_option(resource)
+            }
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
             "AWS::EFS::MountTarget" => self.create_efs_mount_target(resource),
@@ -1639,6 +1651,18 @@ impl ResourceProvisioner {
             }
             "AWS::MSK::VpcConnection" => Some(self.update_msk_vpc_connection(existing, new_def)?),
             "AWS::MSK::Replicator" => Some(self.update_msk_replicator(existing, new_def)?),
+            "AWS::KinesisAnalyticsV2::Application" => {
+                Some(self.update_ka2_application(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                Some(self.update_ka2_application_output(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                Some(self.update_ka2_reference_data_source(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                Some(self.update_ka2_cloudwatch_logging_option(existing, new_def)?)
+            }
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
@@ -2091,6 +2115,22 @@ impl ResourceProvisioner {
             }
             "AWS::MSK::Replicator" => {
                 self.delete_msk_replicator(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::Application" => {
+                self.delete_ka2_application(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                self.delete_ka2_application_output(resource);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                self.delete_ka2_reference_data_source(resource);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                self.delete_ka2_cloudwatch_logging_option(resource);
                 Ok(())
             }
             "AWS::CodeCommit::Repository" => {
@@ -6756,6 +6796,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             kafka_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            ka2_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

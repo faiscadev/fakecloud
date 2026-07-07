@@ -185,6 +185,11 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         // VpcConnection, Replicator) since the mapping keys on the service
         // segment. The server registers a `kafka` snapshot hook.
         "MSK" => "kafka",
+        // A single entry covers every AWS::KinesisAnalyticsV2::* type
+        // (Application / ApplicationOutput / ApplicationReferenceDataSource /
+        // ApplicationCloudWatchLoggingOption) since the mapping keys on the
+        // service segment. The server registers a `kinesisanalyticsv2` hook.
+        "KinesisAnalyticsV2" => "kinesisanalyticsv2",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
         _ => return None,
@@ -425,6 +430,7 @@ pub struct CloudFormationDeps {
     pub elasticbeanstalk: fakecloud_elasticbeanstalk::SharedEbState,
     pub mq: fakecloud_mq::SharedMqState,
     pub kafka: fakecloud_kafka::SharedKafkaState,
+    pub kinesisanalyticsv2: fakecloud_kinesisanalyticsv2::SharedKa2State,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -940,6 +946,7 @@ impl CloudFormationService {
             elasticbeanstalk_state: self.deps.elasticbeanstalk.clone(),
             mq_state: self.deps.mq.clone(),
             kafka_state: self.deps.kafka.clone(),
+            ka2_state: self.deps.kinesisanalyticsv2.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3226,6 +3233,13 @@ mod tests {
                 ),
             )),
             kafka: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            kinesisanalyticsv2: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",
