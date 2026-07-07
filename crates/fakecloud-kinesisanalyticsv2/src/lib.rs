@@ -1,6 +1,7 @@
 //! Amazon Managed Service for Apache Flink (`kinesisanalyticsv2`, formerly
 //! Kinesis Data Analytics v2) implementation for FakeCloud.
 
+pub mod builders;
 pub mod persistence;
 pub mod runtime;
 pub mod service;

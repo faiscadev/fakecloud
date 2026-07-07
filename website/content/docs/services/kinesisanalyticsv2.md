@@ -99,6 +99,43 @@ machine (`STARTING` -> `RUNNING` in memory) — running arbitrary SQL as a live
 Flink job needs the Flink SQL gateway, which is out of scope for now. Only
 Flink-flavor apps with a JAR get the real runtime.
 
+## CloudFormation
+
+fakecloud provisions every `AWS::KinesisAnalyticsV2::*` resource type through
+CloudFormation:
+
+- `AWS::KinesisAnalyticsV2::Application`
+- `AWS::KinesisAnalyticsV2::ApplicationOutput`
+- `AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource`
+- `AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption`
+
+Each is written through to the `kinesisanalyticsv2` service via the same shared
+record builders the direct API uses, so a CFN-provisioned application (and its
+outputs / reference data sources / CloudWatch logging options) reads back
+identically on `DescribeApplication` and persists across a restart, exactly like
+its direct-API equivalent.
+
+`Ref` follows the AWS resource spec: an `Application` `Ref` resolves to the
+application name (its physical id), and each sub-resource `Ref` resolves to its
+minted id (the output id, reference id, or CloudWatch-logging-option id). The
+`Application` resource exposes no returnable `Fn::GetAtt` attributes. Creating an
+application never starts a Flink job (`StartApplication` is a separate action),
+so CloudFormation provisioning settles the application to `READY` in the control
+plane and never spawns a Flink container.
+
+## Terraform
+
+fakecloud exercises the upstream `terraform-provider-aws`
+`internal/service/kinesisanalyticsv2` acceptance suite in tfacc, split across the
+`kinesisanalyticsv2-flink`, `kinesisanalyticsv2-sql`, and
+`kinesisanalyticsv2-snapshot` jobs: SQL + Flink flavor applications
+(create/describe/update/delete, tags, import, disappears), inputs / outputs /
+reference data sources, CloudWatch logging options, VPC configurations,
+StartApplication on create + update, snapshot restore, and the standalone
+application snapshot resource. The real Flink-job data plane is disabled for
+tfacc (proven separately by the Docker E2E) so the control plane's
+`STARTING -> RUNNING` settle doesn't race the provider's status assertions.
+
 ## Example
 
 ```python

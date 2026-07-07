@@ -2744,6 +2744,7 @@ mod tests {
             )),
             mq: shared::<fakecloud_mq::MqData>(),
             kafka: shared::<fakecloud_kafka::KafkaData>(),
+            kinesisanalyticsv2: shared::<fakecloud_kinesisanalyticsv2::Ka2State>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

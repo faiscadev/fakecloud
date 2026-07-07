@@ -167,7 +167,7 @@ async fn flink_application_runs_a_real_job_in_a_container() {
     let created = ka2
         .create_application()
         .application_name(app_name)
-        .runtime_environment(RuntimeEnvironment::from("FLINK_1_19"))
+        .runtime_environment(RuntimeEnvironment::from("FLINK-1_19"))
         .service_execution_role(role)
         .application_configuration(code_cfg)
         .send()

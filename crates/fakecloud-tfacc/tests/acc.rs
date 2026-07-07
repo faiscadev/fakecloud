@@ -153,6 +153,56 @@ async fn kafka_scram_repl_vpc_acceptance() {
 }
 
 #[tokio::test]
+async fn kinesisanalyticsv2_flink_lifecycle_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-lifecycle").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_flink_update_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-update").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_flink_restore_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-restore").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_flink_vpc_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-vpc").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_flink_misc_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-misc").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_input_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-input").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_inputproc_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-inputproc").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_start_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-start").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_rest_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-rest").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_snapshot_acceptance() {
+    run_shard("kinesisanalyticsv2-snapshot").await;
+}
+
+#[tokio::test]
 async fn glacier_acceptance() {
     run_shard("glacier").await;
 }

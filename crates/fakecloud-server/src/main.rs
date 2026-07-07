@@ -1261,6 +1261,7 @@ async fn main() {
             elasticbeanstalk: beanstalk_state.clone(),
             mq: mq_state.clone(),
             kafka: kafka_state.clone(),
+            kinesisanalyticsv2: kinesisanalyticsv2_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -4697,7 +4698,8 @@ async fn main() {
             None
         };
     let mut kinesisanalyticsv2_service =
-        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone());
+        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone())
+            .with_ec2_state(ec2_state.clone());
     if let Some(store) = kinesisanalyticsv2_snapshot_store {
         kinesisanalyticsv2_service = kinesisanalyticsv2_service.with_snapshot_store(store);
     }
@@ -4717,6 +4719,12 @@ async fn main() {
     kinesisanalyticsv2_service
         .recover_persisted_containers()
         .await;
+    // CloudFormation `AWS::KinesisAnalyticsV2::*` resources mutate the ka2 state
+    // directly; register its snapshot hook so a CFN-provisioned application is
+    // written through to disk after a stack op, matching the direct API.
+    if let Some(h) = kinesisanalyticsv2_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kinesisanalyticsv2", h);
+    }
     registry.register(Arc::new(kinesisanalyticsv2_service));
 
     // Cloud Map (servicediscovery) namespace control plane.

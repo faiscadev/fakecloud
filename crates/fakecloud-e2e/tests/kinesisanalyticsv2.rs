@@ -39,7 +39,7 @@ async fn application_lifecycle_create_start_snapshot_stop_update_delete() {
     let created = ka2
         .create_application()
         .application_name("e2e-flink-app")
-        .runtime_environment(RuntimeEnvironment::from("FLINK_1_20"))
+        .runtime_environment(RuntimeEnvironment::from("FLINK-1_20"))
         .service_execution_role(role)
         .application_description("e2e managed flink app")
         .send()

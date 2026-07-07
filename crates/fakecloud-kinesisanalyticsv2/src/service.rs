@@ -67,27 +67,31 @@ pub const KA2_ACTIONS: &[&str] = &[
     "UpdateApplicationMaintenanceConfiguration",
 ];
 
+// The AWS wire values for RuntimeEnvironment are hyphenated (`FLINK-1_20`,
+// `SQL-1_0`, `ZEPPELIN-FLINK-1_0`) — the Smithy enum NAME is `FLINK-1_20` but
+// its serialized `value` is `FLINK-1_20`, which is what the AWS SDKs and the
+// terraform provider send. Validate against the wire values, not the names.
 const RUNTIME_ENVIRONMENTS: &[&str] = &[
-    "SQL_1_0",
-    "FLINK_1_6",
-    "FLINK_1_8",
-    "ZEPPELIN_FLINK_1_0",
-    "FLINK_1_11",
-    "FLINK_1_13",
-    "ZEPPELIN_FLINK_2_0",
-    "FLINK_1_15",
-    "ZEPPELIN_FLINK_3_0",
-    "FLINK_1_18",
-    "FLINK_1_19",
-    "FLINK_1_20",
-    "FLINK_2_2",
+    "SQL-1_0",
+    "FLINK-1_6",
+    "FLINK-1_8",
+    "ZEPPELIN-FLINK-1_0",
+    "FLINK-1_11",
+    "FLINK-1_13",
+    "ZEPPELIN-FLINK-2_0",
+    "FLINK-1_15",
+    "ZEPPELIN-FLINK-3_0",
+    "FLINK-1_18",
+    "FLINK-1_19",
+    "FLINK-1_20",
+    "FLINK-2_2",
 ];
 const APPLICATION_MODES: &[&str] = &["STREAMING", "INTERACTIVE"];
 const URL_TYPES: &[&str] = &["FLINK_DASHBOARD_URL", "ZEPPELIN_UI_URL"];
 const OPERATION_STATUSES: &[&str] = &["IN_PROGRESS", "CANCELLED", "SUCCESSFUL", "FAILED"];
 
-const DEFAULT_MAINTENANCE_START: &str = "06:00";
-const DEFAULT_MAINTENANCE_END: &str = "14:00";
+pub(crate) const DEFAULT_MAINTENANCE_START: &str = "06:00";
+pub(crate) const DEFAULT_MAINTENANCE_END: &str = "14:00";
 
 pub struct Ka2Service {
     state: SharedKa2State,
@@ -102,6 +106,10 @@ pub struct Ka2Service {
     /// In-process S3 reader used to fetch an application's code JAR from a
     /// fakecloud S3 bucket for submission to the Flink cluster.
     s3: Option<Arc<dyn S3Delivery>>,
+    /// Shared EC2 state, used to resolve the owning VPC of an application's VPC
+    /// configuration subnets (AWS derives `VpcId` from the subnets). `None` when
+    /// EC2 is not wired -> a synthesized placeholder VPC id is used.
+    ec2_state: Option<fakecloud_ec2::SharedEc2State>,
 }
 
 impl Ka2Service {
@@ -112,7 +120,15 @@ impl Ka2Service {
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             runtime: None,
             s3: None,
+            ec2_state: None,
         }
+    }
+
+    /// Attach shared EC2 state so a VPC configuration's `VpcId` is resolved from
+    /// the owning VPC of its subnets, exactly as AWS derives it.
+    pub fn with_ec2_state(mut self, ec2_state: fakecloud_ec2::SharedEc2State) -> Self {
+        self.ec2_state = Some(ec2_state);
+        self
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -141,6 +157,26 @@ impl Ka2Service {
             &self.snapshot_lock,
         )
         .await;
+    }
+
+    /// Persist hook for the CloudFormation provisioner (registered by name in
+    /// the server). The CFN `AWS::KinesisAnalyticsV2::*` provisioner mutates the
+    /// shared `Ka2State` directly and never triggers this service's own save
+    /// path, so CloudFormation invokes this hook after a stack op to write the
+    /// state through to disk -- the same persistence a direct mutating API call
+    /// gets. `None` in memory mode (no snapshot store configured).
+    pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
+        let store = self.snapshot_store.clone()?;
+        let state = self.state.clone();
+        let lock = self.snapshot_lock.clone();
+        Some(Arc::new(move || {
+            let state = state.clone();
+            let store = store.clone();
+            let lock = lock.clone();
+            Box::pin(async move {
+                crate::persistence::save_snapshot(&state, Some(store), &lock).await;
+            })
+        }))
     }
 }
 
@@ -174,8 +210,19 @@ fn is_mutating(action: &str) -> bool {
         || action.starts_with("Rollback")
         || action.starts_with("Tag")
         || action.starts_with("Untag")
-        // DescribeApplication settles transient lifecycle state in place.
-        || action == "DescribeApplication"
+    // NOTE: DescribeApplication is deliberately NOT listed here. It settles
+    // transient lifecycle state (STARTING -> RUNNING, UPDATING -> RUNNING, ...)
+    // in memory, but that settle is deterministic and idempotent -- the next
+    // describe re-derives it from `settle_status`, so it never needs to be
+    // persisted. Terraform's status waiters poll DescribeApplication rapidly
+    // while an application settles; if every poll triggered `save()` (clone the
+    // whole account state, JSON-serialize a Flink app's multi-MB code payload
+    // under `spawn_blocking`, write the snapshot to disk, and AWAIT it, all
+    // serialized behind the snapshot mutex), the awaited saves back up faster
+    // than they drain on a 2-core CI runner. Describe then stops responding and
+    // the provider's waiter wedges to the job timeout -- a stall that never
+    // reproduces on a many-core dev box where the saves drain between polls.
+    // A real mutation (Start/Stop/Update/...) still persists the settled state.
 }
 
 fn dispatch(s: &Ka2Service, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -365,11 +412,11 @@ fn int_range(
     }
 }
 
-fn arn(region: &str, account: &str, name: &str) -> String {
+pub(crate) fn arn(region: &str, account: &str, name: &str) -> String {
     format!("arn:aws:kinesisanalytics:{region}:{account}:application/{name}")
 }
 
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
@@ -542,9 +589,21 @@ fn str_of(v: &Value, k: &str) -> Option<String> {
 
 /// Build the `ApplicationConfigurationDescription` object from an input
 /// `ApplicationConfiguration`, assigning ids to inputs/outputs/reference data
-/// sources/VPC configurations. Only members present in the input are emitted;
-/// every emitted member matches the output shape exactly.
-fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value {
+/// sources/VPC configurations.
+///
+/// For a **Flink** runtime (`FLINK-1_x`) AWS always materializes a full
+/// `FlinkApplicationConfigurationDescription` (checkpoint / monitoring /
+/// parallelism) and an `ApplicationSnapshotConfigurationDescription`, filling
+/// the documented DEFAULT values for anything the caller omitted -- so a bare
+/// Flink app still reads back a populated configuration. SQL / Zeppelin apps
+/// only echo the members that were supplied.
+pub(crate) fn config_to_description(
+    cfg: &Value,
+    role: Option<&str>,
+    runtime: &str,
+    id: &mut u64,
+) -> Value {
+    let is_flink = runtime.starts_with("FLINK-");
     let mut out = serde_json::Map::new();
     let mut next = || {
         *id += 1;
@@ -580,20 +639,13 @@ fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value
         );
     }
 
-    if let Some(flink) = cfg.get("FlinkApplicationConfiguration") {
-        let mut fd = serde_json::Map::new();
-        if let Some(c) = flink.get("CheckpointConfiguration") {
-            fd.insert("CheckpointConfigurationDescription".into(), c.clone());
-        }
-        if let Some(c) = flink.get("MonitoringConfiguration") {
-            fd.insert("MonitoringConfigurationDescription".into(), c.clone());
-        }
-        if let Some(c) = flink.get("ParallelismConfiguration") {
-            fd.insert("ParallelismConfigurationDescription".into(), c.clone());
-        }
+    if is_flink {
+        // AWS always returns a fully-populated FlinkApplicationConfiguration
+        // description for a Flink app, defaulting any sub-config the caller
+        // omitted to its documented DEFAULT values.
         out.insert(
             "FlinkApplicationConfigurationDescription".into(),
-            Value::Object(fd),
+            flink_config_description(cfg.get("FlinkApplicationConfiguration")),
         );
     }
 
@@ -632,7 +684,19 @@ fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value
         );
     }
 
-    if let Some(snap) = cfg.get("ApplicationSnapshotConfiguration") {
+    if is_flink {
+        // A Flink app always reports a snapshot configuration; when the caller
+        // did not supply one AWS defaults SnapshotsEnabled to `true`.
+        let enabled = cfg
+            .get("ApplicationSnapshotConfiguration")
+            .and_then(|s| s.get("SnapshotsEnabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        out.insert(
+            "ApplicationSnapshotConfigurationDescription".into(),
+            json!({ "SnapshotsEnabled": enabled }),
+        );
+    } else if let Some(snap) = cfg.get("ApplicationSnapshotConfiguration") {
         let enabled = snap
             .get("SnapshotsEnabled")
             .and_then(Value::as_bool)
@@ -693,6 +757,110 @@ fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value
     Value::Object(out)
 }
 
+// ===== Flink application-configuration defaults =====
+//
+// AWS auto-populates a Flink app's FlinkApplicationConfiguration description on
+// create, and returns it (plus its DEFAULT-vs-CUSTOM per-sub-config values) on
+// every describe. When a sub-config's ConfigurationType is DEFAULT (or the
+// sub-config was omitted entirely) AWS reports the documented default values;
+// when CUSTOM it echoes the caller's values (defaulting any individual field
+// the caller left unset).
+
+const DEFAULT_CHECKPOINT_INTERVAL: i64 = 60_000;
+const DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS: i64 = 5_000;
+const DEFAULT_METRICS_LEVEL: &str = "APPLICATION";
+const DEFAULT_LOG_LEVEL: &str = "INFO";
+
+/// Build the full `FlinkApplicationConfigurationDescription` (all three
+/// sub-descriptions) from an optional input `FlinkApplicationConfiguration`.
+fn flink_config_description(flink: Option<&Value>) -> Value {
+    json!({
+        "CheckpointConfigurationDescription":
+            checkpoint_description(flink.and_then(|f| f.get("CheckpointConfiguration"))),
+        "MonitoringConfigurationDescription":
+            monitoring_description(flink.and_then(|f| f.get("MonitoringConfiguration"))),
+        "ParallelismConfigurationDescription":
+            parallelism_description(flink.and_then(|f| f.get("ParallelismConfiguration"))),
+    })
+}
+
+/// The `ConfigurationType` of an input sub-config, defaulting to `DEFAULT` when
+/// the sub-config is absent or did not specify one.
+fn configuration_type(input: Option<&Value>) -> String {
+    input
+        .and_then(|v| str_of(v, "ConfigurationType"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "DEFAULT".to_string())
+}
+
+fn checkpoint_description(input: Option<&Value>) -> Value {
+    let ctype = configuration_type(input);
+    let custom = ctype == "CUSTOM";
+    let get_bool = |k: &str, d: bool| {
+        input
+            .filter(|_| custom)
+            .and_then(|v| v.get(k))
+            .and_then(Value::as_bool)
+            .unwrap_or(d)
+    };
+    let get_int = |k: &str, d: i64| {
+        input
+            .filter(|_| custom)
+            .and_then(|v| v.get(k))
+            .and_then(Value::as_i64)
+            .unwrap_or(d)
+    };
+    json!({
+        "ConfigurationType": ctype,
+        "CheckpointingEnabled": get_bool("CheckpointingEnabled", true),
+        "CheckpointInterval": get_int("CheckpointInterval", DEFAULT_CHECKPOINT_INTERVAL),
+        "MinPauseBetweenCheckpoints":
+            get_int("MinPauseBetweenCheckpoints", DEFAULT_MIN_PAUSE_BETWEEN_CHECKPOINTS),
+    })
+}
+
+fn monitoring_description(input: Option<&Value>) -> Value {
+    let ctype = configuration_type(input);
+    let custom = ctype == "CUSTOM";
+    let get_str = |k: &str, d: &str| {
+        input
+            .filter(|_| custom)
+            .and_then(|v| str_of(v, k))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| d.to_string())
+    };
+    json!({
+        "ConfigurationType": ctype,
+        "LogLevel": get_str("LogLevel", DEFAULT_LOG_LEVEL),
+        "MetricsLevel": get_str("MetricsLevel", DEFAULT_METRICS_LEVEL),
+    })
+}
+
+fn parallelism_description(input: Option<&Value>) -> Value {
+    let ctype = configuration_type(input);
+    let custom = ctype == "CUSTOM";
+    let get_int = |k: &str, d: i64| {
+        input
+            .filter(|_| custom)
+            .and_then(|v| v.get(k))
+            .and_then(Value::as_i64)
+            .unwrap_or(d)
+    };
+    let parallelism = get_int("Parallelism", 1);
+    let auto_scaling = input
+        .filter(|_| custom)
+        .and_then(|v| v.get("AutoScalingEnabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    json!({
+        "ConfigurationType": ctype,
+        "Parallelism": parallelism,
+        "ParallelismPerKPU": get_int("ParallelismPerKPU", 1),
+        "AutoScalingEnabled": auto_scaling,
+        "CurrentParallelism": parallelism,
+    })
+}
+
 fn s3_code_location(s3: &Value) -> Value {
     let mut m = serde_json::Map::new();
     m.insert(
@@ -709,11 +877,30 @@ fn s3_code_location(s3: &Value) -> Value {
     Value::Object(m)
 }
 
+/// Build the ordered list of in-app stream names AWS mints for a SQL input:
+/// one `<NamePrefix>_NNN` (1-based, zero-padded to 3 digits) per unit of the
+/// input's parallelism `Count`. So a `Count=1` input reports a single stream
+/// and a `Count=42` input reports 42.
+fn in_app_stream_names(name_prefix: &str, count: i64) -> Vec<String> {
+    (1..=count.max(1))
+        .map(|i| format!("{name_prefix}_{i:03}"))
+        .collect()
+}
+
 fn input_desc(input: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
     let mut d = serde_json::Map::new();
     d.insert("InputId".into(), json!(next()));
+    // AWS auto-populates InputParallelism.Count to 1 when the caller omits it.
+    let count = input
+        .get("InputParallelism")
+        .and_then(|p| p.get("Count"))
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
     if let Some(np) = str_of(input, "NamePrefix") {
-        d.insert("InAppStreamNames".into(), json!([format!("{np}_001")]));
+        d.insert(
+            "InAppStreamNames".into(),
+            json!(in_app_stream_names(&np, count)),
+        );
         d.insert("NamePrefix".into(), json!(np));
     }
     if let Some(ipc) = input.get("InputProcessingConfiguration") {
@@ -738,16 +925,22 @@ fn input_desc(input: &Value, next: &mut impl FnMut() -> String, role: Option<&st
             resource_role_desc(k, role),
         );
     }
-    if let Some(p) = input.get("InputParallelism") {
-        d.insert("InputParallelism".into(), p.clone());
-    }
+    d.insert("InputParallelism".into(), json!({ "Count": count }));
     if let Some(s) = input.get("InputSchema") {
         d.insert("InputSchema".into(), s.clone());
     }
+    // AWS always reports an InputStartingPositionConfiguration on the input; its
+    // InputStartingPosition stays unset (reads back empty) until the application
+    // is started with a run configuration that pins one.
+    d.insert("InputStartingPositionConfiguration".into(), json!({}));
     Value::Object(d)
 }
 
-fn output_desc(output: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+pub(crate) fn output_desc(
+    output: &Value,
+    next: &mut impl FnMut() -> String,
+    role: Option<&str>,
+) -> Value {
     let mut d = serde_json::Map::new();
     d.insert("OutputId".into(), json!(next()));
     if let Some(n) = str_of(output, "Name") {
@@ -777,7 +970,11 @@ fn output_desc(output: &Value, next: &mut impl FnMut() -> String, role: Option<&
     Value::Object(d)
 }
 
-fn reference_desc(r: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+pub(crate) fn reference_desc(
+    r: &Value,
+    next: &mut impl FnMut() -> String,
+    role: Option<&str>,
+) -> Value {
     let mut d = serde_json::Map::new();
     d.insert("ReferenceId".into(), json!(next()));
     d.insert(
@@ -833,7 +1030,7 @@ fn vpc_desc(v: &Value, next: &mut impl FnMut() -> String) -> Value {
     })
 }
 
-fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
+pub(crate) fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
     let mut m = serde_json::Map::new();
     m.insert("CloudWatchLoggingOptionId".into(), json!(id));
     m.insert(
@@ -848,7 +1045,7 @@ fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
 
 // ===== version + operation recording =====
 
-fn record_version(app: &mut Application) {
+pub(crate) fn record_version(app: &mut Application) {
     let detail = build_application_detail(app);
     app.versions.insert(
         app.version_id,
@@ -883,7 +1080,7 @@ fn record_operation(
 
 /// Bump the application version for a config-changing operation, refresh the
 /// conditional token, and record the new version snapshot.
-fn bump_version(app: &mut Application) {
+pub(crate) fn bump_version(app: &mut Application) {
     let from = app.version_id;
     app.version_id += 1;
     app.version_updated_from = Some(from);
@@ -922,6 +1119,60 @@ fn check_concurrency(app: &Application, b: &Value) -> Result<(), AwsServiceError
 // ===== handlers =====
 
 impl Ka2Service {
+    /// Overwrite each `VpcConfigurationDescription.VpcId` in a config
+    /// description with the real owning VPC of its subnets, resolved from EC2
+    /// state (AWS derives `VpcId` from the configuration's subnets). A no-op
+    /// when EC2 state is not wired or a subnet is unknown -- the synthesized
+    /// placeholder id set by `vpc_desc` is then left in place.
+    /// Snapshot the EC2 `subnet_id -> owning vpc_id` map for an account, taken
+    /// WITHOUT holding the ka2 state lock. Callers gather this *before*
+    /// acquiring `self.state.write()` so the EC2 read lock is never nested
+    /// inside the ka2 write lock. That nesting (ka2.write -> ec2.read) is a
+    /// cross-service lock ordering: under `parking_lot`'s writer-priority, a
+    /// concurrent EC2 writer (terraform provisions the VPC/subnets/security
+    /// groups in parallel with the application) makes the nested `ec2.read()`
+    /// block while the ka2 write lock is held, stalling every other ka2 request
+    /// -- on a 2-core CI runner this wedged the provider's status waiters to the
+    /// job timeout even though it never reproduced on a many-core dev box.
+    /// Returns an empty map when EC2 is not wired.
+    fn ec2_subnet_vpc_map(&self, account: &str) -> BTreeMap<String, String> {
+        let Some(ec2) = self.ec2_state.as_ref() else {
+            return BTreeMap::new();
+        };
+        let guard = ec2.read();
+        guard
+            .get(account)
+            .map(|st| {
+                st.subnets
+                    .iter()
+                    .map(|(sid, sub)| (sid.clone(), sub.vpc_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Overwrite each VPC configuration description's `VpcId` from a
+    /// pre-snapshotted `subnet_id -> vpc_id` map (see `ec2_subnet_vpc_map`).
+    /// Pure: takes no lock, so it is safe to call while holding `self.state`.
+    fn resolve_vpc_ids(cfg: &mut Value, subnet_vpc: &BTreeMap<String, String>) {
+        let Some(arr) = cfg
+            .get_mut("VpcConfigurationDescriptions")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        for d in arr.iter_mut() {
+            let vpc = d
+                .get("SubnetIds")
+                .and_then(Value::as_array)
+                .and_then(|s| s.iter().filter_map(Value::as_str).next())
+                .and_then(|sid| subnet_vpc.get(sid).cloned());
+            if let (Some(v), Some(o)) = (vpc, d.as_object_mut()) {
+                o.insert("VpcId".into(), json!(v));
+            }
+        }
+    }
+
     fn create_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = parse(req)?;
         let ec = "InvalidArgumentException";
@@ -932,70 +1183,34 @@ impl Ka2Service {
         let role = req_str_len(&b, "ServiceExecutionRole", 1, 2048, ec)?;
         let mode = enum_field(&b, "ApplicationMode", APPLICATION_MODES, false, ec)?;
 
+        // Snapshot the EC2 subnet->vpc map BEFORE taking the ka2 write lock so
+        // the EC2 read lock is never nested inside it (see `ec2_subnet_vpc_map`).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        if st.applications.contains_key(&name) {
-            return Err(fault(
-                "ResourceInUseException",
-                &format!("Application {name} already exists."),
-            ));
-        }
-        let now = Utc::now();
-        let application_arn = arn(&req.region, &req.account_id, &name);
-        let mut id_counter = 0u64;
-        let config_description = match b.get("ApplicationConfiguration") {
-            Some(cfg) if cfg.is_object() => {
-                config_to_description(cfg, Some(&role), &mut id_counter)
-            }
-            _ => Value::Object(serde_json::Map::new()),
-        };
-        let cloudwatch: Vec<Value> = b
-            .get("CloudWatchLoggingOptions")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .map(|o| {
-                        id_counter += 1;
-                        cloudwatch_desc(o, &id_counter.to_string(), Some(&role))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut app = Application {
-            name: name.clone(),
-            arn: application_arn.clone(),
+        // Build + insert through the shared builder so a CFN-provisioned
+        // `AWS::KinesisAnalyticsV2::Application` stores byte-identical wire state
+        // and cannot diverge from this path (#1766).
+        crate::builders::insert_application(
+            st,
+            &req.region,
+            &req.account_id,
+            &name,
             description,
-            runtime_environment: runtime,
-            service_execution_role: Some(role),
-            application_mode: mode,
-            status: "READY".to_string(),
-            version_id: 1,
-            create_timestamp: now,
-            last_update_timestamp: now,
-            conditional_token: new_token(),
-            config_description,
-            cloudwatch_logging_options: cloudwatch,
-            maintenance_start: DEFAULT_MAINTENANCE_START.to_string(),
-            maintenance_end: DEFAULT_MAINTENANCE_END.to_string(),
-            snapshots: BTreeMap::new(),
-            operations: Vec::new(),
-            versions: BTreeMap::new(),
-            id_counter,
-            version_updated_from: None,
-            version_rolled_back_from: None,
-            version_rolled_back_to: None,
-            flink_binding: None,
-        };
-        record_version(&mut app);
-        let detail = build_application_detail(&app);
-
-        let tags = parse_tags(&b);
-        if !tags.is_empty() {
-            st.tags.insert(application_arn.clone(), tags);
-        }
-        st.applications.insert(name, app);
-
+            &runtime,
+            &role,
+            mode,
+            b.get("ApplicationConfiguration"),
+            b.get("CloudWatchLoggingOptions"),
+            parse_tags(&b),
+        )
+        .map_err(|m| fault("ResourceInUseException", &m))?;
+        let app = st.applications.get_mut(&name).expect("just inserted");
+        // Resolve each VPC configuration's owning VpcId from EC2 state, then
+        // refresh the version-1 detail so the persisted version reflects it.
+        Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
+        record_version(app);
+        let detail = build_application_detail(app);
         ok(json!({ "ApplicationDetail": detail }))
     }
 
@@ -1055,6 +1270,8 @@ impl Ka2Service {
         )?;
         let role_update = opt_str_len(&b, "ServiceExecutionRoleUpdate", 1, 2048, ec)?;
 
+        // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -1071,11 +1288,19 @@ impl Ka2Service {
         }
         if let Some(cfg) = b.get("ApplicationConfigurationUpdate") {
             if cfg.is_object() {
-                let role = app.service_execution_role.clone();
-                let mut id = app.id_counter;
-                let new_desc = config_to_description(cfg, role.as_deref(), &mut id);
-                app.id_counter = id;
-                merge_config_description(&mut app.config_description, new_desc);
+                apply_config_update(app, cfg);
+                // A VpcConfigurationUpdate may change the subnets; re-resolve the
+                // owning VpcId from EC2 state.
+                Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
+            }
+        }
+        // A `RunConfigurationUpdate` (top-level on UpdateApplication) revises the
+        // run configuration a started Flink app reports.
+        if app.runtime_environment.starts_with("FLINK-") {
+            if let Some(rc) = b.get("RunConfigurationUpdate") {
+                let desc = run_config_description(Some(rc));
+                ensure_object(&mut app.config_description)
+                    .insert("RunConfigurationDescription".into(), desc);
             }
         }
         if let Some(updates) = b
@@ -1185,8 +1410,19 @@ impl Ka2Service {
             .applications
             .get_mut(&name)
             .ok_or_else(|| not_found(&name))?;
-        if let Some(rc) = b.get("RunConfiguration") {
-            apply_run_configuration(app, rc);
+        if app.runtime_environment.starts_with("FLINK-") {
+            // Once a Flink app is started, AWS records a RunConfiguration
+            // description on it -- defaulting to RESTORE_FROM_LATEST_SNAPSHOT /
+            // AllowNonRestoredState=false when the caller supplied nothing, and
+            // echoing any provided RunConfiguration otherwise.
+            let desc = run_config_description(b.get("RunConfiguration"));
+            ensure_object(&mut app.config_description)
+                .insert("RunConfigurationDescription".into(), desc);
+        } else if let Some(rc) = b.get("RunConfiguration") {
+            // A SQL app's RunConfiguration pins each input's starting position
+            // via SqlRunConfigurations; unlike Flink it records no
+            // RunConfigurationDescription.
+            apply_sql_run_configuration(app, rc);
         }
         app.status = "STARTING".to_string();
         let op_id = record_operation(app, "StartApplication", None, None);
@@ -1226,6 +1462,11 @@ impl Ka2Service {
             .applications
             .get_mut(&name)
             .ok_or_else(|| not_found(&name))?;
+        // AWS drops the RunConfiguration description once an application is
+        // stopped; it is re-established on the next StartApplication.
+        if let Some(obj) = app.config_description.as_object_mut() {
+            obj.remove("RunConfigurationDescription");
+        }
         let real = self.runtime.is_some() && is_real_flink(app);
         let binding = app.flink_binding.clone();
         let running_job = binding
@@ -1540,16 +1781,13 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "CloudWatchLoggingOption is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        check_concurrency(app, &b)?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        app.cloudwatch_logging_options
-            .push(cloudwatch_desc(&opt, &id, role.as_deref()));
-        bump_version(app);
+        {
+            let app = st.applications.get(&name).ok_or_else(|| not_found(&name))?;
+            check_concurrency(app, &b)?;
+        }
+        crate::builders::insert_cloudwatch_logging_option(st, &name, &opt)
+            .map_err(|_| not_found(&name))?;
+        let app = st.applications.get_mut(&name).expect("just updated");
         let op_id = record_operation(
             app,
             "UpdateApplication",
@@ -1609,6 +1847,8 @@ impl Ka2Service {
             .get("VpcConfiguration")
             .cloned()
             .ok_or_else(|| fault(ec, "VpcConfiguration is required."))?;
+        // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -1621,8 +1861,23 @@ impl Ka2Service {
         config_array_push(
             &mut app.config_description,
             "VpcConfigurationDescriptions",
-            desc.clone(),
+            desc,
         );
+        // Resolve the owning VpcId from EC2 state, then read the stored
+        // description back so the response carries the resolved id.
+        Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
+        let stored = app
+            .config_description
+            .get("VpcConfigurationDescriptions")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|d| {
+                        d.get("VpcConfigurationId").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                    .cloned()
+            })
+            .unwrap_or(Value::Null);
         bump_version(app);
         let op_id = record_operation(
             app,
@@ -1633,7 +1888,7 @@ impl Ka2Service {
         ok(json!({
             "ApplicationARN": app.arn,
             "ApplicationVersionId": app.version_id,
-            "VpcConfigurationDescription": desc,
+            "VpcConfigurationDescription": stored,
             "OperationId": op_id,
         }))
     }
@@ -1793,15 +2048,8 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "Output is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        let desc = output_desc(&output, &mut || id.clone(), role.as_deref());
-        sql_array_push(&mut app.config_description, "OutputDescriptions", desc);
-        bump_version(app);
+        crate::builders::insert_output(st, &name, &output).map_err(|_| not_found(&name))?;
+        let app = st.applications.get(&name).expect("just updated");
         let descs = sql_array_get(&app.config_description, "OutputDescriptions");
         ok(json!({
             "ApplicationARN": app.arn,
@@ -1846,19 +2094,9 @@ impl Ka2Service {
             .ok_or_else(|| fault(ec, "ReferenceDataSource is required."))?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        let app = st
-            .applications
-            .get_mut(&name)
-            .ok_or_else(|| not_found(&name))?;
-        let id = app.next_id();
-        let role = app.service_execution_role.clone();
-        let desc = reference_desc(&rds, &mut || id.clone(), role.as_deref());
-        sql_array_push(
-            &mut app.config_description,
-            "ReferenceDataSourceDescriptions",
-            desc,
-        );
-        bump_version(app);
+        crate::builders::insert_reference_data_source(st, &name, &rds)
+            .map_err(|_| not_found(&name))?;
+        let app = st.applications.get(&name).expect("just updated");
         let descs = sql_array_get(&app.config_description, "ReferenceDataSourceDescriptions");
         ok(json!({
             "ApplicationARN": app.arn,
@@ -2386,11 +2624,11 @@ impl Ka2Service {
 }
 
 /// Whether an application is a REAL-runtime-managed Flink app: a Flink-flavor
-/// runtime environment (`FLINK_1_x`, excluding SQL and Zeppelin) AND a code JAR
+/// runtime environment (`FLINK-1_x`, excluding SQL and Zeppelin) AND a code JAR
 /// in S3 to submit. Only these get the Docker-backed Flink job; everything else
 /// stays on the control-plane state machine.
 fn is_real_flink(app: &Application) -> bool {
-    app.runtime_environment.starts_with("FLINK_") && flink_code_location(app).is_some()
+    app.runtime_environment.starts_with("FLINK-") && flink_code_location(app).is_some()
 }
 
 /// Extract the `(bucket, key)` of an application's code JAR from its
@@ -2530,7 +2768,7 @@ fn config_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
 
 /// Push into `SqlApplicationConfigurationDescription.<key>`, creating the
 /// nested structure as needed.
-fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
+pub(crate) fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
     let obj = ensure_object(cfg);
     let sql = obj
         .entry("SqlApplicationConfigurationDescription")
@@ -2542,13 +2780,44 @@ fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
     }
 }
 
-fn sql_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
+pub(crate) fn sql_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
     if let Some(arr) = cfg
         .get_mut("SqlApplicationConfigurationDescription")
         .and_then(|s| s.get_mut(key))
         .and_then(Value::as_array_mut)
     {
         arr.retain(|e| e.get(id_field).and_then(Value::as_str) != Some(id));
+    }
+    collapse_empty_sql_config(cfg);
+}
+
+/// Drop the whole `SqlApplicationConfigurationDescription` once its inputs,
+/// outputs and reference data sources are all gone. AWS reports no
+/// `SqlApplicationConfiguration` (rather than an empty one) after the last SQL
+/// resource is removed, so terraform reads `sql_application_configuration.# = 0`.
+fn collapse_empty_sql_config(cfg: &mut Value) {
+    let Some(obj) = cfg.as_object_mut() else {
+        return;
+    };
+    let empty = obj
+        .get("SqlApplicationConfigurationDescription")
+        .map(|sql| {
+            [
+                "InputDescriptions",
+                "OutputDescriptions",
+                "ReferenceDataSourceDescriptions",
+            ]
+            .iter()
+            .all(|k| {
+                sql.get(k)
+                    .and_then(Value::as_array)
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true)
+            })
+        })
+        .unwrap_or(false);
+    if empty {
+        obj.remove("SqlApplicationConfigurationDescription");
     }
 }
 
@@ -2565,34 +2834,439 @@ fn sql_array_get(cfg: &Value, key: &str) -> Value {
         .unwrap_or_else(|| json!([]))
 }
 
-/// Merge a freshly-transformed config description over the existing one,
-/// replacing top-level members that the update supplied.
-fn merge_config_description(existing: &mut Value, update: Value) {
-    let dst = ensure_object(existing);
-    if let Value::Object(src) = update {
-        for (k, v) in src {
-            dst.insert(k, v);
+/// Apply an `ApplicationConfigurationUpdate` to an application's stored
+/// `ApplicationConfigurationDescription` in place. Each member present in the
+/// update (which carries `*Update`-suffixed shapes) rebuilds the corresponding
+/// description member; members the update omits are preserved. This mirrors how
+/// AWS re-derives the description after `UpdateApplication`, including
+/// re-defaulting a Flink sub-config whose `ConfigurationType` reverted to
+/// `DEFAULT`.
+fn apply_config_update(app: &mut Application, update: &Value) {
+    let is_flink = app.runtime_environment.starts_with("FLINK-");
+
+    if let Some(code) = update.get("ApplicationCodeConfigurationUpdate") {
+        let existing = app
+            .config_description
+            .get("ApplicationCodeConfigurationDescription")
+            .cloned();
+        let desc = code_config_update_description(code, existing.as_ref());
+        ensure_object(&mut app.config_description)
+            .insert("ApplicationCodeConfigurationDescription".into(), desc);
+    }
+
+    if is_flink {
+        if let Some(flink) = update.get("FlinkApplicationConfigurationUpdate") {
+            let existing = app
+                .config_description
+                .get("FlinkApplicationConfigurationDescription")
+                .cloned();
+            let desc = flink_config_update_description(flink, existing.as_ref());
+            ensure_object(&mut app.config_description)
+                .insert("FlinkApplicationConfigurationDescription".into(), desc);
+        }
+    } else if let Some(sql) = update.get("SqlApplicationConfigurationUpdate") {
+        let role = app.service_execution_role.clone();
+        apply_sql_config_update(&mut app.config_description, role.as_deref(), sql);
+    }
+
+    if let Some(snap) = update.get("ApplicationSnapshotConfigurationUpdate") {
+        if let Some(enabled) = snap.get("SnapshotsEnabledUpdate").and_then(Value::as_bool) {
+            ensure_object(&mut app.config_description).insert(
+                "ApplicationSnapshotConfigurationDescription".into(),
+                json!({ "SnapshotsEnabled": enabled }),
+            );
+        }
+    }
+
+    if let Some(env) = update.get("EnvironmentPropertyUpdates") {
+        // An empty PropertyGroups list removes all groups.
+        let groups = env.get("PropertyGroups").and_then(Value::as_array);
+        match groups {
+            Some(pg) if !pg.is_empty() => {
+                ensure_object(&mut app.config_description).insert(
+                    "EnvironmentPropertyDescriptions".into(),
+                    json!({ "PropertyGroupDescriptions": pg.clone() }),
+                );
+            }
+            Some(_) => {
+                ensure_object(&mut app.config_description)
+                    .remove("EnvironmentPropertyDescriptions");
+            }
+            None => {}
+        }
+    }
+
+    if let Some(vpcs) = update
+        .get("VpcConfigurationUpdates")
+        .and_then(Value::as_array)
+    {
+        for vu in vpcs {
+            let id = str_of(vu, "VpcConfigurationIdUpdate");
+            if let Some(arr) = app
+                .config_description
+                .get_mut("VpcConfigurationDescriptions")
+                .and_then(Value::as_array_mut)
+            {
+                for d in arr.iter_mut() {
+                    let matches = id.is_none()
+                        || d.get("VpcConfigurationId").and_then(Value::as_str) == id.as_deref();
+                    if !matches {
+                        continue;
+                    }
+                    if let Some(s) = vu.get("SubnetIdUpdates") {
+                        d.as_object_mut()
+                            .unwrap()
+                            .insert("SubnetIds".into(), s.clone());
+                    }
+                    if let Some(s) = vu.get("SecurityGroupIdUpdates") {
+                        d.as_object_mut()
+                            .unwrap()
+                            .insert("SecurityGroupIds".into(), s.clone());
+                    }
+                }
+            }
         }
     }
 }
 
-fn apply_run_configuration(app: &mut Application, rc: &Value) {
-    let mut run_desc = serde_json::Map::new();
-    if let Some(restore) = rc.get("ApplicationRestoreConfiguration") {
-        run_desc.insert(
-            "ApplicationRestoreConfigurationDescription".into(),
-            restore.clone(),
+/// Map a `*Update`-suffixed input object to its base description-shaped object
+/// (e.g. `ConfigurationTypeUpdate` -> `ConfigurationType`). Values are cloned.
+fn strip_update_suffix(update: &Value) -> Value {
+    let mut m = serde_json::Map::new();
+    if let Some(obj) = update.as_object() {
+        for (k, v) in obj {
+            let base = k.strip_suffix("Update").unwrap_or(k);
+            m.insert(base.to_string(), v.clone());
+        }
+    }
+    Value::Object(m)
+}
+
+/// Rebuild a `FlinkApplicationConfigurationDescription` from a
+/// `FlinkApplicationConfigurationUpdate`, preserving any sub-description the
+/// update does not touch.
+fn flink_config_update_description(flink_update: &Value, existing: Option<&Value>) -> Value {
+    let mut out = existing
+        .and_then(|e| e.as_object())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(c) = flink_update.get("CheckpointConfigurationUpdate") {
+        out.insert(
+            "CheckpointConfigurationDescription".into(),
+            checkpoint_description(Some(&strip_update_suffix(c))),
         );
     }
-    if let Some(flink) = rc.get("FlinkRunConfiguration") {
-        run_desc.insert("FlinkRunConfigurationDescription".into(), flink.clone());
-    }
-    if !run_desc.is_empty() {
-        let obj = ensure_object(&mut app.config_description);
-        obj.insert(
-            "RunConfigurationDescription".into(),
-            Value::Object(run_desc),
+    if let Some(m) = flink_update.get("MonitoringConfigurationUpdate") {
+        out.insert(
+            "MonitoringConfigurationDescription".into(),
+            monitoring_description(Some(&strip_update_suffix(m))),
         );
+    }
+    if let Some(p) = flink_update.get("ParallelismConfigurationUpdate") {
+        out.insert(
+            "ParallelismConfigurationDescription".into(),
+            parallelism_description(Some(&strip_update_suffix(p))),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Rebuild an `ApplicationCodeConfigurationDescription` from an
+/// `ApplicationCodeConfigurationUpdate`, preserving fields the update omits.
+fn code_config_update_description(code_update: &Value, existing: Option<&Value>) -> Value {
+    let mut out = existing
+        .and_then(|e| e.as_object())
+        .cloned()
+        .unwrap_or_default();
+    if let Some(t) = str_of(code_update, "CodeContentTypeUpdate") {
+        out.insert("CodeContentType".into(), json!(t));
+    }
+    out.entry("CodeContentType")
+        .or_insert_with(|| json!("ZIPFILE"));
+    if let Some(cc) = code_update.get("CodeContentUpdate") {
+        let mut ccd = out
+            .get("CodeContentDescription")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(t) = str_of(cc, "TextContentUpdate") {
+            ccd.insert("TextContent".into(), json!(t));
+        }
+        if let Some(s3u) = cc.get("S3ContentLocationUpdate") {
+            ccd.insert(
+                "S3ApplicationCodeLocationDescription".into(),
+                s3_code_location(&strip_update_suffix(s3u)),
+            );
+        }
+        out.insert("CodeContentDescription".into(), Value::Object(ccd));
+    }
+    Value::Object(out)
+}
+
+/// Build the `RunConfigurationDescription` AWS records on a started Flink app,
+/// from an optional input `RunConfiguration` / `RunConfigurationUpdate` (both
+/// carry an `ApplicationRestoreConfiguration` + `FlinkRunConfiguration`). Unset
+/// fields default to AWS's documented values: `RESTORE_FROM_LATEST_SNAPSHOT`
+/// and `AllowNonRestoredState=false`.
+fn run_config_description(rc: Option<&Value>) -> Value {
+    let restore = rc.and_then(|r| r.get("ApplicationRestoreConfiguration"));
+    let restore_type = restore
+        .and_then(|v| str_of(v, "ApplicationRestoreType"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "RESTORE_FROM_LATEST_SNAPSHOT".to_string());
+    let mut restore_desc = serde_json::Map::new();
+    restore_desc.insert("ApplicationRestoreType".into(), json!(restore_type));
+    if let Some(sn) = restore.and_then(|v| str_of(v, "SnapshotName")) {
+        restore_desc.insert("SnapshotName".into(), json!(sn));
+    }
+    let allow = rc
+        .and_then(|r| r.get("FlinkRunConfiguration"))
+        .and_then(|v| v.get("AllowNonRestoredState"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    json!({
+        "ApplicationRestoreConfigurationDescription": Value::Object(restore_desc),
+        "FlinkRunConfigurationDescription": { "AllowNonRestoredState": allow },
+    })
+}
+
+/// Build a `{ ResourceARN, RoleARN }` description from a bare resource ARN and
+/// the application's service-execution role, used when an `*Update` shape
+/// carries only a `ResourceARNUpdate`.
+fn arn_role_desc(arn: &str, role: Option<&str>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("ResourceARN".into(), json!(arn));
+    if let Some(r) = role {
+        m.insert("RoleARN".into(), json!(r));
+    }
+    Value::Object(m)
+}
+
+/// Apply a `SqlApplicationConfigurationUpdate` (sent by `UpdateApplication` for
+/// a SQL app) in place: input / output / reference-data-source updates each
+/// match an existing description by its minted id and revise it, mirroring how
+/// AWS re-derives the `SqlApplicationConfigurationDescription`.
+fn apply_sql_config_update(cfg: &mut Value, role: Option<&str>, sql_update: &Value) {
+    if let Some(updates) = sql_update.get("InputUpdates").and_then(Value::as_array) {
+        for iu in updates {
+            apply_input_update(cfg, role, iu);
+        }
+    }
+    if let Some(updates) = sql_update.get("OutputUpdates").and_then(Value::as_array) {
+        for ou in updates {
+            apply_output_update(cfg, role, ou);
+        }
+    }
+    if let Some(updates) = sql_update
+        .get("ReferenceDataSourceUpdates")
+        .and_then(Value::as_array)
+    {
+        for ru in updates {
+            apply_reference_update(cfg, ru);
+        }
+    }
+}
+
+/// Revise an existing `InputDescription` from an `InputUpdate` matched by
+/// `InputId`. Regenerates `InAppStreamNames` whenever the name prefix or
+/// parallelism count changes, and switches the input source type (a Kinesis
+/// streams / Firehose source is mutually exclusive).
+fn apply_input_update(cfg: &mut Value, role: Option<&str>, iu: &Value) {
+    let input_id = str_of(iu, "InputId");
+    let Some(list) = sql_array_mut(cfg, "InputDescriptions") else {
+        return;
+    };
+    for i in list.iter_mut() {
+        let matches =
+            input_id.is_none() || i.get("InputId").and_then(Value::as_str) == input_id.as_deref();
+        if !matches {
+            continue;
+        }
+        let Some(o) = i.as_object_mut() else { continue };
+        if let Some(np) = str_of(iu, "NamePrefixUpdate") {
+            o.insert("NamePrefix".into(), json!(np));
+        }
+        if let Some(c) = iu
+            .get("InputParallelismUpdate")
+            .and_then(|p| p.get("CountUpdate"))
+            .and_then(Value::as_i64)
+        {
+            o.insert("InputParallelism".into(), json!({ "Count": c }));
+        }
+        // Re-mint the in-app stream names from the (possibly updated) prefix and
+        // count so their number tracks the parallelism.
+        let count = o
+            .get("InputParallelism")
+            .and_then(|p| p.get("Count"))
+            .and_then(Value::as_i64)
+            .unwrap_or(1);
+        if let Some(np) = o
+            .get("NamePrefix")
+            .and_then(Value::as_str)
+            .map(String::from)
+        {
+            o.insert(
+                "InAppStreamNames".into(),
+                json!(in_app_stream_names(&np, count)),
+            );
+        }
+        if let Some(su) = iu.get("InputSchemaUpdate") {
+            let mut schema = o
+                .get("InputSchema")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(rf) = su.get("RecordFormatUpdate") {
+                schema.insert("RecordFormat".into(), rf.clone());
+            }
+            if let Some(re) = su.get("RecordEncodingUpdate") {
+                schema.insert("RecordEncoding".into(), re.clone());
+            }
+            if let Some(rc) = su.get("RecordColumnUpdates") {
+                schema.insert("RecordColumns".into(), rc.clone());
+            }
+            o.insert("InputSchema".into(), Value::Object(schema));
+        }
+        if let Some(k) = iu.get("KinesisStreamsInputUpdate") {
+            let arn = str_of(k, "ResourceARNUpdate").unwrap_or_default();
+            o.insert(
+                "KinesisStreamsInputDescription".into(),
+                arn_role_desc(&arn, role),
+            );
+            o.remove("KinesisFirehoseInputDescription");
+        }
+        if let Some(k) = iu.get("KinesisFirehoseInputUpdate") {
+            let arn = str_of(k, "ResourceARNUpdate").unwrap_or_default();
+            o.insert(
+                "KinesisFirehoseInputDescription".into(),
+                arn_role_desc(&arn, role),
+            );
+            o.remove("KinesisStreamsInputDescription");
+        }
+        if let Some(ipc) = iu.get("InputProcessingConfigurationUpdate") {
+            if let Some(lp) = ipc.get("InputLambdaProcessorUpdate") {
+                let arn = str_of(lp, "ResourceARNUpdate").unwrap_or_default();
+                o.insert(
+                    "InputProcessingConfigurationDescription".into(),
+                    json!({ "InputLambdaProcessorDescription": arn_role_desc(&arn, role) }),
+                );
+            }
+        }
+    }
+}
+
+/// Revise an existing `OutputDescription` from an `OutputUpdate` matched by
+/// `OutputId`, switching the (mutually exclusive) destination type as needed.
+fn apply_output_update(cfg: &mut Value, role: Option<&str>, ou: &Value) {
+    let output_id = str_of(ou, "OutputId");
+    let Some(list) = sql_array_mut(cfg, "OutputDescriptions") else {
+        return;
+    };
+    for out in list.iter_mut() {
+        let matches = output_id.is_none()
+            || out.get("OutputId").and_then(Value::as_str) == output_id.as_deref();
+        if !matches {
+            continue;
+        }
+        let Some(o) = out.as_object_mut() else {
+            continue;
+        };
+        if let Some(n) = str_of(ou, "NameUpdate") {
+            o.insert("Name".into(), json!(n));
+        }
+        if let Some(ds) = ou.get("DestinationSchemaUpdate") {
+            o.insert("DestinationSchema".into(), ds.clone());
+        }
+        let sink_keys = [
+            (
+                "KinesisStreamsOutputUpdate",
+                "KinesisStreamsOutputDescription",
+            ),
+            (
+                "KinesisFirehoseOutputUpdate",
+                "KinesisFirehoseOutputDescription",
+            ),
+            ("LambdaOutputUpdate", "LambdaOutputDescription"),
+        ];
+        for (update_key, desc_key) in sink_keys {
+            if let Some(k) = ou.get(update_key) {
+                let arn = str_of(k, "ResourceARNUpdate").unwrap_or_default();
+                for (_, dk) in sink_keys {
+                    o.remove(dk);
+                }
+                o.insert(desc_key.into(), arn_role_desc(&arn, role));
+                break;
+            }
+        }
+    }
+}
+
+/// Revise an existing `ReferenceDataSourceDescription` from a
+/// `ReferenceDataSourceUpdate` matched by `ReferenceId`.
+fn apply_reference_update(cfg: &mut Value, ru: &Value) {
+    let ref_id = str_of(ru, "ReferenceId");
+    let Some(list) = sql_array_mut(cfg, "ReferenceDataSourceDescriptions") else {
+        return;
+    };
+    for r in list.iter_mut() {
+        let matches =
+            ref_id.is_none() || r.get("ReferenceId").and_then(Value::as_str) == ref_id.as_deref();
+        if !matches {
+            continue;
+        }
+        let Some(o) = r.as_object_mut() else { continue };
+        if let Some(tn) = str_of(ru, "TableNameUpdate") {
+            o.insert("TableName".into(), json!(tn));
+        }
+        if let Some(s3u) = ru.get("S3ReferenceDataSourceUpdate") {
+            let mut s3 = o
+                .get("S3ReferenceDataSourceDescription")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(b) = str_of(s3u, "BucketARNUpdate") {
+                s3.insert("BucketARN".into(), json!(b));
+            }
+            if let Some(f) = str_of(s3u, "FileKeyUpdate") {
+                s3.insert("FileKey".into(), json!(f));
+            }
+            o.insert("S3ReferenceDataSourceDescription".into(), Value::Object(s3));
+        }
+        if let Some(rs) = ru.get("ReferenceSchemaUpdate") {
+            o.insert("ReferenceSchema".into(), rs.clone());
+        }
+    }
+}
+
+/// Apply a SQL app's `RunConfiguration.SqlRunConfigurations` (supplied to
+/// `StartApplication`) by pinning each targeted input's
+/// `InputStartingPositionConfiguration.InputStartingPosition`.
+fn apply_sql_run_configuration(app: &mut Application, rc: &Value) {
+    let Some(runs) = rc.get("SqlRunConfigurations").and_then(Value::as_array) else {
+        return;
+    };
+    for run in runs {
+        let input_id = str_of(run, "InputId");
+        let Some(pos) = run
+            .get("InputStartingPositionConfiguration")
+            .and_then(|c| str_of(c, "InputStartingPosition"))
+        else {
+            continue;
+        };
+        if let Some(list) = sql_array_mut(&mut app.config_description, "InputDescriptions") {
+            for i in list.iter_mut() {
+                let matches = input_id.is_none()
+                    || i.get("InputId").and_then(Value::as_str) == input_id.as_deref();
+                if matches {
+                    if let Some(o) = i.as_object_mut() {
+                        o.insert(
+                            "InputStartingPositionConfiguration".into(),
+                            json!({ "InputStartingPosition": pos }),
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2674,7 +3348,7 @@ mod tests {
                 "CreateApplication",
                 json!({
                     "ApplicationName": "app1",
-                    "RuntimeEnvironment": "FLINK_1_20",
+                    "RuntimeEnvironment": "FLINK-1_20",
                     "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
                     "ApplicationDescription": "hello"
                 }),
@@ -2691,7 +3365,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         )));
@@ -2705,7 +3379,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2739,7 +3413,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2775,7 +3449,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_20",
+                "RuntimeEnvironment": "FLINK-1_20",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
             }),
         ))
@@ -2799,7 +3473,10 @@ mod tests {
         let cfg = config_to_description(
             &json!({
                 "FlinkApplicationConfiguration": {
-                    "ParallelismConfiguration": { "Parallelism": 3 }
+                    "ParallelismConfiguration": {
+                        "ConfigurationType": "CUSTOM",
+                        "Parallelism": 3
+                    }
                 },
                 "ApplicationCodeConfiguration": {
                     "CodeContentType": "ZIPFILE",
@@ -2818,13 +3495,14 @@ mod tests {
                 }
             }),
             Some("arn:aws:iam::000000000000:role/r"),
+            "FLINK-1_19",
             &mut 0,
         );
         Application {
             name: "flinkapp".into(),
             arn: arn("us-east-1", "000000000000", "flinkapp"),
             description: None,
-            runtime_environment: "FLINK_1_19".into(),
+            runtime_environment: "FLINK-1_19".into(),
             service_execution_role: Some("arn:aws:iam::000000000000:role/r".into()),
             application_mode: Some("STREAMING".into()),
             status: "READY".into(),
@@ -2865,7 +3543,7 @@ mod tests {
     #[test]
     fn sql_app_is_not_real_flink() {
         let mut app = flink_app_with_jar();
-        app.runtime_environment = "SQL_1_0".into();
+        app.runtime_environment = "SQL-1_0".into();
         // SQL flavor -> control-plane only, never the real Docker Flink job.
         assert!(!is_real_flink(&app));
     }
@@ -2890,7 +3568,7 @@ mod tests {
             "CreateApplication",
             json!({
                 "ApplicationName": "app1",
-                "RuntimeEnvironment": "FLINK_1_19",
+                "RuntimeEnvironment": "FLINK-1_19",
                 "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
                 "ApplicationConfiguration": {
                     "ApplicationCodeConfiguration": {
@@ -2938,7 +3616,7 @@ mod tests {
                 "CreateApplication",
                 json!({
                     "ApplicationName": format!("app{i}"),
-                    "RuntimeEnvironment": "FLINK_1_20",
+                    "RuntimeEnvironment": "FLINK-1_20",
                     "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
                 }),
             ))
