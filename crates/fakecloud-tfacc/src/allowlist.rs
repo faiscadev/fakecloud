@@ -1770,19 +1770,31 @@ pub const SHARDS: &[Shard] = &[
     // whole suite and whose run_regexes are pairwise disjoint. The `_` after
     // `Application` in the flink/sql shards excludes the `ApplicationSnapshot`
     // resource tests, which the third shard claims.
+    // The Flink and SQL application suites are split into two shards each: every
+    // Flink test uploads the 66MB app JAR (twice, count=2) and each acc test
+    // does a full apply/refresh/destroy cycle, so a single ~18-test shard runs
+    // ~54min on a 2-core CI runner and blows the 60min job cap (and the timeout
+    // cancels before the build cache saves, so reruns stay slow). Halving each
+    // suite keeps every shard well under the cap. Regexes are exhaustive +
+    // pairwise-disjoint over the enumerated provider test names.
     Shard {
-        name: "kinesisanalyticsv2-flink",
+        name: "kinesisanalyticsv2-flink-core",
         service: "kinesisanalyticsv2",
-        // Flink-flavor application tests + the flavor-agnostic application tests
-        // (basic flink, application mode, application code, environment
-        // properties, run configuration, service execution role, tags,
-        // disappears). `Flink` also captures the Flink VPC / start / snapshot-
-        // restore / runtime-update / environment-property variants.
+        // The JAR-heavy Flink-flavor application tests: basic, snapshot-restore,
+        // update / runtime-update / update-running, environment-properties,
+        // start-on-create/update, and the three VPC variants (all `FlinkApplication*`).
+        run_regex: "^TestAccKinesisAnalyticsV2Application_(basicFlink|FlinkApplication)",
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-flink-misc",
+        service: "kinesisanalyticsv2",
+        // The flavor-agnostic application tests (still Flink-backed): application
+        // mode, application code, environment properties, run configuration,
+        // service execution role, tags, disappears.
         run_regex: concat!(
             "^TestAccKinesisAnalyticsV2Application_(",
-            "basicFlink",
-            "|Flink",
-            "|applicationMode",
+            "applicationMode",
             "|ApplicationCode",
             "|EnvironmentProperties",
             "|RunConfiguration",
@@ -1794,16 +1806,31 @@ pub const SHARDS: &[Shard] = &[
         extra_deny: &[],
     },
     Shard {
-        name: "kinesisanalyticsv2-sql",
+        name: "kinesisanalyticsv2-sql-input",
         service: "kinesisanalyticsv2",
-        // SQL-flavor application tests (inputs, input-processing, outputs,
-        // reference data sources, multiple, updateRunning, start-on-
-        // create/update) + the CloudWatch logging option tests.
+        // SQL basic + input / input-processing tests, start-on-create/update,
+        // and update-running.
         run_regex: concat!(
             "^TestAccKinesisAnalyticsV2Application_(",
             "basicSQL",
-            "|SQL",
-            "|CloudWatchLoggingOptions",
+            "|SQLApplicationInput",
+            "|SQLApplicationStartApplication",
+            "|SQLApplication_updateRunning",
+            ")",
+        ),
+        extra_deny: &[],
+    },
+    Shard {
+        name: "kinesisanalyticsv2-sql-rest",
+        service: "kinesisanalyticsv2",
+        // SQL outputs, reference data sources, multiple-update, and the
+        // CloudWatch logging option tests.
+        run_regex: concat!(
+            "^TestAccKinesisAnalyticsV2Application_(",
+            "CloudWatchLoggingOptions",
+            "|SQLApplicationMultiple",
+            "|SQLApplicationOutput",
+            "|SQLApplicationReferenceDataSource",
             ")",
         ),
         extra_deny: &[],

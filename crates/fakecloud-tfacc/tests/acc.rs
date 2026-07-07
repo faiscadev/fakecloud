@@ -153,13 +153,23 @@ async fn kafka_scram_repl_vpc_acceptance() {
 }
 
 #[tokio::test]
-async fn kinesisanalyticsv2_flink_acceptance() {
-    run_shard("kinesisanalyticsv2-flink").await;
+async fn kinesisanalyticsv2_flink_core_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-core").await;
 }
 
 #[tokio::test]
-async fn kinesisanalyticsv2_sql_acceptance() {
-    run_shard("kinesisanalyticsv2-sql").await;
+async fn kinesisanalyticsv2_flink_misc_acceptance() {
+    run_shard("kinesisanalyticsv2-flink-misc").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_input_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-input").await;
+}
+
+#[tokio::test]
+async fn kinesisanalyticsv2_sql_rest_acceptance() {
+    run_shard("kinesisanalyticsv2-sql-rest").await;
 }
 
 #[tokio::test]
