@@ -1,6 +1,6 @@
 {
-  "variants_passed": 191188,
-  "total_variants": 191188,
+  "variants_passed": 192048,
+  "total_variants": 192048,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -333,6 +333,10 @@
     "kinesisanalyticsv2": {
       "passed": 1232,
       "total": 1232
+    },
+    "fis": {
+      "passed": 860,
+      "total": 860
     }
   }
 }

@@ -691,6 +691,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -5445,6 +5452,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("mwaa", h);
     }
     registry.register(Arc::new(mwaa_service));
+
+    let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("fis").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_fis::persistence::load_into(&store, &fis_state) {
+                Ok(fakecloud_fis::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded fis persistence snapshot");
+                }
+                Ok(fakecloud_fis::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no fis persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut fis_service = fakecloud_fis::FisService::new(fis_state.clone());
+    if let Some(store) = fis_snapshot_store {
+        fis_service = fis_service.with_snapshot_store(store);
+    }
+    if let Some(h) = fis_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("fis", h);
+    }
+    registry.register(Arc::new(fis_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to

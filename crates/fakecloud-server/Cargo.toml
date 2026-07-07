@@ -49,6 +49,7 @@ fakecloud-elasticache = { workspace = true }
 fakecloud-elasticbeanstalk = { workspace = true }
 fakecloud-efs = { workspace = true }
 fakecloud-mq = { workspace = true }
+fakecloud-fis = { workspace = true }
 fakecloud-kafka = { workspace = true }
 fakecloud-mwaa = { workspace = true }
 fakecloud-eks = { workspace = true }
