@@ -698,6 +698,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let appsync_state: fakecloud_appsync::SharedAppSyncState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let xray_state: fakecloud_xray::SharedXrayState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5541,6 +5548,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("xray", h);
     }
     registry.register(Arc::new(xray_service));
+
+    let appsync_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("appsync").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_appsync::persistence::load_into(&store, &appsync_state) {
+                Ok(fakecloud_appsync::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded appsync persistence snapshot");
+                }
+                Ok(fakecloud_appsync::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no appsync persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut appsync_service = fakecloud_appsync::AppSyncService::new(appsync_state.clone());
+    if let Some(store) = appsync_snapshot_store {
+        appsync_service = appsync_service.with_snapshot_store(store);
+    }
+    if let Some(h) = appsync_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("appsync", h);
+    }
+    registry.register(Arc::new(appsync_service));
 
     let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

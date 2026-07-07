@@ -480,6 +480,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-appsync"
+version = "1.111.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47198536664b73d1f9a5c8e2972cde088b3940eec0fe616922656fd209827e0b"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-athena"
 version = "1.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3780,6 +3804,7 @@ dependencies = [
  "fakecloud-apigatewayv2",
  "fakecloud-appconfig",
  "fakecloud-application-autoscaling",
+ "fakecloud-appsync",
  "fakecloud-athena",
  "fakecloud-autoscaling",
  "fakecloud-aws",
@@ -4043,6 +4068,28 @@ dependencies = [
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-appsync"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4765,6 +4812,7 @@ dependencies = [
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-applicationautoscaling",
+ "aws-sdk-appsync",
  "aws-sdk-athena",
  "aws-sdk-autoscaling",
  "aws-sdk-batch",

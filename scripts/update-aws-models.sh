@@ -102,6 +102,7 @@ SERVICES=(
     "emr:emr"
     "fis:fis"
     "xray:xray"
+    "appsync:appsync"
 )
 
 # Sparse checkout only the models we need
