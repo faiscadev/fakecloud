@@ -45,10 +45,28 @@ pub fn replicator_arn(region: &str, account: &str, name: &str, uuid: &str, n: u6
     format!("arn:aws:kafka:{region}:{account}:replicator/{name}/{uuid}-{n}")
 }
 
-/// MSK VPC-connection ARN:
-/// `arn:aws:kafka:{region}:{account}:vpc-connection/{uuid}-{n}`.
-pub fn vpc_connection_arn(region: &str, account: &str, uuid: &str, n: u64) -> String {
-    format!("arn:aws:kafka:{region}:{account}:vpc-connection/{uuid}-{n}")
+/// MSK VPC-connection ARN. Real MSK embeds the TARGET cluster's account, name,
+/// and a connection UUID in the resource part:
+/// `arn:aws:kafka:{region}:{account}:vpc-connection/{targetAccount}/{targetClusterName}/{uuid}-{n}`.
+/// `target_account` / `target_cluster_name` are derived from the target cluster
+/// ARN (falling back to the caller's own account / `cluster` when it can't be
+/// parsed), so the provider's ARN-shape assertion matches.
+pub fn vpc_connection_arn(
+    region: &str,
+    account: &str,
+    target_account: &str,
+    target_cluster_name: &str,
+    uuid: &str,
+    n: u64,
+) -> String {
+    format!(
+        "arn:aws:kafka:{region}:{account}:vpc-connection/{target_account}/{target_cluster_name}/{uuid}-{n}"
+    )
+}
+
+/// The account id embedded in a `kafka` ARN (the 5th colon-delimited field).
+pub fn arn_account(arn: &str) -> Option<&str> {
+    arn.split(':').nth(4)
 }
 
 /// The region embedded in a `kafka` ARN (the 4th colon-delimited field). Used
@@ -64,6 +82,12 @@ pub fn cluster_name_from_arn(arn: &str) -> Option<&str> {
 }
 
 /// The supported Kafka versions Amazon MSK offers, newest first, all `ACTIVE`.
+///
+/// This mirrors the real `ListKafkaVersions` catalog (the current Apache Kafka
+/// and KRaft/tiered-storage variants plus the still-selectable older lines) so
+/// the `aws_msk_kafka_version` data source -- which filters `ListKafkaVersions`
+/// by an exact `version` (e.g. `2.4.1.1`) and reads its `status` -- resolves,
+/// and so a cluster can be created at, and upgraded between, any of these.
 pub const KAFKA_VERSIONS: &[&str] = &[
     "3.8.x.kraft",
     "3.8.x",
@@ -72,8 +96,27 @@ pub const KAFKA_VERSIONS: &[&str] = &[
     "3.6.0",
     "3.5.1",
     "3.4.0",
+    "3.3.2",
+    "3.3.1",
+    "3.2.0",
+    "3.1.1",
     "2.8.2.tiered",
     "2.8.1",
+    "2.8.0",
+    "2.7.2",
+    "2.7.1",
+    "2.7.0",
+    "2.6.3",
+    "2.6.2",
+    "2.6.1",
+    "2.6.0",
+    "2.5.1",
+    "2.4.1.1",
+    "2.4.1",
+    "2.3.1",
+    "2.2.1",
+    "2.1.0",
+    "1.1.1",
 ];
 
 /// The `ListKafkaVersions` payload: each supported version with `ACTIVE` status.

@@ -138,6 +138,11 @@ async fn mq_acceptance() {
 }
 
 #[tokio::test]
+async fn kafka_acceptance() {
+    run_shard("kafka").await;
+}
+
+#[tokio::test]
 async fn glacier_acceptance() {
     run_shard("glacier").await;
 }

@@ -71,11 +71,31 @@ broker.
   `CurrentVersion`, and move it to `UPDATING`/`REBOOTING_BROKER` (settling to
   `ACTIVE` on the next describe). `ListClusterOperations`/`ListClusterOperationsV2`
   and `DescribeClusterOperation`/`DescribeClusterOperationV2` return them.
+- **Cluster attributes** - `CreateCluster`/`CreateClusterV2` persist and
+  `DescribeCluster`/`DescribeClusterV2` echo the full cluster sub-objects, with
+  AWS defaults applied when omitted so both an explicit and a minimal create
+  round-trip: `BrokerNodeGroupInfo` (`ConnectivityInfo` with `PublicAccess`
+  defaulting to `DISABLED` and an all-disabled `VpcConnectivity`, `StorageInfo`/
+  `EBSStorageInfo` with `VolumeSize` and an as-configured `ProvisionedThroughput`,
+  `BrokerAZDistribution` `DEFAULT`), `EncryptionInfo` (`EncryptionInTransit`
+  `ClientBroker` `TLS` + `InCluster` `true`, and a synthesized
+  `EncryptionAtRest.DataVolumeKMSKeyId` KMS key ARN), `ClientAuthentication`,
+  `LoggingInfo`, `OpenMonitoring`, `EnhancedMonitoring` (`DEFAULT`), and
+  `CurrentBrokerSoftwareInfo` (Kafka version + any associated configuration
+  ARN/revision). Serverless clusters synthesize a default `VpcConfig` security
+  group and an IAM-enabled `ClientAuthentication`.
 - **Broker nodes** - `ListNodes` synthesizes one `BrokerNodeInfo` per
   `NumberOfBrokerNodes` (broker id `1..=N`, client VPC IP, ENI, subnet,
-  endpoints, and current software info). `GetBootstrapBrokers` returns the
-  plaintext (`:9092`), TLS (`:9094`), SASL/SCRAM (`:9096`), and SASL/IAM
-  (`:9098`) connection strings derived from those nodes.
+  endpoints, and current software info). `GetBootstrapBrokers` returns exactly
+  the connection-string variants the cluster's config enables, gated on its
+  in-transit `ClientBroker` and client-auth schemes: plaintext (`:9092`, when
+  `ClientBroker` allows `PLAINTEXT`), TLS (`:9094`, when TLS is allowed and no
+  SASL scheme is on), SASL/SCRAM (`:9096`) and SASL/IAM (`:9098`) when enabled,
+  the `Public*` variants (`:9194`/`:9196`/`:9198`) when public access is enabled,
+  and the `VpcConnectivity*` variants when vpc-connectivity auth is enabled; the
+  schemes a cluster does not enable are omitted, exactly as MSK omits them. When
+  a real broker backs the cluster, its reachable `host:port` is returned as the
+  plaintext string.
 - **Configurations** - `CreateConfiguration` stores the base64 `ServerProperties`
   with a monotonic revision list (revision `1`, `CreationTime`, `Description`);
   `UpdateConfiguration` adds a revision; `DescribeConfigurationRevision` returns
@@ -94,9 +114,12 @@ broker.
   `{TopicName, PartitionCount, ReplicationFactor, Configs}`;
   `DescribeTopic`/`ListTopics`/`DescribeTopicPartitions` reflect it;
   `UpdateTopic`/`DeleteTopic` mutate it.
-- **Versions** - `ListKafkaVersions` returns the supported MSK version catalog
-  (2.8.x through 3.8.x, including KRaft variants) with `ACTIVE` status;
-  `GetCompatibleKafkaVersions` returns compatible upgrade targets.
+- **Versions** - `ListKafkaVersions` returns the real MSK supported-version
+  catalog (the `1.1.1` / `2.x` lines through `3.8.x`, including the `2.8.2.tiered`
+  and `3.7.x`/`3.8.x` KRaft variants) with `ACTIVE` status, so the
+  `aws_msk_kafka_version` data source (which filters by an exact version + status)
+  resolves; `GetCompatibleKafkaVersions` returns the strictly-newer upgrade
+  targets for a source version.
 - **Tags** - `TagResource` (204) / `UntagResource` (204) / `ListTagsForResource`
   maintain an ARN-keyed tag map; `CreateCluster`/`CreateConfiguration`/
   `CreateVpcConnection`/`CreateReplicator` honour inline `Tags`, and tags surface
@@ -133,14 +156,19 @@ in-memory control plane, the same as the direct API.
 
 ## Terraform
 
-fakecloud is exercised by the upstream `terraform-provider-aws` MSK acceptance
-tests (`internal/service/kafka`) in the `kafka` tfacc job -- clusters,
-configurations, cluster policies, serverless clusters, SCRAM-secret
-associations, and the Kafka-version / cluster / broker-nodes / bootstrap-brokers
-data sources round-trip against the auto-settling control plane. Tests that need
-a real in-transit TLS/SASL broker handshake, real CloudWatch/S3/Firehose log
-destinations that MSK validates, or real multi-VPC/public connectivity the
-provider verifies against EC2 are out of scope for a control-plane emulator.
+fakecloud passes the **entire** upstream `terraform-provider-aws` MSK acceptance
+suite (`internal/service/kafka`) in the `kafka` tfacc job, with no denies:
+provisioned + serverless clusters (create/describe/update/delete, tags, import,
+client-auth, encryption, logging, monitoring, storage, connectivity, and
+version-upgrade paths), cluster policies, configurations, SCRAM-secret
+associations, standalone VPC connections, replicators, TLS client-auth with an
+ACM PCA certificate-authority ARN, and the cluster / cluster-policy /
+configuration / broker-nodes / bootstrap-brokers / kafka-version / vpc-connection
+data sources all round-trip against the auto-settling control plane. The suite
+runs with the Kafka broker data plane disabled (`FAKECLOUD_KAFKA_DISABLE_BACKEND=1`)
+so the AWS-format `*.amazonaws.com` bootstrap-broker assertions don't race a real
+`127.0.0.1:<port>` endpoint; the real in-transit produce/consume round trip is
+proven separately by the dedicated `msk-broker` Docker E2E.
 
 ## Persistence
 
