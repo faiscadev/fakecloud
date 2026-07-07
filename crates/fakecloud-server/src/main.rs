@@ -684,6 +684,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let mwaa_state: fakecloud_mwaa::SharedMwaaState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -5407,6 +5414,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("appconfig", h);
     }
     registry.register(Arc::new(appconfig_service));
+
+    let mwaa_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("mwaa").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_mwaa::persistence::load_into(&store, &mwaa_state) {
+                Ok(fakecloud_mwaa::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded mwaa persistence snapshot");
+                }
+                Ok(fakecloud_mwaa::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no mwaa persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut mwaa_service = fakecloud_mwaa::MwaaService::new(mwaa_state.clone());
+    if let Some(store) = mwaa_snapshot_store {
+        mwaa_service = mwaa_service.with_snapshot_store(store);
+    }
+    if let Some(h) = mwaa_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("mwaa", h);
+    }
+    registry.register(Arc::new(mwaa_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to

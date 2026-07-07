@@ -206,6 +206,7 @@ jobs:
           publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
           publish fakecloud-mq               # only core/persistence/aws deps
           publish fakecloud-kafka            # only core/persistence deps
+          publish fakecloud-mwaa             # only core/persistence deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
           publish fakecloud-identitystore    # only core/persistence/aws deps

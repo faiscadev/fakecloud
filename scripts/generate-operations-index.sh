@@ -70,6 +70,7 @@ SERVICES=(
     "efs|Amazon EFS|efs"
     "mq|Amazon MQ|mq"
     "kafka|Amazon MSK|kafka"
+    "mwaa|Amazon MWAA|mwaa"
     "glacier|Amazon S3 Glacier|glacier"
     "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"
