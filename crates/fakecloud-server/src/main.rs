@@ -4687,6 +4687,22 @@ async fn main() {
     if let Some(store) = kinesisanalyticsv2_snapshot_store {
         kinesisanalyticsv2_service = kinesisanalyticsv2_service.with_snapshot_store(store);
     }
+    // Amazon Managed Service for Apache Flink: a Flink-flavor application with a
+    // JAR in S3 runs as a REAL Apache Flink job in a Docker container (the
+    // MQ/MSK data-plane bar). Attach the backing-container runtime + the
+    // in-process S3 reader used to fetch the application's code JAR. `None` when
+    // no container CLI is available or the backend is disabled -> the app stays
+    // on the control-plane state machine.
+    if let Some(flink_runtime) = fakecloud_kinesisanalyticsv2::FlinkRuntime::new().map(Arc::new) {
+        kinesisanalyticsv2_service = kinesisanalyticsv2_service
+            .with_runtime(flink_runtime)
+            .with_s3(s3_delivery_for_logs.clone());
+    }
+    // Re-attach backing Flink containers for persisted RUNNING apps (same
+    // restart-recovery contract as MSK / MQ / RDS). Fire-and-forget per app.
+    kinesisanalyticsv2_service
+        .recover_persisted_containers()
+        .await;
     registry.register(Arc::new(kinesisanalyticsv2_service));
 
     // Cloud Map (servicediscovery) namespace control plane.

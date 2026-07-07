@@ -23,9 +23,14 @@ persistent mode. The wire protocol is awsJson1.1 (x-amz-target
   created or updated is persisted and echoed back on describe. Applications
   carry `arn:aws:kinesisanalytics:<region>:<account>:application/<name>` ARNs.
 - **Lifecycle** (`StartApplication`, `StopApplication`, `RollbackApplication`).
+  For a **Flink-flavor** application with a JAR in S3, `StartApplication` spawns
+  a REAL Apache Flink job in a Docker container (see [Data plane](#data-plane)
+  below) and only reaches `RUNNING` once Flink reports the job `RUNNING`;
+  `StopApplication` cancels the real job and tears the container down. In the
+  degraded / control-plane-only path (no container runtime, or a SQL app),
   `StartApplication` moves `READY` -> `STARTING` -> `RUNNING` (settling on the
-  next describe); `StopApplication` moves `RUNNING` -> `STOPPING` -> `READY`
-  (with `Force` support); `RollbackApplication` restores the previous version's
+  next describe) and `StopApplication` moves `RUNNING` -> `STOPPING` -> `READY`.
+  `Force` is supported; `RollbackApplication` restores the previous version's
   configuration into a new version.
 - **Versioning** (`DescribeApplicationVersion`, `ListApplicationVersions`).
   Every configuration-changing operation increments `ApplicationVersionId` and
@@ -49,22 +54,50 @@ persistent mode. The wire protocol is awsJson1.1 (x-amz-target
   `DeleteApplicationReferenceDataSource`) assign ids and update the version.
 - **Schema discovery** (`DiscoverInputSchema`) infers a record format and
   columns from the provided input.
-- **Presigned dashboard URL** (`CreateApplicationPresignedUrl`) returns a
-  well-formed authorized URL.
+- **Presigned dashboard URL** (`CreateApplicationPresignedUrl`) returns the
+  REAL reachable Flink Web Dashboard / REST base URL when a Flink app is running
+  against the live container runtime, and a well-formed synthesized authorized
+  URL otherwise.
 - **Maintenance windows** (`UpdateApplicationMaintenanceConfiguration`).
 - **Tagging** (`TagResource`, `UntagResource`, `ListTagsForResource`),
   ARN-keyed; `CreateApplication` honors inline `Tags`.
 
 100% conformance: all 1,232 generated Smithy probe variants pass.
 
-## Control plane vs data plane
+## Data plane
 
-Amazon Managed Service for Apache Flink ships as a full control plane today:
-every application, version, snapshot, and operation is real, validated,
-account-partitioned, and persisted. The real Flink-job **data plane**
-(`StartApplication` actually running a Flink job inside a Docker container) is a
-roadmap item, mirroring how other fakecloud services shipped their control plane
-first.
+Starting a **Flink-flavor** application (`RuntimeEnvironment` `FLINK-1_x`) whose
+`ApplicationCodeConfiguration` points at a JAR in a fakecloud S3 bucket runs a
+GENUINE Apache Flink job, the same Docker-backed data-plane bar Amazon MQ, MSK,
+RDS, ElastiCache, and Lambda meet:
+
+- `StartApplication` spawns a real **`flink:1.19`** session cluster (a JobManager
+  + TaskManager) in a container, publishing the Flink REST port `8081` on a free
+  host port.
+- fakecloud fetches the application's code JAR from its own S3 service, uploads
+  it to the cluster via the Flink REST API (`POST /jars/upload`), and submits it
+  (`POST /jars/{id}/run`) with the configured parallelism.
+- The application settles to `RUNNING` **only once the real Flink job reaches
+  `RUNNING`** (polled via `GET /jobs/{id}`); `DescribeApplication` reflects the
+  live job status.
+- `CreateApplicationPresignedUrl` returns the cluster's reachable dashboard/REST
+  URL, so you can drive the live JobManager directly.
+- `StopApplication` cancels the real job (`PATCH /jobs/{id}?mode=cancel`) and
+  tears the container down; `DeleteApplication` reaps it. Persisted RUNNING apps
+  re-attach their container on restart (no `RUNNING`-with-dead-container).
+
+The backing runtime is used automatically when a container CLI (Docker/Podman)
+is available. It is skipped (and the pure control-plane state machine used
+instead) when none is present or when `FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND=1`
+is set; the image is overridable via `FAKECLOUD_KINESISANALYTICSV2_IMAGE`. The
+end-to-end Docker-backed job is proven by the `flink-runtime` CI job, gated on
+`FAKECLOUD_E2E_FLINK=1`.
+
+**Honest scope: SQL applications do not run for real.** A **SQL-flavor**
+application (`RuntimeEnvironment` `SQL-1_0`) keeps the control-plane state
+machine (`STARTING` -> `RUNNING` in memory) — running arbitrary SQL as a live
+Flink job needs the Flink SQL gateway, which is out of scope for now. Only
+Flink-flavor apps with a JAR get the real runtime.
 
 ## Example
 

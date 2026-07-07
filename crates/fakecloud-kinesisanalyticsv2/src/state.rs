@@ -56,6 +56,32 @@ pub struct VersionRecord {
     pub detail: Value,
 }
 
+/// The persisted, describe-facing binding to an application's REAL backing
+/// Flink session-cluster container + submitted job. Present only for
+/// Flink-flavor applications that have been started with a container runtime
+/// attached; `None` for SQL-flavor apps and the control-plane-only path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlinkBinding {
+    /// Backing Flink cluster container id.
+    pub container_id: String,
+    /// Reach address for the published REST port (`127.0.0.1` or the sibling
+    /// host alias when fakecloud is containerized).
+    pub host: String,
+    /// Host port the container's Flink REST port (8081) is published on.
+    pub rest_port: u16,
+    /// Flink jar id returned by `POST /jars/upload` (once the job is submitted).
+    pub jar_id: Option<String>,
+    /// Flink job id returned by `POST /jars/{jar_id}/run` (once submitted).
+    pub job_id: Option<String>,
+}
+
+impl FlinkBinding {
+    /// The reachable Flink Web Dashboard / REST base URL.
+    pub fn dashboard_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.rest_port)
+    }
+}
+
 /// A managed Flink / SQL application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Application {
@@ -85,6 +111,11 @@ pub struct Application {
     pub version_updated_from: Option<i64>,
     pub version_rolled_back_from: Option<i64>,
     pub version_rolled_back_to: Option<i64>,
+    /// Binding to the REAL backing Flink cluster + job, when one is running.
+    /// `#[serde(default)]` so snapshots written before the data-plane batch
+    /// (which had no such field) still load.
+    #[serde(default)]
+    pub flink_binding: Option<FlinkBinding>,
 }
 
 impl Application {

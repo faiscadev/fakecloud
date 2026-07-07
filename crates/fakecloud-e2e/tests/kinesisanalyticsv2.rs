@@ -7,9 +7,16 @@
 //!   create -> describe -> start (settles RUNNING) -> snapshot -> stop
 //!          -> update (version bump) -> delete
 //!
-//! This is a pure control-plane test — no real Flink container is spawned; the
-//! lifecycle auto-settles in memory on describe. The Docker-backed Flink job
-//! data plane is a separate later batch.
+//! This runs in the shared partition with
+//! `FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND=1`, so it is a pure
+//! CONTROL-PLANE test: no real Flink container is spawned and the lifecycle
+//! auto-settles in memory (STARTING -> RUNNING on the first describe). The real
+//! Docker-backed Flink job + REST round trip lives in
+//! `kinesisanalyticsv2_dataplane.rs`, which runs ONLY in the dedicated
+//! `flink-runtime` CI job. Without the flag, a docker-capable shared runner
+//! would attach the live runtime and spawn a heavy Flink cluster here (and the
+//! app would not instantly settle to RUNNING) — exactly what the dedicated job
+//! exists to isolate.
 
 mod helpers;
 
@@ -22,7 +29,8 @@ async fn ka2_client(server: &TestServer) -> aws_sdk_kinesisanalyticsv2::Client {
 
 #[tokio::test]
 async fn application_lifecycle_create_start_snapshot_stop_update_delete() {
-    let server = TestServer::start().await;
+    let server =
+        TestServer::start_with_env(&[("FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND", "1")]).await;
     let ka2 = ka2_client(&server).await;
 
     let role = "arn:aws:iam::000000000000:role/service-role/kinesis-analytics";

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -19,11 +20,15 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+use fakecloud_core::delivery::S3Delivery;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
-use crate::state::{Application, OperationRecord, SharedKa2State, Snapshot, TagMap, VersionRecord};
+use crate::runtime::{flink_state_to_app_status, is_terminal_flink_state, FlinkRuntime};
+use crate::state::{
+    Application, FlinkBinding, OperationRecord, SharedKa2State, Snapshot, TagMap, VersionRecord,
+};
 
 /// Every operation name in the kinesisanalyticsv2 Smithy model.
 pub const KA2_ACTIONS: &[&str] = &[
@@ -88,6 +93,15 @@ pub struct Ka2Service {
     state: SharedKa2State,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// The backing-container runtime that spawns REAL Apache Flink session
+    /// clusters and submits jobs. `None` in the degraded / control-plane-only
+    /// path (no container CLI, or the backend explicitly disabled): Flink apps
+    /// then behave as the pure state machine (`STARTING` settles to `RUNNING`
+    /// on the next describe).
+    runtime: Option<Arc<FlinkRuntime>>,
+    /// In-process S3 reader used to fetch an application's code JAR from a
+    /// fakecloud S3 bucket for submission to the Flink cluster.
+    s3: Option<Arc<dyn S3Delivery>>,
 }
 
 impl Ka2Service {
@@ -96,11 +110,27 @@ impl Ka2Service {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            runtime: None,
+            s3: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Attach the backing-container runtime that spawns real Flink session
+    /// clusters. With it present, a **Flink-flavor** application with a JAR in
+    /// S3 runs as a genuine Flink job in Docker.
+    pub fn with_runtime(mut self, runtime: Arc<FlinkRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Attach the in-process S3 reader used to fetch application code JARs.
+    pub fn with_s3(mut self, s3: Arc<dyn S3Delivery>) -> Self {
+        self.s3 = Some(s3);
         self
     }
 
@@ -955,6 +985,7 @@ impl Ka2Service {
             version_updated_from: None,
             version_rolled_back_from: None,
             version_rolled_back_to: None,
+            flink_binding: None,
         };
         record_version(&mut app);
         let detail = build_application_detail(&app);
@@ -978,11 +1009,34 @@ impl Ka2Service {
             .applications
             .get_mut(&name)
             .ok_or_else(|| not_found(&name))?;
-        let settled = settle_status(&app.status);
-        if settled != app.status {
-            app.status = settled.to_string();
+        // A Flink-flavor app backed by the REAL runtime has ALL its lifecycle
+        // transitions driven by the background container/job tasks -- never
+        // auto-settle those in place (that would report RUNNING before the real
+        // Flink job is actually up). The pure control-plane path (SQL apps, no
+        // runtime, or a Flink app with no JAR) keeps the in-memory settle.
+        let real = self.runtime.is_some() && is_real_flink(app);
+        if !real {
+            let settled = settle_status(&app.status);
+            if settled != app.status {
+                app.status = settled.to_string();
+            }
         }
         let detail = build_application_detail(app);
+        // If a real job is RUNNING, reconcile it against the live cluster in the
+        // background so a later describe reflects a job that finished/failed on
+        // its own (the "a read fires a transition" pattern).
+        let reconcile = if real && app.status == "RUNNING" {
+            app.flink_binding
+                .as_ref()
+                .and_then(|b| b.job_id.as_ref().map(|j| (b.clone(), j.clone())))
+        } else {
+            None
+        };
+        let account = req.account_id.clone();
+        drop(accounts);
+        if let Some((binding, job_id)) = reconcile {
+            self.spawn_flink_reconcile(account, name, binding, job_id);
+        }
         ok(json!({ "ApplicationDetail": detail }))
     }
 
@@ -1074,6 +1128,15 @@ impl Ka2Service {
             .remove(&name)
             .ok_or_else(|| not_found(&name))?;
         st.tags.remove(&app.arn);
+        let binding = app.flink_binding.clone();
+        drop(accounts);
+        // Tear down the backing Flink cluster container on delete so it is not
+        // leaked (fire-and-forget; the request must not block on the daemon).
+        if let (Some(runtime), Some(bind)) = (self.runtime.clone(), binding) {
+            tokio::spawn(async move {
+                runtime.remove_by_id(&bind.container_id).await;
+            });
+        }
         ok_empty()
     }
 
@@ -1127,6 +1190,28 @@ impl Ka2Service {
         }
         app.status = "STARTING".to_string();
         let op_id = record_operation(app, "StartApplication", None, None);
+        // Real path: a Flink-flavor app with a JAR in S3 and a runtime attached
+        // spawns a genuine Flink session cluster and submits the job in the
+        // background (never block the handler on a container pull/start/submit,
+        // issues #1539/#1730). The app settles to RUNNING only once Flink reports
+        // the job RUNNING. Otherwise the pure state machine settles on describe.
+        let real = self.runtime.is_some() && is_real_flink(app);
+        let code = if real { flink_code_location(app) } else { None };
+        let parallelism = if real { flink_parallelism(app) } else { None };
+        let program_args = if real { flink_program_args(app) } else { None };
+        let arn = app.arn.clone();
+        drop(accounts);
+        if let Some((bucket, key)) = code {
+            self.spawn_flink_start(
+                req.account_id.clone(),
+                name,
+                arn,
+                bucket,
+                key,
+                parallelism,
+                program_args,
+            );
+        }
         ok(json!({ "OperationId": op_id }))
     }
 
@@ -1141,12 +1226,30 @@ impl Ka2Service {
             .applications
             .get_mut(&name)
             .ok_or_else(|| not_found(&name))?;
-        app.status = if force {
-            "FORCE_STOPPING".to_string()
+        let real = self.runtime.is_some() && is_real_flink(app);
+        let binding = app.flink_binding.clone();
+        let running_job = binding
+            .as_ref()
+            .and_then(|b| b.job_id.clone())
+            .filter(|_| real);
+        if real && running_job.is_none() {
+            // A real-flink app with no live job must settle straight to READY:
+            // describe skips the in-memory settle for real apps, so a STOPPING
+            // with no background canceller would strand forever.
+            app.status = "READY".to_string();
         } else {
-            "STOPPING".to_string()
-        };
+            app.status = if force {
+                "FORCE_STOPPING".to_string()
+            } else {
+                "STOPPING".to_string()
+            };
+        }
         let op_id = record_operation(app, "StopApplication", None, None);
+        let arn = app.arn.clone();
+        drop(accounts);
+        if let (Some(bind), Some(_job)) = (binding, running_job) {
+            self.spawn_flink_stop(req.account_id.clone(), name, arn, bind);
+        }
         ok(json!({ "OperationId": op_id }))
     }
 
@@ -1836,15 +1939,23 @@ impl Ka2Service {
             ec,
         )?;
         let accounts = self.state.read();
-        let _app = accounts
+        let app = accounts
             .get(&req.account_id)
             .and_then(|st| st.applications.get(&name))
             .ok_or_else(|| not_found(&name))?;
-        let token = new_token();
-        let url = format!(
-            "https://{}.kinesisanalytics.{}.amazonaws.com/dashboard?authToken={token}",
-            name, req.region
-        );
+        // When a REAL Flink cluster is running for this app, return its actually
+        // reachable dashboard/REST base URL so a client (or the E2E) can hit the
+        // live JobManager. Otherwise fall back to the synthesized AWS-shaped URL.
+        let url = match &app.flink_binding {
+            Some(bind) if app.status == "RUNNING" => bind.dashboard_url(),
+            _ => {
+                let token = new_token();
+                format!(
+                    "https://{}.kinesisanalytics.{}.amazonaws.com/dashboard?authToken={token}",
+                    name, req.region
+                )
+            }
+        };
         ok(json!({ "AuthorizedUrl": url }))
     }
 
@@ -1960,6 +2071,437 @@ impl Ka2Service {
         let tags = st.tags.get(&resource_arn).cloned().unwrap_or_default();
         ok(json!({ "Tags": tags_json(&tags) }))
     }
+}
+
+// ===== real Flink data-plane background tasks =====
+
+/// Bounded poll for a job to reach RUNNING (or a terminal state) after
+/// submission: 120 * 500ms = ~60s.
+const JOB_POLL_ATTEMPTS: u32 = 120;
+/// Bounded poll for a canceled job to reach a terminal state: ~30s.
+const CANCEL_POLL_ATTEMPTS: u32 = 60;
+
+impl Ka2Service {
+    /// Whether a real container runtime is attached.
+    pub fn runtime_present(&self) -> bool {
+        self.runtime.is_some()
+    }
+
+    /// Bring up the backing Flink cluster, fetch the app's code JAR from S3,
+    /// submit it, and settle the application to RUNNING once Flink reports the
+    /// job RUNNING. Any failure settles the app back to READY (and tears the
+    /// container down) with a logged reason. Fire-and-forget: never blocks the
+    /// StartApplication handler.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_flink_start(
+        &self,
+        account: String,
+        name: String,
+        arn: String,
+        bucket: String,
+        key: String,
+        parallelism: Option<i64>,
+        program_args: Option<String>,
+    ) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let s3 = self.s3.clone();
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            // 1. Spawn (or reuse) the backing Flink session cluster.
+            let running = match runtime.ensure_cluster(&arn).await {
+                Ok(r) => r,
+                Err(error) => {
+                    tracing::error!(%error, app_arn = %arn, "failed to bring up Flink cluster; app back to READY");
+                    set_app_status(&state, &account, &name, "READY", None);
+                    save_snapshot(&state, store.clone(), &lock).await;
+                    return;
+                }
+            };
+            // Persist the container binding immediately so a restart can
+            // re-attach it (no RUNNING-with-dead-container, #1338).
+            set_app_binding(
+                &state,
+                &account,
+                &name,
+                Some(FlinkBinding {
+                    container_id: running.container_id.clone(),
+                    host: running.host.clone(),
+                    rest_port: running.rest_port,
+                    jar_id: None,
+                    job_id: None,
+                }),
+            );
+            save_snapshot(&state, store.clone(), &lock).await;
+
+            // 2. Fetch the code JAR from fakecloud S3.
+            let Some(s3) = s3 else {
+                tracing::error!(app_arn = %arn, "no S3 reader attached; cannot submit Flink job");
+                runtime.stop_cluster(&arn).await;
+                set_app_status(&state, &account, &name, "READY", Some(None));
+                save_snapshot(&state, store.clone(), &lock).await;
+                return;
+            };
+            let jar_bytes = match s3.get_object(&account, &bucket, &key) {
+                Ok(b) => b,
+                Err(error) => {
+                    tracing::error!(%error, app_arn = %arn, bucket = %bucket, key = %key, "failed to read Flink code JAR from S3; app back to READY");
+                    runtime.stop_cluster(&arn).await;
+                    set_app_status(&state, &account, &name, "READY", Some(None));
+                    save_snapshot(&state, store.clone(), &lock).await;
+                    return;
+                }
+            };
+            let file_name = key.rsplit('/').next().unwrap_or("application.jar");
+
+            // 3. Upload + run the job.
+            let jar_id = match runtime.upload_jar(&running, jar_bytes, file_name).await {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(%error, app_arn = %arn, "Flink jar upload failed; app back to READY");
+                    runtime.stop_cluster(&arn).await;
+                    set_app_status(&state, &account, &name, "READY", Some(None));
+                    save_snapshot(&state, store.clone(), &lock).await;
+                    return;
+                }
+            };
+            let job_id = match runtime
+                .run_job(
+                    &running,
+                    &jar_id,
+                    parallelism,
+                    program_args.as_deref(),
+                    None,
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(error) => {
+                    tracing::error!(%error, app_arn = %arn, "Flink job submission failed; app back to READY");
+                    runtime.stop_cluster(&arn).await;
+                    set_app_status(&state, &account, &name, "READY", Some(None));
+                    save_snapshot(&state, store.clone(), &lock).await;
+                    return;
+                }
+            };
+            set_app_binding(
+                &state,
+                &account,
+                &name,
+                Some(FlinkBinding {
+                    container_id: running.container_id.clone(),
+                    host: running.host.clone(),
+                    rest_port: running.rest_port,
+                    jar_id: Some(jar_id),
+                    job_id: Some(job_id.clone()),
+                }),
+            );
+            save_snapshot(&state, store.clone(), &lock).await;
+
+            // 4. Poll until the real Flink job is RUNNING (or terminal).
+            for _ in 0..JOB_POLL_ATTEMPTS {
+                match runtime.job_state(&running, &job_id).await {
+                    Ok(state_str) if flink_state_to_app_status(&state_str) == "RUNNING" => {
+                        set_app_status(&state, &account, &name, "RUNNING", None);
+                        save_snapshot(&state, store.clone(), &lock).await;
+                        tracing::info!(app_arn = %arn, job_id = %job_id, "Flink job is RUNNING");
+                        return;
+                    }
+                    Ok(state_str) if is_terminal_flink_state(&state_str) => {
+                        tracing::error!(app_arn = %arn, job_id = %job_id, flink_state = %state_str, "Flink job reached a terminal state before RUNNING; app back to READY");
+                        runtime.stop_cluster(&arn).await;
+                        set_app_status(&state, &account, &name, "READY", Some(None));
+                        save_snapshot(&state, store.clone(), &lock).await;
+                        return;
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(500)).await,
+                }
+            }
+            tracing::error!(app_arn = %arn, job_id = %job_id, "Flink job did not reach RUNNING within the deadline; app back to READY");
+            runtime.stop_cluster(&arn).await;
+            set_app_status(&state, &account, &name, "READY", Some(None));
+            save_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Cancel the real Flink job, wait for it to reach a terminal state, tear
+    /// the cluster down, and settle the application to READY. Fire-and-forget.
+    fn spawn_flink_stop(&self, account: String, name: String, arn: String, binding: FlinkBinding) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let running = crate::runtime::RunningFlink {
+                container_id: binding.container_id.clone(),
+                host: binding.host.clone(),
+                rest_port: binding.rest_port,
+            };
+            if let Some(job_id) = &binding.job_id {
+                if let Err(error) = runtime.cancel_job(&running, job_id).await {
+                    tracing::warn!(%error, app_arn = %arn, "cancel_job failed; tearing the cluster down anyway");
+                }
+                // Wait for the cancel to settle (best-effort).
+                for _ in 0..CANCEL_POLL_ATTEMPTS {
+                    match runtime.job_state(&running, job_id).await {
+                        Ok(s) if is_terminal_flink_state(&s) => break,
+                        Err(_) => break,
+                        _ => tokio::time::sleep(Duration::from_millis(500)).await,
+                    }
+                }
+            }
+            runtime.stop_cluster(&arn).await;
+            set_app_status(&state, &account, &name, "READY", Some(None));
+            save_snapshot(&state, store, &lock).await;
+            tracing::info!(app_arn = %arn, "Flink app stopped and cluster torn down");
+        });
+    }
+
+    /// Poll a RUNNING app's real job once; if it is no longer running, settle
+    /// the app to READY. Guards against clobbering a concurrent start/stop by
+    /// only acting when the app is still RUNNING with the same job id.
+    fn spawn_flink_reconcile(
+        &self,
+        account: String,
+        name: String,
+        binding: FlinkBinding,
+        job_id: String,
+    ) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let running = crate::runtime::RunningFlink {
+                container_id: binding.container_id.clone(),
+                host: binding.host.clone(),
+                rest_port: binding.rest_port,
+            };
+            let terminal = match runtime.job_state(&running, &job_id).await {
+                Ok(s) => flink_state_to_app_status(&s) != "RUNNING",
+                // Job vanished from the cluster -> no longer running.
+                Err(crate::runtime::JobError::NotFound(_)) => true,
+                // Transient REST hiccup: leave the app as-is.
+                Err(_) => return,
+            };
+            if !terminal {
+                return;
+            }
+            let changed = mutate_app(&state, &account, &name, |app| {
+                let same_job = app.flink_binding.as_ref().and_then(|b| b.job_id.as_deref())
+                    == Some(job_id.as_str());
+                if app.status == "RUNNING" && same_job {
+                    app.status = "READY".to_string();
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                save_snapshot(&state, store, &lock).await;
+                tracing::info!(app = %name, "real Flink job is no longer RUNNING; app settled to READY");
+            }
+        });
+    }
+
+    /// Re-attach backing Flink containers for apps a restored snapshot claims
+    /// are RUNNING/STARTING, mirroring the restart-recovery contract of MSK / MQ
+    /// / RDS (no RUNNING-with-dead-container, #1338/#914). When the persisted
+    /// container is gone or its job is no longer running, the app is settled to
+    /// READY. Fire-and-forget per app so a slow re-attach doesn't block startup.
+    pub async fn recover_persisted_containers(&self) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        // Collect (account, name, binding) for apps that should have a live job.
+        let targets: Vec<(String, String, FlinkBinding)> = {
+            let accounts = self.state.read();
+            let mut out = Vec::new();
+            for (account, st) in accounts.iter() {
+                for (name, app) in &st.applications {
+                    if matches!(app.status.as_str(), "RUNNING" | "STARTING") {
+                        if let Some(b) = &app.flink_binding {
+                            out.push((account.to_string(), name.clone(), b.clone()));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        for (account, name, binding) in targets {
+            let runtime = runtime.clone();
+            let state = self.state.clone();
+            let store = self.snapshot_store.clone();
+            let lock = self.snapshot_lock.clone();
+            let arn = binding_arn(&state, &account, &name);
+            tokio::spawn(async move {
+                let recovered = match runtime.reattach_cluster(&arn, &binding.container_id).await {
+                    Ok(Some(running)) => match &binding.job_id {
+                        Some(job_id) => match runtime.job_state(&running, job_id).await {
+                            Ok(s) if flink_state_to_app_status(&s) == "RUNNING" => Some(running),
+                            _ => None,
+                        },
+                        None => None,
+                    },
+                    _ => None,
+                };
+                match recovered {
+                    Some(running) => {
+                        // Refresh host/port in case the published port moved.
+                        set_app_binding(
+                            &state,
+                            &account,
+                            &name,
+                            Some(FlinkBinding {
+                                container_id: running.container_id,
+                                host: running.host,
+                                rest_port: running.rest_port,
+                                jar_id: binding.jar_id.clone(),
+                                job_id: binding.job_id.clone(),
+                            }),
+                        );
+                        set_app_status(&state, &account, &name, "RUNNING", None);
+                        tracing::info!(app = %name, "recovered RUNNING Flink app after restart");
+                    }
+                    None => {
+                        runtime.stop_cluster(&arn).await;
+                        set_app_status(&state, &account, &name, "READY", Some(None));
+                        tracing::warn!(app = %name, "could not recover Flink job after restart; app settled to READY");
+                    }
+                }
+                save_snapshot(&state, store, &lock).await;
+            });
+        }
+    }
+}
+
+/// Whether an application is a REAL-runtime-managed Flink app: a Flink-flavor
+/// runtime environment (`FLINK_1_x`, excluding SQL and Zeppelin) AND a code JAR
+/// in S3 to submit. Only these get the Docker-backed Flink job; everything else
+/// stays on the control-plane state machine.
+fn is_real_flink(app: &Application) -> bool {
+    app.runtime_environment.starts_with("FLINK_") && flink_code_location(app).is_some()
+}
+
+/// Extract the `(bucket, key)` of an application's code JAR from its
+/// `ApplicationCodeConfigurationDescription`, or `None` when it has no S3 code
+/// location. The `BucketARN` (`arn:aws:s3:::bucket`) is reduced to the name.
+fn flink_code_location(app: &Application) -> Option<(String, String)> {
+    let s3 = app
+        .config_description
+        .get("ApplicationCodeConfigurationDescription")?
+        .get("CodeContentDescription")?
+        .get("S3ApplicationCodeLocationDescription")?;
+    let bucket_arn = s3.get("BucketARN").and_then(Value::as_str)?;
+    let key = s3.get("FileKey").and_then(Value::as_str)?;
+    let bucket = bucket_arn.rsplit(":::").next().unwrap_or(bucket_arn);
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((bucket.to_string(), key.to_string()))
+}
+
+/// Read the configured job parallelism from a Flink app's config description.
+fn flink_parallelism(app: &Application) -> Option<i64> {
+    app.config_description
+        .get("FlinkApplicationConfigurationDescription")?
+        .get("ParallelismConfigurationDescription")?
+        .get("Parallelism")
+        .and_then(Value::as_i64)
+}
+
+/// Derive program arguments from the app's environment property groups. KDA has
+/// no first-class "program args" field; a `PropertyGroupId` of
+/// `kinesis.analytics.flink.run.options` with a `ProgramArgs` key is the
+/// convention we honor, joining nothing else.
+fn flink_program_args(app: &Application) -> Option<String> {
+    let groups = app
+        .config_description
+        .get("EnvironmentPropertyDescriptions")?
+        .get("PropertyGroupDescriptions")?
+        .as_array()?;
+    for g in groups {
+        if g.get("PropertyGroupId").and_then(Value::as_str)
+            == Some("kinesis.analytics.flink.run.options")
+        {
+            if let Some(args) = g
+                .get("PropertyMap")
+                .and_then(|m| m.get("ProgramArgs"))
+                .and_then(Value::as_str)
+            {
+                return Some(args.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Look up an application's ARN from state (used by the recovery task, which
+/// only carries the account+name).
+fn binding_arn(state: &SharedKa2State, account: &str, name: &str) -> String {
+    state
+        .read()
+        .get(account)
+        .and_then(|st| st.applications.get(name))
+        .map(|a| a.arn.clone())
+        .unwrap_or_default()
+}
+
+/// Apply a mutation to an application in state, returning whether it was found.
+fn mutate_app<F: FnOnce(&mut Application) -> bool>(
+    state: &SharedKa2State,
+    account: &str,
+    name: &str,
+    f: F,
+) -> bool {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(account);
+    match st.applications.get_mut(name) {
+        Some(app) => f(app),
+        None => false,
+    }
+}
+
+/// Set an application's status. `binding` is `Some(new_binding)` to also replace
+/// the Flink binding (e.g. `Some(None)` to clear it on stop), or `None` to leave
+/// the binding untouched.
+fn set_app_status(
+    state: &SharedKa2State,
+    account: &str,
+    name: &str,
+    status: &str,
+    binding: Option<Option<FlinkBinding>>,
+) {
+    mutate_app(state, account, name, |app| {
+        app.status = status.to_string();
+        if let Some(b) = binding {
+            app.flink_binding = b;
+        }
+        true
+    });
+}
+
+/// Replace an application's Flink binding.
+fn set_app_binding(
+    state: &SharedKa2State,
+    account: &str,
+    name: &str,
+    binding: Option<FlinkBinding>,
+) {
+    mutate_app(state, account, name, |app| {
+        app.flink_binding = binding;
+        true
+    });
 }
 
 // ===== config-description manipulation helpers =====
@@ -2251,6 +2793,141 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(v["SnapshotDetails"]["SnapshotStatus"], "READY");
+    }
+
+    fn flink_app_with_jar() -> Application {
+        let cfg = config_to_description(
+            &json!({
+                "FlinkApplicationConfiguration": {
+                    "ParallelismConfiguration": { "Parallelism": 3 }
+                },
+                "ApplicationCodeConfiguration": {
+                    "CodeContentType": "ZIPFILE",
+                    "CodeContent": {
+                        "S3ContentLocation": {
+                            "BucketARN": "arn:aws:s3:::my-code-bucket",
+                            "FileKey": "jobs/app.jar"
+                        }
+                    }
+                },
+                "EnvironmentProperties": {
+                    "PropertyGroups": [
+                        { "PropertyGroupId": "kinesis.analytics.flink.run.options",
+                          "PropertyMap": { "ProgramArgs": "--error-rate 0.1" } }
+                    ]
+                }
+            }),
+            Some("arn:aws:iam::000000000000:role/r"),
+            &mut 0,
+        );
+        Application {
+            name: "flinkapp".into(),
+            arn: arn("us-east-1", "000000000000", "flinkapp"),
+            description: None,
+            runtime_environment: "FLINK_1_19".into(),
+            service_execution_role: Some("arn:aws:iam::000000000000:role/r".into()),
+            application_mode: Some("STREAMING".into()),
+            status: "READY".into(),
+            version_id: 1,
+            create_timestamp: Utc::now(),
+            last_update_timestamp: Utc::now(),
+            conditional_token: "t".into(),
+            config_description: cfg,
+            cloudwatch_logging_options: Vec::new(),
+            maintenance_start: DEFAULT_MAINTENANCE_START.into(),
+            maintenance_end: DEFAULT_MAINTENANCE_END.into(),
+            snapshots: BTreeMap::new(),
+            operations: Vec::new(),
+            versions: BTreeMap::new(),
+            id_counter: 0,
+            version_updated_from: None,
+            version_rolled_back_from: None,
+            version_rolled_back_to: None,
+            flink_binding: None,
+        }
+    }
+
+    #[test]
+    fn flink_app_with_jar_is_real() {
+        let app = flink_app_with_jar();
+        assert!(is_real_flink(&app));
+        assert_eq!(
+            flink_code_location(&app),
+            Some(("my-code-bucket".into(), "jobs/app.jar".into()))
+        );
+        assert_eq!(flink_parallelism(&app), Some(3));
+        assert_eq!(
+            flink_program_args(&app).as_deref(),
+            Some("--error-rate 0.1")
+        );
+    }
+
+    #[test]
+    fn sql_app_is_not_real_flink() {
+        let mut app = flink_app_with_jar();
+        app.runtime_environment = "SQL_1_0".into();
+        // SQL flavor -> control-plane only, never the real Docker Flink job.
+        assert!(!is_real_flink(&app));
+    }
+
+    #[test]
+    fn flink_app_without_jar_is_not_real() {
+        // A Flink runtime with no S3 code location stays on the control plane.
+        let mut app = flink_app_with_jar();
+        app.config_description = json!({});
+        assert!(!is_real_flink(&app));
+        assert_eq!(flink_code_location(&app), None);
+    }
+
+    #[test]
+    fn degraded_fallback_no_runtime_settles_and_synthesizes_url() {
+        // With no runtime attached (the degraded / control-plane path), a Flink
+        // app with a JAR still starts as the pure state machine and the
+        // presigned URL is the synthesized AWS-shaped URL, not a live endpoint.
+        let s = svc();
+        assert!(!s.runtime_present());
+        s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "FLINK_1_19",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
+                "ApplicationConfiguration": {
+                    "ApplicationCodeConfiguration": {
+                        "CodeContentType": "ZIPFILE",
+                        "CodeContent": { "S3ContentLocation": {
+                            "BucketARN": "arn:aws:s3:::b", "FileKey": "app.jar" } }
+                    }
+                }
+            }),
+        ))
+        .unwrap();
+        s.start_application(&req("StartApplication", json!({"ApplicationName":"app1"})))
+            .unwrap();
+        let v = body_of(
+            s.describe_application(&req(
+                "DescribeApplication",
+                json!({"ApplicationName":"app1"}),
+            ))
+            .unwrap(),
+        );
+        // No runtime -> the state machine settles STARTING -> RUNNING in place.
+        assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "RUNNING");
+        let u = body_of(
+            s.create_application_presigned_url(&req(
+                "CreateApplicationPresignedUrl",
+                json!({"ApplicationName":"app1","UrlType":"FLINK_DASHBOARD_URL"}),
+            ))
+            .unwrap(),
+        );
+        assert!(
+            u["AuthorizedUrl"]
+                .as_str()
+                .unwrap()
+                .contains("kinesisanalytics.us-east-1.amazonaws.com"),
+            "degraded path returns the synthesized dashboard URL: {}",
+            u["AuthorizedUrl"]
+        );
     }
 
     #[test]
