@@ -195,6 +195,10 @@
     "repo_dir": "glue",
     "service_name": "glue"
   },
+  "emr": {
+    "repo_dir": "emr",
+    "service_name": "emr"
+  },
   "organizations": {
     "repo_dir": "organizations",
     "service_name": "organizations"

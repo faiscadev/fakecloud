@@ -1,6 +1,6 @@
 {
-  "variants_passed": 192048,
-  "total_variants": 192048,
+  "variants_passed": 194150,
+  "total_variants": 194150,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -337,6 +337,10 @@
     "fis": {
       "passed": 860,
       "total": 860
+    },
+    "emr": {
+      "passed": 2102,
+      "total": 2102
     }
   }
 }
