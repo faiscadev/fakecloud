@@ -101,6 +101,7 @@ SERVICES=(
     "mwaa:mwaa"
     "emr:emr"
     "fis:fis"
+    "xray:xray"
 )
 
 # Sparse checkout only the models we need

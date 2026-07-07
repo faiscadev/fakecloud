@@ -72,6 +72,7 @@ SERVICES=(
     "kafka|Amazon MSK|kafka"
     "mwaa|Amazon MWAA|mwaa"
     "fis|AWS Fault Injection Simulator|fis"
+    "xray|AWS X-Ray|xray"
     "glacier|Amazon S3 Glacier|glacier"
     "backup|AWS Backup|backup"
     "es|Elasticsearch Service|opensearch"

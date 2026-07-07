@@ -2413,6 +2413,47 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateSafetyLeverState`
 - `UpdateTargetAccountConfiguration`
 
+## [AWS X-Ray](@/docs/services/xray.md)
+
+- `BatchGetTraces`
+- `CancelTraceRetrieval`
+- `CreateGroup`
+- `CreateSamplingRule`
+- `DeleteGroup`
+- `DeleteResourcePolicy`
+- `DeleteSamplingRule`
+- `GetEncryptionConfig`
+- `GetGroup`
+- `GetGroups`
+- `GetIndexingRules`
+- `GetInsight`
+- `GetInsightEvents`
+- `GetInsightImpactGraph`
+- `GetInsightSummaries`
+- `GetRetrievedTracesGraph`
+- `GetSamplingRules`
+- `GetSamplingStatisticSummaries`
+- `GetSamplingTargets`
+- `GetServiceGraph`
+- `GetTimeSeriesServiceStatistics`
+- `GetTraceGraph`
+- `GetTraceSegmentDestination`
+- `GetTraceSummaries`
+- `ListResourcePolicies`
+- `ListRetrievedTraces`
+- `ListTagsForResource`
+- `PutEncryptionConfig`
+- `PutResourcePolicy`
+- `PutTelemetryRecords`
+- `PutTraceSegments`
+- `StartTraceRetrieval`
+- `TagResource`
+- `UntagResource`
+- `UpdateGroup`
+- `UpdateIndexingRule`
+- `UpdateSamplingRule`
+- `UpdateTraceSegmentDestination`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`

@@ -338,5 +338,9 @@
   "fis": {
     "repo_dir": "fis",
     "service_name": "fis"
+  },
+  "xray": {
+    "repo_dir": "xray",
+    "service_name": "xray"
   }
 }

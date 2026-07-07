@@ -52,6 +52,7 @@ fakecloud-mq = { workspace = true }
 fakecloud-fis = { workspace = true }
 fakecloud-kafka = { workspace = true }
 fakecloud-mwaa = { workspace = true }
+fakecloud-xray = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-glacier = { workspace = true }
 fakecloud-appconfig = { workspace = true }
