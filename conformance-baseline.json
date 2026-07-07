@@ -1,6 +1,6 @@
 {
-  "variants_passed": 194150,
-  "total_variants": 194150,
+  "variants_passed": 195217,
+  "total_variants": 195217,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -341,6 +341,10 @@
     "emr": {
       "passed": 2102,
       "total": 2102
+    },
+    "xray": {
+      "passed": 1067,
+      "total": 1067
     }
   }
 }

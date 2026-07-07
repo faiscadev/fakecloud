@@ -80,6 +80,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // target-resource-type catalogs, target-account configurations, safety
     // levers, and tags; JSON bodies). Signs as `fis`.
     "fis",
+    // AWS X-Ray: restJson1 control plane + trace data plane (fixed `@http`
+    // `POST /<Op>` URIs over trace segments, the derived service graph,
+    // sampling rules, groups, encryption config, and tags; JSON bodies).
+    // Signs as `xray`.
+    "xray",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

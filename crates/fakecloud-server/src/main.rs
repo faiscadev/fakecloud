@@ -698,6 +698,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let xray_state: fakecloud_xray::SharedXrayState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5503,6 +5510,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("mwaa", h);
     }
     registry.register(Arc::new(mwaa_service));
+
+    let xray_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("xray").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_xray::persistence::load_into(&store, &xray_state) {
+                Ok(fakecloud_xray::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded xray persistence snapshot");
+                }
+                Ok(fakecloud_xray::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no xray persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut xray_service = fakecloud_xray::XrayService::new(xray_state.clone());
+    if let Some(store) = xray_snapshot_store {
+        xray_service = xray_service.with_snapshot_store(store);
+    }
+    if let Some(h) = xray_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("xray", h);
+    }
+    registry.register(Arc::new(xray_service));
 
     let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
