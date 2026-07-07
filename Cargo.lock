@@ -1313,6 +1313,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-kinesisanalyticsv2"
+version = "1.103.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "651f3ca282b1e52a0ed0e9573aa46878516ebe340509ffc86310a55cb24a62b6"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-kms"
 version = "1.106.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3703,6 +3727,7 @@ dependencies = [
  "fakecloud-k8s",
  "fakecloud-kafka",
  "fakecloud-kinesis",
+ "fakecloud-kinesisanalyticsv2",
  "fakecloud-kms",
  "fakecloud-lakeformation",
  "fakecloud-lambda",
@@ -4670,6 +4695,7 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sdk-kafka",
  "aws-sdk-kinesis",
+ "aws-sdk-kinesisanalyticsv2",
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-mq",
@@ -5098,6 +5124,26 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fakecloud-kinesisanalyticsv2"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

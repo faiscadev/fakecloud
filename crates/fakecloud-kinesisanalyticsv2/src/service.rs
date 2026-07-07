@@ -1,0 +1,2277 @@
+//! Amazon Managed Service for Apache Flink (`kinesisanalyticsv2`) awsJson1.1
+//! dispatch + operation handlers.
+//!
+//! Full 33-operation control plane. Applications are a faithful,
+//! persisted state machine: `StartApplication` moves `READY -> STARTING ->
+//! RUNNING` (settling on the next describe), `StopApplication` moves
+//! `RUNNING -> STOPPING -> READY`, mirroring how other FakeCloud services
+//! auto-settle async state. Every config-changing operation increments the
+//! application version and records an async operation. The real Flink-job
+//! data plane (a running Docker container) is a separate later batch.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use http::StatusCode;
+use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
+use uuid::Uuid;
+
+use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_persistence::SnapshotStore;
+
+use crate::persistence::save_snapshot;
+use crate::state::{Application, OperationRecord, SharedKa2State, Snapshot, TagMap, VersionRecord};
+
+/// Every operation name in the kinesisanalyticsv2 Smithy model.
+pub const KA2_ACTIONS: &[&str] = &[
+    "AddApplicationCloudWatchLoggingOption",
+    "AddApplicationInput",
+    "AddApplicationInputProcessingConfiguration",
+    "AddApplicationOutput",
+    "AddApplicationReferenceDataSource",
+    "AddApplicationVpcConfiguration",
+    "CreateApplication",
+    "CreateApplicationPresignedUrl",
+    "CreateApplicationSnapshot",
+    "DeleteApplication",
+    "DeleteApplicationCloudWatchLoggingOption",
+    "DeleteApplicationInputProcessingConfiguration",
+    "DeleteApplicationOutput",
+    "DeleteApplicationReferenceDataSource",
+    "DeleteApplicationSnapshot",
+    "DeleteApplicationVpcConfiguration",
+    "DescribeApplication",
+    "DescribeApplicationOperation",
+    "DescribeApplicationSnapshot",
+    "DescribeApplicationVersion",
+    "DiscoverInputSchema",
+    "ListApplicationOperations",
+    "ListApplicationSnapshots",
+    "ListApplicationVersions",
+    "ListApplications",
+    "ListTagsForResource",
+    "RollbackApplication",
+    "StartApplication",
+    "StopApplication",
+    "TagResource",
+    "UntagResource",
+    "UpdateApplication",
+    "UpdateApplicationMaintenanceConfiguration",
+];
+
+const RUNTIME_ENVIRONMENTS: &[&str] = &[
+    "SQL_1_0",
+    "FLINK_1_6",
+    "FLINK_1_8",
+    "ZEPPELIN_FLINK_1_0",
+    "FLINK_1_11",
+    "FLINK_1_13",
+    "ZEPPELIN_FLINK_2_0",
+    "FLINK_1_15",
+    "ZEPPELIN_FLINK_3_0",
+    "FLINK_1_18",
+    "FLINK_1_19",
+    "FLINK_1_20",
+    "FLINK_2_2",
+];
+const APPLICATION_MODES: &[&str] = &["STREAMING", "INTERACTIVE"];
+const URL_TYPES: &[&str] = &["FLINK_DASHBOARD_URL", "ZEPPELIN_UI_URL"];
+const OPERATION_STATUSES: &[&str] = &["IN_PROGRESS", "CANCELLED", "SUCCESSFUL", "FAILED"];
+
+const DEFAULT_MAINTENANCE_START: &str = "06:00";
+const DEFAULT_MAINTENANCE_END: &str = "14:00";
+
+pub struct Ka2Service {
+    state: SharedKa2State,
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
+}
+
+impl Ka2Service {
+    pub fn new(state: SharedKa2State) -> Self {
+        Self {
+            state,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    async fn save(&self) {
+        save_snapshot(
+            &self.state,
+            self.snapshot_store.clone(),
+            &self.snapshot_lock,
+        )
+        .await;
+    }
+}
+
+#[async_trait]
+impl AwsService for Ka2Service {
+    fn service_name(&self) -> &str {
+        "kinesisanalyticsv2"
+    }
+
+    async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mutates = is_mutating(request.action.as_str());
+        let result = dispatch(self, &request);
+        if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            self.save().await;
+        }
+        result
+    }
+
+    fn supported_actions(&self) -> &[&str] {
+        KA2_ACTIONS
+    }
+}
+
+fn is_mutating(action: &str) -> bool {
+    action.starts_with("Add")
+        || action.starts_with("Create")
+        || action.starts_with("Delete")
+        || action.starts_with("Update")
+        || action.starts_with("Start")
+        || action.starts_with("Stop")
+        || action.starts_with("Rollback")
+        || action.starts_with("Tag")
+        || action.starts_with("Untag")
+        // DescribeApplication settles transient lifecycle state in place.
+        || action == "DescribeApplication"
+}
+
+fn dispatch(s: &Ka2Service, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    match req.action.as_str() {
+        "CreateApplication" => s.create_application(req),
+        "DescribeApplication" => s.describe_application(req),
+        "UpdateApplication" => s.update_application(req),
+        "DeleteApplication" => s.delete_application(req),
+        "ListApplications" => s.list_applications(req),
+        "StartApplication" => s.start_application(req),
+        "StopApplication" => s.stop_application(req),
+        "RollbackApplication" => s.rollback_application(req),
+        "CreateApplicationSnapshot" => s.create_application_snapshot(req),
+        "DeleteApplicationSnapshot" => s.delete_application_snapshot(req),
+        "DescribeApplicationSnapshot" => s.describe_application_snapshot(req),
+        "ListApplicationSnapshots" => s.list_application_snapshots(req),
+        "DescribeApplicationVersion" => s.describe_application_version(req),
+        "ListApplicationVersions" => s.list_application_versions(req),
+        "DescribeApplicationOperation" => s.describe_application_operation(req),
+        "ListApplicationOperations" => s.list_application_operations(req),
+        "AddApplicationCloudWatchLoggingOption" => s.add_cloudwatch_logging_option(req),
+        "DeleteApplicationCloudWatchLoggingOption" => s.delete_cloudwatch_logging_option(req),
+        "AddApplicationVpcConfiguration" => s.add_vpc_configuration(req),
+        "DeleteApplicationVpcConfiguration" => s.delete_vpc_configuration(req),
+        "AddApplicationInput" => s.add_input(req),
+        "AddApplicationInputProcessingConfiguration" => s.add_input_processing_configuration(req),
+        "DeleteApplicationInputProcessingConfiguration" => {
+            s.delete_input_processing_configuration(req)
+        }
+        "AddApplicationOutput" => s.add_output(req),
+        "DeleteApplicationOutput" => s.delete_output(req),
+        "AddApplicationReferenceDataSource" => s.add_reference_data_source(req),
+        "DeleteApplicationReferenceDataSource" => s.delete_reference_data_source(req),
+        "DiscoverInputSchema" => s.discover_input_schema(req),
+        "CreateApplicationPresignedUrl" => s.create_application_presigned_url(req),
+        "UpdateApplicationMaintenanceConfiguration" => s.update_maintenance_configuration(req),
+        "TagResource" => s.tag_resource(req),
+        "UntagResource" => s.untag_resource(req),
+        "ListTagsForResource" => s.list_tags_for_resource(req),
+        _ => Err(AwsServiceError::action_not_implemented(
+            s.service_name(),
+            &req.action,
+        )),
+    }
+}
+
+// ===== helpers =====
+
+fn ok(v: Value) -> Result<AwsResponse, AwsServiceError> {
+    Ok(AwsResponse::json_value(StatusCode::OK, v))
+}
+
+fn ok_empty() -> Result<AwsResponse, AwsServiceError> {
+    ok(json!({}))
+}
+
+fn parse(req: &AwsRequest) -> Result<Value, AwsServiceError> {
+    if req.body.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(&req.body)
+        .map_err(|e| fault("InvalidArgumentException", &format!("malformed body: {e}")))
+}
+
+fn fault(code: &str, msg: &str) -> AwsServiceError {
+    let status = if code == "ResourceNotFoundException" {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    AwsServiceError::aws_error(status, code, msg)
+}
+
+fn not_found(name: &str) -> AwsServiceError {
+    fault(
+        "ResourceNotFoundException",
+        &format!("Application {name} not found."),
+    )
+}
+
+/// Read + length-validate a required string field.
+fn req_str_len(
+    b: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+    ec: &str,
+) -> Result<String, AwsServiceError> {
+    let s = b
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| fault(ec, &format!("{field} is required.")))?;
+    check_len(s, field, min, max, ec)?;
+    Ok(s.to_string())
+}
+
+/// Read + length-validate an optional string field.
+fn opt_str_len(
+    b: &Value,
+    field: &str,
+    min: usize,
+    max: usize,
+    ec: &str,
+) -> Result<Option<String>, AwsServiceError> {
+    match b.get(field).and_then(Value::as_str) {
+        Some(s) => {
+            check_len(s, field, min, max, ec)?;
+            Ok(Some(s.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn check_len(
+    s: &str,
+    field: &str,
+    min: usize,
+    max: usize,
+    ec: &str,
+) -> Result<(), AwsServiceError> {
+    let len = s.chars().count();
+    if len < min || len > max {
+        return Err(fault(
+            ec,
+            &format!("{field} must be between {min} and {max} characters."),
+        ));
+    }
+    Ok(())
+}
+
+/// Read + validate an enum-valued string field.
+fn enum_field(
+    b: &Value,
+    field: &str,
+    allowed: &[&str],
+    required: bool,
+    ec: &str,
+) -> Result<Option<String>, AwsServiceError> {
+    match b.get(field) {
+        Some(Value::String(s)) => {
+            if !allowed.contains(&s.as_str()) {
+                return Err(fault(ec, &format!("{field} has an invalid value: {s}.")));
+            }
+            Ok(Some(s.clone()))
+        }
+        Some(Value::Null) | None => {
+            if required {
+                Err(fault(ec, &format!("{field} is required.")))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(_) => Err(fault(ec, &format!("{field} must be a string."))),
+    }
+}
+
+/// Read + range-validate an integer field.
+fn int_range(
+    b: &Value,
+    field: &str,
+    min: i64,
+    max: i64,
+    required: bool,
+    ec: &str,
+) -> Result<Option<i64>, AwsServiceError> {
+    match b.get(field) {
+        Some(Value::Number(n)) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| fault(ec, &format!("{field} must be an integer.")))?;
+            if v < min || v > max {
+                return Err(fault(
+                    ec,
+                    &format!("{field} must be between {min} and {max}."),
+                ));
+            }
+            Ok(Some(v))
+        }
+        Some(Value::Null) | None => {
+            if required {
+                Err(fault(ec, &format!("{field} is required.")))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(_) => Err(fault(ec, &format!("{field} must be an integer."))),
+    }
+}
+
+fn arn(region: &str, account: &str, name: &str) -> String {
+    format!("arn:aws:kinesisanalytics:{region}:{account}:application/{name}")
+}
+
+fn new_token() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+fn ts(t: DateTime<Utc>) -> Value {
+    json!(t.timestamp())
+}
+
+fn parse_tags(b: &Value) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(arr) = b.get("Tags").and_then(Value::as_array) {
+        for t in arr {
+            if let Some(k) = t.get("Key").and_then(Value::as_str) {
+                let v = t.get("Value").and_then(Value::as_str).unwrap_or("");
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn tags_json(tags: &TagMap) -> Vec<Value> {
+    tags.iter()
+        .map(|(k, v)| json!({ "Key": k, "Value": v }))
+        .collect()
+}
+
+/// Decode a numeric next-token; empty/absent -> page start 0.
+fn page_start(b: &Value) -> Option<usize> {
+    match b.get("NextToken").and_then(Value::as_str) {
+        None | Some("") => Some(0),
+        Some(t) => t.parse::<usize>().ok(),
+    }
+}
+
+fn limit(b: &Value, default: usize) -> usize {
+    b.get("Limit")
+        .and_then(Value::as_i64)
+        .map(|n| n.max(1) as usize)
+        .unwrap_or(default)
+}
+
+fn paginate(items: Vec<Value>, b: &Value, default_max: usize) -> (Vec<Value>, Option<String>) {
+    let Some(start) = page_start(b) else {
+        return (Vec::new(), None);
+    };
+    let max = limit(b, default_max);
+    let total = items.len();
+    if start >= total {
+        return (Vec::new(), None);
+    }
+    let end = start.saturating_add(max).min(total);
+    let next = (end < total).then(|| end.to_string());
+    (items[start..end].to_vec(), next)
+}
+
+// ===== lifecycle settle =====
+
+/// Settle a transient application status to its steady-state target. Called on
+/// every describe so reads reflect the natural async progression without a
+/// background timer.
+fn settle_status(status: &str) -> &'static str {
+    match status {
+        "STARTING" => "RUNNING",
+        "STOPPING" | "FORCE_STOPPING" => "READY",
+        "UPDATING" | "AUTOSCALING" => "RUNNING",
+        "ROLLING_BACK" => "READY",
+        "DELETING" => "DELETING",
+        "MAINTENANCE" => "READY",
+        other => match other {
+            "RUNNING" => "RUNNING",
+            "ROLLED_BACK" => "READY",
+            _ => "READY",
+        },
+    }
+}
+
+// ===== detail builders =====
+
+fn build_application_detail(app: &Application) -> Value {
+    let mut detail = json!({
+        "ApplicationARN": app.arn,
+        "ApplicationName": app.name,
+        "RuntimeEnvironment": app.runtime_environment,
+        "ApplicationStatus": app.status,
+        "ApplicationVersionId": app.version_id,
+        "CreateTimestamp": ts(app.create_timestamp),
+        "LastUpdateTimestamp": ts(app.last_update_timestamp),
+        "ConditionalToken": app.conditional_token,
+        "ApplicationMaintenanceConfigurationDescription": {
+            "ApplicationMaintenanceWindowStartTime": app.maintenance_start,
+            "ApplicationMaintenanceWindowEndTime": app.maintenance_end,
+        },
+    });
+    let obj = detail.as_object_mut().unwrap();
+    if let Some(d) = &app.description {
+        obj.insert("ApplicationDescription".into(), json!(d));
+    }
+    if let Some(r) = &app.service_execution_role {
+        obj.insert("ServiceExecutionRole".into(), json!(r));
+    }
+    if let Some(m) = &app.application_mode {
+        obj.insert("ApplicationMode".into(), json!(m));
+    }
+    if app.config_description.is_object() && !app.config_description.as_object().unwrap().is_empty()
+    {
+        obj.insert(
+            "ApplicationConfigurationDescription".into(),
+            app.config_description.clone(),
+        );
+    }
+    if !app.cloudwatch_logging_options.is_empty() {
+        obj.insert(
+            "CloudWatchLoggingOptionDescriptions".into(),
+            json!(app.cloudwatch_logging_options),
+        );
+    }
+    if let Some(v) = app.version_updated_from {
+        obj.insert("ApplicationVersionUpdatedFrom".into(), json!(v));
+    }
+    if let Some(v) = app.version_rolled_back_from {
+        obj.insert("ApplicationVersionRolledBackFrom".into(), json!(v));
+    }
+    if let Some(v) = app.version_rolled_back_to {
+        obj.insert("ApplicationVersionRolledBackTo".into(), json!(v));
+    }
+    detail
+}
+
+fn application_summary(app: &Application) -> Value {
+    let mut s = json!({
+        "ApplicationName": app.name,
+        "ApplicationARN": app.arn,
+        "ApplicationStatus": app.status,
+        "ApplicationVersionId": app.version_id,
+        "RuntimeEnvironment": app.runtime_environment,
+    });
+    if let Some(m) = &app.application_mode {
+        s.as_object_mut()
+            .unwrap()
+            .insert("ApplicationMode".into(), json!(m));
+    }
+    s
+}
+
+fn operation_info(op: &OperationRecord) -> Value {
+    json!({
+        "Operation": op.operation,
+        "OperationId": op.operation_id,
+        "StartTime": ts(op.start_time),
+        "EndTime": ts(op.end_time),
+        "OperationStatus": op.status,
+    })
+}
+
+fn snapshot_details(s: &Snapshot) -> Value {
+    json!({
+        "SnapshotName": s.name,
+        "SnapshotStatus": s.status,
+        "ApplicationVersionId": s.application_version_id,
+        "SnapshotCreationTimestamp": ts(s.create_timestamp),
+        "RuntimeEnvironment": s.runtime_environment,
+    })
+}
+
+// ===== config input -> description transform =====
+
+fn str_of(v: &Value, k: &str) -> Option<String> {
+    v.get(k).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Build the `ApplicationConfigurationDescription` object from an input
+/// `ApplicationConfiguration`, assigning ids to inputs/outputs/reference data
+/// sources/VPC configurations. Only members present in the input are emitted;
+/// every emitted member matches the output shape exactly.
+fn config_to_description(cfg: &Value, role: Option<&str>, id: &mut u64) -> Value {
+    let mut out = serde_json::Map::new();
+    let mut next = || {
+        *id += 1;
+        id.to_string()
+    };
+
+    if let Some(sql) = cfg.get("SqlApplicationConfiguration") {
+        let mut sqld = serde_json::Map::new();
+        if let Some(inputs) = sql.get("Inputs").and_then(Value::as_array) {
+            let descs: Vec<Value> = inputs
+                .iter()
+                .map(|i| input_desc(i, &mut next, role))
+                .collect();
+            sqld.insert("InputDescriptions".into(), json!(descs));
+        }
+        if let Some(outputs) = sql.get("Outputs").and_then(Value::as_array) {
+            let descs: Vec<Value> = outputs
+                .iter()
+                .map(|o| output_desc(o, &mut next, role))
+                .collect();
+            sqld.insert("OutputDescriptions".into(), json!(descs));
+        }
+        if let Some(refs) = sql.get("ReferenceDataSources").and_then(Value::as_array) {
+            let descs: Vec<Value> = refs
+                .iter()
+                .map(|r| reference_desc(r, &mut next, role))
+                .collect();
+            sqld.insert("ReferenceDataSourceDescriptions".into(), json!(descs));
+        }
+        out.insert(
+            "SqlApplicationConfigurationDescription".into(),
+            Value::Object(sqld),
+        );
+    }
+
+    if let Some(flink) = cfg.get("FlinkApplicationConfiguration") {
+        let mut fd = serde_json::Map::new();
+        if let Some(c) = flink.get("CheckpointConfiguration") {
+            fd.insert("CheckpointConfigurationDescription".into(), c.clone());
+        }
+        if let Some(c) = flink.get("MonitoringConfiguration") {
+            fd.insert("MonitoringConfigurationDescription".into(), c.clone());
+        }
+        if let Some(c) = flink.get("ParallelismConfiguration") {
+            fd.insert("ParallelismConfigurationDescription".into(), c.clone());
+        }
+        out.insert(
+            "FlinkApplicationConfigurationDescription".into(),
+            Value::Object(fd),
+        );
+    }
+
+    if let Some(env) = cfg.get("EnvironmentProperties") {
+        if let Some(pg) = env.get("PropertyGroups") {
+            out.insert(
+                "EnvironmentPropertyDescriptions".into(),
+                json!({ "PropertyGroupDescriptions": pg.clone() }),
+            );
+        }
+    }
+
+    if let Some(code) = cfg.get("ApplicationCodeConfiguration") {
+        let mut cd = serde_json::Map::new();
+        if let Some(t) = str_of(code, "CodeContentType") {
+            cd.insert("CodeContentType".into(), json!(t));
+        } else {
+            cd.insert("CodeContentType".into(), json!("ZIPFILE"));
+        }
+        if let Some(cc) = code.get("CodeContent") {
+            let mut ccd = serde_json::Map::new();
+            if let Some(t) = str_of(cc, "TextContent") {
+                ccd.insert("TextContent".into(), json!(t));
+            }
+            if let Some(s3) = cc.get("S3ContentLocation") {
+                ccd.insert(
+                    "S3ApplicationCodeLocationDescription".into(),
+                    s3_code_location(s3),
+                );
+            }
+            cd.insert("CodeContentDescription".into(), Value::Object(ccd));
+        }
+        out.insert(
+            "ApplicationCodeConfigurationDescription".into(),
+            Value::Object(cd),
+        );
+    }
+
+    if let Some(snap) = cfg.get("ApplicationSnapshotConfiguration") {
+        let enabled = snap
+            .get("SnapshotsEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        out.insert(
+            "ApplicationSnapshotConfigurationDescription".into(),
+            json!({ "SnapshotsEnabled": enabled }),
+        );
+    }
+
+    if let Some(rb) = cfg.get("ApplicationSystemRollbackConfiguration") {
+        let enabled = rb
+            .get("RollbackEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        out.insert(
+            "ApplicationSystemRollbackConfigurationDescription".into(),
+            json!({ "RollbackEnabled": enabled }),
+        );
+    }
+
+    if let Some(vpcs) = cfg.get("VpcConfigurations").and_then(Value::as_array) {
+        let descs: Vec<Value> = vpcs.iter().map(|v| vpc_desc(v, &mut next)).collect();
+        out.insert("VpcConfigurationDescriptions".into(), json!(descs));
+    }
+
+    if let Some(z) = cfg.get("ZeppelinApplicationConfiguration") {
+        let mut zd = serde_json::Map::new();
+        let log_level = z
+            .get("MonitoringConfiguration")
+            .and_then(|m| str_of(m, "LogLevel"))
+            .unwrap_or_else(|| "INFO".to_string());
+        zd.insert(
+            "MonitoringConfigurationDescription".into(),
+            json!({ "LogLevel": log_level }),
+        );
+        out.insert(
+            "ZeppelinApplicationConfigurationDescription".into(),
+            Value::Object(zd),
+        );
+    }
+
+    if let Some(enc) = cfg.get("ApplicationEncryptionConfiguration") {
+        let mut ed = serde_json::Map::new();
+        if let Some(k) = str_of(enc, "KeyId") {
+            ed.insert("KeyId".into(), json!(k));
+        }
+        ed.insert(
+            "KeyType".into(),
+            json!(str_of(enc, "KeyType").unwrap_or_else(|| "AWS_OWNED_KEY".to_string())),
+        );
+        out.insert(
+            "ApplicationEncryptionConfigurationDescription".into(),
+            Value::Object(ed),
+        );
+    }
+
+    Value::Object(out)
+}
+
+fn s3_code_location(s3: &Value) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "BucketARN".into(),
+        json!(str_of(s3, "BucketARN").unwrap_or_default()),
+    );
+    m.insert(
+        "FileKey".into(),
+        json!(str_of(s3, "FileKey").unwrap_or_default()),
+    );
+    if let Some(v) = str_of(s3, "ObjectVersion") {
+        m.insert("ObjectVersion".into(), json!(v));
+    }
+    Value::Object(m)
+}
+
+fn input_desc(input: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+    let mut d = serde_json::Map::new();
+    d.insert("InputId".into(), json!(next()));
+    if let Some(np) = str_of(input, "NamePrefix") {
+        d.insert("InAppStreamNames".into(), json!([format!("{np}_001")]));
+        d.insert("NamePrefix".into(), json!(np));
+    }
+    if let Some(ipc) = input.get("InputProcessingConfiguration") {
+        if let Some(lp) = ipc.get("InputLambdaProcessor") {
+            d.insert(
+                "InputProcessingConfigurationDescription".into(),
+                json!({
+                    "InputLambdaProcessorDescription": resource_role_desc(lp, role)
+                }),
+            );
+        }
+    }
+    if let Some(k) = input.get("KinesisStreamsInput") {
+        d.insert(
+            "KinesisStreamsInputDescription".into(),
+            resource_role_desc(k, role),
+        );
+    }
+    if let Some(k) = input.get("KinesisFirehoseInput") {
+        d.insert(
+            "KinesisFirehoseInputDescription".into(),
+            resource_role_desc(k, role),
+        );
+    }
+    if let Some(p) = input.get("InputParallelism") {
+        d.insert("InputParallelism".into(), p.clone());
+    }
+    if let Some(s) = input.get("InputSchema") {
+        d.insert("InputSchema".into(), s.clone());
+    }
+    Value::Object(d)
+}
+
+fn output_desc(output: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+    let mut d = serde_json::Map::new();
+    d.insert("OutputId".into(), json!(next()));
+    if let Some(n) = str_of(output, "Name") {
+        d.insert("Name".into(), json!(n));
+    }
+    if let Some(k) = output.get("KinesisStreamsOutput") {
+        d.insert(
+            "KinesisStreamsOutputDescription".into(),
+            resource_role_desc(k, role),
+        );
+    }
+    if let Some(k) = output.get("KinesisFirehoseOutput") {
+        d.insert(
+            "KinesisFirehoseOutputDescription".into(),
+            resource_role_desc(k, role),
+        );
+    }
+    if let Some(k) = output.get("LambdaOutput") {
+        d.insert(
+            "LambdaOutputDescription".into(),
+            resource_role_desc(k, role),
+        );
+    }
+    if let Some(ds) = output.get("DestinationSchema") {
+        d.insert("DestinationSchema".into(), ds.clone());
+    }
+    Value::Object(d)
+}
+
+fn reference_desc(r: &Value, next: &mut impl FnMut() -> String, role: Option<&str>) -> Value {
+    let mut d = serde_json::Map::new();
+    d.insert("ReferenceId".into(), json!(next()));
+    d.insert(
+        "TableName".into(),
+        json!(str_of(r, "TableName").unwrap_or_default()),
+    );
+    let s3 = r.get("S3ReferenceDataSource");
+    let mut s3d = serde_json::Map::new();
+    s3d.insert(
+        "BucketARN".into(),
+        json!(s3.and_then(|v| str_of(v, "BucketARN")).unwrap_or_default()),
+    );
+    s3d.insert(
+        "FileKey".into(),
+        json!(s3.and_then(|v| str_of(v, "FileKey")).unwrap_or_default()),
+    );
+    if let Some(r) = role {
+        s3d.insert("ReferenceRoleARN".into(), json!(r));
+    }
+    d.insert(
+        "S3ReferenceDataSourceDescription".into(),
+        Value::Object(s3d),
+    );
+    if let Some(s) = r.get("ReferenceSchema") {
+        d.insert("ReferenceSchema".into(), s.clone());
+    }
+    Value::Object(d)
+}
+
+fn resource_role_desc(v: &Value, role: Option<&str>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "ResourceARN".into(),
+        json!(str_of(v, "ResourceARN").unwrap_or_default()),
+    );
+    if let Some(r) = role {
+        m.insert("RoleARN".into(), json!(r));
+    }
+    Value::Object(m)
+}
+
+fn vpc_desc(v: &Value, next: &mut impl FnMut() -> String) -> Value {
+    let subnets = v.get("SubnetIds").cloned().unwrap_or_else(|| json!([]));
+    let sgs = v
+        .get("SecurityGroupIds")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    json!({
+        "VpcConfigurationId": next(),
+        "VpcId": "vpc-0a1b2c3d4e5f6a7b8",
+        "SubnetIds": subnets,
+        "SecurityGroupIds": sgs,
+    })
+}
+
+fn cloudwatch_desc(opt: &Value, id: &str, role: Option<&str>) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("CloudWatchLoggingOptionId".into(), json!(id));
+    m.insert(
+        "LogStreamARN".into(),
+        json!(str_of(opt, "LogStreamARN").unwrap_or_default()),
+    );
+    if let Some(r) = role {
+        m.insert("RoleARN".into(), json!(r));
+    }
+    Value::Object(m)
+}
+
+// ===== version + operation recording =====
+
+fn record_version(app: &mut Application) {
+    let detail = build_application_detail(app);
+    app.versions.insert(
+        app.version_id,
+        VersionRecord {
+            version_id: app.version_id,
+            status: app.status.clone(),
+            create_timestamp: Utc::now(),
+            detail,
+        },
+    );
+}
+
+fn record_operation(
+    app: &mut Application,
+    operation: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> String {
+    let now = Utc::now();
+    let id = Uuid::new_v4().simple().to_string();
+    app.operations.push(OperationRecord {
+        operation_id: id.clone(),
+        operation: operation.to_string(),
+        start_time: now,
+        end_time: now,
+        status: "SUCCESSFUL".to_string(),
+        version_from: from,
+        version_to: to,
+    });
+    id
+}
+
+/// Bump the application version for a config-changing operation, refresh the
+/// conditional token, and record the new version snapshot.
+fn bump_version(app: &mut Application) {
+    let from = app.version_id;
+    app.version_id += 1;
+    app.version_updated_from = Some(from);
+    app.version_rolled_back_from = None;
+    app.version_rolled_back_to = None;
+    app.conditional_token = new_token();
+    app.last_update_timestamp = Utc::now();
+    record_version(app);
+}
+
+/// Optimistic-concurrency check for `CurrentApplicationVersionId` /
+/// `ConditionalToken`. Only enforced when the caller supplied one.
+fn check_concurrency(app: &Application, b: &Value) -> Result<(), AwsServiceError> {
+    if let Some(v) = b.get("CurrentApplicationVersionId").and_then(Value::as_i64) {
+        if v != app.version_id {
+            return Err(fault(
+                "ConcurrentModificationException",
+                &format!(
+                    "The current application version id is {}, not {v}.",
+                    app.version_id
+                ),
+            ));
+        }
+    }
+    if let Some(t) = b.get("ConditionalToken").and_then(Value::as_str) {
+        if !t.is_empty() && t != app.conditional_token {
+            return Err(fault(
+                "ConcurrentModificationException",
+                "The supplied ConditionalToken does not match the current application state.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ===== handlers =====
+
+impl Ka2Service {
+    fn create_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let description = opt_str_len(&b, "ApplicationDescription", 0, 1024, ec)?;
+        let runtime = enum_field(&b, "RuntimeEnvironment", RUNTIME_ENVIRONMENTS, true, ec)?
+            .ok_or_else(|| fault(ec, "RuntimeEnvironment is required."))?;
+        let role = req_str_len(&b, "ServiceExecutionRole", 1, 2048, ec)?;
+        let mode = enum_field(&b, "ApplicationMode", APPLICATION_MODES, false, ec)?;
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if st.applications.contains_key(&name) {
+            return Err(fault(
+                "ResourceInUseException",
+                &format!("Application {name} already exists."),
+            ));
+        }
+        let now = Utc::now();
+        let application_arn = arn(&req.region, &req.account_id, &name);
+        let mut id_counter = 0u64;
+        let config_description = match b.get("ApplicationConfiguration") {
+            Some(cfg) if cfg.is_object() => {
+                config_to_description(cfg, Some(&role), &mut id_counter)
+            }
+            _ => Value::Object(serde_json::Map::new()),
+        };
+        let cloudwatch: Vec<Value> = b
+            .get("CloudWatchLoggingOptions")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|o| {
+                        id_counter += 1;
+                        cloudwatch_desc(o, &id_counter.to_string(), Some(&role))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut app = Application {
+            name: name.clone(),
+            arn: application_arn.clone(),
+            description,
+            runtime_environment: runtime,
+            service_execution_role: Some(role),
+            application_mode: mode,
+            status: "READY".to_string(),
+            version_id: 1,
+            create_timestamp: now,
+            last_update_timestamp: now,
+            conditional_token: new_token(),
+            config_description,
+            cloudwatch_logging_options: cloudwatch,
+            maintenance_start: DEFAULT_MAINTENANCE_START.to_string(),
+            maintenance_end: DEFAULT_MAINTENANCE_END.to_string(),
+            snapshots: BTreeMap::new(),
+            operations: Vec::new(),
+            versions: BTreeMap::new(),
+            id_counter,
+            version_updated_from: None,
+            version_rolled_back_from: None,
+            version_rolled_back_to: None,
+        };
+        record_version(&mut app);
+        let detail = build_application_detail(&app);
+
+        let tags = parse_tags(&b);
+        if !tags.is_empty() {
+            st.tags.insert(application_arn.clone(), tags);
+        }
+        st.applications.insert(name, app);
+
+        ok(json!({ "ApplicationDetail": detail }))
+    }
+
+    fn describe_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        let settled = settle_status(&app.status);
+        if settled != app.status {
+            app.status = settled.to_string();
+        }
+        let detail = build_application_detail(app);
+        ok(json!({ "ApplicationDetail": detail }))
+    }
+
+    fn update_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, false, ec)?;
+        opt_str_len(&b, "ConditionalToken", 1, 512, ec)?;
+        let runtime_update = enum_field(
+            &b,
+            "RuntimeEnvironmentUpdate",
+            RUNTIME_ENVIRONMENTS,
+            false,
+            ec,
+        )?;
+        let role_update = opt_str_len(&b, "ServiceExecutionRoleUpdate", 1, 2048, ec)?;
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        check_concurrency(app, &b)?;
+
+        if let Some(r) = runtime_update {
+            app.runtime_environment = r;
+        }
+        if let Some(r) = role_update {
+            app.service_execution_role = Some(r);
+        }
+        if let Some(cfg) = b.get("ApplicationConfigurationUpdate") {
+            if cfg.is_object() {
+                let role = app.service_execution_role.clone();
+                let mut id = app.id_counter;
+                let new_desc = config_to_description(cfg, role.as_deref(), &mut id);
+                app.id_counter = id;
+                merge_config_description(&mut app.config_description, new_desc);
+            }
+        }
+        if let Some(updates) = b
+            .get("CloudWatchLoggingOptionUpdates")
+            .and_then(Value::as_array)
+        {
+            let role = app.service_execution_role.clone();
+            for u in updates {
+                if let Some(oid) = str_of(u, "CloudWatchLoggingOptionId") {
+                    for opt in app.cloudwatch_logging_options.iter_mut() {
+                        if opt.get("CloudWatchLoggingOptionId").and_then(Value::as_str)
+                            == Some(oid.as_str())
+                        {
+                            if let Some(ls) = str_of(u, "LogStreamARNUpdate") {
+                                opt.as_object_mut()
+                                    .unwrap()
+                                    .insert("LogStreamARN".into(), json!(ls));
+                            }
+                            if let Some(r) = &role {
+                                opt.as_object_mut()
+                                    .unwrap()
+                                    .insert("RoleARN".into(), json!(r));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let from = app.version_id;
+        if app.status == "RUNNING" {
+            app.status = "UPDATING".to_string();
+        }
+        bump_version(app);
+        let op_id = record_operation(app, "UpdateApplication", Some(from), Some(app.version_id));
+        let detail = build_application_detail(app);
+        ok(json!({ "ApplicationDetail": detail, "OperationId": op_id }))
+    }
+
+    fn delete_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        if b.get("CreateTimestamp").is_none() {
+            return Err(fault(ec, "CreateTimestamp is required."));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .remove(&name)
+            .ok_or_else(|| not_found(&name))?;
+        st.tags.remove(&app.arn);
+        ok_empty()
+    }
+
+    fn list_applications(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidRequestException";
+        int_range(&b, "Limit", 1, 50, false, ec)?;
+        // NextToken is typed `ApplicationName` (len 1..=128) in this op.
+        opt_str_len(&b, "NextToken", 1, 128, ec)?;
+        let accounts = self.state.read();
+        let summaries: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|st| st.applications.values().map(application_summary).collect())
+            .unwrap_or_default();
+        // This op paginates by application name in the token; emulate with a
+        // numeric offset for determinism.
+        let start = b
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .and_then(|t| t.parse::<usize>().ok())
+            .unwrap_or(0);
+        let max = limit(&b, 50);
+        let total = summaries.len();
+        let end = start.saturating_add(max).min(total);
+        let page = if start < total {
+            summaries[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let mut out = json!({ "ApplicationSummaries": page });
+        if end < total {
+            out.as_object_mut()
+                .unwrap()
+                .insert("NextToken".into(), json!(end.to_string()));
+        }
+        ok(out)
+    }
+
+    fn start_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if let Some(rc) = b.get("RunConfiguration") {
+            apply_run_configuration(app, rc);
+        }
+        app.status = "STARTING".to_string();
+        let op_id = record_operation(app, "StartApplication", None, None);
+        ok(json!({ "OperationId": op_id }))
+    }
+
+    fn stop_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let force = b.get("Force").and_then(Value::as_bool).unwrap_or(false);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        app.status = if force {
+            "FORCE_STOPPING".to_string()
+        } else {
+            "STOPPING".to_string()
+        };
+        let op_id = record_operation(app, "StopApplication", None, None);
+        ok(json!({ "OperationId": op_id }))
+    }
+
+    fn rollback_application(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let current = int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?
+            .ok_or_else(|| fault(ec, "CurrentApplicationVersionId is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if current != app.version_id {
+            return Err(fault(
+                "ConcurrentModificationException",
+                &format!(
+                    "The current application version id is {}, not {current}.",
+                    app.version_id
+                ),
+            ));
+        }
+        let target = app.version_id.saturating_sub(1).max(1);
+        // Restore the target version's configuration into a new version.
+        if let Some(prev) = app.versions.get(&target).cloned() {
+            if let Some(cfg) = prev
+                .detail
+                .get("ApplicationConfigurationDescription")
+                .cloned()
+            {
+                app.config_description = cfg;
+            }
+        }
+        let from = app.version_id;
+        app.version_id += 1;
+        app.conditional_token = new_token();
+        app.last_update_timestamp = Utc::now();
+        app.version_rolled_back_from = Some(from);
+        app.version_rolled_back_to = Some(target);
+        app.version_updated_from = Some(from);
+        app.status = "READY".to_string();
+        record_version(app);
+        let op_id = record_operation(app, "RollbackApplication", Some(from), Some(app.version_id));
+        let detail = build_application_detail(app);
+        ok(json!({ "ApplicationDetail": detail, "OperationId": op_id }))
+    }
+
+    fn create_application_snapshot(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let snap_name = req_str_len(&b, "SnapshotName", 1, 256, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if app.snapshots.contains_key(&snap_name) {
+            return Err(fault(
+                "ResourceInUseException",
+                &format!("Snapshot {snap_name} already exists."),
+            ));
+        }
+        app.snapshots.insert(
+            snap_name.clone(),
+            Snapshot {
+                name: snap_name,
+                status: "READY".to_string(),
+                application_version_id: app.version_id,
+                create_timestamp: Utc::now(),
+                runtime_environment: app.runtime_environment.clone(),
+            },
+        );
+        ok_empty()
+    }
+
+    fn delete_application_snapshot(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let snap_name = req_str_len(&b, "SnapshotName", 1, 256, ec)?;
+        if b.get("SnapshotCreationTimestamp").is_none() {
+            return Err(fault(ec, "SnapshotCreationTimestamp is required."));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if app.snapshots.remove(&snap_name).is_none() {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Snapshot {snap_name} not found."),
+            ));
+        }
+        ok_empty()
+    }
+
+    fn describe_application_snapshot(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let snap_name = req_str_len(&b, "SnapshotName", 1, 256, ec)?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        let snap = app.snapshots.get(&snap_name).ok_or_else(|| {
+            fault(
+                "ResourceNotFoundException",
+                &format!("Snapshot {snap_name} not found."),
+            )
+        })?;
+        ok(json!({ "SnapshotDetails": snapshot_details(snap) }))
+    }
+
+    fn list_application_snapshots(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "Limit", 1, 50, false, ec)?;
+        opt_str_len(&b, "NextToken", 1, 512, ec)?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name));
+        let items: Vec<Value> = app
+            .map(|a| a.snapshots.values().map(snapshot_details).collect())
+            .unwrap_or_default();
+        let (page, next) = paginate(items, &b, 50);
+        let mut out = json!({ "SnapshotSummaries": page });
+        if let Some(n) = next {
+            out.as_object_mut()
+                .unwrap()
+                .insert("NextToken".into(), json!(n));
+        }
+        ok(out)
+    }
+
+    fn describe_application_version(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let version = int_range(&b, "ApplicationVersionId", 1, 999_999_999, true, ec)?
+            .ok_or_else(|| fault(ec, "ApplicationVersionId is required."))?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        match app.versions.get(&version) {
+            Some(v) => ok(json!({ "ApplicationVersionDetail": v.detail })),
+            None => ok(json!({})),
+        }
+    }
+
+    fn list_application_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "Limit", 1, 50, false, ec)?;
+        opt_str_len(&b, "NextToken", 1, 512, ec)?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        let items: Vec<Value> = app
+            .versions
+            .values()
+            .map(|v| json!({ "ApplicationVersionId": v.version_id, "ApplicationStatus": v.status }))
+            .collect();
+        let (page, next) = paginate(items, &b, 50);
+        let mut out = json!({ "ApplicationVersionSummaries": page });
+        if let Some(n) = next {
+            out.as_object_mut()
+                .unwrap()
+                .insert("NextToken".into(), json!(n));
+        }
+        ok(out)
+    }
+
+    fn describe_application_operation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let op_id = req_str_len(&b, "OperationId", 1, 64, ec)?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        let op = app
+            .operations
+            .iter()
+            .find(|o| o.operation_id == op_id)
+            .ok_or_else(|| {
+                fault(
+                    "ResourceNotFoundException",
+                    &format!("Operation {op_id} not found."),
+                )
+            })?;
+        let mut details = json!({
+            "Operation": op.operation,
+            "StartTime": ts(op.start_time),
+            "EndTime": ts(op.end_time),
+            "OperationStatus": op.status,
+        });
+        if let (Some(from), Some(to)) = (op.version_from, op.version_to) {
+            details.as_object_mut().unwrap().insert(
+                "ApplicationVersionChangeDetails".into(),
+                json!({
+                    "ApplicationVersionUpdatedFrom": from,
+                    "ApplicationVersionUpdatedTo": to,
+                }),
+            );
+        }
+        ok(json!({ "ApplicationOperationInfoDetails": details }))
+    }
+
+    fn list_application_operations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "Limit", 1, 50, false, ec)?;
+        opt_str_len(&b, "NextToken", 1, 512, ec)?;
+        opt_str_len(&b, "Operation", 1, 64, ec)?;
+        enum_field(&b, "OperationStatus", OPERATION_STATUSES, false, ec)?;
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        let op_filter = b.get("Operation").and_then(Value::as_str);
+        let status_filter = b.get("OperationStatus").and_then(Value::as_str);
+        let items: Vec<Value> = app
+            .operations
+            .iter()
+            .filter(|o| op_filter.is_none_or(|f| o.operation == f))
+            .filter(|o| status_filter.is_none_or(|f| o.status == f))
+            .map(operation_info)
+            .collect();
+        let (page, next) = paginate(items, &b, 50);
+        let mut out = json!({ "ApplicationOperationInfoList": page });
+        if let Some(n) = next {
+            out.as_object_mut()
+                .unwrap()
+                .insert("NextToken".into(), json!(n));
+        }
+        ok(out)
+    }
+
+    fn add_cloudwatch_logging_option(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, false, ec)?;
+        opt_str_len(&b, "ConditionalToken", 1, 512, ec)?;
+        let opt = b
+            .get("CloudWatchLoggingOption")
+            .cloned()
+            .ok_or_else(|| fault(ec, "CloudWatchLoggingOption is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        check_concurrency(app, &b)?;
+        let id = app.next_id();
+        let role = app.service_execution_role.clone();
+        app.cloudwatch_logging_options
+            .push(cloudwatch_desc(&opt, &id, role.as_deref()));
+        bump_version(app);
+        let op_id = record_operation(
+            app,
+            "UpdateApplication",
+            app.version_updated_from,
+            Some(app.version_id),
+        );
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "CloudWatchLoggingOptionDescriptions": app.cloudwatch_logging_options,
+            "OperationId": op_id,
+        }))
+    }
+
+    fn delete_cloudwatch_logging_option(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, false, ec)?;
+        let opt_id = req_str_len(&b, "CloudWatchLoggingOptionId", 1, 50, ec)?;
+        opt_str_len(&b, "ConditionalToken", 1, 512, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        check_concurrency(app, &b)?;
+        app.cloudwatch_logging_options.retain(|o| {
+            o.get("CloudWatchLoggingOptionId").and_then(Value::as_str) != Some(opt_id.as_str())
+        });
+        bump_version(app);
+        let op_id = record_operation(
+            app,
+            "UpdateApplication",
+            app.version_updated_from,
+            Some(app.version_id),
+        );
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "CloudWatchLoggingOptionDescriptions": app.cloudwatch_logging_options,
+            "OperationId": op_id,
+        }))
+    }
+
+    fn add_vpc_configuration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, false, ec)?;
+        opt_str_len(&b, "ConditionalToken", 1, 512, ec)?;
+        let vpc = b
+            .get("VpcConfiguration")
+            .cloned()
+            .ok_or_else(|| fault(ec, "VpcConfiguration is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        check_concurrency(app, &b)?;
+        let id = app.next_id();
+        let desc = vpc_desc(&vpc, &mut || id.clone());
+        config_array_push(
+            &mut app.config_description,
+            "VpcConfigurationDescriptions",
+            desc.clone(),
+        );
+        bump_version(app);
+        let op_id = record_operation(
+            app,
+            "UpdateApplication",
+            app.version_updated_from,
+            Some(app.version_id),
+        );
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "VpcConfigurationDescription": desc,
+            "OperationId": op_id,
+        }))
+    }
+
+    fn delete_vpc_configuration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, false, ec)?;
+        let vpc_id = req_str_len(&b, "VpcConfigurationId", 1, 50, ec)?;
+        opt_str_len(&b, "ConditionalToken", 1, 512, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        check_concurrency(app, &b)?;
+        config_array_retain(
+            &mut app.config_description,
+            "VpcConfigurationDescriptions",
+            "VpcConfigurationId",
+            &vpc_id,
+        );
+        bump_version(app);
+        let op_id = record_operation(
+            app,
+            "UpdateApplication",
+            app.version_updated_from,
+            Some(app.version_id),
+        );
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "OperationId": op_id,
+        }))
+    }
+
+    fn add_input(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let input = b
+            .get("Input")
+            .cloned()
+            .ok_or_else(|| fault(ec, "Input is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        let id = app.next_id();
+        let role = app.service_execution_role.clone();
+        let desc = input_desc(&input, &mut || id.clone(), role.as_deref());
+        sql_array_push(&mut app.config_description, "InputDescriptions", desc);
+        bump_version(app);
+        let descs = sql_array_get(&app.config_description, "InputDescriptions");
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "InputDescriptions": descs,
+        }))
+    }
+
+    fn add_input_processing_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let input_id = req_str_len(&b, "InputId", 1, 50, ec)?;
+        let ipc = b
+            .get("InputProcessingConfiguration")
+            .cloned()
+            .ok_or_else(|| fault(ec, "InputProcessingConfiguration is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        let role = app.service_execution_role.clone();
+        let ipcd = ipc
+            .get("InputLambdaProcessor")
+            .map(|lp| json!({ "InputLambdaProcessorDescription": resource_role_desc(lp, role.as_deref()) }))
+            .unwrap_or_else(|| json!({}));
+        let mut found = false;
+        if let Some(list) = sql_array_mut(&mut app.config_description, "InputDescriptions") {
+            for i in list.iter_mut() {
+                if i.get("InputId").and_then(Value::as_str) == Some(input_id.as_str()) {
+                    i.as_object_mut().unwrap().insert(
+                        "InputProcessingConfigurationDescription".into(),
+                        ipcd.clone(),
+                    );
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Input {input_id} not found."),
+            ));
+        }
+        bump_version(app);
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "InputId": input_id,
+            "InputProcessingConfigurationDescription": ipcd,
+        }))
+    }
+
+    fn delete_input_processing_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let input_id = req_str_len(&b, "InputId", 1, 50, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if let Some(list) = sql_array_mut(&mut app.config_description, "InputDescriptions") {
+            for i in list.iter_mut() {
+                if i.get("InputId").and_then(Value::as_str) == Some(input_id.as_str()) {
+                    i.as_object_mut()
+                        .unwrap()
+                        .remove("InputProcessingConfigurationDescription");
+                }
+            }
+        }
+        bump_version(app);
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+        }))
+    }
+
+    fn add_output(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let output = b
+            .get("Output")
+            .cloned()
+            .ok_or_else(|| fault(ec, "Output is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        let id = app.next_id();
+        let role = app.service_execution_role.clone();
+        let desc = output_desc(&output, &mut || id.clone(), role.as_deref());
+        sql_array_push(&mut app.config_description, "OutputDescriptions", desc);
+        bump_version(app);
+        let descs = sql_array_get(&app.config_description, "OutputDescriptions");
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "OutputDescriptions": descs,
+        }))
+    }
+
+    fn delete_output(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let output_id = req_str_len(&b, "OutputId", 1, 50, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        sql_array_retain(
+            &mut app.config_description,
+            "OutputDescriptions",
+            "OutputId",
+            &output_id,
+        );
+        bump_version(app);
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+        }))
+    }
+
+    fn add_reference_data_source(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let rds = b
+            .get("ReferenceDataSource")
+            .cloned()
+            .ok_or_else(|| fault(ec, "ReferenceDataSource is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        let id = app.next_id();
+        let role = app.service_execution_role.clone();
+        let desc = reference_desc(&rds, &mut || id.clone(), role.as_deref());
+        sql_array_push(
+            &mut app.config_description,
+            "ReferenceDataSourceDescriptions",
+            desc,
+        );
+        bump_version(app);
+        let descs = sql_array_get(&app.config_description, "ReferenceDataSourceDescriptions");
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+            "ReferenceDataSourceDescriptions": descs,
+        }))
+    }
+
+    fn delete_reference_data_source(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        int_range(&b, "CurrentApplicationVersionId", 1, 999_999_999, true, ec)?;
+        let ref_id = req_str_len(&b, "ReferenceId", 1, 50, ec)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        sql_array_retain(
+            &mut app.config_description,
+            "ReferenceDataSourceDescriptions",
+            "ReferenceId",
+            &ref_id,
+        );
+        bump_version(app);
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationVersionId": app.version_id,
+        }))
+    }
+
+    fn discover_input_schema(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        opt_str_len(&b, "ResourceARN", 1, 2048, ec)?;
+        req_str_len(&b, "ServiceExecutionRole", 1, 2048, ec)?;
+        // Infer a plausible single-column JSON schema, echoing any sample rows
+        // provided via `S3Configuration`/streaming source as raw records.
+        let raw: Vec<Value> = vec![json!("{\"COL1\":\"value\"}")];
+        ok(json!({
+            "InputSchema": {
+                "RecordFormat": {
+                    "RecordFormatType": "JSON",
+                    "MappingParameters": {
+                        "JSONMappingParameters": { "RecordRowPath": "$" }
+                    }
+                },
+                "RecordEncoding": "UTF-8",
+                "RecordColumns": [
+                    { "Name": "COL1", "SqlType": "VARCHAR(16)", "Mapping": "$.COL1" }
+                ]
+            },
+            "RawInputRecords": raw,
+            "ParsedInputRecords": [["value"]],
+            "ProcessedInputRecords": ["{\"COL1\":\"value\"}"],
+        }))
+    }
+
+    fn create_application_presigned_url(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        enum_field(&b, "UrlType", URL_TYPES, true, ec)?;
+        int_range(
+            &b,
+            "SessionExpirationDurationInSeconds",
+            1800,
+            43200,
+            false,
+            ec,
+        )?;
+        let accounts = self.state.read();
+        let _app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&name))
+            .ok_or_else(|| not_found(&name))?;
+        let token = new_token();
+        let url = format!(
+            "https://{}.kinesisanalytics.{}.amazonaws.com/dashboard?authToken={token}",
+            name, req.region
+        );
+        ok(json!({ "AuthorizedUrl": url }))
+    }
+
+    fn update_maintenance_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let name = req_str_len(&b, "ApplicationName", 1, 128, ec)?;
+        let update = b
+            .get("ApplicationMaintenanceConfigurationUpdate")
+            .cloned()
+            .ok_or_else(|| fault(ec, "ApplicationMaintenanceConfigurationUpdate is required."))?;
+        let start = update
+            .get("ApplicationMaintenanceWindowStartTimeUpdate")
+            .and_then(Value::as_str);
+        if let Some(s) = start {
+            check_len(s, "ApplicationMaintenanceWindowStartTimeUpdate", 5, 5, ec)?;
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&name)
+            .ok_or_else(|| not_found(&name))?;
+        if let Some(s) = start {
+            app.maintenance_start = s.to_string();
+            // AWS derives the 8-hour window end from the start time.
+            app.maintenance_end = derive_window_end(s);
+        }
+        ok(json!({
+            "ApplicationARN": app.arn,
+            "ApplicationMaintenanceConfigurationDescription": {
+                "ApplicationMaintenanceWindowStartTime": app.maintenance_start,
+                "ApplicationMaintenanceWindowEndTime": app.maintenance_end,
+            }
+        }))
+    }
+
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let resource_arn = req_str_len(&b, "ResourceARN", 1, 2048, ec)?;
+        let new_tags = parse_tags(&b);
+        if new_tags.is_empty() {
+            return Err(fault(ec, "Tags is required."));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if !application_arn_exists(st, &resource_arn) {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Resource {resource_arn} not found."),
+            ));
+        }
+        let entry = st.tags.entry(resource_arn).or_default();
+        for (k, v) in new_tags {
+            entry.insert(k, v);
+        }
+        if entry.len() > 200 {
+            return Err(fault(
+                "TooManyTagsException",
+                "A resource can have at most 200 tags.",
+            ));
+        }
+        ok_empty()
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let resource_arn = req_str_len(&b, "ResourceARN", 1, 2048, ec)?;
+        let keys: Vec<String> = b
+            .get("TagKeys")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|k| k.as_str().map(str::to_string))
+                    .collect()
+            })
+            .ok_or_else(|| fault(ec, "TagKeys is required."))?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if !application_arn_exists(st, &resource_arn) {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Resource {resource_arn} not found."),
+            ));
+        }
+        if let Some(entry) = st.tags.get_mut(&resource_arn) {
+            for k in keys {
+                entry.remove(&k);
+            }
+        }
+        ok_empty()
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = parse(req)?;
+        let ec = "InvalidArgumentException";
+        let resource_arn = req_str_len(&b, "ResourceARN", 1, 2048, ec)?;
+        let accounts = self.state.read();
+        let st = accounts
+            .get(&req.account_id)
+            .ok_or_else(|| fault("ResourceNotFoundException", "Resource not found."))?;
+        if !application_arn_exists(st, &resource_arn) {
+            return Err(fault(
+                "ResourceNotFoundException",
+                &format!("Resource {resource_arn} not found."),
+            ));
+        }
+        let tags = st.tags.get(&resource_arn).cloned().unwrap_or_default();
+        ok(json!({ "Tags": tags_json(&tags) }))
+    }
+}
+
+// ===== config-description manipulation helpers =====
+
+fn ensure_object(v: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !v.is_object() {
+        *v = Value::Object(serde_json::Map::new());
+    }
+    v.as_object_mut().unwrap()
+}
+
+/// Push an element into a top-level array member of the config description.
+fn config_array_push(cfg: &mut Value, key: &str, item: Value) {
+    let obj = ensure_object(cfg);
+    let arr = obj.entry(key).or_insert_with(|| json!([]));
+    if let Some(a) = arr.as_array_mut() {
+        a.push(item);
+    }
+}
+
+fn config_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
+    if let Some(arr) = cfg.get_mut(key).and_then(Value::as_array_mut) {
+        arr.retain(|e| e.get(id_field).and_then(Value::as_str) != Some(id));
+    }
+}
+
+/// Push into `SqlApplicationConfigurationDescription.<key>`, creating the
+/// nested structure as needed.
+fn sql_array_push(cfg: &mut Value, key: &str, item: Value) {
+    let obj = ensure_object(cfg);
+    let sql = obj
+        .entry("SqlApplicationConfigurationDescription")
+        .or_insert_with(|| json!({}));
+    let sql_obj = ensure_object(sql);
+    let arr = sql_obj.entry(key).or_insert_with(|| json!([]));
+    if let Some(a) = arr.as_array_mut() {
+        a.push(item);
+    }
+}
+
+fn sql_array_retain(cfg: &mut Value, key: &str, id_field: &str, id: &str) {
+    if let Some(arr) = cfg
+        .get_mut("SqlApplicationConfigurationDescription")
+        .and_then(|s| s.get_mut(key))
+        .and_then(Value::as_array_mut)
+    {
+        arr.retain(|e| e.get(id_field).and_then(Value::as_str) != Some(id));
+    }
+}
+
+fn sql_array_mut<'a>(cfg: &'a mut Value, key: &str) -> Option<&'a mut Vec<Value>> {
+    cfg.get_mut("SqlApplicationConfigurationDescription")
+        .and_then(|s| s.get_mut(key))
+        .and_then(Value::as_array_mut)
+}
+
+fn sql_array_get(cfg: &Value, key: &str) -> Value {
+    cfg.get("SqlApplicationConfigurationDescription")
+        .and_then(|s| s.get(key))
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+}
+
+/// Merge a freshly-transformed config description over the existing one,
+/// replacing top-level members that the update supplied.
+fn merge_config_description(existing: &mut Value, update: Value) {
+    let dst = ensure_object(existing);
+    if let Value::Object(src) = update {
+        for (k, v) in src {
+            dst.insert(k, v);
+        }
+    }
+}
+
+fn apply_run_configuration(app: &mut Application, rc: &Value) {
+    let mut run_desc = serde_json::Map::new();
+    if let Some(restore) = rc.get("ApplicationRestoreConfiguration") {
+        run_desc.insert(
+            "ApplicationRestoreConfigurationDescription".into(),
+            restore.clone(),
+        );
+    }
+    if let Some(flink) = rc.get("FlinkRunConfiguration") {
+        run_desc.insert("FlinkRunConfigurationDescription".into(), flink.clone());
+    }
+    if !run_desc.is_empty() {
+        let obj = ensure_object(&mut app.config_description);
+        obj.insert(
+            "RunConfigurationDescription".into(),
+            Value::Object(run_desc),
+        );
+    }
+}
+
+fn derive_window_end(start: &str) -> String {
+    // Parse HH:MM, add 8 hours, wrap at 24h.
+    let parts: Vec<&str> = start.split(':').collect();
+    if parts.len() == 2 {
+        if let (Ok(h), Ok(m)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            let end_h = (h + 8) % 24;
+            return format!("{end_h:02}:{m:02}");
+        }
+    }
+    DEFAULT_MAINTENANCE_END.to_string()
+}
+
+fn application_arn_exists(st: &crate::state::Ka2State, resource_arn: &str) -> bool {
+    st.applications.values().any(|a| a.arn == resource_arn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+
+    fn svc() -> Ka2Service {
+        Ka2Service::new(Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "kinesisanalyticsv2".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "000000000000".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn err_msg(r: Result<AwsResponse, AwsServiceError>) -> String {
+        match r {
+            Ok(_) => panic!("expected error"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn arn_format() {
+        assert_eq!(
+            arn("us-east-1", "123456789012", "app1"),
+            "arn:aws:kinesisanalytics:us-east-1:123456789012:application/app1"
+        );
+    }
+
+    #[test]
+    fn create_describe_roundtrip() {
+        let s = svc();
+        let resp = s
+            .create_application(&req(
+                "CreateApplication",
+                json!({
+                    "ApplicationName": "app1",
+                    "RuntimeEnvironment": "FLINK_1_20",
+                    "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
+                    "ApplicationDescription": "hello"
+                }),
+            ))
+            .unwrap();
+        let v = body_of(resp);
+        let d = &v["ApplicationDetail"];
+        assert_eq!(d["ApplicationStatus"], "READY");
+        assert_eq!(d["ApplicationVersionId"], 1);
+        assert_eq!(d["ApplicationDescription"], "hello");
+
+        // Duplicate -> ResourceInUseException
+        let err = err_msg(s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "FLINK_1_20",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+            }),
+        )));
+        assert!(err.contains("ResourceInUseException"));
+    }
+
+    #[test]
+    fn lifecycle_settles() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "FLINK_1_20",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+            }),
+        ))
+        .unwrap();
+        s.start_application(&req("StartApplication", json!({"ApplicationName":"app1"})))
+            .unwrap();
+        let v = body_of(
+            s.describe_application(&req(
+                "DescribeApplication",
+                json!({"ApplicationName":"app1"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "RUNNING");
+        s.stop_application(&req("StopApplication", json!({"ApplicationName":"app1"})))
+            .unwrap();
+        let v = body_of(
+            s.describe_application(&req(
+                "DescribeApplication",
+                json!({"ApplicationName":"app1"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "READY");
+    }
+
+    #[test]
+    fn version_bumps_on_update() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "FLINK_1_20",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+            }),
+        ))
+        .unwrap();
+        let v = body_of(
+            s.update_application(&req(
+                "UpdateApplication",
+                json!({"ApplicationName":"app1","ServiceExecutionRoleUpdate":"arn:aws:iam::000000000000:role/r2"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(v["ApplicationDetail"]["ApplicationVersionId"], 2);
+    }
+
+    #[test]
+    fn invalid_runtime_rejected() {
+        let s = svc();
+        let err = err_msg(s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "__INVALID_ENUM_VALUE__",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+            }),
+        )));
+        assert!(err.contains("InvalidArgumentException"));
+    }
+
+    #[test]
+    fn snapshot_lifecycle() {
+        let s = svc();
+        s.create_application(&req(
+            "CreateApplication",
+            json!({
+                "ApplicationName": "app1",
+                "RuntimeEnvironment": "FLINK_1_20",
+                "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+            }),
+        ))
+        .unwrap();
+        s.create_application_snapshot(&req(
+            "CreateApplicationSnapshot",
+            json!({"ApplicationName":"app1","SnapshotName":"s1"}),
+        ))
+        .unwrap();
+        let v = body_of(
+            s.describe_application_snapshot(&req(
+                "DescribeApplicationSnapshot",
+                json!({"ApplicationName":"app1","SnapshotName":"s1"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(v["SnapshotDetails"]["SnapshotStatus"], "READY");
+    }
+
+    #[test]
+    fn pagination_lists_applications() {
+        let s = svc();
+        for i in 0..3 {
+            s.create_application(&req(
+                "CreateApplication",
+                json!({
+                    "ApplicationName": format!("app{i}"),
+                    "RuntimeEnvironment": "FLINK_1_20",
+                    "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r"
+                }),
+            ))
+            .unwrap();
+        }
+        let v = body_of(
+            s.list_applications(&req("ListApplications", json!({"Limit":2})))
+                .unwrap(),
+        );
+        assert_eq!(v["ApplicationSummaries"].as_array().unwrap().len(), 2);
+        assert!(v.get("NextToken").is_some());
+    }
+}

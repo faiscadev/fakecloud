@@ -201,6 +201,7 @@ jobs:
           publish fakecloud-elasticache
           publish fakecloud-elasticbeanstalk # only core/persistence/aws deps
           publish fakecloud-memorydb         # only core/persistence/aws deps
+          publish fakecloud-kinesisanalyticsv2 # only core/persistence/aws deps
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
           publish fakecloud-mq               # only core/persistence/aws deps

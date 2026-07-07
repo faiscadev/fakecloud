@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 5,664 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 5,697 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 5,664 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 5,697 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
 - **Total Operations**: 4,220
-- **Conformance Engine**: 189,392 Smithy-based test variants
+- **Conformance Engine**: 190,624 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -32,6 +32,7 @@ fakecloud provides 100% API conformance across 5,664 operations. Unlike mocks, f
 - **Aurora DSQL**: 16 operations. Serverless distributed PostgreSQL control plane. Cluster lifecycle (`CreateCluster`/`GetCluster`/`UpdateCluster`/`DeleteCluster`/`ListClusters`) with async `CREATING`->`ACTIVE` transitions, cluster resource policies, change streams to Kinesis (`CreateStream`/`GetStream`/`DeleteStream`/`ListStreams`), `GetVpcEndpointServiceName`, and tagging. Data plane (reachable container + IAM-token auth) is a follow-up.
 - **ElastiCache**: 75 operations. Real Redis, Valkey, and Memcached via Docker.
 - **MemoryDB**: 45 operations. Full control plane for Redis/Valkey clusters, shards, ACLs, users, parameter and subnet groups, snapshots, and multi-region clusters, with persistence. Redis/Valkey data-plane container backing is a follow-up.
+- **Amazon Managed Service for Apache Flink**: 33 operations. Full `kinesisanalyticsv2` (formerly Kinesis Data Analytics v2) control plane for SQL and Flink streaming applications, with their full configuration persisted and echoed, lifecycle (`STARTING` -> `RUNNING`, `STOPPING` -> `READY`, rollback), version history with optimistic concurrency, snapshots, async operation records, schema discovery, presigned dashboard URLs, maintenance windows, and tagging, with persistence. The real Flink-job data plane (a running container) is a follow-up.
 - **EKS**: 65 operations (complete). Full Elastic Kubernetes Service control plane: clusters (incl. connected-cluster register/deregister), managed node groups, Fargate profiles, add-ons, access entries + access policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, and EKS Anywhere subscriptions (create/describe/list/delete, config + version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging), with persistence. Resources transition `CREATING` -> `ACTIVE` on describe. No real Kubernetes control-plane endpoint (models the AWS management API, not `kubectl`).
 - **Amazon EFS**: 31 operations (complete). Full Elastic File System control plane: file systems (async `creating` -> `available` on describe, `CreationToken` idempotency, size breakdown, performance/throughput modes, encryption, replication-overwrite protection), mount targets (one per Availability Zone per file system, with the AZ / VPC / network interface / IP resolved from the real referenced subnet), access points (POSIX user + root directory), lifecycle configuration, backup policy, file-system resource policy, replication configurations, resource tagging (resource-id API + the deprecated per-file-system tags API), and account preferences, with persistence (in-flight lifecycle transitions reconcile on restart). No real NFS data plane (models the AWS management API).
 - **Amazon MQ**: 25 operations (complete). Full Amazon MQ control plane: brokers (async `CREATION_IN_PROGRESS` -> `RUNNING` on describe, `REBOOT_IN_PROGRESS` reboot that applies staged pending changes, `DELETION_IN_PROGRESS` teardown, `creatorRequestId` idempotency, per-engine wire endpoints and console URLs for ActiveMQ and RabbitMQ, deployment-mode-aware `brokerInstances`), configurations (`c-` ids, base64 `Data` revisions with history, engine type, authentication strategy), per-broker users (console access, groups, `CREATE`/`UPDATE`/`DELETE` pending-change staging applied on reboot), ARN-keyed tagging, and the engine-type / instance-option catalogues, with persistence (in-flight broker transitions reconcile on restart). `b-`/`c-` ids and `arn:aws:mq:...:broker:<name>:<id>` / `:configuration:<id>` ARNs match AWS. No real message broker is served (models the AWS management API, not the AMQP/OpenWire data plane).

@@ -65,6 +65,7 @@ SERVICES=(
     "elasticache|ElastiCache|elasticache"
     "elasticbeanstalk|Elastic Beanstalk|elasticbeanstalk"
     "memorydb|MemoryDB|memorydb"
+    "kinesisanalyticsv2|Amazon Managed Service for Apache Flink|kinesisanalyticsv2"
     "eks|EKS|eks"
     "efs|Amazon EFS|efs"
     "mq|Amazon MQ|mq"

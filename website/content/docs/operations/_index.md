@@ -2141,6 +2141,42 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateSubnetGroup`
 - `UpdateUser`
 
+## [Amazon Managed Service for Apache Flink](@/docs/services/kinesisanalyticsv2.md)
+
+- `AddApplicationCloudWatchLoggingOption`
+- `AddApplicationInput`
+- `AddApplicationInputProcessingConfiguration`
+- `AddApplicationOutput`
+- `AddApplicationReferenceDataSource`
+- `AddApplicationVpcConfiguration`
+- `CreateApplication`
+- `CreateApplicationPresignedUrl`
+- `CreateApplicationSnapshot`
+- `DeleteApplication`
+- `DeleteApplicationCloudWatchLoggingOption`
+- `DeleteApplicationInputProcessingConfiguration`
+- `DeleteApplicationOutput`
+- `DeleteApplicationReferenceDataSource`
+- `DeleteApplicationSnapshot`
+- `DeleteApplicationVpcConfiguration`
+- `DescribeApplication`
+- `DescribeApplicationOperation`
+- `DescribeApplicationSnapshot`
+- `DescribeApplicationVersion`
+- `DiscoverInputSchema`
+- `ListApplicationOperations`
+- `ListApplicationSnapshots`
+- `ListApplicationVersions`
+- `ListApplications`
+- `ListTagsForResource`
+- `RollbackApplication`
+- `StartApplication`
+- `StopApplication`
+- `TagResource`
+- `UntagResource`
+- `UpdateApplication`
+- `UpdateApplicationMaintenanceConfiguration`
+
 ## [EKS](@/docs/services/eks.md)
 
 - `AssociateAccessPolicy`

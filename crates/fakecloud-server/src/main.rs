@@ -545,6 +545,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let kinesisanalyticsv2_state: fakecloud_kinesisanalyticsv2::SharedKa2State = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let servicediscovery_state: fakecloud_servicediscovery::SharedServiceDiscoveryState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4646,6 +4653,41 @@ async fn main() {
         memorydb_service = memorydb_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(memorydb_service));
+
+    // Amazon Managed Service for Apache Flink (kinesisanalyticsv2) control plane.
+    let kinesisanalyticsv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("kinesisanalyticsv2").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_kinesisanalyticsv2::persistence::load_into(
+                &store,
+                &kinesisanalyticsv2_state,
+            ) {
+                Ok(fakecloud_kinesisanalyticsv2::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded kinesisanalyticsv2 persistence snapshot");
+                }
+                Ok(fakecloud_kinesisanalyticsv2::persistence::LoadOutcome::Empty) => {
+                    tracing::info!(
+                        "no kinesisanalyticsv2 persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut kinesisanalyticsv2_service =
+        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone());
+    if let Some(store) = kinesisanalyticsv2_snapshot_store {
+        kinesisanalyticsv2_service = kinesisanalyticsv2_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(kinesisanalyticsv2_service));
 
     // Cloud Map (servicediscovery) namespace control plane.
     let servicediscovery_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =

@@ -322,5 +322,9 @@
   "kafka": {
     "repo_dir": "kafka",
     "service_name": "kafka"
+  },
+  "kinesisanalyticsv2": {
+    "repo_dir": "kinesis-analytics-v2",
+    "service_name": "kinesisanalyticsv2"
   }
 }
