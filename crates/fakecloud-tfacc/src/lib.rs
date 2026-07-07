@@ -225,6 +225,7 @@ pub struct GoTestRunner<'a> {
 ///   parallelism on an unconstrained machine — so this is pure oversubscription,
 ///   not a correctness bug). Serial keeps each test ~90s, so even the 11-test
 ///   flink-core shard finishes in ~16min.
+///
 /// Other services have no such heavy per-test load, so parallel-4 is fine.
 fn parallelism_for(service: &str) -> u32 {
     match service {
