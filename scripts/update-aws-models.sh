@@ -97,6 +97,7 @@ SERVICES=(
     "efs:efs"
     "mq:mq"
     "kafka:kafka"
+    "kinesisanalyticsv2:kinesis-analytics-v2"
 )
 
 # Sparse checkout only the models we need

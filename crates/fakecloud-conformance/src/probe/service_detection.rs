@@ -40,6 +40,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "kinesis" => Protocol::Json {
             target_prefix: "Kinesis_20131202",
         },
+        "kinesisanalyticsv2" => Protocol::Json {
+            target_prefix: "KinesisAnalytics_20180523",
+        },
         "ecr" => Protocol::Json {
             target_prefix: "AmazonEC2ContainerRegistry_V20150921",
         },

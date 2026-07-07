@@ -64,6 +64,7 @@ fakecloud-codepipeline = { workspace = true }
 fakecloud-codeartifact = { workspace = true }
 fakecloud-opensearch = { workspace = true }
 fakecloud-memorydb = { workspace = true }
+fakecloud-kinesisanalyticsv2 = { workspace = true }
 fakecloud-servicediscovery = { workspace = true }
 fakecloud-elbv2 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }

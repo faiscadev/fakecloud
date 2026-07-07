@@ -65,6 +65,7 @@ aws-sdk-efs = "1"
 aws-sdk-elasticbeanstalk = "1"
 aws-sdk-mq = "1"
 aws-sdk-kafka = "1"
+aws-sdk-kinesisanalyticsv2 = "1"
 # Pure-Rust Kafka client for the MSK data-plane produce/consume round trip.
 # `default-features = false` drops the optional native compression codecs
 # (zstd/lz4 link C) and TLS, leaving a portable pure-Rust build that compiles

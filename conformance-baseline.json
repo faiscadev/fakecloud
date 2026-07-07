@@ -1,6 +1,6 @@
 {
-  "variants_passed": 189392,
-  "total_variants": 189392,
+  "variants_passed": 190624,
+  "total_variants": 190624,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -325,6 +325,10 @@
     "kafka": {
       "passed": 1555,
       "total": 1555
+    },
+    "kinesisanalyticsv2": {
+      "passed": 1232,
+      "total": 1232
     }
   }
 }

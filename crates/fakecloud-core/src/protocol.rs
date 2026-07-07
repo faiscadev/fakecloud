@@ -487,6 +487,11 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",
+        // Amazon Managed Service for Apache Flink (formerly Kinesis Data
+        // Analytics v2): awsJson1.1. The SigV4 signing name is
+        // `kinesisanalytics`; the internal fakecloud service key is
+        // `kinesisanalyticsv2`.
+        s if s.starts_with("KinesisAnalytics_20180523") => "kinesisanalyticsv2",
         // Cloud Map (servicediscovery): awsJson1.1, target prefix carries the
         // dated Route53 Auto Naming service version.
         "Route53AutoNaming_v20170314" => "servicediscovery",
