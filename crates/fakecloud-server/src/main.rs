@@ -650,6 +650,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let shield_state: fakecloud_shield::SharedShieldState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3573,6 +3580,42 @@ async fn main() {
         cfn_snapshot_hooks.insert("transcribe", h);
     }
     registry.register(Arc::new(transcribe_service));
+
+    // AWS Shield / Shield Advanced: awsJson1.1 control plane (protections,
+    // protection groups, the annual auto-renewing subscription, emergency
+    // contacts, DRT access, proactive engagement, application-layer automatic
+    // response, health-check association, tags). Attack surfacing is honest
+    // (empty list / zeroed statistics; no synthetic DDoS records).
+    let shield_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("shield").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_shield::persistence::load_into(&store, &shield_state) {
+                Ok(fakecloud_shield::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded shield persistence snapshot");
+                }
+                Ok(fakecloud_shield::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no shield persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut shield_service = fakecloud_shield::ShieldService::new(shield_state.clone());
+    if let Some(store) = shield_snapshot_store {
+        shield_service = shield_service.with_snapshot_store(store);
+    }
+    if let Some(h) = shield_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("shield", h);
+    }
+    registry.register(Arc::new(shield_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

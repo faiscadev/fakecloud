@@ -1880,6 +1880,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-shield"
+version = "1.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617751b0d1bd07e267256cd4864e71a34292daf19bf303d3d65718a882811de6"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sns"
 version = "1.98.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3950,6 +3974,7 @@ dependencies = [
  "fakecloud-secretsmanager",
  "fakecloud-servicediscovery",
  "fakecloud-ses",
+ "fakecloud-shield",
  "fakecloud-sns",
  "fakecloud-sqs",
  "fakecloud-ssm",
@@ -4958,6 +4983,7 @@ dependencies = [
  "aws-sdk-ses",
  "aws-sdk-sesv2",
  "aws-sdk-sfn",
+ "aws-sdk-shield",
  "aws-sdk-sns",
  "aws-sdk-sqs",
  "aws-sdk-ssm",
@@ -6025,6 +6051,25 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-shield"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
