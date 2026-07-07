@@ -75,6 +75,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // plane (path-labelled `@http` URIs over environments, access tokens, and
     // tags; JSON bodies). Signs as `airflow`, normalized to `mwaa`.
     "mwaa",
+    // AWS Fault Injection Simulator: restJson1 control plane (path-labelled
+    // `@http` URIs over experiment templates, experiments, the actions and
+    // target-resource-type catalogs, target-account configurations, safety
+    // levers, and tags; JSON bodies). Signs as `fis`.
+    "fis",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

@@ -1,15 +1,15 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 5,709 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 5,735 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 5,709 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 5,735 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
 - **Total Operations**: 4,220
-- **Conformance Engine**: 191,188 Smithy-based test variants
+- **Conformance Engine**: 192,048 Smithy-based test variants
 - **Startup Time**: ~300ms
 
 ## Supported Services
@@ -48,6 +48,7 @@ fakecloud provides 100% API conformance across 5,709 operations. Unlike mocks, f
 ### Messaging & Integration
 - **SQS**: 23 operations. Standard and FIFO queues, Dead Letter Queues (DLQ).
 - **SNS**: 42 operations. Topic management and fan-out to SQS/Lambda.
+- **AWS FIS**: 26 operations (complete). Full AWS Fault Injection Simulator control plane: experiment templates (`Create`/`Get`/`Update`/`Delete`/`List`ExperimentTemplate) echoing targets/actions/stopConditions verbatim with `EXT`-shaped ids and `arn:aws:fis:...:experiment-template/<id>` ARNs; the experiment lifecycle (`StartExperiment` begins `initiating` and settles `initiating` -> `running` -> `completed` deterministically on the next read; `StopExperiment` moves to `stopping` -> `stopped`; each action's `state` tracks the run) with `EXP`-shaped ids; the AWS-provided static `actions` catalog (`ListActions`/`GetAction` return real ids like `aws:ec2:stop-instances`, `aws:ecs:stop-task`, `aws:ssm:send-command`, with their parameters + target roles) and target-resource-type catalog; per-template and per-experiment multi-account target-account configurations (reflected by `targetAccountConfigurationsCount`); resolved-target listing; account-level safety levers (`GetSafetyLever` / `UpdateSafetyLeverState`); and ARN-keyed tagging. Model-derived required/`@length`/`@range`/enum validation; persisted (in-flight experiment transitions reconcile on restart). The real fault injection into other services (stopping EC2 instances, draining ECS tasks) is a later batch.
 - **Amazon MWAA**: 12 operations (complete). Full Amazon Managed Workflows for Apache Airflow control plane, signing as `airflow`: environments with the async lifecycle modelled by the control-plane state machine (created `CREATING`, settling to `AVAILABLE` on the next read; `UpdateEnvironment` moves to `UPDATING` and records a `LastUpdate` that settles `SUCCESS`; `DeleteEnvironment` moves to `DELETING` and is removed on the next read), `arn:aws:airflow:...:environment/<name>` ARNs, `EnvironmentName` pattern + name-uniqueness validation, and AWS-synthesized `WebserverUrl` / `ServiceRoleArn` / `CeleryExecutorQueue` / per-module `LoggingConfiguration`. Also the short-lived `CreateCliToken` / `CreateWebLoginToken` access tokens, `InvokeRestApi` (returns the modelled `RestApiServerException` until the Airflow web-server data plane is attached), the internal `PublishMetrics` sink, and ARN-keyed tagging; persisted (in-flight lifecycle transitions reconcile on restart). The real Docker-backed Apache Airflow web server / DAG runtime is a later batch.
 - **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) and EventBridge Pipes (10 operations) are separate services.
 - **EventBridge Pipes**: 10 operations. Point-to-point source -> filter -> Lambda enrichment -> target integrations with per-target InputTemplate transforms, driven by a real background runner.

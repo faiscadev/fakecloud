@@ -330,5 +330,9 @@
   "mwaa": {
     "repo_dir": "mwaa",
     "service_name": "mwaa"
+  },
+  "fis": {
+    "repo_dir": "fis",
+    "service_name": "fis"
   }
 }

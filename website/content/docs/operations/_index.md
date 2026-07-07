@@ -2384,6 +2384,35 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UntagResource`
 - `UpdateEnvironment`
 
+## [AWS Fault Injection Simulator](@/docs/services/fis.md)
+
+- `CreateExperimentTemplate`
+- `CreateTargetAccountConfiguration`
+- `DeleteExperimentTemplate`
+- `DeleteTargetAccountConfiguration`
+- `GetAction`
+- `GetExperiment`
+- `GetExperimentTargetAccountConfiguration`
+- `GetExperimentTemplate`
+- `GetSafetyLever`
+- `GetTargetAccountConfiguration`
+- `GetTargetResourceType`
+- `ListActions`
+- `ListExperimentResolvedTargets`
+- `ListExperimentTargetAccountConfigurations`
+- `ListExperimentTemplates`
+- `ListExperiments`
+- `ListTagsForResource`
+- `ListTargetAccountConfigurations`
+- `ListTargetResourceTypes`
+- `StartExperiment`
+- `StopExperiment`
+- `TagResource`
+- `UntagResource`
+- `UpdateExperimentTemplate`
+- `UpdateSafetyLeverState`
+- `UpdateTargetAccountConfiguration`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`
