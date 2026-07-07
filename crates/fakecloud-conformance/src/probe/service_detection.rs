@@ -83,6 +83,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "glue" => Protocol::Json {
             target_prefix: "AWSGlue",
         },
+        "emr" => Protocol::Json {
+            target_prefix: "ElasticMapReduce",
+        },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },

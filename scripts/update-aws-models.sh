@@ -99,6 +99,7 @@ SERVICES=(
     "kafka:kafka"
     "kinesisanalyticsv2:kinesis-analytics-v2"
     "mwaa:mwaa"
+    "emr:emr"
     "fis:fis"
 )
 

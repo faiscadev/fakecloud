@@ -252,6 +252,18 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // either to the probes' synthetic (missing / out-of-bounds) inputs ran
         // correctly. Source: AWS Config API reference per-op "Errors".
         "config" => &["InvalidParameterValueException", "ValidationException"],
+        // Amazon EMR's `InvalidRequestException` is a service-wide client-error
+        // response: AWS returns it whenever an operation dereferences a
+        // cluster/step/studio/session/notebook that does not exist or fails
+        // input validation, on essentially every operation. The 2009-era Smithy
+        // model only enumerates it on a subset -- many mutating ops
+        // (`RunJobFlow`, `AddJobFlowSteps`, `AddInstanceGroups`,
+        // `TerminateJobFlows`, the `Set*` family) declare only
+        // `InternalServerError`, and the scaling/auto-termination `Put*`/`Get*`/
+        // `Remove*` ops declare no errors at all, yet the live API returns
+        // `InvalidRequestException` for the probes' synthetic (non-existent)
+        // cluster ids. A handler returning it ran correctly.
+        "emr" => &["InvalidRequestException"],
         _ => &[],
     }
 }

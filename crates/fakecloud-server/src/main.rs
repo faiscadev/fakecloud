@@ -629,6 +629,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let emr_state: fakecloud_emr::SharedEmrState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3425,6 +3432,42 @@ async fn main() {
         cfn_snapshot_hooks.insert("glue", h);
     }
     registry.register(Arc::new(glue_service));
+
+    // Amazon EMR (elasticmapreduce): awsJson1.1 control plane (clusters/job
+    // flows, steps, instance groups/fleets, instances, bootstrap actions,
+    // security configurations, Studios + session mappings, notebook executions,
+    // persistent app UIs, interactive sessions, block-public-access, scaling /
+    // auto-termination policies, release labels, tags).
+    let emr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("emr").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_emr::persistence::load_into(&store, &emr_state) {
+                Ok(fakecloud_emr::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded emr persistence snapshot");
+                }
+                Ok(fakecloud_emr::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no emr persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut emr_service = fakecloud_emr::EmrService::new(emr_state.clone());
+    if let Some(store) = emr_snapshot_store {
+        emr_service = emr_service.with_snapshot_store(store);
+    }
+    if let Some(h) = emr_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("emr", h);
+    }
+    registry.register(Arc::new(emr_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

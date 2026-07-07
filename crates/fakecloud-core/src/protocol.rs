@@ -493,6 +493,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AmazonAthena" => "athena",
         s if s.starts_with("Firehose_") => "firehose",
         "AWSGlue" => "glue",
+        // Amazon EMR (Elastic MapReduce): awsJson1.1. The service shape short
+        // name is the target prefix (`ElasticMapReduce.<Operation>`).
+        "ElasticMapReduce" => "emr",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",

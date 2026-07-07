@@ -117,6 +117,7 @@ SERVICES=(
     "cloudwatch|CloudWatch (Metrics & Alarms)|cloudwatch"
     "firehose|Firehose|firehose"
     "glue|Glue|glue"
+    "emr|EMR (Elastic MapReduce)|emr"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"
 )
