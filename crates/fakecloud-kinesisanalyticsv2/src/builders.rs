@@ -49,10 +49,15 @@ pub fn insert_application(
     let now = Utc::now();
     let application_arn = arn(region, account, name);
     let mut id_counter = 0u64;
-    let config_description = match application_configuration {
-        Some(cfg) if cfg.is_object() => config_to_description(cfg, Some(role), &mut id_counter),
-        _ => Value::Object(serde_json::Map::new()),
+    // Always run the transform (even with no `ApplicationConfiguration`): a Flink
+    // app materializes its AWS-populated Flink/snapshot defaults from an empty
+    // input, while a SQL/Zeppelin app with no config yields an empty description.
+    let empty = Value::Object(serde_json::Map::new());
+    let cfg_input = match application_configuration {
+        Some(cfg) if cfg.is_object() => cfg,
+        _ => &empty,
     };
+    let config_description = config_to_description(cfg_input, Some(role), runtime, &mut id_counter);
     let cloudwatch: Vec<Value> = cloudwatch_logging_options
         .and_then(Value::as_array)
         .map(|arr| {

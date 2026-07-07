@@ -4684,7 +4684,8 @@ async fn main() {
             None
         };
     let mut kinesisanalyticsv2_service =
-        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone());
+        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone())
+            .with_ec2_state(ec2_state.clone());
     if let Some(store) = kinesisanalyticsv2_snapshot_store {
         kinesisanalyticsv2_service = kinesisanalyticsv2_service.with_snapshot_store(store);
     }
