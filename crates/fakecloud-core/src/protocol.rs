@@ -71,6 +71,10 @@ const REST_JSON_SERVICES: &[&str] = &[
     // (path-labelled `@http` URIs over clusters, configurations, operations,
     // replicators, VPC connections, and topics; JSON bodies). Signs as `kafka`.
     "kafka",
+    // Amazon MWAA (Managed Workflows for Apache Airflow): restJson1 control
+    // plane (path-labelled `@http` URIs over environments, access tokens, and
+    // tags; JSON bodies). Signs as `airflow`, normalized to `mwaa`.
+    "mwaa",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
@@ -673,6 +677,11 @@ fn normalize_service_name(service: &str) -> &str {
         // `appconfigdata`; alias it to `appconfig` so both model-services
         // resolve to the one registry entry, which routes on the URL path.
         "appconfigdata" => "appconfig",
+        // Amazon MWAA signs SigV4 with the `airflow` scope (its ARN namespace),
+        // so a real SDK request arrives as `airflow`. Alias it to the `mwaa`
+        // registry entry (the conformance probe signs with the Smithy service
+        // shape name `mwaa`, which already resolves).
+        "airflow" => "mwaa",
         other => other,
     }
 }

@@ -214,6 +214,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // plane (path-labelled `@http` URIs over clusters, configurations,
         // operations, replicators, VPC connections, and topics). Signs as `kafka`.
         "kafka" => Protocol::Rest,
+        // Amazon MWAA (Managed Workflows for Apache Airflow): restJson1 control
+        // plane (path-labelled `@http` URIs over environments, access tokens,
+        // and tags). Signs as `airflow`; the probe signs with `mwaa`.
+        "mwaa" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

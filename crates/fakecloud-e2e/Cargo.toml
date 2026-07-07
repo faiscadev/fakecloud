@@ -65,6 +65,7 @@ aws-sdk-efs = "1"
 aws-sdk-elasticbeanstalk = "1"
 aws-sdk-mq = "1"
 aws-sdk-kafka = "1"
+aws-sdk-mwaa = "1"
 aws-sdk-kinesisanalyticsv2 = "1"
 # Pure-Rust Kafka client for the MSK data-plane produce/consume round trip.
 # `default-features = false` drops the optional native compression codecs
@@ -76,6 +77,7 @@ aws-sdk-cloudwatch = "=1.61.0"
 tokio-postgres = "0.7"
 mysql_async = "0.34"
 aws-smithy-types = "1"
+aws-smithy-runtime-api = "1"
 aws-credential-types = "1"
 aws-types = "1"
 reqwest = { workspace = true }

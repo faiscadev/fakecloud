@@ -1434,6 +1434,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-mwaa"
+version = "1.105.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea54074e00d8b3bff1a2cb5a6ac28a048bdcd13a98e93aa3fcdeeddc8b760493"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-organizations"
 version = "1.113.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3734,6 +3758,7 @@ dependencies = [
  "fakecloud-logs",
  "fakecloud-memorydb",
  "fakecloud-mq",
+ "fakecloud-mwaa",
  "fakecloud-opensearch",
  "fakecloud-organizations",
  "fakecloud-persistence",
@@ -4699,6 +4724,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-mq",
+ "aws-sdk-mwaa",
  "aws-sdk-organizations",
  "aws-sdk-pipes",
  "aws-sdk-rds",
@@ -4715,6 +4741,7 @@ dependencies = [
  "aws-sdk-ssm",
  "aws-sdk-sts",
  "aws-sdk-wafv2",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "aws-types",
  "base64 0.22.1",
@@ -5289,6 +5316,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-mwaa"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

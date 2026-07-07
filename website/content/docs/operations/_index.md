@@ -2369,6 +2369,21 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateStorage`
 - `UpdateTopic`
 
+## [Amazon MWAA](@/docs/services/mwaa.md)
+
+- `CreateCliToken`
+- `CreateEnvironment`
+- `CreateWebLoginToken`
+- `DeleteEnvironment`
+- `GetEnvironment`
+- `InvokeRestApi`
+- `ListEnvironments`
+- `ListTagsForResource`
+- `PublishMetrics`
+- `TagResource`
+- `UntagResource`
+- `UpdateEnvironment`
+
 ## [Amazon S3 Glacier](@/docs/services/glacier.md)
 
 - `AbortMultipartUpload`
