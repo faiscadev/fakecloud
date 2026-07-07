@@ -210,8 +210,19 @@ fn is_mutating(action: &str) -> bool {
         || action.starts_with("Rollback")
         || action.starts_with("Tag")
         || action.starts_with("Untag")
-        // DescribeApplication settles transient lifecycle state in place.
-        || action == "DescribeApplication"
+    // NOTE: DescribeApplication is deliberately NOT listed here. It settles
+    // transient lifecycle state (STARTING -> RUNNING, UPDATING -> RUNNING, ...)
+    // in memory, but that settle is deterministic and idempotent -- the next
+    // describe re-derives it from `settle_status`, so it never needs to be
+    // persisted. Terraform's status waiters poll DescribeApplication rapidly
+    // while an application settles; if every poll triggered `save()` (clone the
+    // whole account state, JSON-serialize a Flink app's multi-MB code payload
+    // under `spawn_blocking`, write the snapshot to disk, and AWAIT it, all
+    // serialized behind the snapshot mutex), the awaited saves back up faster
+    // than they drain on a 2-core CI runner. Describe then stops responding and
+    // the provider's waiter wedges to the job timeout -- a stall that never
+    // reproduces on a many-core dev box where the saves drain between polls.
+    // A real mutation (Start/Stop/Update/...) still persists the settled state.
 }
 
 fn dispatch(s: &Ka2Service, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1113,25 +1124,49 @@ impl Ka2Service {
     /// state (AWS derives `VpcId` from the configuration's subnets). A no-op
     /// when EC2 state is not wired or a subnet is unknown -- the synthesized
     /// placeholder id set by `vpc_desc` is then left in place.
-    fn resolve_vpc_ids(&self, account: &str, cfg: &mut Value) {
+    /// Snapshot the EC2 `subnet_id -> owning vpc_id` map for an account, taken
+    /// WITHOUT holding the ka2 state lock. Callers gather this *before*
+    /// acquiring `self.state.write()` so the EC2 read lock is never nested
+    /// inside the ka2 write lock. That nesting (ka2.write -> ec2.read) is a
+    /// cross-service lock ordering: under `parking_lot`'s writer-priority, a
+    /// concurrent EC2 writer (terraform provisions the VPC/subnets/security
+    /// groups in parallel with the application) makes the nested `ec2.read()`
+    /// block while the ka2 write lock is held, stalling every other ka2 request
+    /// -- on a 2-core CI runner this wedged the provider's status waiters to the
+    /// job timeout even though it never reproduced on a many-core dev box.
+    /// Returns an empty map when EC2 is not wired.
+    fn ec2_subnet_vpc_map(&self, account: &str) -> BTreeMap<String, String> {
         let Some(ec2) = self.ec2_state.as_ref() else {
-            return;
+            return BTreeMap::new();
         };
+        let guard = ec2.read();
+        guard
+            .get(account)
+            .map(|st| {
+                st.subnets
+                    .iter()
+                    .map(|(sid, sub)| (sid.clone(), sub.vpc_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Overwrite each VPC configuration description's `VpcId` from a
+    /// pre-snapshotted `subnet_id -> vpc_id` map (see `ec2_subnet_vpc_map`).
+    /// Pure: takes no lock, so it is safe to call while holding `self.state`.
+    fn resolve_vpc_ids(cfg: &mut Value, subnet_vpc: &BTreeMap<String, String>) {
         let Some(arr) = cfg
             .get_mut("VpcConfigurationDescriptions")
             .and_then(Value::as_array_mut)
         else {
             return;
         };
-        let guard = ec2.read();
-        let acc = guard.get(account);
         for d in arr.iter_mut() {
             let vpc = d
                 .get("SubnetIds")
                 .and_then(Value::as_array)
                 .and_then(|s| s.iter().filter_map(Value::as_str).next())
-                .and_then(|sid| acc.and_then(|st| st.subnets.get(sid)))
-                .map(|sub| sub.vpc_id.clone());
+                .and_then(|sid| subnet_vpc.get(sid).cloned());
             if let (Some(v), Some(o)) = (vpc, d.as_object_mut()) {
                 o.insert("VpcId".into(), json!(v));
             }
@@ -1148,6 +1183,9 @@ impl Ka2Service {
         let role = req_str_len(&b, "ServiceExecutionRole", 1, 2048, ec)?;
         let mode = enum_field(&b, "ApplicationMode", APPLICATION_MODES, false, ec)?;
 
+        // Snapshot the EC2 subnet->vpc map BEFORE taking the ka2 write lock so
+        // the EC2 read lock is never nested inside it (see `ec2_subnet_vpc_map`).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         // Build + insert through the shared builder so a CFN-provisioned
@@ -1170,7 +1208,7 @@ impl Ka2Service {
         let app = st.applications.get_mut(&name).expect("just inserted");
         // Resolve each VPC configuration's owning VpcId from EC2 state, then
         // refresh the version-1 detail so the persisted version reflects it.
-        self.resolve_vpc_ids(&req.account_id, &mut app.config_description);
+        Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
         record_version(app);
         let detail = build_application_detail(app);
         ok(json!({ "ApplicationDetail": detail }))
@@ -1232,6 +1270,8 @@ impl Ka2Service {
         )?;
         let role_update = opt_str_len(&b, "ServiceExecutionRoleUpdate", 1, 2048, ec)?;
 
+        // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -1251,7 +1291,7 @@ impl Ka2Service {
                 apply_config_update(app, cfg);
                 // A VpcConfigurationUpdate may change the subnets; re-resolve the
                 // owning VpcId from EC2 state.
-                self.resolve_vpc_ids(&req.account_id, &mut app.config_description);
+                Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
             }
         }
         // A `RunConfigurationUpdate` (top-level on UpdateApplication) revises the
@@ -1807,6 +1847,8 @@ impl Ka2Service {
             .get("VpcConfiguration")
             .cloned()
             .ok_or_else(|| fault(ec, "VpcConfiguration is required."))?;
+        // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -1823,7 +1865,7 @@ impl Ka2Service {
         );
         // Resolve the owning VpcId from EC2 state, then read the stored
         // description back so the response carries the resolved id.
-        self.resolve_vpc_ids(&req.account_id, &mut app.config_description);
+        Self::resolve_vpc_ids(&mut app.config_description, &vpc_map);
         let stored = app
             .config_description
             .get("VpcConfigurationDescriptions")
