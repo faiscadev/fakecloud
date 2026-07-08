@@ -540,6 +540,10 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Amazon SWF (Simple Workflow Service): awsJson1_0. The service shape
         // short name is the target prefix (`SimpleWorkflowService.<Operation>`).
         "SimpleWorkflowService" => "swf",
+        // Amazon Timestream (Write + Query): awsJson1_0. BOTH the write and
+        // query SDK clients carry the SAME dated target prefix
+        // (`Timestream_20181101.<Operation>`); one fakecloud crate serves both.
+        "Timestream_20181101" => "timestream",
         // AWS Support: awsJson1.1. The service shape carries the dated version
         // (`AWSSupport_20130415.<Operation>`).
         "AWSSupport_20130415" => "support",

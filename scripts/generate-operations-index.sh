@@ -132,6 +132,7 @@ SERVICES=(
     "shield|Shield (Shield Advanced)|shield"
     "comprehend|Amazon Comprehend|comprehend"
     "swf|Amazon SWF (Simple Workflow Service)|swf"
+    "timestream|Amazon Timestream (Write + Query)|timestream"
     "support|AWS Support|support"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"

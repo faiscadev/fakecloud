@@ -65,6 +65,8 @@ sdk-clients = [
     "dep:aws-sdk-organizations",
     "dep:aws-sdk-ec2",
     "dep:aws-sdk-pipes",
+    "dep:aws-sdk-timestreamwrite",
+    "dep:aws-sdk-timestreamquery",
 ]
 
 [dependencies]
@@ -93,6 +95,8 @@ aws-sdk-kinesis = { version = "1", optional = true }
 aws-sdk-rds = { version = "1", optional = true }
 aws-sdk-docdb = { version = "1", optional = true }
 aws-sdk-neptune = { version = "1", optional = true }
+aws-sdk-timestreamwrite = { version = "1", optional = true }
+aws-sdk-timestreamquery = { version = "1", optional = true }
 aws-sdk-ec2 = { version = "1", optional = true }
 aws-sdk-elasticache = { version = "1", optional = true }
 aws-sdk-elasticbeanstalk = { version = "1", optional = true }

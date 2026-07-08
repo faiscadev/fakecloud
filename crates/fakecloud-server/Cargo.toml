@@ -94,6 +94,7 @@ fakecloud-textract = { workspace = true }
 fakecloud-transcribe = { workspace = true }
 fakecloud-translate = { workspace = true }
 fakecloud-swf = { workspace = true }
+fakecloud-timestream = { workspace = true }
 fakecloud-shield = { workspace = true }
 fakecloud-comprehend = { workspace = true }
 fakecloud-support = { workspace = true }

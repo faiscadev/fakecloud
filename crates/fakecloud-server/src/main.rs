@@ -692,6 +692,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let timestream_state: fakecloud_timestream::SharedTimestreamState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let shield_state: fakecloud_shield::SharedShieldState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3831,6 +3838,43 @@ async fn main() {
         cfn_snapshot_hooks.insert("swf", h);
     }
     registry.register(Arc::new(swf_service));
+
+    // Amazon Timestream (Write + Query): awsJson1_0 control plane over one
+    // shared store -- databases, tables, ingested points (queryable via a
+    // bounded SQL handler), scheduled queries, batch-load tasks, account
+    // settings, endpoint discovery, and ARN-keyed tagging. Both SDK clients
+    // share the `Timestream_20181101` target prefix.
+    let timestream_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("timestream").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_timestream::persistence::load_into(&store, &timestream_state) {
+                Ok(fakecloud_timestream::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded timestream persistence snapshot");
+                }
+                Ok(fakecloud_timestream::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no timestream persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut timestream_service =
+        fakecloud_timestream::TimestreamService::new(timestream_state.clone());
+    if let Some(store) = timestream_snapshot_store {
+        timestream_service = timestream_service.with_snapshot_store(store);
+    }
+    if let Some(h) = timestream_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("timestream", h);
+    }
+    registry.register(Arc::new(timestream_service));
 
     // AWS Shield / Shield Advanced: awsJson1.1 control plane (protections,
     // protection groups, the annual auto-renewing subscription, emergency

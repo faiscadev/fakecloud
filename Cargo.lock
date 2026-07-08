@@ -2268,6 +2268,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-timestreamquery"
+version = "1.102.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2422f5f7c81eeea6113bc298362bc414aa555c5518ee30b7f7d38e2834881d7d"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-timestreamwrite"
+version = "1.99.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11324f8f9c13617b5df1fdfc196165bfe2de32ae35afce5be93c3a4f563b3c41"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-transcribe"
 version = "1.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4207,6 +4257,7 @@ dependencies = [
  "fakecloud-support",
  "fakecloud-swf",
  "fakecloud-textract",
+ "fakecloud-timestream",
  "fakecloud-transcribe",
  "fakecloud-transfer",
  "fakecloud-translate",
@@ -5263,6 +5314,8 @@ dependencies = [
  "aws-sdk-support",
  "aws-sdk-swf",
  "aws-sdk-textract",
+ "aws-sdk-timestreamquery",
+ "aws-sdk-timestreamwrite",
  "aws-sdk-transcribe",
  "aws-sdk-translate",
  "aws-sdk-wafv2",
@@ -6649,6 +6702,8 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-sdk-ssm",
  "aws-sdk-sts",
+ "aws-sdk-timestreamquery",
+ "aws-sdk-timestreamwrite",
  "aws-sdk-wafv2",
  "aws-types",
  "libc",
@@ -6683,6 +6738,26 @@ version = "0.40.1"
 dependencies = [
  "fakecloud-testkit",
  "tokio",
+]
+
+[[package]]
+name = "fakecloud-timestream"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
