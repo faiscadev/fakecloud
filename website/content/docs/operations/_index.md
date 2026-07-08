@@ -5588,6 +5588,28 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateVocabulary`
 - `UpdateVocabularyFilter`
 
+## [Amazon Translate](@/docs/services/translate.md)
+
+- `CreateParallelData`
+- `DeleteParallelData`
+- `DeleteTerminology`
+- `DescribeTextTranslationJob`
+- `GetParallelData`
+- `GetTerminology`
+- `ImportTerminology`
+- `ListLanguages`
+- `ListParallelData`
+- `ListTagsForResource`
+- `ListTerminologies`
+- `ListTextTranslationJobs`
+- `StartTextTranslationJob`
+- `StopTextTranslationJob`
+- `TagResource`
+- `TranslateDocument`
+- `TranslateText`
+- `UntagResource`
+- `UpdateParallelData`
+
 ## [Shield (Shield Advanced)](@/docs/services/shield.md)
 
 - `AssociateDRTLogBucket`

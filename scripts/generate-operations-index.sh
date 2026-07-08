@@ -123,6 +123,7 @@ SERVICES=(
     "emr|EMR (Elastic MapReduce)|emr"
     "textract|AWS Textract|textract"
     "transcribe|Amazon Transcribe|transcribe"
+    "translate|Amazon Translate|translate"
     "shield|Shield (Shield Advanced)|shield"
     "comprehend|Amazon Comprehend|comprehend"
     "organizations|Organizations|organizations"
