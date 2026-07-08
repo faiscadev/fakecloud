@@ -374,5 +374,9 @@
   "comprehend": {
     "repo_dir": "comprehend",
     "service_name": "comprehend"
+  },
+  "swf": {
+    "repo_dir": "swf",
+    "service_name": "swf"
   }
 }

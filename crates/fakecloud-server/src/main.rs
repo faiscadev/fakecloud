@@ -664,6 +664,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let swf_state: fakecloud_swf::SharedSwfState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let shield_state: fakecloud_shield::SharedShieldState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3636,6 +3643,42 @@ async fn main() {
         cfn_snapshot_hooks.insert("translate", h);
     }
     registry.register(Arc::new(translate_service));
+
+    // Amazon SWF (Simple Workflow Service): awsJson1_0 control plane (domains,
+    // versioned activity/workflow types, workflow executions with a real
+    // decider/worker state machine -- decision tasks, activity tasks, and the
+    // event history that ties them together -- plus pending-task counts and
+    // ARN-keyed domain tagging).
+    let swf_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("swf").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_swf::persistence::load_into(&store, &swf_state) {
+                Ok(fakecloud_swf::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded swf persistence snapshot");
+                }
+                Ok(fakecloud_swf::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no swf persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut swf_service = fakecloud_swf::SwfService::new(swf_state.clone());
+    if let Some(store) = swf_snapshot_store {
+        swf_service = swf_service.with_snapshot_store(store);
+    }
+    if let Some(h) = swf_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("swf", h);
+    }
+    registry.register(Arc::new(swf_service));
 
     // AWS Shield / Shield Advanced: awsJson1.1 control plane (protections,
     // protection groups, the annual auto-renewing subscription, emergency

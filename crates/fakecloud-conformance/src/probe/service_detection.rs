@@ -101,6 +101,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "shield" => Protocol::Json {
             target_prefix: "AWSShield_20160616",
         },
+        // Amazon SWF (Simple Workflow Service): awsJson1_0.
+        "swf" => Protocol::Json {
+            target_prefix: "SimpleWorkflowService",
+        },
         // Amazon Comprehend: awsJson1.1 (NLP control + inference plane).
         "comprehend" => Protocol::Json {
             target_prefix: "Comprehend_20171127",

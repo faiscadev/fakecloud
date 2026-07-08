@@ -110,6 +110,7 @@ SERVICES=(
     "shield:shield"
     "xray:xray"
     "appsync:appsync"
+    "swf:swf"
 )
 
 # Sparse checkout only the models we need
