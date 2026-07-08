@@ -127,6 +127,7 @@ SERVICES=(
     "translate|Amazon Translate|translate"
     "shield|Shield (Shield Advanced)|shield"
     "comprehend|Amazon Comprehend|comprehend"
+    "swf|Amazon SWF (Simple Workflow Service)|swf"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"
 )

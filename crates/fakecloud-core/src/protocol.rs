@@ -531,6 +531,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Amazon Comprehend (NLP): awsJson1.1. The service shape name carries the
         // dated version (`Comprehend_20171127.<Operation>`).
         "Comprehend_20171127" => "comprehend",
+        // Amazon SWF (Simple Workflow Service): awsJson1_0. The service shape
+        // short name is the target prefix (`SimpleWorkflowService.<Operation>`).
+        "SimpleWorkflowService" => "swf",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",

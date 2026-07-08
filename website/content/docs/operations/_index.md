@@ -5774,6 +5774,48 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateEndpoint`
 - `UpdateFlywheel`
 
+## [Amazon SWF (Simple Workflow Service)](@/docs/services/swf.md)
+
+- `CountClosedWorkflowExecutions`
+- `CountOpenWorkflowExecutions`
+- `CountPendingActivityTasks`
+- `CountPendingDecisionTasks`
+- `DeleteActivityType`
+- `DeleteWorkflowType`
+- `DeprecateActivityType`
+- `DeprecateDomain`
+- `DeprecateWorkflowType`
+- `DescribeActivityType`
+- `DescribeDomain`
+- `DescribeWorkflowExecution`
+- `DescribeWorkflowType`
+- `GetWorkflowExecutionHistory`
+- `ListActivityTypes`
+- `ListClosedWorkflowExecutions`
+- `ListDomains`
+- `ListOpenWorkflowExecutions`
+- `ListTagsForResource`
+- `ListWorkflowTypes`
+- `PollForActivityTask`
+- `PollForDecisionTask`
+- `RecordActivityTaskHeartbeat`
+- `RegisterActivityType`
+- `RegisterDomain`
+- `RegisterWorkflowType`
+- `RequestCancelWorkflowExecution`
+- `RespondActivityTaskCanceled`
+- `RespondActivityTaskCompleted`
+- `RespondActivityTaskFailed`
+- `RespondDecisionTaskCompleted`
+- `SignalWorkflowExecution`
+- `StartWorkflowExecution`
+- `TagResource`
+- `TerminateWorkflowExecution`
+- `UndeprecateActivityType`
+- `UndeprecateDomain`
+- `UndeprecateWorkflowType`
+- `UntagResource`
+
 ## [Organizations](@/docs/services/organizations.md)
 
 - `AcceptHandshake`
