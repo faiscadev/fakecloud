@@ -355,6 +355,10 @@
     "repo_dir": "amplify",
     "service_name": "amplify"
   },
+  "mediaconvert": {
+    "repo_dir": "mediaconvert",
+    "service_name": "mediaconvert"
+  },
   "transcribe": {
     "repo_dir": "transcribe",
     "service_name": "transcribe"
