@@ -378,5 +378,9 @@
   "swf": {
     "repo_dir": "swf",
     "service_name": "swf"
+  },
+  "support": {
+    "repo_dir": "support",
+    "service_name": "support"
   }
 }

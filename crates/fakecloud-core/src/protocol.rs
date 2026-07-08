@@ -534,6 +534,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Amazon SWF (Simple Workflow Service): awsJson1_0. The service shape
         // short name is the target prefix (`SimpleWorkflowService.<Operation>`).
         "SimpleWorkflowService" => "swf",
+        // AWS Support: awsJson1.1. The service shape carries the dated version
+        // (`AWSSupport_20130415.<Operation>`).
+        "AWSSupport_20130415" => "support",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",

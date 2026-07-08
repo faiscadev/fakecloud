@@ -109,6 +109,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "comprehend" => Protocol::Json {
             target_prefix: "Comprehend_20171127",
         },
+        // AWS Support: awsJson1.1 (support cases + Trusted Advisor control plane).
+        "support" => Protocol::Json {
+            target_prefix: "AWSSupport_20130415",
+        },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },

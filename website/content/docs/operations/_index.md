@@ -5816,6 +5816,25 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UndeprecateWorkflowType`
 - `UntagResource`
 
+## [AWS Support](@/docs/services/support.md)
+
+- `AddAttachmentsToSet`
+- `AddCommunicationToCase`
+- `CreateCase`
+- `DescribeAttachment`
+- `DescribeCases`
+- `DescribeCommunications`
+- `DescribeCreateCaseOptions`
+- `DescribeServices`
+- `DescribeSeverityLevels`
+- `DescribeSupportedLanguages`
+- `DescribeTrustedAdvisorCheckRefreshStatuses`
+- `DescribeTrustedAdvisorCheckResult`
+- `DescribeTrustedAdvisorCheckSummaries`
+- `DescribeTrustedAdvisorChecks`
+- `RefreshTrustedAdvisorCheck`
+- `ResolveCase`
+
 ## [Organizations](@/docs/services/organizations.md)
 
 - `AcceptHandshake`
