@@ -101,6 +101,7 @@ SERVICES=(
     "kinesisanalyticsv2:kinesis-analytics-v2"
     "mwaa:mwaa"
     "emr:emr"
+    "textract:textract"
     "fis:fis"
     "xray:xray"
     "appsync:appsync"

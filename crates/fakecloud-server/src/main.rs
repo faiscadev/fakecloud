@@ -636,6 +636,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let textract_state: fakecloud_textract::SharedTextractState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3490,6 +3497,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("emr", h);
     }
     registry.register(Arc::new(emr_service));
+    // Amazon Textract: awsJson1_1 document text/analysis extraction (sync
+    // Detect/Analyze ops, async Start*/Get* jobs, custom adapters + versions,
+    // tagging). OCR/ML inference is an honest gap; the API surface, validation,
+    // job lifecycle, adapters and persistence are real.
+    let textract_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("textract").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_textract::persistence::load_into(&store, &textract_state) {
+                Ok(fakecloud_textract::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded textract persistence snapshot");
+                }
+                Ok(fakecloud_textract::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no textract persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut textract_service = fakecloud_textract::TextractService::new(textract_state.clone());
+    if let Some(store) = textract_snapshot_store {
+        textract_service = textract_service.with_snapshot_store(store);
+    }
+    if let Some(h) = textract_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("textract", h);
+    }
+    registry.register(Arc::new(textract_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

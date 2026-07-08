@@ -2026,6 +2026,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-textract"
+version = "1.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e0000523137c9f8eb701a8e86dafb2c1ec9585e2131b69ca4291857626f588b"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-wafv2"
 version = "1.112.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3907,6 +3931,7 @@ dependencies = [
  "fakecloud-ssm",
  "fakecloud-ssoadmin",
  "fakecloud-stepfunctions",
+ "fakecloud-textract",
  "fakecloud-transfer",
  "fakecloud-verifiedpermissions",
  "fakecloud-wafv2",
@@ -4912,6 +4937,7 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-sdk-ssm",
  "aws-sdk-sts",
+ "aws-sdk-textract",
  "aws-sdk-wafv2",
  "aws-sdk-xray",
  "aws-smithy-runtime-api",
@@ -6160,6 +6186,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "fakecloud-textract"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 {
-  "variants_passed": 199184,
-  "total_variants": 199184,
+  "variants_passed": 200024,
+  "total_variants": 200024,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -353,6 +353,10 @@
     "amplify": {
       "passed": 1575,
       "total": 1575
+    },
+    "textract": {
+      "passed": 840,
+      "total": 840
     }
   }
 }
