@@ -775,6 +775,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let serverlessrepo_state: fakecloud_serverlessrepo::SharedServerlessRepoState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5950,6 +5957,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("mediaconvert", h);
     }
     registry.register(Arc::new(mediaconvert_service));
+
+    let serverlessrepo_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("serverlessrepo").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_serverlessrepo::persistence::load_into(&store, &serverlessrepo_state) {
+                Ok(fakecloud_serverlessrepo::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded serverlessrepo persistence snapshot");
+                }
+                Ok(fakecloud_serverlessrepo::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no serverlessrepo persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut serverlessrepo_service =
+        fakecloud_serverlessrepo::ServerlessRepoService::new(serverlessrepo_state.clone());
+    if let Some(store) = serverlessrepo_snapshot_store {
+        serverlessrepo_service = serverlessrepo_service.with_snapshot_store(store);
+    }
+    if let Some(h) = serverlessrepo_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("serverlessrepo", h);
+    }
+    registry.register(Arc::new(serverlessrepo_service));
 
     let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

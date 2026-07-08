@@ -75,6 +75,7 @@ SERVICES=(
     "xray|AWS X-Ray|xray"
     "amplify|AWS Amplify|amplify"
     "mediaconvert|AWS Elemental MediaConvert|mediaconvert"
+    "serverlessrepo|AWS Serverless Application Repository|serverlessrepo"
     "appsync|AWS AppSync|appsync"
     "glacier|Amazon S3 Glacier|glacier"
     "backup|AWS Backup|backup"

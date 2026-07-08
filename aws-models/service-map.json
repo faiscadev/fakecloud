@@ -359,6 +359,10 @@
     "repo_dir": "mediaconvert",
     "service_name": "mediaconvert"
   },
+  "serverlessrepo": {
+    "repo_dir": "serverlessapplicationrepository",
+    "service_name": "serverlessrepo"
+  },
   "transcribe": {
     "repo_dir": "transcribe",
     "service_name": "transcribe"

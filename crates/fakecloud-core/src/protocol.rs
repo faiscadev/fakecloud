@@ -100,6 +100,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // templates, jobs, policy, endpoints, and tags; JSON bodies). Signs as
     // `mediaconvert`.
     "mediaconvert",
+    // AWS Serverless Application Repository: restJson1 control plane
+    // (path-labelled `@http` URIs under `/applications` over applications,
+    // versions, sharing policies, CloudFormation change sets/templates, and
+    // dependencies; JSON bodies). Signs as `serverlessrepo`.
+    "serverlessrepo",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
