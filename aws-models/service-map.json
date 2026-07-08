@@ -363,6 +363,10 @@
     "repo_dir": "serverlessapplicationrepository",
     "service_name": "serverlessrepo"
   },
+  "managedblockchain": {
+    "repo_dir": "managedblockchain",
+    "service_name": "managedblockchain"
+  },
   "transcribe": {
     "repo_dir": "transcribe",
     "service_name": "transcribe"

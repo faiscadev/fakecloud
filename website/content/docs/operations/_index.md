@@ -2548,6 +2548,36 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UnshareApplication`
 - `UpdateApplication`
 
+## [Amazon Managed Blockchain](@/docs/services/managedblockchain.md)
+
+- `CreateAccessor`
+- `CreateMember`
+- `CreateNetwork`
+- `CreateNode`
+- `CreateProposal`
+- `DeleteAccessor`
+- `DeleteMember`
+- `DeleteNode`
+- `GetAccessor`
+- `GetMember`
+- `GetNetwork`
+- `GetNode`
+- `GetProposal`
+- `ListAccessors`
+- `ListInvitations`
+- `ListMembers`
+- `ListNetworks`
+- `ListNodes`
+- `ListProposalVotes`
+- `ListProposals`
+- `ListTagsForResource`
+- `RejectInvitation`
+- `TagResource`
+- `UntagResource`
+- `UpdateMember`
+- `UpdateNode`
+- `VoteOnProposal`
+
 ## [AWS AppSync](@/docs/services/appsync.md)
 
 - `AssociateApi`

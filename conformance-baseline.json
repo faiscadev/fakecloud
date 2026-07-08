@@ -1,6 +1,6 @@
 {
-  "variants_passed": 210373,
-  "total_variants": 210373,
+  "variants_passed": 211401,
+  "total_variants": 211401,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -389,6 +389,10 @@
     "serverlessrepo": {
       "passed": 380,
       "total": 380
+    },
+    "managedblockchain": {
+      "passed": 1028,
+      "total": 1028
     }
   }
 }
