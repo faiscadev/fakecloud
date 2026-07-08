@@ -24,6 +24,7 @@ SERVICES=(
     "amplify:amplify"
     "mediaconvert:mediaconvert"
     "serverlessrepo:serverlessapplicationrepository"
+    "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"
     "ssoadmin:sso-admin"

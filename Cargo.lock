@@ -1506,6 +1506,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-managedblockchain"
+version = "1.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b60af834087570c4e8eb5908ae15f7313a2e06144965208f296f1054e67ae383"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-mediaconvert"
 version = "1.126.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4097,6 +4121,7 @@ dependencies = [
  "fakecloud-lakeformation",
  "fakecloud-lambda",
  "fakecloud-logs",
+ "fakecloud-managedblockchain",
  "fakecloud-mediaconvert",
  "fakecloud-memorydb",
  "fakecloud-mq",
@@ -5141,6 +5166,7 @@ dependencies = [
  "aws-sdk-kinesisanalyticsv2",
  "aws-sdk-kms",
  "aws-sdk-lambda",
+ "aws-sdk-managedblockchain",
  "aws-sdk-mediaconvert",
  "aws-sdk-mq",
  "aws-sdk-mwaa",
@@ -5740,6 +5766,27 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-managedblockchain"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

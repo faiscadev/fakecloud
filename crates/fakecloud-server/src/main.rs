@@ -782,6 +782,14 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let managedblockchain_state: fakecloud_managedblockchain::SharedManagedBlockchainState =
+        Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                &cli.account_id,
+                &cli.region,
+                &endpoint_url,
+            ),
+        ));
     let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5989,6 +5997,43 @@ async fn main() {
         cfn_snapshot_hooks.insert("serverlessrepo", h);
     }
     registry.register(Arc::new(serverlessrepo_service));
+
+    let managedblockchain_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("managedblockchain").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_managedblockchain::persistence::load_into(
+                &store,
+                &managedblockchain_state,
+            ) {
+                Ok(fakecloud_managedblockchain::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded managedblockchain persistence snapshot");
+                }
+                Ok(fakecloud_managedblockchain::persistence::LoadOutcome::Empty) => {
+                    tracing::info!(
+                        "no managedblockchain persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut managedblockchain_service =
+        fakecloud_managedblockchain::ManagedBlockchainService::new(managedblockchain_state.clone());
+    if let Some(store) = managedblockchain_snapshot_store {
+        managedblockchain_service = managedblockchain_service.with_snapshot_store(store);
+    }
+    if let Some(h) = managedblockchain_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("managedblockchain", h);
+    }
+    registry.register(Arc::new(managedblockchain_service));
 
     let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

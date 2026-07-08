@@ -184,6 +184,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "monitoring" => Protocol::Query,
         "s3" => Protocol::Rest,
         "eks" => Protocol::Rest,
+        // Amazon Managed Blockchain: restJson1 control plane (path-labelled
+        // `@http` URIs over networks/members/nodes/proposals + JSON bodies).
+        "managedblockchain" => Protocol::Rest,
         // Amazon S3 Glacier: restJson1, account-scoped paths, custom headers.
         "glacier" => Protocol::Rest,
         // AWS Backup: restJson1 control plane (@http traits + JSON bodies).
