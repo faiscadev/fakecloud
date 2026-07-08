@@ -945,6 +945,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-comprehend"
+version = "1.98.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56a2f5fa53cdc70219676e25309d7c71340da1cd46e1ae38543b6ae98f3dadc4"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-dsql"
 version = "1.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3923,6 +3947,7 @@ dependencies = [
  "fakecloud-codedeploy",
  "fakecloud-codepipeline",
  "fakecloud-cognito",
+ "fakecloud-comprehend",
  "fakecloud-config",
  "fakecloud-core",
  "fakecloud-dms",
@@ -4726,6 +4751,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-comprehend"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-config"
 version = "0.40.1"
 dependencies = [
@@ -4950,6 +4995,7 @@ dependencies = [
  "aws-sdk-codecommit",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
+ "aws-sdk-comprehend",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",
  "aws-sdk-ec2",

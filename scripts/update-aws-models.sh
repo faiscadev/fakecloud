@@ -103,6 +103,7 @@ SERVICES=(
     "emr:emr"
     "textract:textract"
     "transcribe:transcribe"
+    "comprehend:comprehend"
     "fis:fis"
     "shield:shield"
     "xray:xray"

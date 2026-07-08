@@ -520,6 +520,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // AWS Shield / Shield Advanced: awsJson1_1. The service shape short
         // name (`AWSShield_20160616.<Operation>`) is the target prefix.
         "AWSShield_20160616" => "shield",
+        // Amazon Comprehend (NLP): awsJson1.1. The service shape name carries the
+        // dated version (`Comprehend_20171127.<Operation>`).
+        "Comprehend_20171127" => "comprehend",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",
