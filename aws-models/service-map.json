@@ -199,6 +199,10 @@
     "repo_dir": "emr",
     "service_name": "emr"
   },
+  "textract": {
+    "repo_dir": "textract",
+    "service_name": "textract"
+  },
   "organizations": {
     "repo_dir": "organizations",
     "service_name": "organizations"

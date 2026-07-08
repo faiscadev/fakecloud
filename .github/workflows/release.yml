@@ -234,6 +234,7 @@ jobs:
           publish fakecloud-codepipeline      # only core/persistence/aws deps
           publish fakecloud-codeartifact      # only core/persistence/aws deps
           publish fakecloud-emr               # only core/persistence/aws deps
+          publish fakecloud-textract          # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock

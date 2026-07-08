@@ -121,6 +121,7 @@ SERVICES=(
     "firehose|Firehose|firehose"
     "glue|Glue|glue"
     "emr|EMR (Elastic MapReduce)|emr"
+    "textract|AWS Textract|textract"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"
 )

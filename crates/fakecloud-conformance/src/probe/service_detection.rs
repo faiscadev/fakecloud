@@ -86,6 +86,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "emr" => Protocol::Json {
             target_prefix: "ElasticMapReduce",
         },
+        "textract" => Protocol::Json {
+            target_prefix: "Textract",
+        },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },

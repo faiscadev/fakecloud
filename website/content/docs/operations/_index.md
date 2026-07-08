@@ -5514,6 +5514,34 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateStudio`
 - `UpdateStudioSessionMapping`
 
+## [AWS Textract](@/docs/services/textract.md)
+
+- `AnalyzeDocument`
+- `AnalyzeExpense`
+- `AnalyzeID`
+- `CreateAdapter`
+- `CreateAdapterVersion`
+- `DeleteAdapter`
+- `DeleteAdapterVersion`
+- `DetectDocumentText`
+- `GetAdapter`
+- `GetAdapterVersion`
+- `GetDocumentAnalysis`
+- `GetDocumentTextDetection`
+- `GetExpenseAnalysis`
+- `GetLendingAnalysis`
+- `GetLendingAnalysisSummary`
+- `ListAdapterVersions`
+- `ListAdapters`
+- `ListTagsForResource`
+- `StartDocumentAnalysis`
+- `StartDocumentTextDetection`
+- `StartExpenseAnalysis`
+- `StartLendingAnalysis`
+- `TagResource`
+- `UntagResource`
+- `UpdateAdapter`
+
 ## [Organizations](@/docs/services/organizations.md)
 
 - `AcceptHandshake`

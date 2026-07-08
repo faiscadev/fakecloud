@@ -511,6 +511,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Amazon EMR (Elastic MapReduce): awsJson1.1. The service shape short
         // name is the target prefix (`ElasticMapReduce.<Operation>`).
         "ElasticMapReduce" => "emr",
+        // Amazon Textract (document text/analysis extraction): awsJson1_1. The
+        // service shape short name is the target prefix (`Textract.<Operation>`).
+        "Textract" => "textract",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",
