@@ -2531,6 +2531,23 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdatePreset`
 - `UpdateQueue`
 
+## [AWS Serverless Application Repository](@/docs/services/serverlessrepo.md)
+
+- `CreateApplication`
+- `CreateApplicationVersion`
+- `CreateCloudFormationChangeSet`
+- `CreateCloudFormationTemplate`
+- `DeleteApplication`
+- `GetApplication`
+- `GetApplicationPolicy`
+- `GetCloudFormationTemplate`
+- `ListApplicationDependencies`
+- `ListApplicationVersions`
+- `ListApplications`
+- `PutApplicationPolicy`
+- `UnshareApplication`
+- `UpdateApplication`
+
 ## [AWS AppSync](@/docs/services/appsync.md)
 
 - `AssociateApi`

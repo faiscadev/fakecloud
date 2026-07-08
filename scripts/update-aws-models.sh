@@ -23,6 +23,7 @@ SERVICES=(
     "account:account"
     "amplify:amplify"
     "mediaconvert:mediaconvert"
+    "serverlessrepo:serverlessapplicationrepository"
     "config:config-service"
     "identitystore:identitystore"
     "ssoadmin:sso-admin"

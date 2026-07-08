@@ -263,6 +263,11 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // job templates, jobs, policy, endpoints; JSON bodies). Signs as
         // `mediaconvert`.
         "mediaconvert" => Protocol::Rest,
+        // AWS Serverless Application Repository: restJson1 control plane
+        // (path-labelled `@http` URIs under `/applications` over applications,
+        // versions, sharing policies, CloudFormation change sets/templates, and
+        // dependencies; JSON bodies). Signs as `serverlessrepo`.
+        "serverlessrepo" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
