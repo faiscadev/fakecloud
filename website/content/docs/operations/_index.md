@@ -5994,6 +5994,43 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UndeprecateWorkflowType`
 - `UntagResource`
 
+## [Amazon Timestream (Write + Query)](@/docs/services/timestream.md)
+
+- `CancelQuery`
+- `CreateBatchLoadTask`
+- `CreateDatabase`
+- `CreateScheduledQuery`
+- `CreateTable`
+- `DeleteDatabase`
+- `DeleteScheduledQuery`
+- `DeleteTable`
+- `DescribeAccountSettings`
+- `DescribeBatchLoadTask`
+- `DescribeDatabase`
+- `DescribeEndpoints`
+- `DescribeEndpoints`
+- `DescribeScheduledQuery`
+- `DescribeTable`
+- `ExecuteScheduledQuery`
+- `ListBatchLoadTasks`
+- `ListDatabases`
+- `ListScheduledQueries`
+- `ListTables`
+- `ListTagsForResource`
+- `ListTagsForResource`
+- `PrepareQuery`
+- `Query`
+- `ResumeBatchLoadTask`
+- `TagResource`
+- `TagResource`
+- `UntagResource`
+- `UntagResource`
+- `UpdateAccountSettings`
+- `UpdateDatabase`
+- `UpdateScheduledQuery`
+- `UpdateTable`
+- `WriteRecords`
+
 ## [AWS Support](@/docs/services/support.md)
 
 - `AddAttachmentsToSet`

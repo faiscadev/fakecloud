@@ -124,6 +124,11 @@ for mapping in "${SERVICES[@]}"; do
     repo_dir="${mapping#*:}"
     SPARSE_DIRS+=("models/$repo_dir")
 done
+# Amazon Timestream ships as two Smithy models (write + query) that share the
+# same service family and awsJson1_0 target prefix. fakecloud serves both from
+# one crate under one service key, so we merge them into a single combined
+# aws-models/timestream.json below.
+SPARSE_DIRS+=("models/timestream-write" "models/timestream-query")
 git sparse-checkout set "${SPARSE_DIRS[@]}"
 
 # Copy each model
@@ -138,6 +143,39 @@ for mapping in "${SERVICES[@]}"; do
     cp "$json_file" "$DEST/$our_name.json"
     echo "Updated $our_name.json from $json_file"
 done
+
+# Merge Timestream write + query into one combined model keyed as "timestream".
+# The two models live in distinct namespaces (no shape-id collisions); we keep
+# one service shape whose operations list is the union (dropping the query
+# duplicates of the four ops shared with write: DescribeEndpoints,
+# ListTagsForResource, TagResource, UntagResource).
+TS_WRITE=$(find models/timestream-write -name "*.json" -type f | head -1)
+TS_QUERY=$(find models/timestream-query -name "*.json" -type f | head -1)
+if [ -n "$TS_WRITE" ] && [ -n "$TS_QUERY" ]; then
+    python3 - "$TS_WRITE" "$TS_QUERY" "$DEST/timestream.json" <<'PY'
+import json, sys, collections
+w = json.load(open(sys.argv[1]), object_pairs_hook=collections.OrderedDict)
+q = json.load(open(sys.argv[2]), object_pairs_hook=collections.OrderedDict)
+wsvc = [k for k, v in w["shapes"].items() if v.get("type") == "service"][0]
+qsvc = [k for k, v in q["shapes"].items() if v.get("type") == "service"][0]
+shared = {"DescribeEndpoints", "ListTagsForResource", "TagResource", "UntagResource"}
+q_ops = [o for o in q["shapes"][qsvc]["operations"]
+         if o["target"].rsplit("#", 1)[1] not in shared]
+combined = list(w["shapes"][wsvc]["operations"]) + q_ops
+shapes = collections.OrderedDict(w["shapes"])
+for k, v in q["shapes"].items():
+    if k != qsvc:
+        shapes[k] = v
+shapes[wsvc]["operations"] = combined
+model = collections.OrderedDict([("smithy", "2.0"), ("shapes", shapes)])
+with open(sys.argv[3], "w") as f:
+    json.dump(model, f, indent=2)
+    f.write("\n")
+print("Updated timestream.json (merged write + query, %d ops)" % len(combined))
+PY
+else
+    echo "WARNING: could not find both timestream-write and timestream-query models"
+fi
 
 echo ""
 echo "Done. Review changes with: git diff aws-models/"

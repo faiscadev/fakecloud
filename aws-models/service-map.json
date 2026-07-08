@@ -398,5 +398,9 @@
   "support": {
     "repo_dir": "support",
     "service_name": "support"
+  },
+  "timestream": {
+    "repo_dir": "timestream",
+    "service_name": "timestream"
   }
 }

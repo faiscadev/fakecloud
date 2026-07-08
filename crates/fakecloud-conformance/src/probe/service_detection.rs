@@ -105,6 +105,11 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "swf" => Protocol::Json {
             target_prefix: "SimpleWorkflowService",
         },
+        // Amazon Timestream (Write + Query): awsJson1_0. Both SDK clients share
+        // the `Timestream_20181101` target prefix.
+        "timestream" => Protocol::Json {
+            target_prefix: "Timestream_20181101",
+        },
         // Amazon Comprehend: awsJson1.1 (NLP control + inference plane).
         "comprehend" => Protocol::Json {
             target_prefix: "Comprehend_20171127",

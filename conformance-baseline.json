@@ -1,6 +1,6 @@
 {
-  "variants_passed": 214856,
-  "total_variants": 214856,
+  "variants_passed": 215715,
+  "total_variants": 215715,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -401,6 +401,10 @@
     "neptune": {
       "passed": 1942,
       "total": 1942
+    },
+    "timestream": {
+      "passed": 859,
+      "total": 859
     }
   }
 }

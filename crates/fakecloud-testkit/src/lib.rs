@@ -752,6 +752,14 @@ impl TestServer {
         aws_sdk_docdb::Client::new(&self.aws_config().await)
     }
 
+    pub async fn timestream_write_client(&self) -> aws_sdk_timestreamwrite::Client {
+        aws_sdk_timestreamwrite::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn timestream_query_client(&self) -> aws_sdk_timestreamquery::Client {
+        aws_sdk_timestreamquery::Client::new(&self.aws_config().await)
+    }
+
     pub async fn elasticache_client(&self) -> aws_sdk_elasticache::Client {
         aws_sdk_elasticache::Client::new(&self.aws_config().await)
     }
