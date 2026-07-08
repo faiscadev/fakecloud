@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 98 AWS services with 3,966 total operations. 212,914/212,914 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 99 AWS services with 3,966 total operations. 214,856/214,856 generated Smithy conformance variants pass on every commit — true 100% across the board. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -33,6 +33,7 @@ fakecloud implements 98 AWS services with 3,966 total operations. 212,914/212,91
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | RDS Data API           |   6 | Real SQL on the backing Postgres/MySQL container; typed params/results incl. `bytea`/`BLOB`, transactions, batch |
 | DocumentDB             |  55 | RDS-shaped Query API (control plane only); clusters/instances/snapshots/restore, parameter + subnet + global groups, event subscriptions, tags. No MongoDB-compatible engine image, so endpoints accept no connections |
+| Neptune                |  70 | RDS-shaped Query API (control plane only); clusters/instances/cluster endpoints/snapshots/restore, IAM roles, cluster + DB parameter groups, subnet + global groups, event subscriptions, tags. No Gremlin/SPARQL graph engine image, so endpoints accept no connections |
 | Redshift               | 141 | Full control plane: clusters (progress to `available`, synthetic endpoint), snapshots (real `SnapshotArn`), parameter groups (`Source=user` filter), subnet/security groups, snapshot schedules + copy grants, endpoint access (synthesized VPC endpoint), per-cluster logging, cross-region snapshot-copy config, tagging. No SQL data plane (separate `redshift-data` API) |
 | Aurora DSQL            |  16 | Serverless distributed Postgres control plane; clusters, resource policies, change streams to Kinesis, multi-region properties, deletion protection, `clientToken` idempotency, tagging; async `CREATING`->`ACTIVE` lifecycle. Data plane (reachable container + IAM-token auth) is a follow-up |
 | Transfer Family        |  71 | Full control plane: SFTP/FTPS/FTP/AS2 servers (start/stop settle `State`), users + SSH keys, host keys, accesses, workflows + executions, agreements, connectors (`TestConnection`, file transfer, directory listing, remote delete/move), profiles, certificates, security policies, web apps, `TestIdentityProvider`, tagging; persisted. No SFTP daemon or AS2 transport engine |

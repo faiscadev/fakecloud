@@ -281,6 +281,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "rds" => Protocol::Query,
         // Amazon DocumentDB — RDS-shaped Query API on the `rds` signing scope.
         "docdb" => Protocol::Query,
+        // Amazon Neptune — RDS-shaped Query API on the `rds` signing scope.
+        "neptune" => Protocol::Query,
         "elasticache" => Protocol::Query,
         "elasticbeanstalk" => Protocol::Query,
         "elasticloadbalancing" => Protocol::Query,

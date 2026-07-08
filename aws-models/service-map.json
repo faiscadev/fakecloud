@@ -83,6 +83,10 @@
     "repo_dir": "docdb",
     "service_name": "docdb"
   },
+  "neptune": {
+    "repo_dir": "neptune",
+    "service_name": "neptune"
+  },
   "rds-data": {
     "repo_dir": "rds-data",
     "service_name": "rds-data"
