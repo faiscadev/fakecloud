@@ -241,6 +241,7 @@ jobs:
           publish fakecloud-shield              # only core/persistence/aws deps
           publish fakecloud-comprehend             # only core/persistence/aws deps
           publish fakecloud-swf                    # only core/persistence/aws deps
+          publish fakecloud-support             # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock

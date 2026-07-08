@@ -92,6 +92,7 @@ fakecloud-translate = { workspace = true }
 fakecloud-swf = { workspace = true }
 fakecloud-shield = { workspace = true }
 fakecloud-comprehend = { workspace = true }
+fakecloud-support = { workspace = true }
 fakecloud-cloudwatch = { workspace = true }
 fakecloud-application-autoscaling = { workspace = true }
 fakecloud-autoscaling = { workspace = true }

@@ -650,6 +650,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let support_state: fakecloud_support::SharedSupportState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let transcribe_state: fakecloud_transcribe::SharedTranscribeState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3750,6 +3757,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("comprehend", h);
     }
     registry.register(Arc::new(comprehend_service));
+
+    // AWS Support (support): awsJson1.1 support-cases + Trusted Advisor control
+    // plane (cases, communications, attachment sets, severity levels, the
+    // Trusted Advisor check catalogue + refresh state machine).
+    let support_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("support").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_support::persistence::load_into(&store, &support_state) {
+                Ok(fakecloud_support::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded support persistence snapshot");
+                }
+                Ok(fakecloud_support::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no support persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut support_service = fakecloud_support::SupportService::new(support_state.clone());
+    if let Some(store) = support_snapshot_store {
+        support_service = support_service.with_snapshot_store(store);
+    }
+    if let Some(h) = support_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("support", h);
+    }
+    registry.register(Arc::new(support_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
