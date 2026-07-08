@@ -211,11 +211,23 @@ jobs:
 
       # Run the prebuilt test binaries straight from the archive — no compilation.
       # --workspace-remap . points runtime workspace lookups at this checkout (the
-      # path matches the build runner on GitHub-hosted runners). nextest extracts
-      # to its own temp dir under /tmp (ample free space on the root fs);
-      # container images still land on the /mnt-relocated docker root.
+      # path matches the build runner on GitHub-hosted runners).
+      #
+      # nextest extracts the archive to a temp dir under $TMPDIR. The default
+      # ($TMPDIR unset -> /tmp) lives on the root fs, which on current
+      # GitHub-hosted Ubuntu runners is only ~72G with ~16G free (the runner
+      # image already uses ~56G). The archive holds every E2E test binary and
+      # grows with each new service crate, so extracting it onto the small root
+      # eventually ENOSPCs ("No space left on device (os error 28)" while
+      # unpacking target/debug/deps/*). Point TMPDIR at the near-empty ~74G
+      # /mnt (same large disk #2200 relocated docker to) so the extract has
+      # ~66G of headroom. Container images still land on the /mnt docker root.
       - name: Run nextest partition
+        env:
+          TMPDIR: /mnt/nextest-tmp
         run: |
+          sudo mkdir -p /mnt/nextest-tmp
+          sudo chmod 1777 /mnt/nextest-tmp
           cmd=(cargo nextest run -P ci
             --archive-file e2e-archive.tar.zst
             --workspace-remap .
