@@ -111,6 +111,12 @@ const REST_JSON_SERVICES: &[&str] = &[
     // `/topics/{topic}`, `/retainedMessage`, and `/connections`; raw
     // `@httpPayload` shadow documents). Signs as `iotdata`.
     "iotdata",
+    // Amazon Pinpoint: restJson1 control plane (RESTful `@http` method + path
+    // routing under `/v1/apps/...`, `/v1/templates/...`, `/v1/recommenders`,
+    // `/v1/tags/...` over apps, campaigns, segments, endpoints, channels,
+    // journeys, templates, jobs, event streams, recommenders, and tags; JSON
+    // bodies). Signs as `mobiletargeting`, normalized to `pinpoint`.
+    "pinpoint",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
@@ -746,6 +752,11 @@ fn normalize_service_name(service: &str) -> &str {
         // registry entry (the conformance probe signs with the Smithy service
         // shape name `mwaa`, which already resolves).
         "airflow" => "mwaa",
+        // Amazon Pinpoint signs SigV4 with the `mobiletargeting` scope (its ARN
+        // namespace), so a real SDK request arrives as `mobiletargeting`. Alias
+        // it to the `pinpoint` registry entry (the conformance probe signs with
+        // the service-map `service_name`, `pinpoint`, which already resolves).
+        "mobiletargeting" => "pinpoint",
         other => other,
     }
 }

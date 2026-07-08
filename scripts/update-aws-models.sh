@@ -25,6 +25,7 @@ SERVICES=(
     "mediaconvert:mediaconvert"
     "serverlessrepo:serverlessapplicationrepository"
     "iotdata:iot-data-plane"
+    "pinpoint:pinpoint"
     "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"

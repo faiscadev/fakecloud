@@ -281,6 +281,13 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // MQTT publish topics, retained messages, and connections; raw
         // `@httpPayload` shadow documents). Signs as `iotdata`.
         "iotdata" => Protocol::Rest,
+        // Amazon Pinpoint: restJson1 control plane (RESTful `@http` method +
+        // path routing under `/v1/...` over apps, campaigns, segments,
+        // endpoints, channels, journeys, templates, jobs, event streams,
+        // recommenders, and tags; JSON bodies). Signs as `mobiletargeting`,
+        // aliased to `pinpoint`; the conformance probe uses the service-map
+        // `service_name` (`pinpoint`).
+        "pinpoint" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

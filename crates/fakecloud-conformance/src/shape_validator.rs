@@ -206,11 +206,33 @@ pub fn diff_against_example_with_model(
     model: &ServiceModel,
     output_shape_id: &str,
 ) -> Vec<ShapeViolation> {
+    // `@httpPayload` redirects the response body to the payload member's target
+    // shape: restJson1 services serialise the payload member's *content* as the
+    // whole body, unwrapped. AWS commits its `@examples` output at the full
+    // output-structure level, so the documented example wraps the content in the
+    // payload member name (e.g. `{ "JourneyRunsResponse": { "Item": [...] } }`)
+    // while the live wire body is the unwrapped content (`{ "Item": [...] }`).
+    // Unwrap the documented example (and retarget the shape) through the payload
+    // member so the diff compares like with like — the same redirect
+    // `validate_response` already performs for shape validation.
+    let (documented, shape_id) = match effective_shape_type(model, output_shape_id) {
+        Some(ShapeType::Structure { members }) => {
+            match members.iter().find(|m| m.traits.http_payload) {
+                Some(payload) => {
+                    let key = payload.traits.json_name.as_deref().unwrap_or(&payload.name);
+                    let inner = documented.get(key).cloned().unwrap_or(Value::Null);
+                    (inner, payload.target.clone())
+                }
+                None => (documented.clone(), output_shape_id.to_string()),
+            }
+        }
+        _ => (documented.clone(), output_shape_id.to_string()),
+    };
     let mut violations = Vec::new();
     diff_at_with_shape(
         actual,
-        documented,
-        Some((model, output_shape_id)),
+        &documented,
+        Some((model, shape_id.as_str())),
         "$",
         &mut violations,
     );
