@@ -744,6 +744,10 @@ impl TestServer {
         aws_sdk_ec2::Client::new(&self.aws_config().await)
     }
 
+    pub async fn docdb_client(&self) -> aws_sdk_docdb::Client {
+        aws_sdk_docdb::Client::new(&self.aws_config().await)
+    }
+
     pub async fn elasticache_client(&self) -> aws_sdk_elasticache::Client {
         aws_sdk_elasticache::Client::new(&self.aws_config().await)
     }

@@ -335,6 +335,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let docdb_state: fakecloud_docdb::SharedDocDbState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let elasticache_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -2765,6 +2772,64 @@ async fn main() {
     registry.register(Arc::new(fakecloud_rds_data::RdsDataService::new(
         rds_state.clone(),
     )));
+    // Amazon DocumentDB (docdb): RDS-shaped Query API, control-plane only
+    // (no backing MongoDB-compatible engine image exists, so clusters and
+    // instances are records with well-formed endpoints — see the crate docs).
+    let docdb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("docdb").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_docdb::DocDbSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_docdb::DOCDB_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "docdb persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_docdb::DOCDB_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *docdb_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded docdb persistence snapshot",
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse docdb persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no docdb persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read docdb persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut docdb_service = fakecloud_docdb::DocDbService::new(docdb_state.clone());
+    if let Some(store) = docdb_snapshot_store {
+        docdb_service = docdb_service.with_snapshot_store(store);
+    }
+    if let Some(h) = docdb_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("docdb", h);
+    }
+    registry.register(Arc::new(docdb_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

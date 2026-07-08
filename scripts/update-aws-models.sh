@@ -46,6 +46,7 @@ SERVICES=(
     "sesv2:sesv2"
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
+    "docdb:docdb"
     "dms:database-migration-service"
     "cloudtrail:cloudtrail"
     "rds-data:rds-data"

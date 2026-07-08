@@ -279,6 +279,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
         // for clarity instead of relying on the default fall-through.
         "rds" => Protocol::Query,
+        // Amazon DocumentDB — RDS-shaped Query API on the `rds` signing scope.
+        "docdb" => Protocol::Query,
         "elasticache" => Protocol::Query,
         "elasticbeanstalk" => Protocol::Query,
         "elasticloadbalancing" => Protocol::Query,
