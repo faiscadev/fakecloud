@@ -2494,6 +2494,43 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateDomainAssociation`
 - `UpdateWebhook`
 
+## [AWS Elemental MediaConvert](@/docs/services/mediaconvert.md)
+
+- `AssociateCertificate`
+- `CancelJob`
+- `CreateJob`
+- `CreateJobTemplate`
+- `CreatePreset`
+- `CreateQueue`
+- `CreateResourceShare`
+- `DeleteJobTemplate`
+- `DeletePolicy`
+- `DeletePreset`
+- `DeleteQueue`
+- `DescribeEndpoints`
+- `DisassociateCertificate`
+- `GetJob`
+- `GetJobTemplate`
+- `GetJobsQueryResults`
+- `GetPolicy`
+- `GetPreset`
+- `GetQueue`
+- `ListJobTemplates`
+- `ListJobs`
+- `ListPresets`
+- `ListQueues`
+- `ListTagsForResource`
+- `ListVersions`
+- `Probe`
+- `PutPolicy`
+- `SearchJobs`
+- `StartJobsQuery`
+- `TagResource`
+- `UntagResource`
+- `UpdateJobTemplate`
+- `UpdatePreset`
+- `UpdateQueue`
+
 ## [AWS AppSync](@/docs/services/appsync.md)
 
 - `AssociateApi`

@@ -95,6 +95,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // environments, jobs/deployments, artifacts, and tags; JSON bodies).
     // Signs as `amplify`.
     "amplify",
+    // AWS Elemental MediaConvert: restJson1 video-transcoding control plane
+    // (path-labelled `@http` URIs under `/2017-08-29` over queues, presets, job
+    // templates, jobs, policy, endpoints, and tags; JSON bodies). Signs as
+    // `mediaconvert`.
+    "mediaconvert",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

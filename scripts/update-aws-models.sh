@@ -22,6 +22,7 @@ cd repo
 SERVICES=(
     "account:account"
     "amplify:amplify"
+    "mediaconvert:mediaconvert"
     "config:config-service"
     "identitystore:identitystore"
     "ssoadmin:sso-admin"

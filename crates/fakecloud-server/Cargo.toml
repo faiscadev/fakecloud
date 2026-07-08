@@ -80,6 +80,7 @@ fakecloud-verifiedpermissions = { workspace = true }
 fakecloud-acm = { workspace = true }
 fakecloud-acmpca = { workspace = true }
 fakecloud-amplify = { workspace = true }
+fakecloud-mediaconvert = { workspace = true }
 fakecloud-config = { workspace = true }
 fakecloud-route53resolver = { workspace = true }
 fakecloud-firehose = { workspace = true }

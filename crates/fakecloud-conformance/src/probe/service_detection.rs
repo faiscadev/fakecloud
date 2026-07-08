@@ -250,6 +250,11 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // URIs over apps, branches, domains, webhooks, jobs; JSON bodies).
         // Signs as `amplify`.
         "amplify" => Protocol::Rest,
+        // AWS Elemental MediaConvert: restJson1 video-transcoding control plane
+        // (path-labelled `@http` URIs under `/2017-08-29` over queues, presets,
+        // job templates, jobs, policy, endpoints; JSON bodies). Signs as
+        // `mediaconvert`.
+        "mediaconvert" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
