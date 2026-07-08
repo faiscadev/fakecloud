@@ -276,6 +276,11 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // versions, sharing policies, CloudFormation change sets/templates, and
         // dependencies; JSON bodies). Signs as `serverlessrepo`.
         "serverlessrepo" => Protocol::Rest,
+        // AWS IoT Data Plane: restJson1 device-shadow + retained-message data
+        // plane (path-labelled `@http` URIs over things' classic/named shadows,
+        // MQTT publish topics, retained messages, and connections; raw
+        // `@httpPayload` shadow documents). Signs as `iotdata`.
+        "iotdata" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

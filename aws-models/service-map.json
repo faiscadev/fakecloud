@@ -371,6 +371,10 @@
     "repo_dir": "serverlessapplicationrepository",
     "service_name": "serverlessrepo"
   },
+  "iotdata": {
+    "repo_dir": "iot-data-plane",
+    "service_name": "iotdata"
+  },
   "managedblockchain": {
     "repo_dir": "managedblockchain",
     "service_name": "managedblockchain"

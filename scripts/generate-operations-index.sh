@@ -78,6 +78,7 @@ SERVICES=(
     "amplify|AWS Amplify|amplify"
     "mediaconvert|AWS Elemental MediaConvert|mediaconvert"
     "serverlessrepo|AWS Serverless Application Repository|serverlessrepo"
+    "iotdata|AWS IoT Data Plane|iotdata"
     "managedblockchain|Amazon Managed Blockchain|managedblockchain"
     "appsync|AWS AppSync|appsync"
     "glacier|Amazon S3 Glacier|glacier"

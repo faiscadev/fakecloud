@@ -2679,6 +2679,20 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UnshareApplication`
 - `UpdateApplication`
 
+## [AWS IoT Data Plane](@/docs/services/iotdata.md)
+
+- `DeleteConnection`
+- `DeleteThingShadow`
+- `GetConnection`
+- `GetRetainedMessage`
+- `GetThingShadow`
+- `ListNamedShadowsForThing`
+- `ListRetainedMessages`
+- `ListSubscriptions`
+- `Publish`
+- `SendDirectMessage`
+- `UpdateThingShadow`
+
 ## [Amazon Managed Blockchain](@/docs/services/managedblockchain.md)
 
 - `CreateAccessor`

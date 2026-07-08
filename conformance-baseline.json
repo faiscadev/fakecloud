@@ -1,6 +1,6 @@
 {
-  "variants_passed": 215715,
-  "total_variants": 215715,
+  "variants_passed": 216074,
+  "total_variants": 216074,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -405,6 +405,10 @@
     "timestream": {
       "passed": 859,
       "total": 859
+    },
+    "iotdata": {
+      "passed": 359,
+      "total": 359
     }
   }
 }
