@@ -657,6 +657,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let translate_state: fakecloud_translate::SharedTranslateState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let shield_state: fakecloud_shield::SharedShieldState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3587,6 +3594,41 @@ async fn main() {
         cfn_snapshot_hooks.insert("transcribe", h);
     }
     registry.register(Arc::new(transcribe_service));
+
+    // Amazon Translate (translate): awsJson1.1 text/document translation control
+    // plane (synchronous TranslateText / TranslateDocument passthrough, async
+    // batch translation jobs, parallel data, custom terminologies, supported
+    // languages, tags).
+    let translate_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("translate").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_translate::persistence::load_into(&store, &translate_state) {
+                Ok(fakecloud_translate::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded translate persistence snapshot");
+                }
+                Ok(fakecloud_translate::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no translate persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut translate_service = fakecloud_translate::TranslateService::new(translate_state.clone());
+    if let Some(store) = translate_snapshot_store {
+        translate_service = translate_service.with_snapshot_store(store);
+    }
+    if let Some(h) = translate_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("translate", h);
+    }
+    registry.register(Arc::new(translate_service));
 
     // AWS Shield / Shield Advanced: awsJson1.1 control plane (protections,
     // protection groups, the annual auto-renewing subscription, emergency

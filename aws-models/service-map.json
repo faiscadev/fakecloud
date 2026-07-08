@@ -359,6 +359,10 @@
     "repo_dir": "transcribe",
     "service_name": "transcribe"
   },
+  "translate": {
+    "repo_dir": "translate",
+    "service_name": "translate"
+  },
   "shield": {
     "repo_dir": "shield",
     "service_name": "shield"

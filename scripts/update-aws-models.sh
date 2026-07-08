@@ -104,6 +104,7 @@ SERVICES=(
     "textract:textract"
     "transcribe:transcribe"
     "comprehend:comprehend"
+    "translate:translate"
     "fis:fis"
     "shield:shield"
     "xray:xray"
