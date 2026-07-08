@@ -144,10 +144,10 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # No free-disk and no rust-cache here: this job runs prebuilt test binaries
       # from the archive and never compiles. It downloads the archive + the
-      # fakecloud binary and pulls a few container images (<~10G); the runner's
-      # single ~145G root already has ~117G free, so the free-disk reclaim (a
-      # variable 2-4 min, measured as the single biggest per-partition overhead)
-      # is wasted work on the workflow's critical path.
+      # fakecloud binary and pulls container images; the compile-oriented
+      # free-disk reclaim (a variable 2-4 min) is not what this job needs — it
+      # needs its container data-root on the large disk (see the relocate step
+      # below), not preinstalled-SDK cleanup on the root fs.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
 
@@ -155,14 +155,30 @@ jobs:
         if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      # NOTE: an earlier "Relocate container storage to /mnt" step was removed
-      # here. It existed to escape a small root filesystem when /mnt was a large
-      # separate ephemeral disk, but current GitHub-hosted runners have a single
-      # ~145G root (~117G free) and no separate /mnt, so the relocation rsynced
-      # docker's data-root from root back onto root — pure overhead with no
-      # headroom gained. With that much free space the free-disk reclaim is
-      # unnecessary too (removed above); container images for a single partition
-      # stay well under the available room.
+      # Relocate the container data-root to /mnt BEFORE any image pull. Current
+      # GitHub-hosted Ubuntu runners expose a ~72G root `/` with only ~16G free
+      # (the runner image already uses ~56G) plus a SEPARATE ~74G `/mnt`
+      # (/dev/sdb1) that is ~66G free. Docker's default data-root lives on `/`,
+      # so a partition that pulls several runtime images (e.g.
+      # lambda-runtimes-python pulls python:3.9 .. python:3.14) exhausts the 16G
+      # and dies with `write /var/lib/docker/...: no space left on device`.
+      # Pointing the data-root at the near-empty /mnt yields ~66G of headroom.
+      # (An earlier revision claimed a single ~145G root with no /mnt and dropped
+      # this step; `df -h` on the current runners shows that assumption is false.)
+      - name: Relocate container storage to /mnt (large disk)
+        run: |
+          sudo systemctl stop docker docker.socket || true
+          sudo mkdir -p /mnt/docker
+          printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
+          sudo rm -rf /var/lib/docker
+          sudo systemctl start docker
+          if [ "$INSTALL_PODMAN" = "true" ]; then
+            sudo mkdir -p /mnt/containers /etc/containers
+            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers"\n' | sudo tee /etc/containers/storage.conf
+          fi
+          echo "=== df -h after relocate ==="
+          df -h / /mnt
+
       - name: Prune container state before tests
         run: |
           docker system prune -af --volumes || true
