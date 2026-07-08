@@ -70,6 +70,7 @@ aws-sdk-mwaa = "1"
 aws-sdk-fis = "1"
 aws-sdk-xray = "1"
 aws-sdk-appsync = "1"
+aws-sdk-amplify = "1"
 aws-sdk-kinesisanalyticsv2 = "1"
 # Pure-Rust Kafka client for the MSK data-plane produce/consume round trip.
 # `default-features = false` drops the optional native compression codecs

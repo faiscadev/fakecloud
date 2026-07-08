@@ -712,6 +712,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let amplify_state: fakecloud_amplify::SharedAmplifyState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -5579,6 +5586,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("appsync", h);
     }
     registry.register(Arc::new(appsync_service));
+
+    let amplify_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("amplify").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_amplify::persistence::load_into(&store, &amplify_state) {
+                Ok(fakecloud_amplify::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded amplify persistence snapshot");
+                }
+                Ok(fakecloud_amplify::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no amplify persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut amplify_service = fakecloud_amplify::AmplifyService::new(amplify_state.clone());
+    if let Some(store) = amplify_snapshot_store {
+        amplify_service = amplify_service.with_snapshot_store(store);
+    }
+    if let Some(h) = amplify_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("amplify", h);
+    }
+    registry.register(Arc::new(amplify_service));
 
     let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

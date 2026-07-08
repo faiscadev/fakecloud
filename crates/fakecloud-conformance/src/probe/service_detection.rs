@@ -227,6 +227,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // `POST /<Op>` URIs; JSON bodies). Signs as `xray`.
         "xray" => Protocol::Rest,
         "appsync" => Protocol::Rest,
+        // AWS Amplify: restJson1 hosting control plane (path-labelled `@http`
+        // URIs over apps, branches, domains, webhooks, jobs; JSON bodies).
+        // Signs as `amplify`.
+        "amplify" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
