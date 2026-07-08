@@ -85,6 +85,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // sampling rules, groups, encryption config, and tags; JSON bodies).
     // Signs as `xray`.
     "xray",
+    // AWS AppSync: restJson1 control plane + schema state (RESTful `@http`
+    // method + path routing over GraphQL APIs, data sources, resolvers,
+    // functions, types, caches, domain names, the Event-API surface, and
+    // source-API associations; JSON bodies). Signs as `appsync`.
+    "appsync",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

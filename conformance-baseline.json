@@ -1,6 +1,6 @@
 {
-  "variants_passed": 195217,
-  "total_variants": 195217,
+  "variants_passed": 197609,
+  "total_variants": 197609,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -345,6 +345,10 @@
     "xray": {
       "passed": 1067,
       "total": 1067
+    },
+    "appsync": {
+      "passed": 2392,
+      "total": 2392
     }
   }
 }

@@ -342,5 +342,9 @@
   "xray": {
     "repo_dir": "xray",
     "service_name": "xray"
+  },
+  "appsync": {
+    "repo_dir": "appsync",
+    "service_name": "appsync"
   }
 }

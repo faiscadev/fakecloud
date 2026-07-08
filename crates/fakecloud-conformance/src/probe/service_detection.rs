@@ -226,6 +226,7 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // AWS X-Ray: restJson1 control plane + trace data plane (fixed
         // `POST /<Op>` URIs; JSON bodies). Signs as `xray`.
         "xray" => Protocol::Rest,
+        "appsync" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
