@@ -354,5 +354,9 @@
   "amplify": {
     "repo_dir": "amplify",
     "service_name": "amplify"
+  },
+  "transcribe": {
+    "repo_dir": "transcribe",
+    "service_name": "transcribe"
   }
 }

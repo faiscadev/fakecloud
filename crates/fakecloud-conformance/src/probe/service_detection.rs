@@ -89,6 +89,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "textract" => Protocol::Json {
             target_prefix: "Textract",
         },
+        // Amazon Transcribe: awsJson1.1 (speech-to-text control plane).
+        "transcribe" => Protocol::Json {
+            target_prefix: "Transcribe",
+        },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },

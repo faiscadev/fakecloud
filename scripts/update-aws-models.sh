@@ -102,6 +102,7 @@ SERVICES=(
     "mwaa:mwaa"
     "emr:emr"
     "textract:textract"
+    "transcribe:transcribe"
     "fis:fis"
     "xray:xray"
     "appsync:appsync"

@@ -643,6 +643,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let transcribe_state: fakecloud_transcribe::SharedTranscribeState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3531,6 +3538,41 @@ async fn main() {
         cfn_snapshot_hooks.insert("textract", h);
     }
     registry.register(Arc::new(textract_service));
+    // Amazon Transcribe (transcribe): awsJson1.1 speech-to-text control plane
+    // (transcription / medical-transcription / call-analytics / medical-scribe
+    // jobs, custom + medical vocabularies, vocabulary filters, custom language
+    // models, call-analytics categories, tags).
+    let transcribe_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("transcribe").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_transcribe::persistence::load_into(&store, &transcribe_state) {
+                Ok(fakecloud_transcribe::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded transcribe persistence snapshot");
+                }
+                Ok(fakecloud_transcribe::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no transcribe persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut transcribe_service =
+        fakecloud_transcribe::TranscribeService::new(transcribe_state.clone());
+    if let Some(store) = transcribe_snapshot_store {
+        transcribe_service = transcribe_service.with_snapshot_store(store);
+    }
+    if let Some(h) = transcribe_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("transcribe", h);
+    }
+    registry.register(Arc::new(transcribe_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
