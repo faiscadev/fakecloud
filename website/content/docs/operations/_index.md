@@ -5542,6 +5542,52 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UntagResource`
 - `UpdateAdapter`
 
+## [Amazon Transcribe](@/docs/services/transcribe.md)
+
+- `CreateCallAnalyticsCategory`
+- `CreateLanguageModel`
+- `CreateMedicalVocabulary`
+- `CreateVocabulary`
+- `CreateVocabularyFilter`
+- `DeleteCallAnalyticsCategory`
+- `DeleteCallAnalyticsJob`
+- `DeleteLanguageModel`
+- `DeleteMedicalScribeJob`
+- `DeleteMedicalTranscriptionJob`
+- `DeleteMedicalVocabulary`
+- `DeleteTranscriptionJob`
+- `DeleteVocabulary`
+- `DeleteVocabularyFilter`
+- `DescribeLanguageModel`
+- `GetCallAnalyticsCategory`
+- `GetCallAnalyticsJob`
+- `GetMedicalScribeJob`
+- `GetMedicalTranscriptionJob`
+- `GetMedicalVocabulary`
+- `GetTranscriptionJob`
+- `GetVocabulary`
+- `GetVocabularyFilter`
+- `ListCallAnalyticsCategories`
+- `ListCallAnalyticsJobs`
+- `ListLanguageModels`
+- `ListMedicalScribeJobs`
+- `ListMedicalTranscriptionJobs`
+- `ListMedicalVocabularies`
+- `ListTagsForResource`
+- `ListTranscriptionJobs`
+- `ListVocabularies`
+- `ListVocabularyFilters`
+- `StartCallAnalyticsJob`
+- `StartMedicalScribeJob`
+- `StartMedicalTranscriptionJob`
+- `StartTranscriptionJob`
+- `TagResource`
+- `UntagResource`
+- `UpdateCallAnalyticsCategory`
+- `UpdateMedicalVocabulary`
+- `UpdateVocabulary`
+- `UpdateVocabularyFilter`
+
 ## [Organizations](@/docs/services/organizations.md)
 
 - `AcceptHandshake`

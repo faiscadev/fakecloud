@@ -122,6 +122,7 @@ SERVICES=(
     "glue|Glue|glue"
     "emr|EMR (Elastic MapReduce)|emr"
     "textract|AWS Textract|textract"
+    "transcribe|Amazon Transcribe|transcribe"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"
 )

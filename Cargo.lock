@@ -2050,6 +2050,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-transcribe"
+version = "1.104.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30bb9c63adb1ab9a407893f5521a45dcca531b46e477c801cf00fba28e673e0d"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-wafv2"
 version = "1.112.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3932,6 +3956,7 @@ dependencies = [
  "fakecloud-ssoadmin",
  "fakecloud-stepfunctions",
  "fakecloud-textract",
+ "fakecloud-transcribe",
  "fakecloud-transfer",
  "fakecloud-verifiedpermissions",
  "fakecloud-wafv2",
@@ -4938,6 +4963,7 @@ dependencies = [
  "aws-sdk-ssm",
  "aws-sdk-sts",
  "aws-sdk-textract",
+ "aws-sdk-transcribe",
  "aws-sdk-wafv2",
  "aws-sdk-xray",
  "aws-smithy-runtime-api",
@@ -6213,6 +6239,26 @@ version = "0.40.1"
 dependencies = [
  "fakecloud-testkit",
  "tokio",
+]
+
+[[package]]
+name = "fakecloud-transcribe"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
