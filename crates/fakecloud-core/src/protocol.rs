@@ -90,6 +90,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // functions, types, caches, domain names, the Event-API surface, and
     // source-API associations; JSON bodies). Signs as `appsync`.
     "appsync",
+    // AWS Amplify: restJson1 hosting control plane (path-labelled `@http` URIs
+    // over apps, branches, domain associations, webhooks, backend
+    // environments, jobs/deployments, artifacts, and tags; JSON bodies).
+    // Signs as `amplify`.
+    "amplify",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

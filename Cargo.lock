@@ -408,6 +408,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-amplify"
+version = "1.107.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48255049aaa8841081c1b413e099398ce69be72726a72980cab54b535b08035a"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-apigateway"
 version = "1.103.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3800,6 +3824,7 @@ dependencies = [
  "fakecloud-account",
  "fakecloud-acm",
  "fakecloud-acmpca",
+ "fakecloud-amplify",
  "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
  "fakecloud-appconfig",
@@ -3977,6 +4002,26 @@ dependencies = [
  "tracing",
  "uuid",
  "x509-parser",
+]
+
+[[package]]
+name = "fakecloud-amplify"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4809,6 +4854,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-acm",
+ "aws-sdk-amplify",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-applicationautoscaling",

@@ -210,6 +210,7 @@ jobs:
           publish fakecloud-fis              # only core/persistence deps
           publish fakecloud-xray             # only core/persistence deps
           publish fakecloud-appsync          # only core/persistence deps
+          publish fakecloud-amplify          # only core/persistence deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
           publish fakecloud-identitystore    # only core/persistence/aws deps

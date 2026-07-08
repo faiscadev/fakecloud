@@ -1,6 +1,6 @@
 {
-  "variants_passed": 197609,
-  "total_variants": 197609,
+  "variants_passed": 199184,
+  "total_variants": 199184,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -349,6 +349,10 @@
     "appsync": {
       "passed": 2392,
       "total": 2392
+    },
+    "amplify": {
+      "passed": 1575,
+      "total": 1575
     }
   }
 }

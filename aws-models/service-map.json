@@ -346,5 +346,9 @@
   "appsync": {
     "repo_dir": "appsync",
     "service_name": "appsync"
+  },
+  "amplify": {
+    "repo_dir": "amplify",
+    "service_name": "amplify"
   }
 }

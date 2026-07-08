@@ -2454,6 +2454,46 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateSamplingRule`
 - `UpdateTraceSegmentDestination`
 
+## [AWS Amplify](@/docs/services/amplify.md)
+
+- `CreateApp`
+- `CreateBackendEnvironment`
+- `CreateBranch`
+- `CreateDeployment`
+- `CreateDomainAssociation`
+- `CreateWebhook`
+- `DeleteApp`
+- `DeleteBackendEnvironment`
+- `DeleteBranch`
+- `DeleteDomainAssociation`
+- `DeleteJob`
+- `DeleteWebhook`
+- `GenerateAccessLogs`
+- `GetApp`
+- `GetArtifactUrl`
+- `GetBackendEnvironment`
+- `GetBranch`
+- `GetDomainAssociation`
+- `GetJob`
+- `GetWebhook`
+- `ListApps`
+- `ListArtifacts`
+- `ListBackendEnvironments`
+- `ListBranches`
+- `ListDomainAssociations`
+- `ListJobs`
+- `ListTagsForResource`
+- `ListWebhooks`
+- `StartDeployment`
+- `StartJob`
+- `StopJob`
+- `TagResource`
+- `UntagResource`
+- `UpdateApp`
+- `UpdateBranch`
+- `UpdateDomainAssociation`
+- `UpdateWebhook`
+
 ## [AWS AppSync](@/docs/services/appsync.md)
 
 - `AssociateApi`
