@@ -104,6 +104,7 @@ SERVICES=(
     "textract:textract"
     "transcribe:transcribe"
     "fis:fis"
+    "shield:shield"
     "xray:xray"
     "appsync:appsync"
 )

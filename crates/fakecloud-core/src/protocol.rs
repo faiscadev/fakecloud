@@ -517,6 +517,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // Amazon Transcribe: awsJson1.1. The service shape short name is the
         // target prefix (`Transcribe.<Operation>`).
         "Transcribe" => "transcribe",
+        // AWS Shield / Shield Advanced: awsJson1_1. The service shape short
+        // name (`AWSShield_20160616.<Operation>`) is the target prefix.
+        "AWSShield_20160616" => "shield",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",

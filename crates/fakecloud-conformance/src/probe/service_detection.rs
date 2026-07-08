@@ -93,6 +93,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "transcribe" => Protocol::Json {
             target_prefix: "Transcribe",
         },
+        // AWS Shield / Shield Advanced: awsJson1_1.
+        "shield" => Protocol::Json {
+            target_prefix: "AWSShield_20160616",
+        },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
         },

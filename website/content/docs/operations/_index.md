@@ -5588,6 +5588,45 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateVocabulary`
 - `UpdateVocabularyFilter`
 
+## [Shield (Shield Advanced)](@/docs/services/shield.md)
+
+- `AssociateDRTLogBucket`
+- `AssociateDRTRole`
+- `AssociateHealthCheck`
+- `AssociateProactiveEngagementDetails`
+- `CreateProtection`
+- `CreateProtectionGroup`
+- `CreateSubscription`
+- `DeleteProtection`
+- `DeleteProtectionGroup`
+- `DeleteSubscription`
+- `DescribeAttack`
+- `DescribeAttackStatistics`
+- `DescribeDRTAccess`
+- `DescribeEmergencyContactSettings`
+- `DescribeProtection`
+- `DescribeProtectionGroup`
+- `DescribeSubscription`
+- `DisableApplicationLayerAutomaticResponse`
+- `DisableProactiveEngagement`
+- `DisassociateDRTLogBucket`
+- `DisassociateDRTRole`
+- `DisassociateHealthCheck`
+- `EnableApplicationLayerAutomaticResponse`
+- `EnableProactiveEngagement`
+- `GetSubscriptionState`
+- `ListAttacks`
+- `ListProtectionGroups`
+- `ListProtections`
+- `ListResourcesInProtectionGroup`
+- `ListTagsForResource`
+- `TagResource`
+- `UntagResource`
+- `UpdateApplicationLayerAutomaticResponse`
+- `UpdateEmergencyContactSettings`
+- `UpdateProtectionGroup`
+- `UpdateSubscription`
+
 ## [Organizations](@/docs/services/organizations.md)
 
 - `AcceptHandshake`

@@ -264,6 +264,17 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // `InvalidRequestException` for the probes' synthetic (non-existent)
         // cluster ids. A handler returning it ran correctly.
         "emr" => &["InvalidRequestException"],
+        // AWS Shield's `InvalidParameterException` is its canonical
+        // request-validation client error: the live API returns it whenever an
+        // operation is called with a member outside its `length`/`range`/`enum`
+        // bounds or an otherwise-invalid parameter. The Smithy model declares
+        // it on most operations but omits it from a handful (the `Delete*`,
+        // `Describe*` and paginated `List*` families declare only
+        // `ResourceNotFoundException` / `OptimisticLockException` /
+        // `InvalidPaginationTokenException`), yet the model-driven validator
+        // returns it for the probes' out-of-bounds synthetic inputs on those
+        // ops too. A handler returning it ran correctly.
+        "shield" => &["InvalidParameterException"],
         _ => &[],
     }
 }

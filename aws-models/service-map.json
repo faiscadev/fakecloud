@@ -358,5 +358,9 @@
   "transcribe": {
     "repo_dir": "transcribe",
     "service_name": "transcribe"
+  },
+  "shield": {
+    "repo_dir": "shield",
+    "service_name": "shield"
   }
 }
