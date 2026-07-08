@@ -79,6 +79,10 @@
     "repo_dir": "rds",
     "service_name": "rds"
   },
+  "docdb": {
+    "repo_dir": "docdb",
+    "service_name": "docdb"
+  },
   "rds-data": {
     "repo_dir": "rds-data",
     "service_name": "rds-data"

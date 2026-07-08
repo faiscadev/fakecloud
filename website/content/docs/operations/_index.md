@@ -1559,6 +1559,64 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `SwitchoverGlobalCluster`
 - `SwitchoverReadReplica`
 
+## [DocumentDB](@/docs/services/docdb.md)
+
+- `AddSourceIdentifierToSubscription`
+- `AddTagsToResource`
+- `ApplyPendingMaintenanceAction`
+- `CopyDBClusterParameterGroup`
+- `CopyDBClusterSnapshot`
+- `CreateDBCluster`
+- `CreateDBClusterParameterGroup`
+- `CreateDBClusterSnapshot`
+- `CreateDBInstance`
+- `CreateDBSubnetGroup`
+- `CreateEventSubscription`
+- `CreateGlobalCluster`
+- `DeleteDBCluster`
+- `DeleteDBClusterParameterGroup`
+- `DeleteDBClusterSnapshot`
+- `DeleteDBInstance`
+- `DeleteDBSubnetGroup`
+- `DeleteEventSubscription`
+- `DeleteGlobalCluster`
+- `DescribeCertificates`
+- `DescribeDBClusterParameterGroups`
+- `DescribeDBClusterParameters`
+- `DescribeDBClusterSnapshotAttributes`
+- `DescribeDBClusterSnapshots`
+- `DescribeDBClusters`
+- `DescribeDBEngineVersions`
+- `DescribeDBInstances`
+- `DescribeDBSubnetGroups`
+- `DescribeEngineDefaultClusterParameters`
+- `DescribeEventCategories`
+- `DescribeEventSubscriptions`
+- `DescribeEvents`
+- `DescribeGlobalClusters`
+- `DescribeOrderableDBInstanceOptions`
+- `DescribePendingMaintenanceActions`
+- `FailoverDBCluster`
+- `FailoverGlobalCluster`
+- `ListTagsForResource`
+- `ModifyDBCluster`
+- `ModifyDBClusterParameterGroup`
+- `ModifyDBClusterSnapshotAttribute`
+- `ModifyDBInstance`
+- `ModifyDBSubnetGroup`
+- `ModifyEventSubscription`
+- `ModifyGlobalCluster`
+- `RebootDBInstance`
+- `RemoveFromGlobalCluster`
+- `RemoveSourceIdentifierFromSubscription`
+- `RemoveTagsFromResource`
+- `ResetDBClusterParameterGroup`
+- `RestoreDBClusterFromSnapshot`
+- `RestoreDBClusterToPointInTime`
+- `StartDBCluster`
+- `StopDBCluster`
+- `SwitchoverGlobalCluster`
+
 ## [RDS Data](@/docs/services/rds-data.md)
 
 - `BatchExecuteStatement`

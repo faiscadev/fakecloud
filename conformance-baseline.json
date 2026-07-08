@@ -1,6 +1,6 @@
 {
-  "variants_passed": 211401,
-  "total_variants": 211401,
+  "variants_passed": 212914,
+  "total_variants": 212914,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -393,6 +393,10 @@
     "managedblockchain": {
       "passed": 1028,
       "total": 1028
+    },
+    "docdb": {
+      "passed": 1513,
+      "total": 1513
     }
   }
 }

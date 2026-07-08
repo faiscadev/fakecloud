@@ -969,6 +969,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-docdb"
+version = "1.105.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77dc65d4c68715a4364a7fdce9282d1df9d459596f080d6751a3539ae6e856ee"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-dsql"
 version = "1.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4095,6 +4120,7 @@ dependencies = [
  "fakecloud-config",
  "fakecloud-core",
  "fakecloud-dms",
+ "fakecloud-docdb",
  "fakecloud-dsql",
  "fakecloud-dynamodb",
  "fakecloud-ec2",
@@ -5076,6 +5102,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-docdb"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-dsql"
 version = "0.40.1"
 dependencies = [
@@ -5146,6 +5191,7 @@ dependencies = [
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-comprehend",
+ "aws-sdk-docdb",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",
  "aws-sdk-ec2",
@@ -6521,6 +6567,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
+ "aws-sdk-docdb",
  "aws-sdk-dsql",
  "aws-sdk-dynamodb",
  "aws-sdk-dynamodbstreams",

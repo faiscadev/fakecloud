@@ -55,6 +55,7 @@ SERVICES=(
     "cognito-identity|Cognito Identity|cognito"
     "kinesis|Kinesis|kinesis"
     "rds|RDS|rds"
+    "docdb|DocumentDB|docdb"
     "rds-data|RDS Data|rds-data"
     "redshift|Redshift|redshift"
     "dms|Database Migration Service|dms"

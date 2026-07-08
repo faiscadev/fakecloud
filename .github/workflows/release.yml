@@ -221,6 +221,7 @@ jobs:
           publish fakecloud-verifiedpermissions # core/persistence/aws + cedar-policy
           publish fakecloud-redshift         # only core/persistence/aws deps
           publish fakecloud-dms              # only core/persistence/aws deps
+          publish fakecloud-docdb            # only core/persistence/aws deps
           publish fakecloud-opensearch       # only core/persistence/aws deps (ES + OpenSearch)
           publish fakecloud-backup           # only core/persistence/aws deps
           publish fakecloud-glacier          # only core/persistence/aws deps
