@@ -342,6 +342,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let neptune_state: fakecloud_neptune::SharedNeptuneState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let elasticache_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -2830,6 +2837,64 @@ async fn main() {
         cfn_snapshot_hooks.insert("docdb", h);
     }
     registry.register(Arc::new(docdb_service));
+    // Amazon Neptune (neptune): RDS-shaped Query API, control-plane only
+    // (no backing Gremlin/SPARQL graph engine image exists, so clusters and
+    // instances are records with well-formed endpoints — see the crate docs).
+    let neptune_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("neptune").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_neptune::NeptuneSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_neptune::NEPTUNE_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "neptune persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_neptune::NEPTUNE_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *neptune_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded neptune persistence snapshot",
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse neptune persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no neptune persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read neptune persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut neptune_service = fakecloud_neptune::NeptuneService::new(neptune_state.clone());
+    if let Some(store) = neptune_snapshot_store {
+        neptune_service = neptune_service.with_snapshot_store(store);
+    }
+    if let Some(h) = neptune_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("neptune", h);
+    }
+    registry.register(Arc::new(neptune_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

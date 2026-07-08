@@ -56,6 +56,7 @@ SERVICES=(
     "kinesis|Kinesis|kinesis"
     "rds|RDS|rds"
     "docdb|DocumentDB|docdb"
+    "neptune|Neptune|neptune"
     "rds-data|RDS Data|rds-data"
     "redshift|Redshift|redshift"
     "dms|Database Migration Service|dms"

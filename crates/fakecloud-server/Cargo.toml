@@ -41,6 +41,7 @@ fakecloud-ce = { workspace = true }
 fakecloud-codeconnections = { workspace = true }
 fakecloud-dms = { workspace = true }
 fakecloud-docdb = { workspace = true }
+fakecloud-neptune = { workspace = true }
 fakecloud-transfer = { workspace = true }
 fakecloud-dsql = { workspace = true }
 fakecloud-resource-groups = { workspace = true }

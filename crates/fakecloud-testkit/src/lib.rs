@@ -740,6 +740,10 @@ impl TestServer {
         aws_sdk_rds::Client::new(&self.aws_config().await)
     }
 
+    pub async fn neptune_client(&self) -> aws_sdk_neptune::Client {
+        aws_sdk_neptune::Client::new(&self.aws_config().await)
+    }
+
     pub async fn ec2_client(&self) -> aws_sdk_ec2::Client {
         aws_sdk_ec2::Client::new(&self.aws_config().await)
     }

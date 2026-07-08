@@ -47,6 +47,7 @@ SERVICES=(
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
     "docdb:docdb"
+    "neptune:neptune"
     "dms:database-migration-service"
     "cloudtrail:cloudtrail"
     "rds-data:rds-data"

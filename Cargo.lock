@@ -1651,6 +1651,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-neptune"
+version = "1.102.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d69a6264bb24a2f58136c15f623c21e68fd9446fcd18ec3cb3986c1adbc5a0e"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-query",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-organizations"
 version = "1.113.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4152,6 +4177,7 @@ dependencies = [
  "fakecloud-memorydb",
  "fakecloud-mq",
  "fakecloud-mwaa",
+ "fakecloud-neptune",
  "fakecloud-opensearch",
  "fakecloud-organizations",
  "fakecloud-persistence",
@@ -5216,6 +5242,7 @@ dependencies = [
  "aws-sdk-mediaconvert",
  "aws-sdk-mq",
  "aws-sdk-mwaa",
+ "aws-sdk-neptune",
  "aws-sdk-organizations",
  "aws-sdk-pipes",
  "aws-sdk-rds",
@@ -5924,6 +5951,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-neptune"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-opensearch"
 version = "0.40.1"
 dependencies = [
@@ -6586,6 +6632,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-memorydb",
+ "aws-sdk-neptune",
  "aws-sdk-organizations",
  "aws-sdk-pipes",
  "aws-sdk-rds",
