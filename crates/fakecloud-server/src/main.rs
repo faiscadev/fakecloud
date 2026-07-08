@@ -643,6 +643,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let comprehend_state: fakecloud_comprehend::SharedComprehendState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let transcribe_state: fakecloud_transcribe::SharedTranscribeState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -3616,6 +3623,41 @@ async fn main() {
         cfn_snapshot_hooks.insert("shield", h);
     }
     registry.register(Arc::new(shield_service));
+    // Amazon Comprehend (comprehend): awsJson1.1 NLP control + inference plane
+    // (synchronous + batch detection, nine async analysis-job families, custom
+    // document classifiers + entity recognizers, endpoints, flywheels +
+    // iterations, datasets, resource policies, model import, tags).
+    let comprehend_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("comprehend").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_comprehend::persistence::load_into(&store, &comprehend_state) {
+                Ok(fakecloud_comprehend::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded comprehend persistence snapshot");
+                }
+                Ok(fakecloud_comprehend::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no comprehend persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut comprehend_service =
+        fakecloud_comprehend::ComprehendService::new(comprehend_state.clone());
+    if let Some(store) = comprehend_snapshot_store {
+        comprehend_service = comprehend_service.with_snapshot_store(store);
+    }
+    if let Some(h) = comprehend_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("comprehend", h);
+    }
+    registry.register(Arc::new(comprehend_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

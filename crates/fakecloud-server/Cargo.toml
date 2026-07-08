@@ -88,6 +88,7 @@ fakecloud-emr = { workspace = true }
 fakecloud-textract = { workspace = true }
 fakecloud-transcribe = { workspace = true }
 fakecloud-shield = { workspace = true }
+fakecloud-comprehend = { workspace = true }
 fakecloud-cloudwatch = { workspace = true }
 fakecloud-application-autoscaling = { workspace = true }
 fakecloud-autoscaling = { workspace = true }

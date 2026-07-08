@@ -124,6 +124,7 @@ SERVICES=(
     "textract|AWS Textract|textract"
     "transcribe|Amazon Transcribe|transcribe"
     "shield|Shield (Shield Advanced)|shield"
+    "comprehend|Amazon Comprehend|comprehend"
     "organizations|Organizations|organizations"
     "ec2|EC2|ec2"
 )

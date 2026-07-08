@@ -362,5 +362,9 @@
   "shield": {
     "repo_dir": "shield",
     "service_name": "shield"
+  },
+  "comprehend": {
+    "repo_dir": "comprehend",
+    "service_name": "comprehend"
   }
 }
