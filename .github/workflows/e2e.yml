@@ -142,12 +142,9 @@ jobs:
       INSTALL_PODMAN: ${{ matrix.install_podman }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # No free-disk and no rust-cache here: this job runs prebuilt test binaries
-      # from the archive and never compiles. It downloads the archive + the
-      # fakecloud binary and pulls container images; the compile-oriented
-      # free-disk reclaim (a variable 2-4 min) is not what this job needs — it
-      # needs its container data-root on the large disk (see the relocate step
-      # below), not preinstalled-SDK cleanup on the root fs.
+      # No rust-cache here: this job runs prebuilt test binaries from the archive
+      # and never compiles. Disk provisioning is handled by the step below, which
+      # adapts to whichever disk layout the assigned runner actually has.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: taiki-e/install-action@b3bd89dcd46d5f3d508436e1bf794284c155bbcc # nextest
 
@@ -155,29 +152,54 @@ jobs:
         if: matrix.install_podman
         run: sudo apt-get update && sudo apt-get install -y podman
 
-      # Relocate the container data-root to /mnt BEFORE any image pull. Current
-      # GitHub-hosted Ubuntu runners expose a ~72G root `/` with only ~16G free
-      # (the runner image already uses ~56G) plus a SEPARATE ~74G `/mnt`
-      # (/dev/sdb1) that is ~66G free. Docker's default data-root lives on `/`,
-      # so a partition that pulls several runtime images (e.g.
-      # lambda-runtimes-python pulls python:3.9 .. python:3.14) exhausts the 16G
-      # and dies with `write /var/lib/docker/...: no space left on device`.
-      # Pointing the data-root at the near-empty /mnt yields ~66G of headroom.
-      # (An earlier revision claimed a single ~145G root with no /mnt and dropped
-      # this step; `df -h` on the current runners shows that assumption is false.)
-      - name: Relocate container storage to /mnt (large disk)
+      # Provision disk for BOTH the container data-root AND the nextest archive
+      # extraction, adapting to the runner's actual disk layout. Two consumers
+      # compete for space here: (1) container images a partition pulls (e.g.
+      # lambda-runtimes-python pulls python:3.9 .. python:3.14), and (2) nextest
+      # extracting the E2E test archive (every test binary, grows with each new
+      # service crate) to its temp dir.
+      #
+      # MOST GitHub-hosted Ubuntu runners expose a ~72G root `/` with only ~16G
+      # free (the image already uses ~56G) plus a SEPARATE ~74G `/mnt`
+      # (/dev/sdb1, ~66G free). On those we point docker's data-root AND nextest's
+      # TMPDIR at /mnt. But SOME runners have no separate /mnt (it's just a dir on
+      # the root fs); there, sending both consumers to "/mnt" leaves them on the
+      # 14-16G root and the archive extract dies with `No space left on device
+      # (os error 28)` — which is exactly the flake #2200/#2205 chased on the
+      # wrong assumption that /mnt is always separate. So: detect a real, roomy
+      # separate /mnt; if absent, reclaim the root fs (drop preinstalled SDKs)
+      # and keep both consumers on the freed root. Export the chosen temp base as
+      # NEXTEST_TMPDIR for the run step.
+      - name: Provision disk for containers + test archive
         run: |
-          sudo systemctl stop docker docker.socket || true
-          sudo mkdir -p /mnt/docker
-          printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
-          sudo rm -rf /var/lib/docker
-          sudo systemctl start docker
-          if [ "$INSTALL_PODMAN" = "true" ]; then
-            sudo mkdir -p /mnt/containers /etc/containers
-            printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers"\n' | sudo tee /etc/containers/storage.conf
+          mnt_src=$(df --output=source /mnt 2>/dev/null | tail -1)
+          root_src=$(df --output=source / | tail -1)
+          mnt_avail_g=$(df -BG --output=avail /mnt 2>/dev/null | tail -1 | tr -dc '0-9')
+          if [ -n "$mnt_src" ] && [ "$mnt_src" != "$root_src" ] && [ "${mnt_avail_g:-0}" -ge 40 ]; then
+            tmpbase=/mnt
+            echo "Separate /mnt detected ($mnt_src, ${mnt_avail_g}G free) — relocating docker + archive there"
+            sudo systemctl stop docker docker.socket || true
+            sudo mkdir -p /mnt/docker
+            printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
+            sudo rm -rf /var/lib/docker
+            sudo systemctl start docker
+            if [ "$INSTALL_PODMAN" = "true" ]; then
+              sudo mkdir -p /mnt/containers /etc/containers
+              printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers"\n' | sudo tee /etc/containers/storage.conf
+            fi
+          else
+            tmpbase=/tmp
+            echo "No separate /mnt (mnt_src=$mnt_src root_src=$root_src avail=${mnt_avail_g:-0}G) — reclaiming root fs instead"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+              /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+              "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" 2>/dev/null || true
+            sudo docker image prune -af || true
           fi
-          echo "=== df -h after relocate ==="
-          df -h / /mnt
+          sudo mkdir -p "$tmpbase/nextest-tmp"
+          sudo chmod 1777 "$tmpbase/nextest-tmp"
+          echo "NEXTEST_TMPDIR=$tmpbase/nextest-tmp" >> "$GITHUB_ENV"
+          echo "=== df -h after provision ==="
+          df -h
 
       - name: Prune container state before tests
         run: |
@@ -213,18 +235,14 @@ jobs:
       # --workspace-remap . points runtime workspace lookups at this checkout (the
       # path matches the build runner on GitHub-hosted runners).
       #
-      # nextest extracts the archive to a temp dir under $TMPDIR. The default
-      # ($TMPDIR unset -> /tmp) lives on the root fs, which on current
-      # GitHub-hosted Ubuntu runners is only ~72G with ~16G free (the runner
-      # image already uses ~56G). The archive holds every E2E test binary and
-      # grows with each new service crate, so extracting it onto the small root
-      # eventually ENOSPCs ("No space left on device (os error 28)" while
-      # unpacking target/debug/deps/*). Point TMPDIR at the near-empty ~74G
-      # /mnt (same large disk #2200 relocated docker to) so the extract has
-      # ~66G of headroom. Container images still land on the /mnt docker root.
+      # nextest extracts the archive to a temp dir under $TMPDIR. The provision
+      # step above chose a temp base with room (separate /mnt when present, else
+      # the reclaimed root) and exported it as NEXTEST_TMPDIR; point TMPDIR there
+      # so the extract doesn't ENOSPC unpacking target/debug/deps/* on the small
+      # root fs.
       - name: Run nextest partition
         env:
-          TMPDIR: /mnt/nextest-tmp
+          TMPDIR: ${{ env.NEXTEST_TMPDIR }}
         run: |
           sudo mkdir -p /mnt/nextest-tmp
           sudo chmod 1777 /mnt/nextest-tmp
