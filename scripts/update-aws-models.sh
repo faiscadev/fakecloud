@@ -24,6 +24,7 @@ SERVICES=(
     "amplify:amplify"
     "mediaconvert:mediaconvert"
     "serverlessrepo:serverlessapplicationrepository"
+    "iotdata:iot-data-plane"
     "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"

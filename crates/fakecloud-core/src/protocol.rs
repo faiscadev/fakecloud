@@ -106,6 +106,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // versions, sharing policies, CloudFormation change sets/templates, and
     // dependencies; JSON bodies). Signs as `serverlessrepo`.
     "serverlessrepo",
+    // AWS IoT Data Plane: restJson1 device-shadow + retained-message data plane
+    // (path-labelled `@http` URIs over `/things/{thingName}/shadow`,
+    // `/topics/{topic}`, `/retainedMessage`, and `/connections`; raw
+    // `@httpPayload` shadow documents). Signs as `iotdata`.
+    "iotdata",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
