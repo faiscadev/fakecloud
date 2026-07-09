@@ -375,6 +375,10 @@
     "repo_dir": "iot-data-plane",
     "service_name": "iotdata"
   },
+  "pinpoint": {
+    "repo_dir": "pinpoint",
+    "service_name": "pinpoint"
+  },
   "managedblockchain": {
     "repo_dir": "managedblockchain",
     "service_name": "managedblockchain"

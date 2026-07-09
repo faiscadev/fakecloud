@@ -1,6 +1,6 @@
 {
-  "variants_passed": 216074,
-  "total_variants": 216074,
+  "variants_passed": 218919,
+  "total_variants": 218919,
   "per_service": {
     "acm": {
       "passed": 599,
@@ -409,6 +409,10 @@
     "iotdata": {
       "passed": 359,
       "total": 359
+    },
+    "pinpoint": {
+      "passed": 2845,
+      "total": 2845
     }
   }
 }

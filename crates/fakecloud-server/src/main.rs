@@ -810,6 +810,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let pinpoint_state: fakecloud_pinpoint::SharedPinpointState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let managedblockchain_state: fakecloud_managedblockchain::SharedManagedBlockchainState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -6209,6 +6216,40 @@ async fn main() {
         cfn_snapshot_hooks.insert("iotdata", h);
     }
     registry.register(Arc::new(iotdata_service));
+
+    // Amazon Pinpoint: restJson1 control plane over apps, campaigns, segments,
+    // endpoints, channels, journeys, templates, jobs, event streams,
+    // recommenders, and tags. Signs as `mobiletargeting`, aliased to `pinpoint`.
+    let pinpoint_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("pinpoint").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_pinpoint::persistence::load_into(&store, &pinpoint_state) {
+                Ok(fakecloud_pinpoint::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded pinpoint persistence snapshot");
+                }
+                Ok(fakecloud_pinpoint::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no pinpoint persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut pinpoint_service = fakecloud_pinpoint::PinpointService::new(pinpoint_state.clone());
+    if let Some(store) = pinpoint_snapshot_store {
+        pinpoint_service = pinpoint_service.with_snapshot_store(store);
+    }
+    if let Some(h) = pinpoint_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("pinpoint", h);
+    }
+    registry.register(Arc::new(pinpoint_service));
 
     let managedblockchain_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

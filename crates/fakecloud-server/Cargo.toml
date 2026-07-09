@@ -85,6 +85,7 @@ fakecloud-amplify = { workspace = true }
 fakecloud-mediaconvert = { workspace = true }
 fakecloud-serverlessrepo = { workspace = true }
 fakecloud-iotdata = { workspace = true }
+fakecloud-pinpoint = { workspace = true }
 fakecloud-managedblockchain = { workspace = true }
 fakecloud-config = { workspace = true }
 fakecloud-route53resolver = { workspace = true }

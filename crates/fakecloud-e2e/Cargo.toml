@@ -85,6 +85,7 @@ aws-sdk-amplify = "1"
 aws-sdk-mediaconvert = "1"
 aws-sdk-serverlessapplicationrepository = "1"
 aws-sdk-iotdataplane = "1"
+aws-sdk-pinpoint = "1"
 aws-sdk-managedblockchain = "1"
 aws-sdk-kinesisanalyticsv2 = "1"
 # Pure-Rust Kafka client for the MSK data-plane produce/consume round trip.

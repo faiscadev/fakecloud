@@ -1724,6 +1724,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-pinpoint"
+version = "1.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb6f6c16ccf0b75f73c8a40a31298481bc1dff5e16cd683e34b6b23ae4e4a1b7"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-pipes"
 version = "1.101.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4256,6 +4280,7 @@ dependencies = [
  "fakecloud-opensearch",
  "fakecloud-organizations",
  "fakecloud-persistence",
+ "fakecloud-pinpoint",
  "fakecloud-pipes",
  "fakecloud-ram",
  "fakecloud-rds",
@@ -5321,6 +5346,7 @@ dependencies = [
  "aws-sdk-mwaa",
  "aws-sdk-neptune",
  "aws-sdk-organizations",
+ "aws-sdk-pinpoint",
  "aws-sdk-pipes",
  "aws-sdk-rds",
  "aws-sdk-rdsdata",
@@ -6142,6 +6168,27 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "fakecloud-pinpoint"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
