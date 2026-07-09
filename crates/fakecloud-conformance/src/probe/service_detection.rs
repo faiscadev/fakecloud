@@ -288,6 +288,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // aliased to `pinpoint`; the conformance probe uses the service-map
         // `service_name` (`pinpoint`).
         "pinpoint" => Protocol::Rest,
+        // AWS IoT Core control plane: restJson1 registry / jobs / rules /
+        // security control plane (path-labelled `@http` URIs). Signs as `iot`.
+        "iot" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.

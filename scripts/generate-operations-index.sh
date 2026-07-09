@@ -80,6 +80,7 @@ SERVICES=(
     "serverlessrepo|AWS Serverless Application Repository|serverlessrepo"
     "iotdata|AWS IoT Data Plane|iotdata"
     "pinpoint|Amazon Pinpoint|pinpoint"
+    "iot|AWS IoT Core|iot"
     "managedblockchain|Amazon Managed Blockchain|managedblockchain"
     "appsync|AWS AppSync|appsync"
     "glacier|Amazon S3 Glacier|glacier"

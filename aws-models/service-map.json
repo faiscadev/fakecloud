@@ -379,6 +379,10 @@
     "repo_dir": "pinpoint",
     "service_name": "pinpoint"
   },
+  "iot": {
+    "repo_dir": "iot",
+    "service_name": "iot"
+  },
   "managedblockchain": {
     "repo_dir": "managedblockchain",
     "service_name": "managedblockchain"

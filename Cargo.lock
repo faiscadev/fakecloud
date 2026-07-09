@@ -1409,6 +1409,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-iot"
+version = "1.113.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25cd455a945296e4a8a7438e895de01de7633ab38c1baeb12a5e35663e6128fd"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-iotdataplane"
 version = "1.99.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4262,6 +4286,7 @@ dependencies = [
  "fakecloud-glue",
  "fakecloud-iam",
  "fakecloud-identitystore",
+ "fakecloud-iot",
  "fakecloud-iotdata",
  "fakecloud-k8s",
  "fakecloud-kafka",
@@ -5334,6 +5359,7 @@ dependencies = [
  "aws-sdk-fis",
  "aws-sdk-glue",
  "aws-sdk-iam",
+ "aws-sdk-iot",
  "aws-sdk-iotdataplane",
  "aws-sdk-kafka",
  "aws-sdk-kinesis",
@@ -5762,6 +5788,26 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-iot"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

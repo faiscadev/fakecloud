@@ -117,6 +117,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // journeys, templates, jobs, event streams, recommenders, and tags; JSON
     // bodies). Signs as `mobiletargeting`, normalized to `pinpoint`.
     "pinpoint",
+    // AWS IoT Core control plane: restJson1 registry / jobs / rules / security
+    // control plane (path-labelled `@http` URIs over `/things/{thingName}`,
+    // `/policies/{policyName}`, `/jobs/{jobId}`, `/rules/{ruleName}`, ...).
+    // Signs as `iot`.
+    "iot",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
