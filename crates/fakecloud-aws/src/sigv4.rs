@@ -577,6 +577,29 @@ pub fn sign_string(
     hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()))
 }
 
+/// Verify a client-supplied hex signature against the one derived from
+/// `string_to_sign`, in constant time.
+///
+/// Companion to [`sign_string`] for the S3 POST-Policy path. The comparison
+/// uses the same constant-time primitive as the header/query SigV4 path so a
+/// signature check can't leak via timing. `sign_string` emits lowercase hex;
+/// the provided signature is lowercased first (case normalization is not
+/// secret-dependent) so a valid uppercase-hex signature still matches.
+pub fn verify_signature(
+    secret_access_key: &str,
+    date_stamp: &str,
+    region: &str,
+    service: &str,
+    string_to_sign: &str,
+    provided_signature: &str,
+) -> bool {
+    let expected = sign_string(secret_access_key, date_stamp, region, service, string_to_sign);
+    constant_time_eq(
+        expected.as_bytes(),
+        provided_signature.to_ascii_lowercase().as_bytes(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

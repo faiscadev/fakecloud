@@ -417,14 +417,14 @@ impl S3Service {
                     "The AWS Access Key Id you provided does not exist in our records.",
                 )
             })?;
-            let expected = fakecloud_aws::sigv4::sign_string(
+            if !fakecloud_aws::sigv4::verify_signature(
                 &resolved.secret_access_key,
                 &credential.date_stamp,
                 &credential.region,
                 &credential.service,
                 &policy_b64,
-            );
-            if !expected.eq_ignore_ascii_case(signature) {
+                signature,
+            ) {
                 return Err(signature_does_not_match(
                     "The request signature we calculated does not match the signature you provided",
                 ));
