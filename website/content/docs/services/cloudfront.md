@@ -103,6 +103,23 @@ fakecloud runs a single-node, in-process HTTP data plane for CloudFront (modeled
 
 Disable the data plane with `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE=1` to run control-plane only.
 
+### Bind address (containers)
+
+By default the listeners bind `127.0.0.1:0` — loopback, OS-allocated port — which is only reachable from inside fakecloud's own network namespace. To reach distributions from **outside a container** without a bespoke proxy, two optional environment variables control where the listeners bind (defaults reproduce the historic behavior exactly):
+
+- `FAKECLOUD_CLOUDFRONT_DATAPLANE_HOST` — bind host for the listeners (default `127.0.0.1`). Set to `0.0.0.0` to accept connections from outside the container.
+- `FAKECLOUD_CLOUDFRONT_DATAPLANE_BASE_PORT` — when set, each distribution binds a **deterministic** lowest-free port in `[base, base + span)` instead of an ephemeral one, so a known port range can be published ahead of time (e.g. `docker run -p 8100-8149:8100-8149`). Unset (the default) keeps the ephemeral `:0` behavior.
+- `FAKECLOUD_CLOUDFRONT_DATAPLANE_PORT_SPAN` — width of that deterministic window (default `50`). Only consulted when a base port is set.
+
+Ports are still discoverable via `boundPort`. If the deterministic window is exhausted (or a chosen port is already taken), that distribution falls back to an ephemeral port with a warning so it still serves. Example — publish a stable, host-reachable data plane:
+
+```bash
+docker run -d -p 4566:4566 -p 8100-8149:8100-8149 \
+  -e FAKECLOUD_CLOUDFRONT_DATAPLANE_HOST=0.0.0.0 \
+  -e FAKECLOUD_CLOUDFRONT_DATAPLANE_BASE_PORT=8100 \
+  ghcr.io/faiscadev/fakecloud:latest
+```
+
 ## Caveats
 
 The data plane is a single local node, not the global CDN: there is no geo/edge distribution or per-PoP behavior. In-path CloudFront Functions / Lambda@Edge, real TTL caching / invalidation, and OAC/SigV4 to private-S3 origins are not implemented — the MVP forwards uncached and serves public S3-website origins. CloudFront Functions can still be exercised out-of-band via `TestFunction` (this does not apply to Lambda@Edge).

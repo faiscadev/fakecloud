@@ -2,9 +2,12 @@
 //! In-process CloudFront data plane.
 //!
 //! Mirrors the ELBv2 data plane (`fakecloud-elbv2/src/dataplane.rs`): a
-//! supervisor loop binds one `TcpListener` on `127.0.0.1:0` per *enabled*
-//! distribution, records the OS-allocated port back into distribution state as
-//! `bound_port`, and serves viewer requests via `hyper`. The AWS-shaped
+//! supervisor loop binds one `TcpListener` per *enabled* distribution, records
+//! the bound port back into distribution state as `bound_port`, and serves
+//! viewer requests via `hyper`. The bind defaults to `127.0.0.1:0` (loopback,
+//! ephemeral) but the host and an optional deterministic port window are
+//! configurable via `FAKECLOUD_CLOUDFRONT_DATAPLANE_{HOST,BASE_PORT,PORT_SPAN}`
+//! so the listeners can be published from a container (see `BindConfig`). The AWS-shaped
 //! `*.cloudfront.net` domain stays cosmetic; clients discover the real address
 //! via `/_fakecloud/cloudfront/distributions` and connect to
 //! `http://127.0.0.1:{bound_port}/...`.
@@ -16,7 +19,7 @@
 //! precedent. Deferred (not implemented): in-path CloudFront Functions /
 //! Lambda@Edge, TTL caching / invalidation, and OAC/SigV4 to private S3.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -36,6 +39,97 @@ use crate::state::SharedCloudFrontState;
 const ENV_DISABLE: &str = "FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE";
 const SUPERVISOR_TICK_SECS: u64 = 1;
 
+/// Bind host for the per-distribution data-plane listeners. Defaults to
+/// `127.0.0.1` (loopback, unchanged). Set to e.g. `0.0.0.0` so the listeners
+/// are reachable from outside a container.
+const ENV_BIND_HOST: &str = "FAKECLOUD_CLOUDFRONT_DATAPLANE_HOST";
+/// Optional base port. When set, each distribution binds a deterministic port
+/// in `[base, base + span)` instead of an OS-allocated ephemeral one, so a
+/// known port range can be published ahead of time (e.g. `docker run -p`).
+/// Unset (the default) preserves the ephemeral `:0` behavior.
+const ENV_BASE_PORT: &str = "FAKECLOUD_CLOUDFRONT_DATAPLANE_BASE_PORT";
+/// Width of the deterministic port window opened above `ENV_BASE_PORT`. Only
+/// consulted when a base port is set; defaults to `DEFAULT_PORT_SPAN`.
+const ENV_PORT_SPAN: &str = "FAKECLOUD_CLOUDFRONT_DATAPLANE_PORT_SPAN";
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+const DEFAULT_PORT_SPAN: u16 = 50;
+
+/// Where the data-plane supervisor binds per-distribution listeners. Resolved
+/// once from the environment at spawn time; the defaults reproduce the historic
+/// `127.0.0.1:0` (loopback, ephemeral) behavior exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BindConfig {
+    host: String,
+    /// `None` => OS-allocated ephemeral port (`:0`). `Some(base)` => deterministic
+    /// lowest-free port in `[base, base + span)`.
+    base_port: Option<u16>,
+    span: u16,
+}
+
+impl Default for BindConfig {
+    fn default() -> Self {
+        BindConfig {
+            host: DEFAULT_BIND_HOST.to_string(),
+            base_port: None,
+            span: DEFAULT_PORT_SPAN,
+        }
+    }
+}
+
+impl BindConfig {
+    fn from_env() -> Self {
+        Self::resolve(
+            std::env::var(ENV_BIND_HOST).ok(),
+            std::env::var(ENV_BASE_PORT).ok(),
+            std::env::var(ENV_PORT_SPAN).ok(),
+        )
+    }
+
+    /// Pure resolver (testable without touching process env). An empty or
+    /// unparseable value falls back to the default for that field, with a warning
+    /// for the numeric ones so a typo is not silently ignored.
+    fn resolve(host: Option<String>, base: Option<String>, span: Option<String>) -> Self {
+        let host = host
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| DEFAULT_BIND_HOST.to_string());
+        let base_port = base
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .and_then(|b| match b.parse::<u16>() {
+                Ok(0) | Err(_) => {
+                    warn!("{ENV_BASE_PORT}={b:?} is not a valid port (1..=65535); ignoring");
+                    None
+                }
+                Ok(p) => Some(p),
+            });
+        let span = span
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| match s.parse::<u16>() {
+                Ok(0) | Err(_) => {
+                    warn!("{ENV_PORT_SPAN}={s:?} is not a valid span (>= 1); using {DEFAULT_PORT_SPAN}");
+                    None
+                }
+                Ok(v) => Some(v),
+            })
+            .unwrap_or(DEFAULT_PORT_SPAN);
+        BindConfig {
+            host,
+            base_port,
+            span,
+        }
+    }
+}
+
+/// Lowest free port in `[base, base + span)` not already held by a listener,
+/// saturating at the u16 ceiling. `None` when the window is fully occupied.
+fn next_deterministic_port(base: u16, span: u16, in_use: &BTreeSet<u16>) -> Option<u16> {
+    let start = base as u32;
+    let end = (start + span as u32).min(u16::MAX as u32 + 1);
+    (start..end).map(|p| p as u16).find(|p| !in_use.contains(p))
+}
+
 /// Whether the data plane should run. Disabled by setting
 /// `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE` to a truthy value (mirrors the
 /// ELBv2 flag), for environments that only exercise the control plane.
@@ -47,9 +141,12 @@ pub fn dataplane_enabled() -> bool {
 }
 
 /// Per-distribution listener handle. Dropping it aborts the accept loop and
-/// frees the OS port, so a disabled/deleted distribution stops serving.
+/// frees the OS port, so a disabled/deleted distribution stops serving. `port`
+/// is the actually-bound port, used to compute the in-use set when assigning
+/// deterministic ports to newly-enabled distributions.
 struct BoundListener {
     handle: JoinHandle<()>,
+    port: u16,
 }
 
 impl Drop for BoundListener {
@@ -69,6 +166,9 @@ struct DataPlane {
     /// with the website domain preserved in the `Host` header (real CloudFront
     /// likewise treats an S3-website endpoint as an HTTP custom origin).
     s3_endpoint: String,
+    /// Where per-distribution listeners bind (host + ephemeral-vs-deterministic
+    /// port policy). Resolved once from the environment at spawn time.
+    cfg: BindConfig,
 }
 
 /// Spawn the CloudFront data-plane supervisor. No-op (returns without spawning)
@@ -91,10 +191,20 @@ pub fn spawn_dataplane(state: SharedCloudFrontState, server_port: u16) {
             return;
         }
     };
+    let cfg = BindConfig::from_env();
+    if cfg.host != DEFAULT_BIND_HOST || cfg.base_port.is_some() {
+        debug!(
+            host = %cfg.host,
+            base_port = ?cfg.base_port,
+            span = cfg.span,
+            "CloudFront data plane: custom bind config"
+        );
+    }
     let dp = DataPlane {
         state,
         upstream,
         s3_endpoint: format!("127.0.0.1:{server_port}"),
+        cfg,
     };
     tokio::spawn(supervisor_loop(dp));
 }
@@ -134,8 +244,9 @@ async fn reconcile(dp: &DataPlane, bindings: &mut BTreeMap<String, BoundListener
         if bindings.contains_key(dist_id) {
             continue;
         }
-        match TcpListener::bind(("127.0.0.1", 0)).await {
-            Ok(listener) => {
+        let in_use: BTreeSet<u16> = bindings.values().map(|b| b.port).collect();
+        match bind_listener(&dp.cfg, &in_use, dist_id).await {
+            Some(listener) => {
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
                 if port == 0 {
                     warn!("CloudFront data plane: bind returned port 0 for {dist_id}; skipping");
@@ -154,11 +265,11 @@ async fn reconcile(dp: &DataPlane, bindings: &mut BTreeMap<String, BoundListener
                 let handle = tokio::spawn(async move {
                     accept_loop(dp2, id2, listener).await;
                 });
-                bindings.insert(dist_id.clone(), BoundListener { handle });
+                bindings.insert(dist_id.clone(), BoundListener { handle, port });
                 trace!(dist = %dist_id, port, "CloudFront data plane: bound listener");
             }
-            Err(e) => {
-                warn!("CloudFront data plane: failed to bind for {dist_id}: {e}");
+            None => {
+                warn!("CloudFront data plane: failed to bind for {dist_id}");
             }
         }
     }
@@ -173,6 +284,46 @@ async fn reconcile(dp: &DataPlane, bindings: &mut BTreeMap<String, BoundListener
                     d.bound_port = None;
                 }
             }
+        }
+    }
+}
+
+/// Bind one distribution's listener according to `cfg`. With a base port set,
+/// try the lowest free deterministic port in the window on the configured host;
+/// if that specific port can't be bound (already taken by something outside our
+/// bookkeeping) or the window is exhausted, warn and fall back to an ephemeral
+/// port on the same host so the distribution still serves. With no base port
+/// (the default) it binds `host:0` directly — historic behavior when the host
+/// is also the default `127.0.0.1`.
+async fn bind_listener(
+    cfg: &BindConfig,
+    in_use: &BTreeSet<u16>,
+    dist_id: &str,
+) -> Option<TcpListener> {
+    if let Some(base) = cfg.base_port {
+        match next_deterministic_port(base, cfg.span, in_use) {
+            Some(port) => match TcpListener::bind((cfg.host.as_str(), port)).await {
+                Ok(l) => return Some(l),
+                Err(e) => warn!(
+                    dist = %dist_id,
+                    "CloudFront data plane: deterministic bind {}:{port} failed ({e}); \
+                     falling back to an ephemeral port",
+                    cfg.host
+                ),
+            },
+            None => warn!(
+                dist = %dist_id,
+                "CloudFront data plane: deterministic port window [{base}, {}) is full; \
+                 falling back to an ephemeral port",
+                base as u32 + cfg.span as u32
+            ),
+        }
+    }
+    match TcpListener::bind((cfg.host.as_str(), 0)).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            warn!(dist = %dist_id, "CloudFront data plane: bind {}:0 failed: {e}", cfg.host);
+            None
         }
     }
 }
@@ -617,5 +768,71 @@ mod tests {
     fn bare_origin_defaults_to_http() {
         let up = upstream_for(&origin("origin.internal", None), "127.0.0.1:4566");
         assert_eq!(up.url_base, "http://origin.internal");
+    }
+
+    #[test]
+    fn bind_config_defaults_reproduce_loopback_ephemeral() {
+        let cfg = BindConfig::resolve(None, None, None);
+        assert_eq!(cfg, BindConfig::default());
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.base_port, None);
+        assert_eq!(cfg.span, DEFAULT_PORT_SPAN);
+    }
+
+    #[test]
+    fn bind_config_reads_host_base_and_span() {
+        let cfg = BindConfig::resolve(
+            Some("0.0.0.0".into()),
+            Some("8100".into()),
+            Some("10".into()),
+        );
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.base_port, Some(8100));
+        assert_eq!(cfg.span, 10);
+    }
+
+    #[test]
+    fn bind_config_rejects_bad_values_and_falls_back() {
+        // Blank host -> default; port 0 / non-numeric -> ephemeral; bad span -> default.
+        let cfg = BindConfig::resolve(
+            Some("   ".into()),
+            Some("0".into()),
+            Some("nope".into()),
+        );
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.base_port, None);
+        assert_eq!(cfg.span, DEFAULT_PORT_SPAN);
+
+        assert_eq!(
+            BindConfig::resolve(None, Some("notaport".into()), None).base_port,
+            None
+        );
+    }
+
+    #[test]
+    fn deterministic_port_picks_lowest_free() {
+        let mut in_use = BTreeSet::new();
+        assert_eq!(next_deterministic_port(8100, 50, &in_use), Some(8100));
+        in_use.insert(8100);
+        in_use.insert(8101);
+        assert_eq!(next_deterministic_port(8100, 50, &in_use), Some(8102));
+        // A hole below the high-water mark is reused.
+        in_use.remove(&8101);
+        assert_eq!(next_deterministic_port(8100, 50, &in_use), Some(8101));
+    }
+
+    #[test]
+    fn deterministic_port_exhausted_window_returns_none() {
+        let in_use: BTreeSet<u16> = (8100..8103).collect();
+        assert_eq!(next_deterministic_port(8100, 3, &in_use), None);
+    }
+
+    #[test]
+    fn deterministic_port_saturates_at_u16_ceiling() {
+        // base + span would overflow u16; must not panic, just stop at 65535.
+        let in_use = BTreeSet::new();
+        assert_eq!(next_deterministic_port(65534, 50, &in_use), Some(65534));
+        let in_use: BTreeSet<u16> = [65534, 65535].into_iter().collect();
+        assert_eq!(next_deterministic_port(65534, 50, &in_use), None);
     }
 }
