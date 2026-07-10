@@ -557,6 +557,26 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Compute a hex-encoded SigV4 signature for an arbitrary string-to-sign.
+///
+/// Used by wire formats that don't fit the header/query SigV4 grammar
+/// [`verify`] handles — notably S3 POST-Policy (browser-form) uploads, whose
+/// "string to sign" is the base64-encoded policy document rather than a
+/// canonical-request hash. The signing-key derivation (date -> region ->
+/// service -> `aws4_request`) is identical; only the string being signed
+/// differs, so this exposes just that derivation + final HMAC rather than
+/// duplicating it at each call site.
+pub fn sign_string(
+    secret_access_key: &str,
+    date_stamp: &str,
+    region: &str,
+    service: &str,
+    string_to_sign: &str,
+) -> String {
+    let signing_key = derive_signing_key(secret_access_key, date_stamp, region, service);
+    hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
