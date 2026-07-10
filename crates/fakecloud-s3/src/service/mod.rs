@@ -52,6 +52,15 @@ pub struct S3Service {
     kms_state: Option<SharedKmsState>,
     pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
     store: Arc<dyn S3Store>,
+    /// Resolves an access key ID to its secret + principal. Used only by
+    /// POST Object (browser-form "POST Policy" upload) to verify the
+    /// `x-amz-signature` form field cryptographically — that wire format
+    /// carries no `Authorization` header, so dispatch's normal SigV4
+    /// verification path never sees it. `None` when unwired (e.g. most
+    /// unit tests): POST Policy signature checks then only accept the
+    /// `test*` root-bypass access key, matching [`fakecloud_core::auth::is_root_bypass`]'s
+    /// "always skip crypto" convention used everywhere else in the codebase.
+    pub(crate) credential_resolver: Option<Arc<dyn fakecloud_core::auth::CredentialResolver>>,
 }
 
 /// Map a [`StoreError`] from the persistence layer to a 500 InternalError
@@ -92,6 +101,7 @@ impl S3Service {
             kms_state: None,
             kms_hook: None,
             store,
+            credential_resolver: None,
         }
     }
 
@@ -102,6 +112,17 @@ impl S3Service {
 
     pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
         self.kms_hook = Some(hook);
+        self
+    }
+
+    /// Wire a [`fakecloud_core::auth::CredentialResolver`] so POST Object
+    /// (browser-form POST Policy upload) can verify the form-carried
+    /// `x-amz-signature` against a non-root IAM access key's real secret.
+    pub fn with_credential_resolver(
+        mut self,
+        resolver: Arc<dyn fakecloud_core::auth::CredentialResolver>,
+    ) -> Self {
+        self.credential_resolver = Some(resolver);
         self
     }
 
@@ -854,6 +875,24 @@ impl AwsService for S3Service {
             }
             (&Method::POST, Some("WriteGetObjectResponse"), None) => {
                 self.write_get_object_response(account_id, &req)
+            }
+
+            // POST /{bucket} with a multipart/form-data body — POST Object
+            // (browser-form "POST Policy" upload, the target of boto3's
+            // `generate_presigned_post`). Guarded on Content-Type so it
+            // doesn't shadow the `?delete` / metadata-config arms above,
+            // which also match `(POST, Some(b), None)` but carry their own
+            // query-param guards.
+            (&Method::POST, Some(b), None)
+                if req
+                    .headers
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| {
+                        ct.to_ascii_lowercase().starts_with("multipart/form-data")
+                    }) =>
+            {
+                self.post_object(account_id, &req, b).await
             }
 
             _ => Err(AwsServiceError::aws_error(
