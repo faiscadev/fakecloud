@@ -4610,7 +4610,10 @@ async fn cognito_update_provisioned_limit() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["Limit"]["ProvisionedLimitValue"], 500);
-    assert_eq!(body["Limit"]["LimitDefinition"]["LimitClass"], "API_CATEGORY");
+    assert_eq!(
+        body["Limit"]["LimitDefinition"]["LimitClass"],
+        "API_CATEGORY"
+    );
     assert_eq!(
         body["Limit"]["LimitDefinition"]["Attributes"]["apiCategory"],
         "UserAuthentication"

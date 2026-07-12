@@ -12573,7 +12573,7 @@ async fn ec2_modify_account_vpc_encryption_control() {
     let resp = ec2_raw(
         &server,
         "Action=ModifyAccountVpcEncryptionControl&Version=2016-11-15\
-         &Mode=attempt-enforce&LambdaExclusion=enable",
+         &Mode=attempt-enforce&Lambda=enable",
     )
     .await;
     let body = resp.text().await.unwrap();
@@ -12601,9 +12601,14 @@ async fn ec2_modify_vpc_endpoint_payer_responsibility() {
     )
     .await;
     let body = resp.text().await.unwrap();
-    assert!(body.contains(&format!("<vpcEndpointId>{id}</vpcEndpointId>")), "{body}");
     assert!(
-        body.contains("<payerResponsibilityType>vpc-endpoint-service-account</payerResponsibilityType>"),
+        body.contains(&format!("<vpcEndpointId>{id}</vpcEndpointId>")),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "<payerResponsibilityType>vpc-endpoint-service-account</payerResponsibilityType>"
+        ),
         "{body}"
     );
 }
