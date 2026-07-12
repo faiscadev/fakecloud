@@ -1,6 +1,6 @@
 {
-  "variants_passed": 231585,
-  "total_variants": 231585,
+  "variants_passed": 248319,
+  "total_variants": 248319,
   "per_service": {
     "account": {
       "passed": 412,
@@ -329,6 +329,10 @@
     "s3tables": {
       "passed": 1645,
       "total": 1645
+    },
+    "sagemaker": {
+      "passed": 16734,
+      "total": 16734
     },
     "scheduler": {
       "passed": 506,
