@@ -52,6 +52,19 @@ pub struct DiscoveredResource {
     pub configuration: Value,
 }
 
+/// Whether an S3 bucket with `bucket_name` exists in the wired S3 service.
+/// Returns `None` when S3 is not wired (validation is then skipped so the
+/// service degrades gracefully in minimal deployments and unit tests). S3
+/// bucket names are globally unique, so every account is searched.
+pub fn s3_bucket_exists(states: &CrossServiceStates, bucket_name: &str) -> Option<bool> {
+    let s3 = states.s3.as_ref()?;
+    let guard = s3.read();
+    let exists = guard
+        .iter()
+        .any(|(_, st)| st.buckets.contains_key(bucket_name));
+    Some(exists)
+}
+
 /// Discover every supported resource that currently exists across the wired
 /// services for `account_id`.
 pub fn discover_all(
@@ -859,6 +872,72 @@ pub fn outcome_to_result(rule_name: &str, o: &RuleOutcome) -> EvaluationResult {
         config_rule_invoked_time: now,
         ordering_timestamp: now,
     }
+}
+
+/// Proactively evaluate a single supplied resource configuration against the
+/// account's AWS-managed rules, without recording it into history. Used by
+/// `StartResourceEvaluation` so a proactive/detective evaluation reports the
+/// *real* compliance of the supplied config rather than a canned COMPLIANT.
+///
+/// `configuration` is the resource configuration document (the same shape the
+/// recorder stores). Returns one [`EvaluationResult`] per managed rule that
+/// applies to the resource's type. An empty result means no managed rule
+/// applied — the caller reports `INSUFFICIENT_DATA`, never a fabricated pass.
+pub fn evaluate_proactive(
+    account: &AccountState,
+    resource_type: &str,
+    resource_id: &str,
+    configuration: &str,
+) -> Vec<EvaluationResult> {
+    let now = Utc::now();
+    let item = ConfigurationItem {
+        version: "1.3".into(),
+        account_id: String::new(),
+        configuration_item_capture_time: now,
+        configuration_item_status: "ResourceDiscovered".into(),
+        configuration_state_id: now.timestamp_millis().to_string(),
+        arn: String::new(),
+        resource_type: resource_type.to_string(),
+        resource_id: resource_id.to_string(),
+        resource_name: None,
+        aws_region: String::new(),
+        availability_zone: "Regional".into(),
+        resource_creation_time: None,
+        tags: std::collections::BTreeMap::new(),
+        configuration: configuration.to_string(),
+        supplementary_configuration: std::collections::BTreeMap::new(),
+        externally_recorded: true,
+    };
+    let mut temp = AccountState::default();
+    temp.config_items
+        .insert(resource_key(resource_type, resource_id), vec![item]);
+
+    let mut results = Vec::new();
+    for rule in account.rules.values() {
+        let owner = rule
+            .source
+            .get("Owner")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if owner != "AWS" {
+            continue;
+        }
+        let Some(sid) = rule.source.get("SourceIdentifier").and_then(Value::as_str) else {
+            continue;
+        };
+        let params: Value = rule
+            .input_parameters
+            .as_deref()
+            .and_then(|p| serde_json::from_str(p).ok())
+            .unwrap_or(Value::Null);
+        let scope = rule.scope.clone().unwrap_or(Value::Null);
+        for o in evaluate_managed_rule(sid, &params, &scope, &temp) {
+            if o.resource_id == resource_id && o.resource_type == resource_type {
+                results.push(outcome_to_result(&rule.name, &o));
+            }
+        }
+    }
+    results
 }
 
 // ─── SelectResourceConfig query subset ───────────────────────────────────

@@ -3,12 +3,14 @@
 //! aggregators, remediation, retention, stored queries and resource
 //! evaluations.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -178,8 +180,12 @@ pub struct ConfigService {
     /// managed-rule evaluation skip recomputing when nothing changed since the
     /// last evaluation (avoids re-running the full evaluation on every poll).
     state_version: Arc<AtomicU64>,
-    /// The `state_version` at which managed-rule evaluation last ran.
-    last_eval_version: Arc<AtomicU64>,
+    /// The `state_version` at which managed-rule evaluation last ran, tracked
+    /// per account. A single global counter would let one account's evaluation
+    /// suppress every other account's — a second account whose rules never
+    /// evaluated would report stale / INSUFFICIENT_DATA forever. Keyed by
+    /// account id so each account re-evaluates independently.
+    last_eval_version: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl ConfigService {
@@ -192,7 +198,7 @@ impl ConfigService {
             lambda_state: None,
             container_runtime: None,
             state_version: Arc::new(AtomicU64::new(1)),
-            last_eval_version: Arc::new(AtomicU64::new(0)),
+            last_eval_version: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -291,7 +297,7 @@ impl ConfigService {
     /// `PutEvaluations` / `PutExternalEvaluation`.
     fn ensure_evaluated(&self, account_id: &str) {
         let version = self.state_version.load(Ordering::Relaxed);
-        if self.last_eval_version.load(Ordering::Relaxed) == version {
+        if self.last_eval_version.lock().get(account_id).copied() == Some(version) {
             return;
         }
         let mut st = self.state.write();
@@ -336,7 +342,9 @@ impl ConfigService {
             }
         }
         drop(st);
-        self.last_eval_version.store(version, Ordering::Relaxed);
+        self.last_eval_version
+            .lock()
+            .insert(account_id.to_string(), version);
     }
 }
 
@@ -410,7 +418,7 @@ impl AwsService for ConfigService {
             "DeleteConfigurationRecorder" => self.delete_configuration_recorder(&account, &body),
             "StartConfigurationRecorder" => self.set_recording(&account, &body, true),
             "StopConfigurationRecorder" => self.set_recording(&account, &body, false),
-            "ListConfigurationRecorders" => self.list_configuration_recorders(&account),
+            "ListConfigurationRecorders" => self.list_configuration_recorders(&account, &body),
             "PutServiceLinkedConfigurationRecorder" => {
                 self.put_service_linked_recorder(&account, &region, &body)
             }
@@ -566,7 +574,7 @@ impl AwsService for ConfigService {
                 self.put_aggregation_authorization(&account, &region, &body)
             }
             "DescribeAggregationAuthorizations" => {
-                self.describe_aggregation_authorizations(&account)
+                self.describe_aggregation_authorizations(&account, &body)
             }
             "DeleteAggregationAuthorization" => {
                 self.delete_aggregation_authorization(&account, &body)
@@ -614,11 +622,11 @@ impl AwsService for ConfigService {
             "PutStoredQuery" => self.put_stored_query(&account, &region, &body),
             "GetStoredQuery" => self.get_stored_query(&account, &body),
             "DeleteStoredQuery" => self.delete_stored_query(&account, &body),
-            "ListStoredQueries" => self.list_stored_queries(&account),
+            "ListStoredQueries" => self.list_stored_queries(&account, &body),
             // ── Resource evaluations ──
             "StartResourceEvaluation" => self.start_resource_evaluation(&account, &body),
             "GetResourceEvaluationSummary" => self.get_resource_evaluation_summary(&account, &body),
-            "ListResourceEvaluations" => self.list_resource_evaluations(&account),
+            "ListResourceEvaluations" => self.list_resource_evaluations(&account, &body),
             // ── Select ──
             "SelectResourceConfig" => self.select_resource_config(&account, &body, false),
             // ── Tags ──
@@ -818,7 +826,11 @@ impl ConfigService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn list_configuration_recorders(&self, account: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_configuration_recorders(
+        &self,
+        account: &str,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let st = self.state.read();
         let list: Vec<Value> = st
             .account(account)
@@ -838,8 +850,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "ConfigurationRecorderSummaries": list }),
+        Ok(paged_response(
+            "ConfigurationRecorderSummaries",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -984,11 +999,24 @@ impl ConfigService {
             .get("s3BucketName")
             .and_then(Value::as_str)
             .map(String::from);
-        if bucket.is_none() {
-            return Err(no_such(
-                "NoSuchBucketException",
-                "Cannot find a S3 bucket with an empty bucket name.",
-            ));
+        match &bucket {
+            None => {
+                return Err(no_such(
+                    "NoSuchBucketException",
+                    "Cannot find a S3 bucket with an empty bucket name.",
+                ));
+            }
+            Some(name) => {
+                // Validate the referenced bucket actually exists (matches AWS,
+                // which rejects a delivery channel pointing at a missing
+                // bucket). Skipped when S3 is not wired.
+                if validate::s3_bucket_exists(&self.cross, name) == Some(false) {
+                    return Err(no_such(
+                        "NoSuchBucketException",
+                        format!("Cannot find a S3 bucket with the bucket name '{name}'."),
+                    ));
+                }
+            }
         }
         let channel = DeliveryChannel {
             name: name.clone(),
@@ -1258,20 +1286,43 @@ impl ConfigService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let resource_type = require_str(body, "resourceType")?;
         let resource_id = require_str(body, "resourceId")?;
+        // Optional time window (epoch seconds). `laterTime` is the inclusive
+        // upper bound, `earlierTime` the inclusive lower bound.
+        let later = body.get("laterTime").and_then(Value::as_f64);
+        let earlier = body.get("earlierTime").and_then(Value::as_f64);
+        // Default order is Reverse (newest first), matching AWS.
+        let forward = body
+            .get("chronologicalOrder")
+            .and_then(Value::as_str)
+            .map(|o| o.eq_ignore_ascii_case("Forward"))
+            .unwrap_or(false);
         let st = self.state.read();
         let key = resource_key(&resource_type, &resource_id);
-        let items: Vec<Value> = st
-            .account(account)
-            .and_then(|a| a.config_items.get(&key))
-            .map(|h| h.iter().rev().map(Self::config_item_json).collect())
-            .unwrap_or_default();
-        if items.is_empty() {
+        let history = st.account(account).and_then(|a| a.config_items.get(&key));
+        let Some(history) = history else {
             return Err(no_such(
                 "ResourceNotDiscoveredException",
                 format!("Resource {resource_id} of type {resource_type} is not discovered."),
             ));
+        };
+        // Stored oldest-first; select those inside the window.
+        let mut selected: Vec<&ConfigurationItem> = history
+            .iter()
+            .filter(|ci| {
+                let ts = ci.configuration_item_capture_time.timestamp() as f64;
+                later.map(|l| ts <= l).unwrap_or(true) && earlier.map(|e| ts >= e).unwrap_or(true)
+            })
+            .collect();
+        if !forward {
+            selected.reverse();
         }
-        Ok(AwsResponse::ok_json(json!({ "configurationItems": items })))
+        let items: Vec<Value> = selected.into_iter().map(Self::config_item_json).collect();
+        let (page, next) = paginate(items, body);
+        let mut out = json!({ "configurationItems": page });
+        if let Some(t) = next {
+            out["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn batch_get_resource_config(
@@ -1353,7 +1404,12 @@ impl ConfigService {
                 list.push(ident);
             }
         }
-        Ok(AwsResponse::ok_json(json!({ "resourceIdentifiers": list })))
+        let (page, next) = paginate(list, body);
+        let mut out = json!({ "resourceIdentifiers": page });
+        if let Some(t) = next {
+            out["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn get_discovered_resource_counts(
@@ -1387,9 +1443,12 @@ impl ConfigService {
             .into_iter()
             .map(|(t, c)| json!({ "resourceType": t, "count": c }))
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "totalDiscoveredResources": total, "resourceCounts": list }),
-        ))
+        let (page, next) = paginate(list, body);
+        let mut out = json!({ "totalDiscoveredResources": total, "resourceCounts": page });
+        if let Some(t) = next {
+            out["nextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 }
 
@@ -1541,7 +1600,7 @@ impl ConfigService {
                 }
             }
         }
-        Ok(AwsResponse::ok_json(json!({ "ConfigRules": list })))
+        Ok(paged_response("ConfigRules", list, body, "NextToken"))
     }
 
     fn delete_config_rule(
@@ -1560,6 +1619,8 @@ impl ConfigService {
         }
         acc.evaluations.remove(&name);
         acc.remediation_configs.remove(&name);
+        acc.remediation_executions
+            .retain(|_, e| e.config_rule_name != name);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -1590,8 +1651,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "ConfigRulesEvaluationStatus": list }),
+        Ok(paged_response(
+            "ConfigRulesEvaluationStatus",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -1604,7 +1668,7 @@ impl ConfigService {
         self.ensure_evaluated(account);
         // For custom-Lambda rules, invoke the referenced function.
         let names = string_list(body, "ConfigRuleNames");
-        let custom_rules: Vec<(String, String)> = {
+        let custom_rules: Vec<(String, String, Option<String>)> = {
             let st = self.state.read();
             st.account(account)
                 .map(|a| {
@@ -1621,15 +1685,20 @@ impl ConfigService {
                                 .get("SourceIdentifier")
                                 .and_then(Value::as_str)?
                                 .to_string();
-                            Some((r.name.clone(), lambda_arn))
+                            Some((r.name.clone(), lambda_arn, r.input_parameters.clone()))
                         })
                         .collect()
                 })
                 .unwrap_or_default()
         };
-        for (rule_name, lambda_arn) in custom_rules {
-            self.invoke_custom_rule(account, &rule_name, &lambda_arn)
-                .await;
+        for (rule_name, lambda_arn, input_parameters) in custom_rules {
+            self.invoke_custom_rule(
+                account,
+                &rule_name,
+                &lambda_arn,
+                input_parameters.as_deref(),
+            )
+            .await;
         }
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -1638,7 +1707,13 @@ impl ConfigService {
     /// event. If the function returns an array of evaluations synchronously,
     /// record them; otherwise the function is expected to call PutEvaluations
     /// with the supplied resultToken.
-    async fn invoke_custom_rule(&self, account: &str, rule_name: &str, lambda_arn: &str) {
+    async fn invoke_custom_rule(
+        &self,
+        account: &str,
+        rule_name: &str,
+        lambda_arn: &str,
+        input_parameters: Option<&str>,
+    ) {
         let (Some(lambda_state), Some(runtime)) =
             (self.lambda_state.clone(), self.container_runtime.clone())
         else {
@@ -1650,21 +1725,7 @@ impl ConfigService {
             .unwrap_or(lambda_arn)
             .to_string();
         let result_token = format!("{rule_name}#{}", Uuid::new_v4());
-        let invoking_event = json!({
-            "awsAccountId": account,
-            "configRuleName": rule_name,
-            "messageType": "ScheduledNotification",
-            "notificationCreationTime": Utc::now().to_rfc3339(),
-        })
-        .to_string();
-        let event = json!({
-            "invokingEvent": invoking_event,
-            "ruleParameters": "{}",
-            "resultToken": result_token,
-            "configRuleArn": format!("arn:aws:config:us-east-1:{account}:config-rule/{rule_name}"),
-            "configRuleName": rule_name,
-            "accountId": account,
-        });
+        let event = custom_rule_event(account, rule_name, input_parameters, &result_token);
         // Resolve the Lambda in the rule's own account (not just the default
         // account) so a custom rule in a non-default account finds its function.
         let resolved = {
@@ -1933,8 +1994,11 @@ impl ConfigService {
                 }));
             }
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "ComplianceByConfigRules": list }),
+        Ok(paged_response(
+            "ComplianceByConfigRules",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -1985,8 +2049,11 @@ impl ConfigService {
                 "Compliance": { "ComplianceType": compliance },
             }));
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "ComplianceByResources": list }),
+        Ok(paged_response(
+            "ComplianceByResources",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2008,8 +2075,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "EvaluationResults": results }),
+        Ok(paged_response(
+            "EvaluationResults",
+            results,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2043,8 +2113,11 @@ impl ConfigService {
                 }
             }
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "EvaluationResults": results }),
+        Ok(paged_response(
+            "EvaluationResults",
+            results,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2102,8 +2175,13 @@ impl ConfigService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let types = string_list(body, "ResourceTypes");
         let st = self.state.read();
-        let mut per_resource: std::collections::BTreeMap<(String, String), Vec<String>> =
-            std::collections::BTreeMap::new();
+        // Collect the folded compliance per resource, grouped by resource type.
+        // A resource type is COMPLIANT/NON_COMPLIANT once per distinct resource
+        // (folded across every rule that evaluated it).
+        let mut per_type_resources: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, Vec<String>>,
+        > = std::collections::BTreeMap::new();
         if let Some(acc) = st.account(account) {
             for m in acc.evaluations.values() {
                 for r in m.values() {
@@ -2113,31 +2191,66 @@ impl ConfigService {
                     if !types.is_empty() && !types.contains(&r.resource_type) {
                         continue;
                     }
-                    per_resource
-                        .entry((r.resource_type.clone(), r.resource_id.clone()))
+                    per_type_resources
+                        .entry(r.resource_type.clone())
+                        .or_default()
+                        .entry(r.resource_id.clone())
                         .or_default()
                         .push(r.compliance_type.clone());
                 }
             }
         }
-        let mut compliant = 0;
-        let mut noncompliant = 0;
-        for types in per_resource.values() {
-            match fold_compliance(types.iter().map(String::as_str)).as_str() {
-                "COMPLIANT" => compliant += 1,
-                "NON_COMPLIANT" => noncompliant += 1,
-                _ => {}
-            }
-        }
-        Ok(AwsResponse::ok_json(json!({
-            "ComplianceSummariesByResourceType": [{
-                "ResourceType": types.first().cloned().unwrap_or_default(),
-                "ComplianceSummary": {
-                    "CompliantResourceCount": { "CappedCount": compliant, "CapExceeded": false },
-                    "NonCompliantResourceCount": { "CappedCount": noncompliant, "CapExceeded": false },
-                    "ComplianceSummaryTimestamp": Utc::now().timestamp() as f64,
+        let now = Utc::now().timestamp() as f64;
+        let summary_json = |resource_type: &str,
+                            resources: &std::collections::BTreeMap<String, Vec<String>>|
+         -> Value {
+            let mut compliant = 0;
+            let mut noncompliant = 0;
+            for c in resources.values() {
+                match fold_compliance(c.iter().map(String::as_str)).as_str() {
+                    "COMPLIANT" => compliant += 1,
+                    "NON_COMPLIANT" => noncompliant += 1,
+                    _ => {}
                 }
-            }]
+            }
+            let summary = json!({
+                "CompliantResourceCount": { "CappedCount": compliant, "CapExceeded": false },
+                "NonCompliantResourceCount": { "CappedCount": noncompliant, "CapExceeded": false },
+                "ComplianceSummaryTimestamp": now,
+            });
+            if resource_type.is_empty() {
+                json!({ "ComplianceSummary": summary })
+            } else {
+                json!({ "ResourceType": resource_type, "ComplianceSummary": summary })
+            }
+        };
+        let list: Vec<Value> = if types.is_empty() {
+            // No filter: one aggregated summary over all resource types, with no
+            // ResourceType label (matches AWS).
+            let mut all: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for resources in per_type_resources.values() {
+                for (rid, c) in resources {
+                    all.entry(rid.clone())
+                        .or_default()
+                        .extend(c.iter().cloned());
+                }
+            }
+            vec![summary_json("", &all)]
+        } else {
+            // One summary per requested resource type (empty when the type has
+            // no evaluated resources).
+            types
+                .iter()
+                .map(|t| {
+                    let empty = std::collections::BTreeMap::new();
+                    let resources = per_type_resources.get(t).unwrap_or(&empty);
+                    summary_json(t, resources)
+                })
+                .collect()
+        };
+        Ok(AwsResponse::ok_json(json!({
+            "ComplianceSummariesByResourceType": list
         })))
     }
 }
@@ -2253,6 +2366,8 @@ impl ConfigService {
                 "No RemediationConfiguration for rule exists.",
             ));
         }
+        acc.remediation_executions
+            .retain(|_, e| e.config_rule_name != name);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -2323,8 +2438,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "RemediationExceptions": list }),
+        Ok(paged_response(
+            "RemediationExceptions",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2367,24 +2485,51 @@ impl ConfigService {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let st = self.state.read();
-        let has_config = st
-            .account(account)
-            .map(|a| a.remediation_configs.contains_key(&rule_name))
-            .unwrap_or(false);
-        if !has_config {
+        let now = Utc::now();
+        let mut st = self.state.write();
+        let acc = st.account_mut(account);
+        if !acc.remediation_configs.contains_key(&rule_name) {
             return Err(no_such(
                 "NoSuchRemediationConfigurationException",
                 "No RemediationConfiguration for rule exists.",
             ));
         }
-        let _ = keys;
-        Ok(AwsResponse::ok_json(json!({ "FailedItems": [] })))
+        // Record an execution per resource key. The SSM Automation the target
+        // document would drive is not simulated here, so the execution is
+        // recorded as QUEUED (accepted, outcome unknown) rather than a
+        // fabricated SUCCEEDED.
+        let mut failed = Vec::new();
+        for k in &keys {
+            let (Some(rt), Some(rid)) = (
+                k.get("resourceType")
+                    .or_else(|| k.get("ResourceType"))
+                    .and_then(Value::as_str),
+                k.get("resourceId")
+                    .or_else(|| k.get("ResourceId"))
+                    .and_then(Value::as_str),
+            ) else {
+                failed.push(k.clone());
+                continue;
+            };
+            let key = format!("{rule_name}\u{1}{rt}\u{1}{rid}");
+            acc.remediation_executions.insert(
+                key,
+                RemediationExecutionStatus {
+                    config_rule_name: rule_name.clone(),
+                    resource_type: rt.to_string(),
+                    resource_id: rid.to_string(),
+                    state: "QUEUED".into(),
+                    invocation_time: now,
+                    last_updated_time: now,
+                },
+            );
+        }
+        Ok(AwsResponse::ok_json(json!({ "FailedItems": failed })))
     }
 
     fn describe_remediation_execution_status(
         &self,
-        _account: &str,
+        account: &str,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let rule_name = require_str(body, "ConfigRuleName")?;
@@ -2393,37 +2538,71 @@ impl ConfigService {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let now = Utc::now().timestamp() as f64;
-        let list: Vec<Value> = keys
+        // Restrict to the requested resource keys, when any were supplied.
+        let wanted: Vec<(String, String)> = keys
             .iter()
-            .map(|k| {
-                json!({
-                    "ResourceKey": { "resourceType": k.get("ResourceType"), "resourceId": k.get("ResourceId") },
-                    "State": "SUCCEEDED",
-                    "StepDetails": [{ "Name": "remediate", "State": "SUCCEEDED", "StartTime": now, "StopTime": now }],
-                    "InvocationTime": now,
-                    "LastUpdatedTime": now,
-                })
+            .filter_map(|k| {
+                let rt = k
+                    .get("resourceType")
+                    .or_else(|| k.get("ResourceType"))
+                    .and_then(Value::as_str)?;
+                let rid = k
+                    .get("resourceId")
+                    .or_else(|| k.get("ResourceId"))
+                    .and_then(Value::as_str)?;
+                Some((rt.to_string(), rid.to_string()))
             })
             .collect();
-        let _ = rule_name;
-        Ok(AwsResponse::ok_json(
-            json!({ "RemediationExecutionStatuses": list }),
+        let st = self.state.read();
+        let list: Vec<Value> = st
+            .account(account)
+            .map(|a| {
+                a.remediation_executions
+                    .values()
+                    .filter(|e| e.config_rule_name == rule_name)
+                    .filter(|e| {
+                        wanted.is_empty()
+                            || wanted
+                                .iter()
+                                .any(|(rt, rid)| *rt == e.resource_type && *rid == e.resource_id)
+                    })
+                    .map(|e| {
+                        let inv = e.invocation_time.timestamp() as f64;
+                        let upd = e.last_updated_time.timestamp() as f64;
+                        json!({
+                            "ResourceKey": { "resourceType": e.resource_type, "resourceId": e.resource_id },
+                            "State": e.state,
+                            "StepDetails": [{ "Name": "remediate", "State": e.state, "StartTime": inv }],
+                            "InvocationTime": inv,
+                            "LastUpdatedTime": upd,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(paged_response(
+            "RemediationExecutionStatuses",
+            list,
+            body,
+            "NextToken",
         ))
     }
 }
 
 // ─── Conformance packs ──────────────────────────────────────────────────────
 
-/// Extract the `ConfigRuleName`s declared by a conformance-pack template body,
-/// when the template is JSON. Used to scope conformance-pack compliance to the
-/// pack's own rules. YAML templates yield no names (compliance then aggregates
-/// over all account rules).
+/// Extract the `ConfigRuleName`s declared by a conformance-pack template body.
+/// Used to scope conformance-pack compliance to the pack's own rules. Both JSON
+/// and YAML CloudFormation templates are parsed (conformance-pack templates are
+/// most commonly authored in YAML); a template with no parseable rule names
+/// yields an empty list (compliance then aggregates over all account rules).
 fn extract_pack_rule_names(template: Option<&str>) -> Vec<String> {
     let Some(t) = template else { return Vec::new() };
-    let Ok(v) = serde_json::from_str::<Value>(t) else {
-        return Vec::new();
-    };
+    // Try JSON first, then YAML (a superset that also accepts JSON, but JSON is
+    // cheaper and the common case for programmatically-generated templates).
+    let v: Value = serde_json::from_str(t)
+        .or_else(|_| serde_yaml::from_str::<Value>(t))
+        .unwrap_or(Value::Null);
     let Some(resources) = v.get("Resources").and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -2545,8 +2724,11 @@ impl ConfigService {
                 }
             }
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "ConformancePackDetails": list }),
+        Ok(paged_response(
+            "ConformancePackDetails",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2595,8 +2777,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "ConformancePackStatusDetails": list }),
+        Ok(paged_response(
+            "ConformancePackStatusDetails",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -2644,9 +2829,13 @@ impl ConfigService {
                 json!({ "ConfigRuleName": rule, "ComplianceType": c, "Controls": [] })
             })
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "ConformancePackName": name, "ConformancePackRuleComplianceList": list }),
-        ))
+        let (page, next) = paginate(list, body);
+        let mut out =
+            json!({ "ConformancePackName": name, "ConformancePackRuleComplianceList": page });
+        if let Some(t) = next {
+            out["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn get_conformance_pack_compliance_summary(
@@ -2719,9 +2908,13 @@ impl ConfigService {
                 }
             }
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "ConformancePackName": name, "ConformancePackRuleEvaluationResults": results }),
-        ))
+        let (page, next) = paginate(results, body);
+        let mut out =
+            json!({ "ConformancePackName": name, "ConformancePackRuleEvaluationResults": page });
+        if let Some(t) = next {
+            out["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn list_conformance_pack_compliance_scores(
@@ -3147,8 +3340,11 @@ impl ConfigService {
                 }
             }
         }
-        Ok(AwsResponse::ok_json(
-            json!({ "ConfigurationAggregators": list }),
+        Ok(paged_response(
+            "ConfigurationAggregators",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -3256,6 +3452,7 @@ impl ConfigService {
     fn describe_aggregation_authorizations(
         &self,
         account: &str,
+        body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let st = self.state.read();
         let list: Vec<Value> = st
@@ -3267,8 +3464,11 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "AggregationAuthorizations": list }),
+        Ok(paged_response(
+            "AggregationAuthorizations",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -3623,15 +3823,18 @@ impl ConfigService {
     fn describe_retention_configurations(
         &self,
         account: &str,
-        _body: &Value,
+        body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let st = self.state.read();
         let list: Vec<Value> = st
             .account(account)
             .map(|a| a.retention_configurations.values().map(|r| json!({ "Name": r.name, "RetentionPeriodInDays": r.retention_period_in_days })).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "RetentionConfigurations": list }),
+        Ok(paged_response(
+            "RetentionConfigurations",
+            list,
+            body,
+            "NextToken",
         ))
     }
 
@@ -3740,13 +3943,22 @@ impl ConfigService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn list_stored_queries(&self, account: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_stored_queries(
+        &self,
+        account: &str,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let st = self.state.read();
         let list: Vec<Value> = st
             .account(account)
             .map(|a| a.stored_queries.values().map(|q| json!({ "QueryId": q.id, "QueryArn": q.arn, "QueryName": q.name, "Description": q.description })).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "StoredQueryMetadata": list })))
+        Ok(paged_response(
+            "StoredQueryMetadata",
+            list,
+            body,
+            "NextToken",
+        ))
     }
 
     fn start_resource_evaluation(
@@ -3759,18 +3971,50 @@ impl ConfigService {
             .and_then(Value::as_str)
             .unwrap_or("DETECTIVE")
             .to_string();
+        let details = body.get("ResourceDetails").cloned();
+        // Evaluate the supplied resource configuration against the account's
+        // managed rules for real, rather than storing a canned COMPLIANT.
+        let (rtype, rid, config_str) = details
+            .as_ref()
+            .map(|d| {
+                let rt = d
+                    .get("ResourceType")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let ri = d
+                    .get("ResourceId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // ResourceConfiguration is a JSON document string in the AWS
+                // API; tolerate a raw object too.
+                let cfg = match d.get("ResourceConfiguration") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => v.to_string(),
+                    None => "null".to_string(),
+                };
+                (rt, ri, cfg)
+            })
+            .unwrap_or_default();
         let id = Uuid::new_v4().to_string();
         let mut st = self.state.write();
-        st.account_mut(account).resource_evaluations.insert(
+        let acc = st.account_mut(account);
+        let evaluation_results = if rtype.is_empty() || rid.is_empty() {
+            Vec::new()
+        } else {
+            validate::evaluate_proactive(acc, &rtype, &rid, &config_str)
+        };
+        acc.resource_evaluations.insert(
             id.clone(),
             ResourceEvaluation {
                 resource_evaluation_id: id.clone(),
                 evaluation_mode: mode,
                 time_stamp: Utc::now(),
                 status: "SUCCEEDED".into(),
-                resource_details: body.get("ResourceDetails").cloned(),
+                resource_details: details,
                 evaluation_context: body.get("EvaluationContext").cloned(),
-                evaluation_results: Vec::new(),
+                evaluation_results,
             },
         );
         Ok(AwsResponse::ok_json(json!({ "ResourceEvaluationId": id })))
@@ -3804,17 +4048,32 @@ impl ConfigService {
             .and_then(|d| d.get("ResourceId"))
             .cloned()
             .unwrap_or(Value::Null);
+        // Real compliance folded from the recorded per-rule outcomes. No
+        // applicable managed rule -> INSUFFICIENT_DATA, never a canned pass.
+        let compliance = if ev.evaluation_results.is_empty() {
+            "INSUFFICIENT_DATA".to_string()
+        } else {
+            fold_compliance(
+                ev.evaluation_results
+                    .iter()
+                    .map(|r| r.compliance_type.as_str()),
+            )
+        };
         Ok(AwsResponse::ok_json(json!({
             "ResourceEvaluationId": ev.resource_evaluation_id,
             "EvaluationMode": ev.evaluation_mode,
             "EvaluationStatus": { "Status": ev.status },
             "EvaluationStartTimestamp": ev.time_stamp.timestamp() as f64,
-            "Compliance": "COMPLIANT",
+            "Compliance": compliance,
             "ResourceDetails": { "ResourceId": resource_id, "ResourceType": resource_type },
         })))
     }
 
-    fn list_resource_evaluations(&self, account: &str) -> Result<AwsResponse, AwsServiceError> {
+    fn list_resource_evaluations(
+        &self,
+        account: &str,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let st = self.state.read();
         let list: Vec<Value> = st
             .account(account)
@@ -3825,7 +4084,12 @@ impl ConfigService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "ResourceEvaluations": list })))
+        Ok(paged_response(
+            "ResourceEvaluations",
+            list,
+            body,
+            "NextToken",
+        ))
     }
 
     fn select_resource_config(
@@ -3840,11 +4104,15 @@ impl ConfigService {
         let acc = st.account(account).unwrap_or(&empty);
         let rows = validate::run_select(&expr, acc)
             .map_err(|e| invalid(format!("Invalid SelectResourceConfig expression: {e}")))?;
-        let results: Vec<String> = rows.iter().map(|r| r.to_string()).collect();
+        let results: Vec<Value> = rows.iter().map(|r| json!(r.to_string())).collect();
+        let (page, next) = paginate(results, body);
         let mut out = json!({
-            "Results": results,
+            "Results": page,
             "QueryInfo": { "SelectFields": select_fields(&expr) },
         });
+        if let Some(t) = next {
+            out["NextToken"] = json!(t);
+        }
         if aggregate {
             let _ = out.as_object_mut();
         }
@@ -3958,6 +4226,101 @@ fn string_list(body: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Read the page-size cap from a request body, tolerating the several field
+/// spellings AWS Config uses across operations (`Limit`, `MaxResults`, and the
+/// lowercase `limit` on the resource-config data-plane ops).
+fn page_limit(body: &Value) -> Option<usize> {
+    ["Limit", "MaxResults", "limit"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(Value::as_i64))
+        .filter(|l| *l > 0)
+        .map(|l| l as usize)
+}
+
+/// Read the continuation token, tolerating both `NextToken` (control plane) and
+/// `nextToken` (data plane) spellings.
+fn page_token(body: &Value) -> Option<usize> {
+    ["NextToken", "nextToken"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .and_then(decode_page_token)
+}
+
+/// Tokens are an opaque offset into the full ordered result list. They are
+/// encoded so callers treat them as opaque; decoding a malformed token yields
+/// `None` (the page then restarts from the beginning rather than erroring).
+fn encode_page_token(offset: usize) -> String {
+    format!("cfg:{offset}")
+}
+
+fn decode_page_token(token: &str) -> Option<usize> {
+    token.strip_prefix("cfg:").and_then(|n| n.parse().ok())
+}
+
+/// Slice `items` to a single page given the request's `Limit`/`NextToken`.
+/// Returns the page and the token for the next page (`None` when exhausted).
+fn paginate(items: Vec<Value>, body: &Value) -> (Vec<Value>, Option<String>) {
+    let total = items.len();
+    let start = page_token(body).unwrap_or(0).min(total);
+    let end = match page_limit(body) {
+        Some(limit) => start.saturating_add(limit).min(total),
+        None => total,
+    };
+    let next = if end < total {
+        Some(encode_page_token(end))
+    } else {
+        None
+    };
+    (
+        items.into_iter().skip(start).take(end - start).collect(),
+        next,
+    )
+}
+
+/// Build a paginated list response: the list under `field`, plus a continuation
+/// token under `token_field` (`NextToken` for the control plane, `nextToken`
+/// for the data plane) when more items remain.
+fn paged_response(field: &str, items: Vec<Value>, body: &Value, token_field: &str) -> AwsResponse {
+    let (page, next) = paginate(items, body);
+    let mut out = json!({ field: page });
+    if let Some(t) = next {
+        out[token_field] = json!(t);
+    }
+    AwsResponse::ok_json(out)
+}
+
+/// Build the invoking event handed to a custom-Lambda config rule. The rule's
+/// stored `InputParameters` are passed through verbatim as `ruleParameters` (a
+/// JSON string), exactly as AWS Config does, defaulting to `"{}"` when the rule
+/// declared none — a custom rule that reads its parameters must see them.
+fn custom_rule_event(
+    account: &str,
+    rule_name: &str,
+    input_parameters: Option<&str>,
+    result_token: &str,
+) -> Value {
+    let invoking_event = json!({
+        "awsAccountId": account,
+        "configRuleName": rule_name,
+        "messageType": "ScheduledNotification",
+        "notificationCreationTime": Utc::now().to_rfc3339(),
+    })
+    .to_string();
+    let rule_parameters = input_parameters
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| "{}".to_string());
+    json!({
+        "invokingEvent": invoking_event,
+        "ruleParameters": rule_parameters,
+        "resultToken": result_token,
+        "configRuleArn": format!("arn:aws:config:us-east-1:{account}:config-rule/{rule_name}"),
+        "configRuleName": rule_name,
+        "accountId": account,
+    })
+}
+
 /// Best-effort extraction of the SELECT field names for the `QueryInfo`.
 fn select_fields(expr: &str) -> Vec<Value> {
     let lower = expr.to_ascii_lowercase();
@@ -3973,4 +4336,72 @@ fn select_fields(expr: &str) -> Vec<Value> {
         .split(',')
         .map(|s| json!({ "Name": s.trim() }))
         .collect()
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn custom_rule_event_passes_stored_input_parameters() {
+        let params = r#"{"maxAccessKeyAge":"90"}"#;
+        let event = custom_rule_event("111122223333", "my-rule", Some(params), "my-rule#tok");
+        // ruleParameters must carry the rule's stored InputParameters verbatim,
+        // not a hardcoded "{}".
+        assert_eq!(event["ruleParameters"], json!(params));
+        assert_eq!(event["configRuleName"], json!("my-rule"));
+        assert_eq!(event["accountId"], json!("111122223333"));
+        assert_eq!(event["resultToken"], json!("my-rule#tok"));
+    }
+
+    #[test]
+    fn custom_rule_event_defaults_empty_parameters_to_empty_object() {
+        let none = custom_rule_event("111122223333", "r", None, "r#t");
+        assert_eq!(none["ruleParameters"], json!("{}"));
+        let empty = custom_rule_event("111122223333", "r", Some(""), "r#t");
+        assert_eq!(empty["ruleParameters"], json!("{}"));
+    }
+
+    #[test]
+    fn paginate_slices_and_emits_token() {
+        let items: Vec<Value> = (0..5).map(|i| json!(i)).collect();
+        let first_req = json!({ "Limit": 2 });
+        let (page, next) = paginate(items.clone(), &first_req);
+        assert_eq!(page, vec![json!(0), json!(1)]);
+        let token = next.expect("more items remain -> token");
+
+        let second_req = json!({ "Limit": 2, "NextToken": token });
+        let (page2, next2) = paginate(items.clone(), &second_req);
+        assert_eq!(page2, vec![json!(2), json!(3)]);
+        let token2 = next2.expect("still more");
+
+        let third_req = json!({ "Limit": 2, "NextToken": token2 });
+        let (page3, next3) = paginate(items, &third_req);
+        assert_eq!(page3, vec![json!(4)]);
+        assert!(next3.is_none(), "last page has no token");
+    }
+
+    #[test]
+    fn paginate_no_limit_returns_all() {
+        let items: Vec<Value> = (0..3).map(|i| json!(i)).collect();
+        let (page, next) = paginate(items.clone(), &json!({}));
+        assert_eq!(page, items);
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn extract_pack_rule_names_parses_yaml_template() {
+        let yaml = r#"
+Resources:
+  MyRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: yaml-declared-rule
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_VERSIONING_ENABLED
+"#;
+        let names = extract_pack_rule_names(Some(yaml));
+        assert_eq!(names, vec!["yaml-declared-rule".to_string()]);
+    }
 }

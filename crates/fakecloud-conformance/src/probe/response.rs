@@ -252,6 +252,29 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // either to the probes' synthetic (missing / out-of-bounds) inputs ran
         // correctly. Source: AWS Config API reference per-op "Errors".
         "config" => &["InvalidParameterValueException", "ValidationException"],
+        // Amazon EMR's `InvalidRequestException` is a service-wide client-error
+        // response: AWS returns it whenever an operation dereferences a
+        // cluster/step/studio/session/notebook that does not exist or fails
+        // input validation, on essentially every operation. The 2009-era Smithy
+        // model only enumerates it on a subset -- many mutating ops
+        // (`RunJobFlow`, `AddJobFlowSteps`, `AddInstanceGroups`,
+        // `TerminateJobFlows`, the `Set*` family) declare only
+        // `InternalServerError`, and the scaling/auto-termination `Put*`/`Get*`/
+        // `Remove*` ops declare no errors at all, yet the live API returns
+        // `InvalidRequestException` for the probes' synthetic (non-existent)
+        // cluster ids. A handler returning it ran correctly.
+        "emr" => &["InvalidRequestException"],
+        // AWS Shield's `InvalidParameterException` is its canonical
+        // request-validation client error: the live API returns it whenever an
+        // operation is called with a member outside its `length`/`range`/`enum`
+        // bounds or an otherwise-invalid parameter. The Smithy model declares
+        // it on most operations but omits it from a handful (the `Delete*`,
+        // `Describe*` and paginated `List*` families declare only
+        // `ResourceNotFoundException` / `OptimisticLockException` /
+        // `InvalidPaginationTokenException`), yet the model-driven validator
+        // returns it for the probes' out-of-bounds synthetic inputs on those
+        // ops too. A handler returning it ran correctly.
+        "shield" => &["InvalidParameterException"],
         _ => &[],
     }
 }

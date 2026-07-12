@@ -72,6 +72,11 @@ pub struct AccountState {
     pub remediation_configs: BTreeMap<String, RemediationConfiguration>,
     /// Remediation exceptions keyed by `rule\u{1}resourceType\u{1}resourceId`.
     pub remediation_exceptions: BTreeMap<String, RemediationException>,
+    /// Remediation execution statuses keyed by
+    /// `rule\u{1}resourceType\u{1}resourceId`, recorded by
+    /// `StartRemediationExecution`.
+    #[serde(default)]
+    pub remediation_executions: BTreeMap<String, RemediationExecutionStatus>,
     /// Resource evaluations keyed by evaluation id.
     pub resource_evaluations: BTreeMap<String, ResourceEvaluation>,
     /// Tags per resource ARN.
@@ -316,6 +321,22 @@ pub struct RemediationException {
     pub resource_id: String,
     pub message: Option<String>,
     pub expiration_time: Option<DateTime<Utc>>,
+}
+
+/// A recorded remediation execution. FakeCloud does not run the underlying SSM
+/// Automation document (SSM automation is out of the config data plane here), so
+/// executions are recorded as `QUEUED` — honestly reflecting that the request
+/// was accepted but the automation outcome is not simulated, rather than
+/// fabricating a `SUCCEEDED` that never ran.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemediationExecutionStatus {
+    pub config_rule_name: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    /// `QUEUED`, `PENDING`, `SUCCEEDED`, `FAILED`.
+    pub state: String,
+    pub invocation_time: DateTime<Utc>,
+    pub last_updated_time: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

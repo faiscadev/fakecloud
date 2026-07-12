@@ -24,6 +24,7 @@ const REST_XML_SERVICES: &[&str] = &["s3", "cloudfront", "route53"];
 
 /// Services that use REST protocol with JSON responses (detected from SigV4 credential scope).
 const REST_JSON_SERVICES: &[&str] = &[
+    "managedblockchain",
     "lambda",
     "ses",
     "apigateway",
@@ -67,6 +68,65 @@ const REST_JSON_SERVICES: &[&str] = &[
     // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
     // brokers, configurations, users, and tags; JSON bodies). Signs as `mq`.
     "mq",
+    // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control plane
+    // (path-labelled `@http` URIs over clusters, configurations, operations,
+    // replicators, VPC connections, and topics; JSON bodies). Signs as `kafka`.
+    "kafka",
+    // Amazon MWAA (Managed Workflows for Apache Airflow): restJson1 control
+    // plane (path-labelled `@http` URIs over environments, access tokens, and
+    // tags; JSON bodies). Signs as `airflow`, normalized to `mwaa`.
+    "mwaa",
+    // AWS Fault Injection Simulator: restJson1 control plane (path-labelled
+    // `@http` URIs over experiment templates, experiments, the actions and
+    // target-resource-type catalogs, target-account configurations, safety
+    // levers, and tags; JSON bodies). Signs as `fis`.
+    "fis",
+    // AWS X-Ray: restJson1 control plane + trace data plane (fixed `@http`
+    // `POST /<Op>` URIs over trace segments, the derived service graph,
+    // sampling rules, groups, encryption config, and tags; JSON bodies).
+    // Signs as `xray`.
+    "xray",
+    // AWS AppSync: restJson1 control plane + schema state (RESTful `@http`
+    // method + path routing over GraphQL APIs, data sources, resolvers,
+    // functions, types, caches, domain names, the Event-API surface, and
+    // source-API associations; JSON bodies). Signs as `appsync`.
+    "appsync",
+    // AWS Amplify: restJson1 hosting control plane (path-labelled `@http` URIs
+    // over apps, branches, domain associations, webhooks, backend
+    // environments, jobs/deployments, artifacts, and tags; JSON bodies).
+    // Signs as `amplify`.
+    "amplify",
+    // AWS Elemental MediaConvert: restJson1 video-transcoding control plane
+    // (path-labelled `@http` URIs under `/2017-08-29` over queues, presets, job
+    // templates, jobs, policy, endpoints, and tags; JSON bodies). Signs as
+    // `mediaconvert`.
+    "mediaconvert",
+    // AWS Serverless Application Repository: restJson1 control plane
+    // (path-labelled `@http` URIs under `/applications` over applications,
+    // versions, sharing policies, CloudFormation change sets/templates, and
+    // dependencies; JSON bodies). Signs as `serverlessrepo`.
+    "serverlessrepo",
+    // AWS IoT Data Plane: restJson1 device-shadow + retained-message data plane
+    // (path-labelled `@http` URIs over `/things/{thingName}/shadow`,
+    // `/topics/{topic}`, `/retainedMessage`, and `/connections`; raw
+    // `@httpPayload` shadow documents). Signs as `iotdata`.
+    "iotdata",
+    // Amazon Pinpoint: restJson1 control plane (RESTful `@http` method + path
+    // routing under `/v1/apps/...`, `/v1/templates/...`, `/v1/recommenders`,
+    // `/v1/tags/...` over apps, campaigns, segments, endpoints, channels,
+    // journeys, templates, jobs, event streams, recommenders, and tags; JSON
+    // bodies). Signs as `mobiletargeting`, normalized to `pinpoint`.
+    "pinpoint",
+    // AWS IoT Core control plane: restJson1 registry / jobs / rules / security
+    // control plane (path-labelled `@http` URIs over `/things/{thingName}`,
+    // `/policies/{policyName}`, `/jobs/{jobId}`, `/rules/{ruleName}`, ...).
+    // Signs as `iot`.
+    "iot",
+    // AWS IoT Wireless control plane: restJson1 LoRaWAN / Sidewalk registry
+    // (collection-POST creates + path-labelled reads over `/destinations`,
+    // `/wireless-devices/{Identifier}`, `/fuota-tasks/{Id}`, ...). Signs as
+    // `iotwireless`.
+    "iotwireless",
 ];
 
 /// Detected service name and action from an incoming HTTP request.
@@ -480,9 +540,42 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AmazonAthena" => "athena",
         s if s.starts_with("Firehose_") => "firehose",
         "AWSGlue" => "glue",
+        // Amazon EMR (Elastic MapReduce): awsJson1.1. The service shape short
+        // name is the target prefix (`ElasticMapReduce.<Operation>`).
+        "ElasticMapReduce" => "emr",
+        // Amazon Textract (document text/analysis extraction): awsJson1_1. The
+        // service shape short name is the target prefix (`Textract.<Operation>`).
+        "Textract" => "textract",
+        // Amazon Transcribe: awsJson1.1. The service shape short name is the
+        // target prefix (`Transcribe.<Operation>`).
+        "Transcribe" => "transcribe",
+        // Amazon Translate: awsJson1_1. The service shape short name
+        // (`AWSShineFrontendService_20170701.<Operation>`) is the target prefix.
+        "AWSShineFrontendService_20170701" => "translate",
+        // AWS Shield / Shield Advanced: awsJson1_1. The service shape short
+        // name (`AWSShield_20160616.<Operation>`) is the target prefix.
+        "AWSShield_20160616" => "shield",
+        // Amazon Comprehend (NLP): awsJson1.1. The service shape name carries the
+        // dated version (`Comprehend_20171127.<Operation>`).
+        "Comprehend_20171127" => "comprehend",
+        // Amazon SWF (Simple Workflow Service): awsJson1_0. The service shape
+        // short name is the target prefix (`SimpleWorkflowService.<Operation>`).
+        "SimpleWorkflowService" => "swf",
+        // Amazon Timestream (Write + Query): awsJson1_0. BOTH the write and
+        // query SDK clients carry the SAME dated target prefix
+        // (`Timestream_20181101.<Operation>`); one fakecloud crate serves both.
+        "Timestream_20181101" => "timestream",
+        // AWS Support: awsJson1.1. The service shape carries the dated version
+        // (`AWSSupport_20130415.<Operation>`).
+        "AWSSupport_20130415" => "support",
         "CloudApiService" => "cloudcontrolapi",
         "ResourceGroupsTaggingAPI_20170126" => "tagging",
         "AmazonMemoryDB" => "memorydb",
+        // Amazon Managed Service for Apache Flink (formerly Kinesis Data
+        // Analytics v2): awsJson1.1. The SigV4 signing name is
+        // `kinesisanalytics`; the internal fakecloud service key is
+        // `kinesisanalyticsv2`.
+        s if s.starts_with("KinesisAnalytics_20180523") => "kinesisanalyticsv2",
         // Cloud Map (servicediscovery): awsJson1.1, target prefix carries the
         // dated Route53 Auto Naming service version.
         "Route53AutoNaming_v20170314" => "servicediscovery",
@@ -664,6 +757,16 @@ fn normalize_service_name(service: &str) -> &str {
         // `appconfigdata`; alias it to `appconfig` so both model-services
         // resolve to the one registry entry, which routes on the URL path.
         "appconfigdata" => "appconfig",
+        // Amazon MWAA signs SigV4 with the `airflow` scope (its ARN namespace),
+        // so a real SDK request arrives as `airflow`. Alias it to the `mwaa`
+        // registry entry (the conformance probe signs with the Smithy service
+        // shape name `mwaa`, which already resolves).
+        "airflow" => "mwaa",
+        // Amazon Pinpoint signs SigV4 with the `mobiletargeting` scope (its ARN
+        // namespace), so a real SDK request arrives as `mobiletargeting`. Alias
+        // it to the `pinpoint` registry entry (the conformance probe signs with
+        // the service-map `service_name`, `pinpoint`, which already resolves).
+        "mobiletargeting" => "pinpoint",
         other => other,
     }
 }

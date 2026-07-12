@@ -46,6 +46,10 @@ pub fn unknown_resource(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "UnknownResourceException", msg)
 }
 
+pub fn invalid_next_token(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidNextTokenException", msg)
+}
+
 // ─── Ids / ARNs / timestamps ──────────────────────────────────────────────
 
 /// A 17-hex-character resource suffix, matching the shape of real Route 53
@@ -62,6 +66,25 @@ pub fn now_rfc3339() -> String {
 /// `arn:aws:route53resolver:<region>:<account>:<kind>/<id>`.
 pub fn arn(region: &str, account: &str, kind: &str, id: &str) -> String {
     format!("arn:aws:route53resolver:{region}:{account}:{kind}/{id}")
+}
+
+/// FNV-1a hash of a string, used to derive stable deterministic ids/suffixes.
+pub fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 1469598103934665603;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+
+/// Deterministically synthesize a VPC id for a subnet when EC2 state is not
+/// wired (or the subnet is unknown), so `HostVPCId` is stable across calls for
+/// the same subnet. Shared by the awsJson handler and the CloudFormation
+/// provisioner so a CFN-provisioned endpoint carries a non-empty `HostVPCId`
+/// just like the direct-API path.
+pub fn synth_vpc(subnet_id: &str) -> String {
+    format!("vpc-{:017x}", fnv1a(subnet_id) & 0x000f_ffff_ffff_ffff)
 }
 
 // ─── Input parsing ────────────────────────────────────────────────────────

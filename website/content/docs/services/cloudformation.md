@@ -84,7 +84,9 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **Glue** — `Database`, `Table`, `Partition`
 - **IAM** — `Role`, `User`, `Group`, `Policy`, `ManagedPolicy`, `AccessKey`, `InstanceProfile`, `OIDCProvider`, `SAMLProvider`, `ServiceLinkedRole`, `UserToGroupAddition`, `VirtualMFADevice`
 - **Kinesis** — `Stream`, `StreamConsumer`
+- **Kinesis Analytics v2 (Managed Service for Apache Flink)** — `Application`, `ApplicationOutput`, `ApplicationReferenceDataSource`, `ApplicationCloudWatchLoggingOption`
 - **KMS** — `Key`, `Alias`, `ReplicaKey`
+- **MSK (Managed Streaming for Apache Kafka)** — `Cluster`, `ServerlessCluster`, `Configuration`, `ClusterPolicy`, `BatchScramSecret`, `VpcConnection`, `Replicator`
 - **Lambda** — `Function`, `Version`, `Alias`, `LayerVersion`, `Permission`, `EventSourceMapping`, `Url`
 - **CloudWatch Logs** — `LogGroup`, `LogStream`, `MetricFilter`, `SubscriptionFilter`, `Destination`, `ResourcePolicy`, `QueryDefinition`, `Delivery`, `DeliverySource`, `DeliveryDestination`
 - **Organizations** — `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy`

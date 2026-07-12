@@ -130,7 +130,7 @@ async fn member_non_management_delete_returns_access_denied() {
         let org_id = org.org_id.clone();
         let arn = format!(
             "arn:aws:organizations::111111111111:account/{}/{}",
-            org_id, &account_id
+            org_id, account_id
         );
         org.accounts.insert(
             account_id.clone(),

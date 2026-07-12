@@ -1,7 +1,11 @@
 {
-  "variants_passed": 187837,
-  "total_variants": 187837,
+  "variants_passed": 231585,
+  "total_variants": 231585,
   "per_service": {
+    "account": {
+      "passed": 412,
+      "total": 412
+    },
     "acm": {
       "passed": 599,
       "total": 599
@@ -9,6 +13,10 @@
     "acm-pca": {
       "passed": 788,
       "total": 788
+    },
+    "amplify": {
+      "passed": 1575,
+      "total": 1575
     },
     "apigatewayv1": {
       "passed": 3373,
@@ -30,9 +38,17 @@
       "passed": 949,
       "total": 949
     },
+    "appsync": {
+      "passed": 2392,
+      "total": 2392
+    },
     "athena": {
       "passed": 2310,
       "total": 2310
+    },
+    "backup": {
+      "passed": 3089,
+      "total": 3089
     },
     "bedrock": {
       "passed": 3834,
@@ -49,6 +65,10 @@
     "bedrock-runtime": {
       "passed": 446,
       "total": 446
+    },
+    "ce": {
+      "passed": 1781,
+      "total": 1781
     },
     "cloudcontrolapi": {
       "passed": 346,
@@ -70,6 +90,26 @@
       "passed": 2607,
       "total": 2607
     },
+    "codebuild": {
+      "passed": 2051,
+      "total": 2051
+    },
+    "codecommit": {
+      "passed": 2573,
+      "total": 2573
+    },
+    "codeconnections": {
+      "passed": 917,
+      "total": 917
+    },
+    "codedeploy": {
+      "passed": 1344,
+      "total": 1344
+    },
+    "codepipeline": {
+      "passed": 1446,
+      "total": 1446
+    },
     "cognito-identity": {
       "passed": 773,
       "total": 773
@@ -77,6 +117,22 @@
     "cognito-idp": {
       "passed": 4469,
       "total": 4469
+    },
+    "comprehend": {
+      "passed": 3070,
+      "total": 3070
+    },
+    "config": {
+      "passed": 4590,
+      "total": 4590
+    },
+    "dms": {
+      "passed": 3344,
+      "total": 3344
+    },
+    "docdb": {
+      "passed": 1513,
+      "total": 1513
     },
     "dsql": {
       "passed": 491,
@@ -102,30 +158,6 @@
       "passed": 1865,
       "total": 1865
     },
-    "backup": {
-      "passed": 3089,
-      "total": 3089
-    },
-    "elasticfilesystem": {
-      "passed": 1091,
-      "total": 1091
-    },
-    "es": {
-      "passed": 1463,
-      "total": 1463
-    },
-    "glacier": {
-      "passed": 852,
-      "total": 852
-    },
-    "opensearch": {
-      "passed": 3017,
-      "total": 3017
-    },
-    "servicediscovery": {
-      "passed": 1062,
-      "total": 1062
-    },
     "elasticache": {
       "passed": 2251,
       "total": 2251
@@ -134,9 +166,21 @@
       "passed": 1648,
       "total": 1648
     },
+    "elasticfilesystem": {
+      "passed": 1091,
+      "total": 1091
+    },
     "elasticloadbalancing": {
       "passed": 1569,
       "total": 1569
+    },
+    "emr": {
+      "passed": 2102,
+      "total": 2102
+    },
+    "es": {
+      "passed": 1463,
+      "total": 1463
     },
     "events": {
       "passed": 2112,
@@ -146,6 +190,14 @@
       "passed": 416,
       "total": 416
     },
+    "fis": {
+      "passed": 860,
+      "total": 860
+    },
+    "glacier": {
+      "passed": 852,
+      "total": 852
+    },
     "glue": {
       "passed": 9275,
       "total": 9275
@@ -154,13 +206,41 @@
       "passed": 5970,
       "total": 5970
     },
+    "identitystore": {
+      "passed": 726,
+      "total": 726
+    },
+    "iot": {
+      "passed": 9111,
+      "total": 9111
+    },
+    "iotdata": {
+      "passed": 359,
+      "total": 359
+    },
+    "iotwireless": {
+      "passed": 3555,
+      "total": 3555
+    },
+    "kafka": {
+      "passed": 1555,
+      "total": 1555
+    },
     "kinesis": {
       "passed": 1604,
       "total": 1604
     },
+    "kinesisanalyticsv2": {
+      "passed": 1232,
+      "total": 1232
+    },
     "kms": {
       "passed": 2227,
       "total": 2227
+    },
+    "lakeformation": {
+      "passed": 1985,
+      "total": 1985
     },
     "lambda": {
       "passed": 3178,
@@ -170,6 +250,14 @@
       "passed": 3897,
       "total": 3897
     },
+    "managedblockchain": {
+      "passed": 1028,
+      "total": 1028
+    },
+    "mediaconvert": {
+      "passed": 1005,
+      "total": 1005
+    },
     "memorydb": {
       "passed": 1201,
       "total": 1201
@@ -178,13 +266,37 @@
       "passed": 1610,
       "total": 1610
     },
+    "mq": {
+      "passed": 703,
+      "total": 703
+    },
+    "mwaa": {
+      "passed": 564,
+      "total": 564
+    },
+    "neptune": {
+      "passed": 1942,
+      "total": 1942
+    },
+    "opensearch": {
+      "passed": 3017,
+      "total": 3017
+    },
     "organizations": {
       "passed": 2050,
       "total": 2050
     },
+    "pinpoint": {
+      "passed": 2845,
+      "total": 2845
+    },
     "pipes": {
       "passed": 425,
       "total": 425
+    },
+    "ram": {
+      "passed": 1073,
+      "total": 1073
     },
     "rds": {
       "passed": 5487,
@@ -193,6 +305,10 @@
     "rds-data": {
       "passed": 253,
       "total": 253
+    },
+    "redshift": {
+      "passed": 4240,
+      "total": 4240
     },
     "resource-groups": {
       "passed": 786,
@@ -210,6 +326,10 @@
       "passed": 3668,
       "total": 3668
     },
+    "s3tables": {
+      "passed": 1645,
+      "total": 1645
+    },
     "scheduler": {
       "passed": 506,
       "total": 506
@@ -218,9 +338,21 @@
       "passed": 864,
       "total": 864
     },
+    "serverlessrepo": {
+      "passed": 380,
+      "total": 380
+    },
+    "servicediscovery": {
+      "passed": 1062,
+      "total": 1062
+    },
     "ses": {
       "passed": 2864,
       "total": 2864
+    },
+    "shield": {
+      "passed": 1001,
+      "total": 1001
     },
     "sns": {
       "passed": 1018,
@@ -234,6 +366,10 @@
       "passed": 5265,
       "total": 5265
     },
+    "sso": {
+      "passed": 2842,
+      "total": 2842
+    },
     "states": {
       "passed": 1292,
       "total": 1292
@@ -242,85 +378,49 @@
       "passed": 447,
       "total": 447
     },
+    "support": {
+      "passed": 418,
+      "total": 418
+    },
+    "swf": {
+      "passed": 1426,
+      "total": 1426
+    },
     "tagging": {
       "passed": 260,
       "total": 260
     },
-    "wafv2": {
-      "passed": 2133,
-      "total": 2133
+    "textract": {
+      "passed": 840,
+      "total": 840
     },
-    "account": {
-      "passed": 412,
-      "total": 412
+    "timestream": {
+      "passed": 859,
+      "total": 859
     },
-    "identitystore": {
-      "passed": 726,
-      "total": 726
-    },
-    "sso": {
-      "passed": 2842,
-      "total": 2842
-    },
-    "verifiedpermissions": {
-      "passed": 1230,
-      "total": 1230
-    },
-    "redshift": {
-      "passed": 4240,
-      "total": 4240
-    },
-    "dms": {
-      "passed": 3344,
-      "total": 3344
+    "transcribe": {
+      "passed": 2407,
+      "total": 2407
     },
     "transfer": {
       "passed": 2756,
       "total": 2756
     },
-    "ram": {
-      "passed": 1073,
-      "total": 1073
+    "translate": {
+      "passed": 642,
+      "total": 642
     },
-    "ce": {
-      "passed": 1781,
-      "total": 1781
+    "verifiedpermissions": {
+      "passed": 1230,
+      "total": 1230
     },
-    "s3tables": {
-      "passed": 1645,
-      "total": 1645
+    "wafv2": {
+      "passed": 2133,
+      "total": 2133
     },
-    "lakeformation": {
-      "passed": 1985,
-      "total": 1985
-    },
-    "codeconnections": {
-      "passed": 917,
-      "total": 917
-    },
-    "codebuild": {
-      "passed": 2051,
-      "total": 2051
-    },
-    "codecommit": {
-      "passed": 2573,
-      "total": 2573
-    },
-    "codedeploy": {
-      "passed": 1344,
-      "total": 1344
-    },
-    "codepipeline": {
-      "passed": 1446,
-      "total": 1446
-    },
-    "mq": {
-      "passed": 703,
-      "total": 703
-    },
-    "config": {
-      "passed": 4590,
-      "total": 4590
+    "xray": {
+      "passed": 1067,
+      "total": 1067
     }
   }
 }

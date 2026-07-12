@@ -36,7 +36,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 187,837 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 231,585 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -47,7 +47,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-79 services, 5,611 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
+104 services, 6,965 operations, true 100% conformance across every implemented service. Notes below are one-liners; the [parity matrix](https://fakecloud.dev/docs/parity/) has full control-plane vs data-plane coverage and known limitations per service.
 
 | Service                   | Ops | Notes |
 | ------------------------- | --- | ----- |
@@ -83,6 +83,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 | ElastiCache               | 75  | Real Redis, Valkey, Memcached via Docker |
 | MemoryDB                  | 45  | Full control plane: clusters, shards, ACLs, users, parameter/subnet groups, snapshots, multi-region clusters; persisted |
 | EKS                       | 65  | Complete control plane: clusters (incl. connected register/deregister), node groups, Fargate profiles, add-ons, access entries + policies, OIDC identity-provider configs, pod-identity associations, upgrade insights, capabilities, encryption config, EKS Anywhere subscriptions; config/version updates with tracking, cluster-version/add-on/access-policy catalogues, tagging; persisted, `CREATING` -> `ACTIVE` on describe |
+| MWAA (Managed Airflow)    | 12  | Full control plane: environments (`CREATING` -> `AVAILABLE`, `UPDATING`, `DELETING` settle on read), CLI/web-login access tokens, `InvokeRestApi`, internal `PublishMetrics`, ARN tagging; persisted. Airflow web-server/DAG data plane is a later batch |
 | Amazon S3 Glacier         | 33  | Complete surface with a real data plane: vaults, archive upload/delete storing the real bytes + a computed SHA-256 tree hash, multipart uploads assembled into a stored archive, retrieval + inventory jobs that settle to `Succeeded` on read so `GetJobOutput` returns the exact uploaded bytes (or a JSON inventory), vault lock state machine, notifications, access policy, tags, data-retrieval policy, provisioned capacity; persisted (archives survive restart) |
 | AWS Backup                | 109 | Complete control plane: backup plans (+ versions) + selections, vaults (standard/logically-air-gapped/restore-access) with notifications/policies/lock, recovery points, backup/copy/restore/scan jobs (progressed to a terminal state; `StartBackupJob` records a synthetic recovery point `DescribeRecoveryPoint` resolves), frameworks, report plans + jobs, legal holds, restore testing, tiering, protected resources, tags, global/region settings; persisted. No real backup engine (all 109 ops) |
 | OpenSearch Service        | 93  | Complete Amazon OpenSearch Service control plane sharing one domain store with Elasticsearch Service (both sign as `es`): domains (create/describe/delete/config persist; `Processing=false`/`Created=true` settle on describe), packages, VPC endpoints, cross-cluster connections, applications + capabilities, per-domain data sources + indices, direct-query data sources, reserved instances, tags, catalogues; persisted. No real cluster spawned (all 93 ops) |

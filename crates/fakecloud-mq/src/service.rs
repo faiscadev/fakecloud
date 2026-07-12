@@ -299,7 +299,7 @@ impl MqService {
             "DeleteTags" => self.delete_tags(&ctx, a0, &q),
             "ListTags" => self.list_tags(&ctx, a0),
             "DescribeBrokerEngineTypes" => self.describe_broker_engine_types(&q),
-            "DescribeBrokerInstanceOptions" => self.describe_broker_instance_options(&q),
+            "DescribeBrokerInstanceOptions" => self.describe_broker_instance_options(&ctx, &q),
             _ => Err(AwsServiceError::action_not_implemented("mq", action)),
         };
         (result, settled)
@@ -536,6 +536,10 @@ pub(crate) async fn settle_broker_up(
                 let data = guard.get_or_create(account);
                 if let Some(obj) = data.brokers.get_mut(id).and_then(Value::as_object_mut) {
                     obj.insert("brokerState".into(), json!("RUNNING"));
+                    // A prior failed bring-up may have left a statusReason; a
+                    // successful settle to RUNNING clears it so DescribeBroker
+                    // doesn't report a stale failure reason on a healthy broker.
+                    obj.remove("statusReason");
                     data.data_plane.insert(id.to_string(), running_to_dp(&r));
                     true
                 } else {
@@ -877,7 +881,15 @@ impl MqService {
                 le.insert("pending".into(), pending);
             }
         }
-        if let Some(cfg) = b.get("configuration") {
+        // Only ActiveMQ brokers carry a configuration; RabbitMQ brokers have no
+        // `configurations` in AWS, so a configuration on an UpdateBroker to a
+        // RabbitMQ broker is ignored rather than staged into a phantom pending.
+        let is_rabbit = obj
+            .get("engineType")
+            .and_then(Value::as_str)
+            .map(shared::is_rabbit)
+            .unwrap_or(false);
+        if let Some(cfg) = b.get("configuration").filter(|_| !is_rabbit) {
             let configs = obj
                 .entry("configurations")
                 .or_insert_with(|| json!({ "history": [] }));
@@ -890,7 +902,7 @@ impl MqService {
             "brokerId": id,
             "authenticationStrategy": obj.get("authenticationStrategy").cloned().unwrap_or(json!("SIMPLE")),
             "autoMinorVersionUpgrade": obj.get("autoMinorVersionUpgrade").cloned().unwrap_or(json!(false)),
-            "configuration": b.get("configuration").cloned().unwrap_or(json!(null)),
+            "configuration": if is_rabbit { json!(null) } else { b.get("configuration").cloned().unwrap_or(json!(null)) },
             "engineVersion": b.get("engineVersion").cloned().or_else(|| obj.get("engineVersion").cloned()).unwrap_or(json!(null)),
             "hostInstanceType": b.get("hostInstanceType").cloned().or_else(|| obj.get("hostInstanceType").cloned()).unwrap_or(json!(null)),
             "logs": b.get("logs").cloned().unwrap_or(json!(null)),
@@ -1152,7 +1164,15 @@ impl MqService {
         if !data.brokers.contains_key(id) {
             return Err(not_found(&format!("Can't find requested broker [{id}].")));
         }
-        ok(json!({ "brokerId": id }))
+        // Promote drives a Cross-Region Data Replication (CRDR) failover /
+        // switchover between a primary and a replica broker. fakecloud models a
+        // single standalone broker and has no CRDR replica to promote, so rather
+        // than return a fake success that did nothing (a broker with no
+        // `dataReplicationMode: CRDR` cannot be promoted), reject it exactly as
+        // AWS rejects promoting a broker that is not part of a CRDR deployment.
+        Err(bad_request(&format!(
+            "Broker [{id}] is not configured for CRDR (Cross-Region Data Replication) and cannot be promoted."
+        )))
     }
 
     fn list_brokers(
@@ -1257,7 +1277,13 @@ impl MqService {
         let id = format!("c-{}", Uuid::new_v4());
         let arn = config_arn(ctx, &id);
         let created = now_iso();
-        let rev = json!({ "revision": 1, "created": created, "description": "Auto-generated default for Configuration" });
+        // The auto-generated revision names the actual engine (ActiveMQ /
+        // RabbitMQ), matching the broker-auto-config path in `shared.rs`.
+        let auto_desc = format!(
+            "Auto-generated default for {}",
+            shared::engine_display(&engine)
+        );
+        let rev = json!({ "revision": 1, "created": created, "description": auto_desc });
 
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
@@ -1280,7 +1306,7 @@ impl MqService {
             vec![json!({
                 "revision": 1,
                 "created": created,
-                "description": "Auto-generated default for Configuration",
+                "description": auto_desc,
                 "data": shared::default_config_data(&engine),
             })],
         );
@@ -1883,14 +1909,18 @@ impl MqService {
 
     fn describe_broker_instance_options(
         &self,
+        ctx: &Ctx,
         q: &[(String, String)],
     ) -> Result<AwsResponse, AwsServiceError> {
         let engine_filter = query_one(q, "engineType");
         let host_filter = query_one(q, "hostInstanceType");
         let storage_filter = query_one(q, "storageType");
-        let azs: Vec<Value> = ["us-east-1a", "us-east-1b", "us-east-1c"]
+        // Availability zones are named for the REQUEST's region (`<region>a/b/c`),
+        // not a hardcoded us-east-1, so a broker created in eu-west-1 reports
+        // eu-west-1a/b/c as AWS does.
+        let azs: Vec<Value> = ['a', 'b', 'c']
             .iter()
-            .map(|n| json!({ "name": n }))
+            .map(|suffix| json!({ "name": format!("{}{suffix}", ctx.region) }))
             .collect();
         let mut options = Vec::new();
         for engine in ["ACTIVEMQ", "RABBITMQ"] {
@@ -2167,5 +2197,156 @@ mod tests {
         let mut settled2 = true;
         let _ = s.describe_broker(&c, &id, &mut settled2).unwrap();
         assert!(!settled2, "stable read must not report a settle");
+    }
+
+    fn rabbit_body(name: &str) -> Value {
+        json!({
+            "brokerName": name,
+            "engineType": "RABBITMQ",
+            "deploymentMode": "SINGLE_INSTANCE",
+            "hostInstanceType": "mq.m5.large",
+            "publiclyAccessible": false
+        })
+    }
+
+    #[test]
+    fn promote_rejects_a_non_crdr_broker_rather_than_faking_success() {
+        // Promote is a CRDR failover/switchover; fakecloud has no CRDR replica,
+        // so it returns an honest BadRequestException instead of a fake success
+        // that did nothing (finding 3 / no-stub-responses).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("prom")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        let Err(err) = s.promote(&c, &id, &json!({ "mode": "SWITCHOVER" })) else {
+            panic!("promote of a non-CRDR broker must be rejected");
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "BadRequestException");
+        // A missing broker still surfaces the not-found error, not the CRDR one.
+        let Err(missing) = s.promote(&c, "b-does-not-exist", &json!({ "mode": "FAILOVER" })) else {
+            panic!("promote of a missing broker must be not-found");
+        };
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn create_configuration_revision_description_names_the_engine() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        for (engine, expected) in [("ACTIVEMQ", "ActiveMQ"), ("RABBITMQ", "RabbitMQ")] {
+            let body = json!({ "name": "cfg", "engineType": engine });
+            let created = json_of(s.create_configuration(&c, &body).unwrap());
+            let cid = created["id"].as_str().unwrap().to_string();
+            assert_eq!(
+                created["latestRevision"]["description"].as_str(),
+                Some(format!("Auto-generated default for {expected}").as_str())
+            );
+            let rev = json_of(s.describe_configuration_revision(&c, &cid, "1").unwrap());
+            assert_eq!(
+                rev["description"].as_str(),
+                Some(format!("Auto-generated default for {expected}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn broker_instance_options_availability_zones_follow_the_region() {
+        // AZ names are derived from the request region, not a hardcoded
+        // us-east-1 (finding 5).
+        let s = svc();
+        let c = ctx("eu-west-1");
+        let out = json_of(s.describe_broker_instance_options(&c, &[]).unwrap());
+        let azs = out["brokerInstanceOptions"][0]["availabilityZones"]
+            .as_array()
+            .expect("availability zones");
+        let names: Vec<&str> = azs.iter().filter_map(|z| z["name"].as_str()).collect();
+        assert_eq!(names, vec!["eu-west-1a", "eu-west-1b", "eu-west-1c"]);
+    }
+
+    #[test]
+    fn update_broker_does_not_stage_configuration_on_rabbitmq() {
+        // RabbitMQ brokers have no `configurations` in AWS, so a configuration
+        // on an UpdateBroker must not create a phantom pending (finding 6).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &rabbit_body("rabbit-upd")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        let resp = json_of(
+            s.update_broker(
+                &c,
+                &id,
+                &json!({ "configuration": { "id": "c-abc", "revision": 3 } }),
+            )
+            .unwrap(),
+        );
+        assert!(
+            resp["configuration"].is_null(),
+            "RabbitMQ UpdateBroker must not echo a configuration"
+        );
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        assert!(
+            described.get("configurations").is_none(),
+            "RabbitMQ broker must never grow a configurations block, got: {described}"
+        );
+    }
+
+    #[test]
+    fn update_broker_still_stages_configuration_on_activemq() {
+        // The RabbitMQ guard must not regress ActiveMQ, which does carry a config.
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("active-upd")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        s.update_broker(
+            &c,
+            &id,
+            &json!({ "configuration": { "id": "c-xyz", "revision": 2 } }),
+        )
+        .unwrap();
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        assert_eq!(
+            described["configurations"]["pending"]["id"].as_str(),
+            Some("c-xyz")
+        );
+    }
+
+    #[test]
+    fn malformed_next_token_is_rejected() {
+        // A non-numeric pagination token is malformed and must be rejected with
+        // BadRequestException, not silently served as page 1 (finding 7).
+        let bad = crate::validate::validate_query(&[("nextToken".to_string(), "abc".to_string())])
+            .expect_err("malformed nextToken must be rejected");
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        // A well-formed numeric token is accepted.
+        assert!(
+            crate::validate::validate_query(&[("nextToken".to_string(), "5".to_string())]).is_ok()
+        );
+    }
+
+    #[test]
+    fn successful_transition_to_running_clears_stale_status_reason() {
+        // A prior failed attempt may leave a statusReason; a settle to RUNNING
+        // must clear it so DescribeBroker doesn't report a stale failure on a
+        // healthy broker (finding 7-tail).
+        let s = svc();
+        let c = ctx("us-east-1");
+        let created = json_of(s.create_broker(&c, &active_body("reason")).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+        {
+            let mut guard = s.state.write();
+            let data = guard.get_or_create(&c.account);
+            let obj = data.brokers.get_mut(&id).unwrap().as_object_mut().unwrap();
+            obj.insert("statusReason".into(), json!("a previous boot failure"));
+        }
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        assert_eq!(described["brokerState"].as_str(), Some("RUNNING"));
+        assert!(
+            described.get("statusReason").is_none(),
+            "statusReason must be cleared on a successful transition to RUNNING"
+        );
     }
 }

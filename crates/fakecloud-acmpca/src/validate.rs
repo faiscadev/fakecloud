@@ -1,6 +1,6 @@
 //! Input validation + real X.509 crypto for ACM Private CA.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
     DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose, SignatureAlgorithm,
@@ -238,15 +238,43 @@ fn random_serial() -> Vec<u8> {
     bytes.to_vec()
 }
 
-/// Largest validity fakecloud will resolve, in days (~10,000 years). Keeps the
-/// date arithmetic well inside `chrono`'s representable range so a hostile
-/// `Validity.Value` produces a `ValidationException`, never an overflow panic.
-const MAX_VALIDITY_DAYS: i64 = 3_650_000;
+/// Largest validity fakecloud will resolve, in days. This keeps the DAYS/MONTHS/
+/// YEARS arithmetic inside a range whose resulting `not_after` an X.509
+/// certificate can actually encode (see [`ensure_representable`]). ~7,900 years
+/// is comfortably beyond any real certificate lifetime yet stays under the
+/// year-9999 ceiling the ASN.1 GeneralizedTime encoder enforces.
+const MAX_VALIDITY_DAYS: i64 = 2_900_000;
+
+/// Highest year an X.509 `not_after`/`not_before` can encode. ASN.1
+/// GeneralizedTime carries a 4-digit year, so the encoder `rcgen`/`yasna` uses
+/// *panics* on year >= 10000. The certificate is signed with this exact time
+/// value, so this ceiling is a hard limit, not a soft one.
+const MAX_CERT_YEAR: i32 = 9999;
+
+/// Reject a resolved validity whose `not_after` an X.509 certificate cannot
+/// encode. ASN.1 GeneralizedTime only expresses a 4-digit year; the `yasna`
+/// encoder `rcgen` uses panics outright on year >= 10000. This check is
+/// deliberately made against the calendar year via `chrono` (not the `time`
+/// crate's configured date range, which Cargo feature unification can widen to
+/// include years >= 10000), so an over-large validity is surfaced to the caller
+/// as a `ValidationException` before any certificate is signed. Without it a
+/// hostile `Validity` either crashes issuance or is silently clamped to the Unix
+/// epoch, producing a certificate whose window runs backwards.
+fn ensure_representable(dt: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+    if dt.year() > MAX_CERT_YEAR {
+        return Err(
+            "The requested validity exceeds the maximum certificate expiry that can be represented"
+                .to_string(),
+        );
+    }
+    Ok(dt)
+}
 
 /// Resolve a `Validity` (Value + Type) into an absolute expiry timestamp using
 /// checked arithmetic. Returns `Err` (surfaced as `ValidationException`) for a
-/// non-positive value, an out-of-range/overflowing duration, or a malformed
-/// `END_DATE`, rather than overflowing or panicking on hostile input.
+/// non-positive value, an out-of-range/overflowing duration, a value past the
+/// representable certificate-expiry ceiling, or a malformed `END_DATE`, rather
+/// than overflowing, panicking, or silently producing a backwards certificate.
 pub fn resolve_validity(
     from: DateTime<Utc>,
     value: i64,
@@ -270,14 +298,17 @@ pub fn resolve_validity(
             if days > MAX_VALIDITY_DAYS {
                 return Err("Validity Value is too large".to_string());
             }
-            from.checked_add_signed(chrono::Duration::days(days))
-                .ok_or_else(|| "Validity Value is out of range".to_string())
+            let end = from
+                .checked_add_signed(chrono::Duration::days(days))
+                .ok_or_else(|| "Validity Value is out of range".to_string())?;
+            ensure_representable(end)
         }
         // ABSOLUTE: seconds since the Unix epoch.
         "ABSOLUTE" => DateTime::from_timestamp(value, 0)
-            .ok_or_else(|| "Validity ABSOLUTE value is out of range".to_string()),
+            .ok_or_else(|| "Validity ABSOLUTE value is out of range".to_string())
+            .and_then(ensure_representable),
         // END_DATE: a UTC timestamp encoded as the integer YYYYMMDDHHMMSS.
-        "END_DATE" => parse_end_date(value),
+        "END_DATE" => parse_end_date(value).and_then(ensure_representable),
         other => Err(format!("Invalid Validity Type: {other}")),
     }
 }
@@ -297,4 +328,45 @@ fn parse_end_date(value: i64) -> Result<DateTime<Utc>, String> {
     Utc.with_ymd_and_hms(year, month, day, hour, min, sec)
         .single()
         .ok_or_else(|| format!("Invalid END_DATE validity: {value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A resolved `not_after` at year 10000 or beyond is rejected — the ASN.1
+    /// GeneralizedTime encoder can only carry a 4-digit year and panics on
+    /// year >= 10000. This must hold regardless of the `time` crate's configured
+    /// date range (feature unification can enable `large-dates`), so the check is
+    /// exercised here independently of that crate.
+    #[test]
+    fn resolve_validity_rejects_year_10000_and_beyond() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        // END_DATE 10000-01-01 00:00:00.
+        assert!(resolve_validity(now, 100_000_101_000_000, "END_DATE").is_err());
+        // ABSOLUTE seconds that land past year 9999.
+        let far = Utc
+            .with_ymd_and_hms(9999, 1, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert!(resolve_validity(now, far, "ABSOLUTE").is_ok());
+        let too_far = Utc
+            .with_ymd_and_hms(9999, 12, 31, 23, 59, 59)
+            .unwrap()
+            .timestamp();
+        assert!(resolve_validity(now, too_far, "ABSOLUTE").is_ok());
+        // One second into year 10000 is rejected.
+        assert!(resolve_validity(now, too_far + 1, "ABSOLUTE").is_err());
+        // A huge relative validity is rejected before overflow, too.
+        assert!(resolve_validity(now, 1_000_000, "YEARS").is_err());
+    }
+
+    /// A representable validity still resolves to a forward-ordered window.
+    #[test]
+    fn resolve_validity_accepts_normal_windows() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let end = resolve_validity(now, 365, "DAYS").unwrap();
+        assert!(end > now);
+        assert!(end.year() <= MAX_CERT_YEAR);
+    }
 }

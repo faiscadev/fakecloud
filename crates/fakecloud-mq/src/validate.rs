@@ -110,6 +110,14 @@ pub fn validate_query(q: &[(String, String)]) -> Result<(), AwsServiceError> {
                 "Value '{v}' at 'maxResults' failed to satisfy constraint: Member must be between 1 and 100"
             )));
         }
+        // NextToken is an opaque offset the service itself minted (a decimal
+        // string); a client that echoes a malformed token gets a
+        // BadRequestException rather than silently being served page 1.
+        if k == "nextToken" && v.parse::<usize>().is_err() {
+            return Err(bad_request(&format!(
+                "Value '{v}' at 'nextToken' is not a valid pagination token."
+            )));
+        }
     }
     Ok(())
 }

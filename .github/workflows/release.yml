@@ -201,10 +201,23 @@ jobs:
           publish fakecloud-elasticache
           publish fakecloud-elasticbeanstalk # only core/persistence/aws deps
           publish fakecloud-memorydb         # only core/persistence/aws deps
+          publish fakecloud-kinesisanalyticsv2 # only core/persistence/aws deps
           publish fakecloud-eks              # only core/persistence/aws deps
           publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
-          publish fakecloud-route53resolver  # depends on ec2 (VPC/subnet/SG validation)
           publish fakecloud-mq               # only core/persistence/aws deps
+          publish fakecloud-kafka            # only core/persistence deps
+          publish fakecloud-mwaa             # only core/persistence deps
+          publish fakecloud-fis              # only core/persistence deps
+          publish fakecloud-xray             # only core/persistence deps
+          publish fakecloud-appsync          # only core/persistence deps
+          publish fakecloud-amplify          # only core/persistence deps
+          publish fakecloud-mediaconvert     # only core/persistence deps
+          publish fakecloud-serverlessrepo   # only core/persistence deps
+          publish fakecloud-iotdata          # only core/persistence deps
+          publish fakecloud-pinpoint         # only core/persistence deps
+          publish fakecloud-iot              # only core/persistence deps
+          publish fakecloud-iotwireless      # only core/persistence deps
+          publish fakecloud-managedblockchain # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
           publish fakecloud-identitystore    # only core/persistence/aws deps
@@ -212,6 +225,8 @@ jobs:
           publish fakecloud-verifiedpermissions # core/persistence/aws + cedar-policy
           publish fakecloud-redshift         # only core/persistence/aws deps
           publish fakecloud-dms              # only core/persistence/aws deps
+          publish fakecloud-docdb            # only core/persistence/aws deps
+          publish fakecloud-neptune          # only core/persistence/aws deps
           publish fakecloud-opensearch       # only core/persistence/aws deps (ES + OpenSearch)
           publish fakecloud-backup           # only core/persistence/aws deps
           publish fakecloud-glacier          # only core/persistence/aws deps
@@ -223,17 +238,24 @@ jobs:
           publish fakecloud-s3tables          # only core/persistence/aws deps
           publish fakecloud-lakeformation     # only core/persistence/aws deps
           publish fakecloud-codeconnections   # only core/persistence/aws deps
-          publish fakecloud-codebuild         # only core/persistence/aws deps
           publish fakecloud-codecommit        # only core/persistence/aws deps
           publish fakecloud-codedeploy        # only core/persistence/aws deps
           publish fakecloud-codepipeline      # only core/persistence/aws deps
           publish fakecloud-codeartifact      # only core/persistence/aws deps
+          publish fakecloud-emr               # only core/persistence/aws deps
+          publish fakecloud-textract          # only core/persistence/aws deps
+          publish fakecloud-transcribe          # only core/persistence/aws deps
+          publish fakecloud-translate           # only core/persistence/aws deps
+          publish fakecloud-shield              # only core/persistence/aws deps
+          publish fakecloud-comprehend             # only core/persistence/aws deps
+          publish fakecloud-swf                    # only core/persistence/aws deps
+          publish fakecloud-timestream             # only core/persistence/aws deps
+          publish fakecloud-support             # only core/persistence/aws deps
           publish fakecloud-kinesis
           publish fakecloud-scheduler
           publish fakecloud-bedrock
           publish fakecloud-cloudfront
           publish fakecloud-acm
-          publish fakecloud-acmpca
           publish fakecloud-application-autoscaling
           publish fakecloud-autoscaling
           publish fakecloud-wafv2
@@ -252,8 +274,11 @@ jobs:
 
           # Layer 4: depend on layer 3a/3b crates
           publish fakecloud-s3             # depends on kms
+          publish fakecloud-route53resolver  # depends on ec2, s3 (ImportFirewallDomains)
+          publish fakecloud-acmpca         # depends on s3 (audit-report delivery), acm, kms
           publish fakecloud-ecr            # depends on iam, kms
           publish fakecloud-ssm            # depends on secretsmanager
+          publish fakecloud-codebuild      # depends on secretsmanager, ssm, logs (real buildspec exec)
           publish fakecloud-apigateway     # depends on elbv2, wafv2
 
           # Layer 5: depend on layer 4

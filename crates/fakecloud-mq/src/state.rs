@@ -111,6 +111,9 @@ impl MqData {
                 "CREATION_IN_PROGRESS" => {
                     if let Some(obj) = self.brokers.get_mut(&id).and_then(Value::as_object_mut) {
                         obj.insert("brokerState".into(), Value::String("RUNNING".into()));
+                        // A successful transition to RUNNING clears any stale
+                        // failure reason from a prior attempt.
+                        obj.remove("statusReason");
                     }
                     changed = true;
                 }
@@ -184,6 +187,8 @@ impl MqData {
                 }
             }
             obj.insert("brokerState".into(), Value::String("RUNNING".into()));
+            // A successful reboot back to RUNNING clears any stale failure reason.
+            obj.remove("statusReason");
         }
         // Apply each user's pending change.
         if let Some(users) = self.users.get_mut(broker_id) {

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
+use fakecloud_s3::{memory_body, S3Object, SharedS3State};
 
 use crate::persistence::save_acmpca_snapshot;
 use crate::provision::{build_pending_ca, CaCreateParams};
@@ -88,6 +89,10 @@ pub struct AcmPcaService {
     /// Per-CA notifiers signalled when background key generation completes.
     /// Not persisted — rebuilt by `rearm_pending_creations` after a restart.
     keygen_waiters: Arc<SyncMutex<HashMap<String, Arc<Notify>>>>,
+    /// Shared S3 state, when wired. `CreateCertificateAuthorityAuditReport`
+    /// delivers the generated report object into the target bucket here so the
+    /// documented create-report -> read-from-S3 flow actually works.
+    s3: Option<SharedS3State>,
 }
 
 impl AcmPcaService {
@@ -97,11 +102,19 @@ impl AcmPcaService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             keygen_waiters: Arc::new(SyncMutex::new(HashMap::new())),
+            s3: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Wire the shared S3 state so audit reports are delivered as real objects
+    /// into the caller-specified bucket/key.
+    pub fn with_s3(mut self, s3: SharedS3State) -> Self {
+        self.s3 = Some(s3);
         self
     }
 
@@ -433,6 +446,32 @@ impl AcmPcaService {
 
         let account = account_id(req);
         let region = region(req);
+
+        // Idempotency: AWS collapses repeated CreateCertificateAuthority calls
+        // that carry the same IdempotencyToken within a ~5-minute window into a
+        // single CA, returning the ARN of the one already created rather than
+        // minting a fresh CA/ARN on every retry. Match on (account, token).
+        if let Some(token) = &idempotency_token {
+            let existing = {
+                let accounts = self.state.read();
+                accounts.accounts.get(&account).and_then(|a| {
+                    a.authorities
+                        .values()
+                        .find(|ca| {
+                            ca.idempotency_token.as_deref() == Some(token.as_str())
+                                && ca.status != "DELETED"
+                                && within_idempotency_window(ca.created_at)
+                        })
+                        .map(|ca| ca.arn.clone())
+                })
+            };
+            if let Some(arn) = existing {
+                return Ok(AwsResponse::ok_json(
+                    json!({ "CertificateAuthorityArn": arn }),
+                ));
+            }
+        }
+
         let ca_id = Uuid::new_v4().to_string();
         let arn = format!("arn:aws:acm-pca:{region}:{account}:certificate-authority/{ca_id}");
 
@@ -496,38 +535,24 @@ impl AcmPcaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        if let Some(max) = body.get("MaxResults") {
-            match max.as_i64() {
-                Some(n) if (1..=1000).contains(&n) => {}
-                _ => return Err(invalid_args("MaxResults must be between 1 and 1000")),
-            }
-        }
-        if let Some(token) = body.get("NextToken") {
-            let valid = token
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.len() <= 43739);
-            if !valid {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidNextTokenException",
-                    "The NextToken value is invalid",
-                ));
-            }
-        }
+        let (max, start) = read_pagination(&body)?;
         if let Some(owner) = body.get("ResourceOwner").and_then(Value::as_str) {
             if owner != "SELF" && owner != "OTHER_ACCOUNTS" {
                 return Err(invalid_args(format!("Invalid ResourceOwner: {owner}")));
             }
         }
         let accounts = self.state.read();
-        let list: Vec<Value> = accounts
+        let all: Vec<Value> = accounts
             .accounts
             .get(&account_id(req))
             .map(|a| a.authorities.values().map(ca_to_json).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(
-            json!({ "CertificateAuthorities": list }),
-        ))
+        let (page, next) = paginate(all, max, start);
+        let mut resp = json!({ "CertificateAuthorities": page });
+        if let Some(token) = next {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn update_certificate_authority(
@@ -556,6 +581,12 @@ impl AcmPcaService {
         }
         if let Some(s) = new_status {
             // A CA can only be activated once it actually holds a certificate.
+            // Setting DISABLED, by contrast, is permitted from ACTIVE, DISABLED
+            // AND PENDING_CERTIFICATE: the terraform-provider-aws destroy path
+            // disables a CA before deleting it even when the CA never had a
+            // certificate installed, and real AWS accepts that transition. The
+            // top-of-handler guard already rejects the genuinely terminal
+            // CREATING/DELETED states.
             if s == "ACTIVE" && ca.ca_cert_pem.is_none() {
                 return Err(invalid_state(
                     "A certificate authority without an installed certificate cannot be set to ACTIVE",
@@ -821,6 +852,21 @@ impl AcmPcaService {
             .and_then(|a| a.authorities.get_mut(&arn))
             .ok_or_else(|| not_found(&arn))?;
 
+        // Idempotency: a repeated IssueCertificate carrying the same
+        // IdempotencyToken within the ~5-minute window returns the certificate
+        // already issued for that token instead of signing (and charging for) a
+        // second certificate with a fresh serial/ARN.
+        if let Some(token) = &idempotency_token {
+            if let Some(existing) = ca.issued.values().find(|c| {
+                c.idempotency_token.as_deref() == Some(token.as_str())
+                    && within_idempotency_window(c.issued_at)
+            }) {
+                return Ok(AwsResponse::ok_json(
+                    json!({ "CertificateArn": existing.arn }),
+                ));
+            }
+        }
+
         // A ROOT CA self-signs its own certificate during activation:
         // IssueCertificate(RootCACertificate template) is permitted while the CA
         // is still PENDING_CERTIFICATE. Every other issuance requires an ACTIVE CA.
@@ -986,15 +1032,19 @@ impl AcmPcaService {
     fn list_tags(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let arn = required_ca_arn(&body)?;
+        let (max, start) = read_pagination(&body)?;
         let accounts = self.state.read();
         let ca = accounts
             .accounts
             .get(&account_id(req))
             .and_then(|a| a.authorities.get(&arn))
             .ok_or_else(|| not_found(&arn))?;
-        Ok(AwsResponse::ok_json(
-            json!({ "Tags": tags_to_json(&ca.tags) }),
-        ))
+        let (page, next) = paginate(tags_to_json(&ca.tags), max, start);
+        let mut resp = json!({ "Tags": page });
+        if let Some(token) = next {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn tag_certificate_authority(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1109,14 +1159,20 @@ impl AcmPcaService {
     fn list_permissions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let arn = required_ca_arn(&body)?;
+        let (max, start) = read_pagination(&body)?;
         let accounts = self.state.read();
         let ca = accounts
             .accounts
             .get(&account_id(req))
             .and_then(|a| a.authorities.get(&arn))
             .ok_or_else(|| not_found(&arn))?;
-        let perms: Vec<Value> = ca.permissions.values().map(permission_to_json).collect();
-        Ok(AwsResponse::ok_json(json!({ "Permissions": perms })))
+        let all: Vec<Value> = ca.permissions.values().map(permission_to_json).collect();
+        let (page, next) = paginate(all, max, start);
+        let mut resp = json!({ "Permissions": page });
+        if let Some(token) = next {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn delete_permission(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1237,34 +1293,84 @@ impl AcmPcaService {
             format.to_lowercase()
         );
 
-        let mut accounts = self.state.write();
-        let ca = accounts
-            .accounts
-            .get_mut(&account_id(req))
-            .and_then(|a| a.authorities.get_mut(&arn))
-            .ok_or_else(|| not_found(&arn))?;
-        if ca.ca_cert_pem.is_none() {
-            return Err(invalid_state(
-                "The certificate authority does not have a certificate installed",
-            ));
-        }
-        let report_body = build_audit_report(ca, &format);
-        ca.audit_reports.insert(
-            report_id.clone(),
-            AuditReport {
-                id: report_id.clone(),
-                certificate_authority_arn: arn.clone(),
-                s3_bucket_name: s3_bucket,
-                s3_key: s3_key.clone(),
-                status: "SUCCESS".to_string(),
-                created_at: Utc::now(),
-                response_format: format,
-                body: report_body,
-            },
-        );
+        let report_body = {
+            let mut accounts = self.state.write();
+            let ca = accounts
+                .accounts
+                .get_mut(&account_id(req))
+                .and_then(|a| a.authorities.get_mut(&arn))
+                .ok_or_else(|| not_found(&arn))?;
+            if ca.ca_cert_pem.is_none() {
+                return Err(invalid_state(
+                    "The certificate authority does not have a certificate installed",
+                ));
+            }
+            let report_body = build_audit_report(ca, &format);
+            ca.audit_reports.insert(
+                report_id.clone(),
+                AuditReport {
+                    id: report_id.clone(),
+                    certificate_authority_arn: arn.clone(),
+                    s3_bucket_name: s3_bucket.clone(),
+                    s3_key: s3_key.clone(),
+                    status: "SUCCESS".to_string(),
+                    created_at: Utc::now(),
+                    response_format: format.clone(),
+                    body: report_body.clone(),
+                },
+            );
+            report_body
+        };
+
+        // Deliver the report to S3 so the documented create-report -> read the
+        // object from the bucket flow works. Skipped when S3 is not wired or the
+        // target bucket does not exist (fakecloud has no way to reach a bucket in
+        // an account it does not manage), leaving the report still describable
+        // via DescribeCertificateAuthorityAuditReport.
+        self.deliver_audit_report_to_s3(req, &s3_bucket, &s3_key, &format, report_body);
+
         Ok(AwsResponse::ok_json(
             json!({ "AuditReportId": report_id, "S3Key": s3_key }),
         ))
+    }
+
+    /// Put the generated audit report body into the target S3 bucket as a real
+    /// object at `s3_key`. No-op when S3 is not wired or the bucket is absent.
+    fn deliver_audit_report_to_s3(
+        &self,
+        req: &AwsRequest,
+        bucket_name: &str,
+        key: &str,
+        format: &str,
+        body: String,
+    ) {
+        let Some(s3) = &self.s3 else {
+            return;
+        };
+        let content_type = if format == "CSV" {
+            "text/csv"
+        } else {
+            "application/json"
+        };
+        let size = body.len() as u64;
+        let etag = format!("\"{}\"", audit_report_etag(body.as_bytes()));
+        let now = Utc::now();
+        let object = S3Object {
+            key: key.to_string(),
+            body: memory_body(bytes::Bytes::from(body.into_bytes())),
+            content_type: content_type.to_string(),
+            etag,
+            size,
+            last_modified: now,
+            storage_class: "STANDARD".to_string(),
+            ..Default::default()
+        };
+        let mut s3_state = s3.write();
+        let account = account_id(req);
+        let state = s3_state.get_or_create(&account);
+        if let Some(bucket) = state.buckets.get_mut(bucket_name) {
+            bucket.objects.insert(key.to_string(), object);
+        }
     }
 
     fn describe_certificate_authority_audit_report(
@@ -1429,6 +1535,86 @@ fn region(req: &AwsRequest) -> String {
 
 fn is_ca_arn(arn: &str) -> bool {
     arn.starts_with("arn:aws:acm-pca:") && arn.contains(":certificate-authority/")
+}
+
+/// AWS's IdempotencyToken de-duplication window for both
+/// `CreateCertificateAuthority` and `IssueCertificate`: a repeated token within
+/// this window returns the resource already created; past it the same token
+/// mints a fresh resource.
+const IDEMPOTENCY_WINDOW_MINUTES: i64 = 5;
+
+/// True when `created` is recent enough that a repeated idempotency token should
+/// still collapse onto the resource created at that time.
+fn within_idempotency_window(created: DateTime<Utc>) -> bool {
+    Utc::now().signed_duration_since(created)
+        < chrono::Duration::minutes(IDEMPOTENCY_WINDOW_MINUTES)
+}
+
+// ─── Pagination ─────────────────────────────────────────────────────
+
+fn invalid_next_token() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidNextTokenException",
+        "The NextToken value is invalid",
+    )
+}
+
+/// Opaque pagination token: base64 of the 0-based offset to resume from. Kept
+/// server-side-decodable so a client that round-trips the token continues
+/// exactly where the previous page ended.
+fn encode_next_token(offset: usize) -> String {
+    base64::engine::general_purpose::STANDARD.encode(offset.to_string())
+}
+
+fn decode_next_token(token: &str) -> Result<usize, AwsServiceError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(invalid_next_token)
+}
+
+/// Read and validate the shared `MaxResults` (1..=1000) + `NextToken` paging
+/// inputs, resolving them to `(max_results, start_offset)`.
+fn read_pagination(body: &Value) -> Result<(Option<usize>, usize), AwsServiceError> {
+    let max = match body.get("MaxResults") {
+        Some(v) => match v.as_i64() {
+            Some(n) if (1..=1000).contains(&n) => Some(n as usize),
+            _ => return Err(invalid_args("MaxResults must be between 1 and 1000")),
+        },
+        None => None,
+    };
+    let start = match body.get("NextToken").and_then(Value::as_str) {
+        Some(t) => decode_next_token(t)?,
+        None => 0,
+    };
+    Ok((max, start))
+}
+
+/// Slice `items` for the requested page, returning the page plus the NextToken
+/// to continue with (`None` once the page reaches the end of the list).
+fn paginate<T>(items: Vec<T>, max: Option<usize>, start: usize) -> (Vec<T>, Option<String>) {
+    let total = items.len();
+    let start = start.min(total);
+    let take = max.unwrap_or(usize::MAX);
+    let end = start.saturating_add(take).min(total);
+    let page: Vec<T> = items.into_iter().skip(start).take(end - start).collect();
+    let next = if end < total {
+        Some(encode_next_token(end))
+    } else {
+        None
+    };
+    (page, next)
+}
+
+/// A stable 32-hex-char ETag for a delivered audit report object (S3 ETags are
+/// hex; the exact hash function is unobservable, so a SHA-256 prefix suffices).
+fn audit_report_etag(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    hex::encode(&digest[..16])
 }
 
 fn ca_id_from_arn(arn: &str) -> &str {
@@ -1832,5 +2018,312 @@ mod tests {
 
     fn body_json(resp: &AwsResponse) -> Value {
         serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    /// `AwsResponse` is not `Debug`, so `Result::unwrap_err` cannot be used;
+    /// this pulls the error out (panicking if the call unexpectedly succeeded).
+    fn expect_err(r: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
+        match r {
+            Ok(_) => panic!("expected an error but the call succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    fn create_ca(svc: &AcmPcaService, common_name: &str, extra: Value) -> String {
+        let mut body = json!({
+            "CertificateAuthorityConfiguration": {
+                "KeyAlgorithm": "EC_prime256v1",
+                "SigningAlgorithm": "SHA256WITHECDSA",
+                "Subject": { "CommonName": common_name }
+            },
+            "CertificateAuthorityType": "ROOT"
+        });
+        if let Value::Object(map) = extra {
+            for (k, v) in map {
+                body[k] = v;
+            }
+        }
+        body_json(
+            &svc.create_certificate_authority(&req("CreateCertificateAuthority", body))
+                .unwrap(),
+        )["CertificateAuthorityArn"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Finding 1: repeated CreateCertificateAuthority carrying the same
+    /// IdempotencyToken within the window collapses onto one CA/ARN.
+    #[tokio::test]
+    async fn create_certificate_authority_is_idempotent_within_window() {
+        let svc = AcmPcaService::default();
+        let first = create_ca(
+            &svc,
+            "idem.example.com",
+            json!({ "IdempotencyToken": "tok-1" }),
+        );
+        let second = create_ca(
+            &svc,
+            "idem.example.com",
+            json!({ "IdempotencyToken": "tok-1" }),
+        );
+        assert_eq!(
+            first, second,
+            "same idempotency token must return the same CA ARN"
+        );
+        let count = svc
+            .state
+            .read()
+            .accounts
+            .get(TEST_ACCOUNT)
+            .map(|a| a.authorities.len())
+            .unwrap_or(0);
+        assert_eq!(count, 1, "repeated create must not mint a second CA");
+
+        // A different token creates a distinct CA.
+        let third = create_ca(
+            &svc,
+            "idem.example.com",
+            json!({ "IdempotencyToken": "tok-2" }),
+        );
+        assert_ne!(first, third, "a different token must create a new CA");
+    }
+
+    /// Finding 1: repeated IssueCertificate with the same IdempotencyToken
+    /// returns the certificate already issued instead of signing a second one.
+    #[tokio::test]
+    async fn issue_certificate_is_idempotent_within_window() {
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+        let issue_body = json!({
+            "CertificateAuthorityArn": arn,
+            "Csr": leaf_csr(),
+            "SigningAlgorithm": "SHA256WITHECDSA",
+            "Validity": { "Value": 365, "Type": "DAYS" },
+            "IdempotencyToken": "issue-tok-1"
+        });
+        let first = body_json(
+            &svc.issue_certificate(&req("IssueCertificate", issue_body.clone()))
+                .unwrap(),
+        )["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second = body_json(
+            &svc.issue_certificate(&req("IssueCertificate", issue_body))
+                .unwrap(),
+        )["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            first, second,
+            "same idempotency token must return the same certificate ARN"
+        );
+        // Exactly one certificate carries the shared token (the other issued
+        // cert is the root's own self-signed activation certificate).
+        let with_token = svc
+            .state
+            .read()
+            .accounts
+            .get(TEST_ACCOUNT)
+            .unwrap()
+            .authorities
+            .get(&arn)
+            .unwrap()
+            .issued
+            .values()
+            .filter(|c| c.idempotency_token.as_deref() == Some("issue-tok-1"))
+            .count();
+        assert_eq!(
+            with_token, 1,
+            "repeated issue must not sign a second certificate"
+        );
+    }
+
+    /// Finding 2: ListCertificateAuthorities honours MaxResults and round-trips
+    /// its NextToken so every CA is returned exactly once across pages.
+    #[tokio::test]
+    async fn list_certificate_authorities_paginates() {
+        let svc = AcmPcaService::default();
+        for i in 0..3 {
+            create_ca(&svc, &format!("ca{i}.example.com"), json!({}));
+        }
+        let page1 = body_json(
+            &svc.list_certificate_authorities(&req(
+                "ListCertificateAuthorities",
+                json!({ "MaxResults": 2 }),
+            ))
+            .unwrap(),
+        );
+        let list1 = page1["CertificateAuthorities"].as_array().unwrap().clone();
+        assert_eq!(list1.len(), 2, "first page must respect MaxResults");
+        let token = page1["NextToken"]
+            .as_str()
+            .expect("a truncated page must carry a NextToken")
+            .to_string();
+
+        let page2 = body_json(
+            &svc.list_certificate_authorities(&req(
+                "ListCertificateAuthorities",
+                json!({ "MaxResults": 2, "NextToken": token }),
+            ))
+            .unwrap(),
+        );
+        let list2 = page2["CertificateAuthorities"].as_array().unwrap().clone();
+        assert_eq!(list2.len(), 1, "second page must hold the remainder");
+        assert!(
+            page2.get("NextToken").is_none(),
+            "the final page must not carry a NextToken"
+        );
+
+        let mut arns: Vec<String> = list1
+            .iter()
+            .chain(list2.iter())
+            .map(|c| c["Arn"].as_str().unwrap().to_string())
+            .collect();
+        arns.sort();
+        arns.dedup();
+        assert_eq!(arns.len(), 3, "pagination must cover all three CAs once");
+
+        // A garbage NextToken is rejected.
+        let err = expect_err(svc.list_certificate_authorities(&req(
+            "ListCertificateAuthorities",
+            json!({ "NextToken": "not-base64-@@" }),
+        )));
+        assert_eq!(err.code(), "InvalidNextTokenException");
+    }
+
+    /// Finding 3: the audit report is delivered as a real object into the target
+    /// S3 bucket, so the documented create-report -> read-from-S3 flow works.
+    #[tokio::test]
+    async fn audit_report_is_delivered_to_s3() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        use fakecloud_s3::{S3Bucket, S3State, SharedS3State};
+
+        let s3: SharedS3State = Arc::new(RwLock::new(MultiAccountState::<S3State>::new(
+            TEST_ACCOUNT,
+            "us-east-1",
+            "http://localhost",
+        )));
+        s3.write().get_or_create(TEST_ACCOUNT).buckets.insert(
+            "audit-bucket".to_string(),
+            S3Bucket::new("audit-bucket", "us-east-1", TEST_ACCOUNT),
+        );
+
+        let svc =
+            AcmPcaService::new(Arc::new(RwLock::new(AcmPcaAccounts::new()))).with_s3(s3.clone());
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+        // Issue a leaf so the report body has a certificate row.
+        let leaf_arn = body_json(
+            &svc.issue_certificate(&req(
+                "IssueCertificate",
+                json!({
+                    "CertificateAuthorityArn": arn,
+                    "Csr": leaf_csr(),
+                    "SigningAlgorithm": "SHA256WITHECDSA",
+                    "Validity": { "Value": 365, "Type": "DAYS" }
+                }),
+            ))
+            .unwrap(),
+        )["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let created = body_json(
+            &svc.create_certificate_authority_audit_report(&req(
+                "CreateCertificateAuthorityAuditReport",
+                json!({
+                    "CertificateAuthorityArn": arn,
+                    "S3BucketName": "audit-bucket",
+                    "AuditReportResponseFormat": "JSON"
+                }),
+            ))
+            .unwrap(),
+        );
+        let s3_key = created["S3Key"].as_str().unwrap().to_string();
+
+        // The object really exists in the bucket and its body is the report.
+        let bytes = {
+            let st = s3.read();
+            let bucket = st
+                .get(TEST_ACCOUNT)
+                .unwrap()
+                .buckets
+                .get("audit-bucket")
+                .unwrap();
+            let obj = bucket
+                .objects
+                .get(&s3_key)
+                .expect("audit report object must be delivered to the bucket");
+            assert_eq!(obj.content_type, "application/json");
+            S3State::read_body_uncached(&obj.body).unwrap()
+        };
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = parsed.as_array().unwrap();
+        // The report lists every issued cert (the leaf plus the root's own
+        // self-signed activation certificate).
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["certificateArn"].as_str() == Some(leaf_arn.as_str())),
+            "delivered report must include the issued leaf certificate"
+        );
+    }
+
+    /// Finding 4: a validity past the representable certificate-expiry ceiling
+    /// (year 9999) is rejected with a ValidationException, not silently clamped
+    /// to the Unix epoch (which would produce a backwards not_after < not_before).
+    #[tokio::test]
+    async fn over_large_validity_is_rejected() {
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+        // END_DATE in year 10000 -> beyond the time crate's year-9999 ceiling.
+        let err = expect_err(svc.issue_certificate(&req(
+            "IssueCertificate",
+            json!({
+                "CertificateAuthorityArn": arn,
+                "Csr": leaf_csr(),
+                "SigningAlgorithm": "SHA256WITHECDSA",
+                "Validity": { "Value": 100_000_101_000_000i64, "Type": "END_DATE" }
+            }),
+        )));
+        assert_eq!(err.code(), "InvalidArgsException");
+    }
+
+    /// UpdateCertificateAuthority(Status): a PENDING_CERTIFICATE CA can be moved
+    /// to DISABLED (the terraform destroy path relies on this — it disables a CA
+    /// before deleting it even when no certificate was ever installed), but it
+    /// cannot be set to ACTIVE without an installed certificate.
+    #[tokio::test]
+    async fn update_status_transitions_from_pending_ca() {
+        let svc = AcmPcaService::default();
+        let arn = create_ca(&svc, "pending.example.com", json!({}));
+
+        // PENDING_CERTIFICATE -> DISABLED is allowed.
+        svc.update_certificate_authority(&req(
+            "UpdateCertificateAuthority",
+            json!({ "CertificateAuthorityArn": arn, "Status": "DISABLED" }),
+        ))
+        .unwrap();
+        let status = body_json(
+            &svc.describe_certificate_authority(&req(
+                "DescribeCertificateAuthority",
+                json!({ "CertificateAuthorityArn": arn }),
+            ))
+            .unwrap(),
+        )["CertificateAuthority"]["Status"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(status, "DISABLED");
+
+        // But it cannot be set ACTIVE without an installed certificate.
+        let err = expect_err(svc.update_certificate_authority(&req(
+            "UpdateCertificateAuthority",
+            json!({ "CertificateAuthorityArn": arn, "Status": "ACTIVE" }),
+        )));
+        assert_eq!(err.code(), "InvalidStateException");
     }
 }

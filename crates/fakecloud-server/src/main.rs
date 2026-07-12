@@ -335,6 +335,20 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let docdb_state: fakecloud_docdb::SharedDocDbState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let neptune_state: fakecloud_neptune::SharedNeptuneState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let elasticache_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -545,6 +559,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let kinesisanalyticsv2_state: fakecloud_kinesisanalyticsv2::SharedKa2State = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let servicediscovery_state: fakecloud_servicediscovery::SharedServiceDiscoveryState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -622,6 +643,69 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let emr_state: fakecloud_emr::SharedEmrState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let textract_state: fakecloud_textract::SharedTextractState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let comprehend_state: fakecloud_comprehend::SharedComprehendState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let support_state: fakecloud_support::SharedSupportState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let transcribe_state: fakecloud_transcribe::SharedTranscribeState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let translate_state: fakecloud_translate::SharedTranslateState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let swf_state: fakecloud_swf::SharedSwfState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let timestream_state: fakecloud_timestream::SharedTimestreamState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let shield_state: fakecloud_shield::SharedShieldState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let efs_state: fakecloud_efs::SharedEfsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -630,6 +714,13 @@ async fn main() {
         ),
     ));
     let mq_state: fakecloud_mq::SharedMqState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let kafka_state: fakecloud_kafka::SharedKafkaState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
             &cli.region,
@@ -670,6 +761,91 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let mwaa_state: fakecloud_mwaa::SharedMwaaState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let appsync_state: fakecloud_appsync::SharedAppSyncState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let xray_state: fakecloud_xray::SharedXrayState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let amplify_state: fakecloud_amplify::SharedAmplifyState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let mediaconvert_state: fakecloud_mediaconvert::SharedMediaConvertState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let serverlessrepo_state: fakecloud_serverlessrepo::SharedServerlessRepoState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let iotdata_state: fakecloud_iotdata::SharedIotDataState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let pinpoint_state: fakecloud_pinpoint::SharedPinpointState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let iot_state: fakecloud_iot::SharedIotState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+    let iotwireless_state: fakecloud_iotwireless::SharedIotWirelessState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
+    let managedblockchain_state: fakecloud_managedblockchain::SharedManagedBlockchainState =
+        Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                &cli.account_id,
+                &cli.region,
+                &endpoint_url,
+            ),
+        ));
+    let fis_state: fakecloud_fis::SharedFisState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let resource_groups_tagging_state:
         fakecloud_resource_groups_tagging::SharedResourceGroupsTaggingState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
@@ -753,6 +929,19 @@ async fn main() {
         );
     } else {
         degraded_runtimes.push("MQ (control-plane-only brokers, no connectable broker data plane)");
+    }
+    // Amazon MSK (Kafka) backing-broker runtime (Docker/Podman). Constructed
+    // here so the degraded-runtimes banner reports it; attached to the
+    // KafkaService further down where the service is built.
+    let kafka_runtime = fakecloud_kafka::KafkaRuntime::new().map(Arc::new);
+    if let Some(ref rt) = kafka_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "MSK Kafka broker execution enabled via container runtime"
+        );
+    } else {
+        degraded_runtimes
+            .push("MSK (control-plane-only clusters, no connectable Kafka broker data plane)");
     }
     // ECS runtime is constructed below, after the EventBridge + CloudWatch
     // Logs wiring is in place. Placeholder kept here so downstream blocks
@@ -1219,6 +1408,8 @@ async fn main() {
             efs: efs_state.clone(),
             elasticbeanstalk: beanstalk_state.clone(),
             mq: mq_state.clone(),
+            kafka: kafka_state.clone(),
+            kinesisanalyticsv2: kinesisanalyticsv2_state.clone(),
             delivery: delivery_for_cf,
             lambda_runtime: container_runtime.clone(),
             rds_runtime: rds_runtime.clone(),
@@ -1226,6 +1417,7 @@ async fn main() {
             ecs_runtime: ecs_runtime.clone(),
             elasticache_runtime: elasticache_runtime.clone(),
             mq_runtime: mq_runtime.clone(),
+            kafka_runtime: kafka_runtime.clone(),
         },
     );
     if let Some(store) = cloudformation_snapshot_store {
@@ -2622,6 +2814,122 @@ async fn main() {
     registry.register(Arc::new(fakecloud_rds_data::RdsDataService::new(
         rds_state.clone(),
     )));
+    // Amazon DocumentDB (docdb): RDS-shaped Query API, control-plane only
+    // (no backing MongoDB-compatible engine image exists, so clusters and
+    // instances are records with well-formed endpoints — see the crate docs).
+    let docdb_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("docdb").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_docdb::DocDbSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_docdb::DOCDB_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "docdb persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_docdb::DOCDB_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *docdb_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded docdb persistence snapshot",
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse docdb persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no docdb persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read docdb persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut docdb_service = fakecloud_docdb::DocDbService::new(docdb_state.clone());
+    if let Some(store) = docdb_snapshot_store {
+        docdb_service = docdb_service.with_snapshot_store(store);
+    }
+    if let Some(h) = docdb_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("docdb", h);
+    }
+    registry.register(Arc::new(docdb_service));
+    // Amazon Neptune (neptune): RDS-shaped Query API, control-plane only
+    // (no backing Gremlin/SPARQL graph engine image exists, so clusters and
+    // instances are records with well-formed endpoints — see the crate docs).
+    let neptune_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("neptune").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_neptune::NeptuneSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_neptune::NEPTUNE_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "neptune persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_neptune::NEPTUNE_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *neptune_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded neptune persistence snapshot",
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse neptune persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no neptune persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read neptune persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut neptune_service = fakecloud_neptune::NeptuneService::new(neptune_state.clone());
+    if let Some(store) = neptune_snapshot_store {
+        neptune_service = neptune_service.with_snapshot_store(store);
+    }
+    if let Some(h) = neptune_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("neptune", h);
+    }
+    registry.register(Arc::new(neptune_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -3134,7 +3442,8 @@ async fn main() {
         } else {
             None
         };
-    let mut acmpca_inner = fakecloud_acmpca::AcmPcaService::new(acmpca_state.clone());
+    let mut acmpca_inner =
+        fakecloud_acmpca::AcmPcaService::new(acmpca_state.clone()).with_s3(s3_state.clone());
     if let Some(store) = acmpca_snapshot_store.clone() {
         acmpca_inner = acmpca_inner.with_snapshot_store(store);
     }
@@ -3197,7 +3506,8 @@ async fn main() {
         };
     let mut route53resolver_inner =
         fakecloud_route53resolver::Route53ResolverService::new(route53resolver_state.clone())
-            .with_ec2_state(ec2_state.clone());
+            .with_ec2_state(ec2_state.clone())
+            .with_s3_state(s3_state.clone());
     if let Some(store) = route53resolver_snapshot_store.clone() {
         route53resolver_inner = route53resolver_inner.with_snapshot_store(store);
     }
@@ -3380,6 +3690,324 @@ async fn main() {
         cfn_snapshot_hooks.insert("glue", h);
     }
     registry.register(Arc::new(glue_service));
+
+    // Amazon EMR (elasticmapreduce): awsJson1.1 control plane (clusters/job
+    // flows, steps, instance groups/fleets, instances, bootstrap actions,
+    // security configurations, Studios + session mappings, notebook executions,
+    // persistent app UIs, interactive sessions, block-public-access, scaling /
+    // auto-termination policies, release labels, tags).
+    let emr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("emr").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_emr::persistence::load_into(&store, &emr_state) {
+                Ok(fakecloud_emr::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded emr persistence snapshot");
+                }
+                Ok(fakecloud_emr::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no emr persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut emr_service = fakecloud_emr::EmrService::new(emr_state.clone());
+    if let Some(store) = emr_snapshot_store {
+        emr_service = emr_service.with_snapshot_store(store);
+    }
+    if let Some(h) = emr_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("emr", h);
+    }
+    registry.register(Arc::new(emr_service));
+    // Amazon Textract: awsJson1_1 document text/analysis extraction (sync
+    // Detect/Analyze ops, async Start*/Get* jobs, custom adapters + versions,
+    // tagging). OCR/ML inference is an honest gap; the API surface, validation,
+    // job lifecycle, adapters and persistence are real.
+    let textract_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("textract").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_textract::persistence::load_into(&store, &textract_state) {
+                Ok(fakecloud_textract::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded textract persistence snapshot");
+                }
+                Ok(fakecloud_textract::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no textract persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut textract_service = fakecloud_textract::TextractService::new(textract_state.clone());
+    if let Some(store) = textract_snapshot_store {
+        textract_service = textract_service.with_snapshot_store(store);
+    }
+    if let Some(h) = textract_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("textract", h);
+    }
+    registry.register(Arc::new(textract_service));
+    // Amazon Transcribe (transcribe): awsJson1.1 speech-to-text control plane
+    // (transcription / medical-transcription / call-analytics / medical-scribe
+    // jobs, custom + medical vocabularies, vocabulary filters, custom language
+    // models, call-analytics categories, tags).
+    let transcribe_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("transcribe").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_transcribe::persistence::load_into(&store, &transcribe_state) {
+                Ok(fakecloud_transcribe::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded transcribe persistence snapshot");
+                }
+                Ok(fakecloud_transcribe::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no transcribe persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut transcribe_service =
+        fakecloud_transcribe::TranscribeService::new(transcribe_state.clone());
+    if let Some(store) = transcribe_snapshot_store {
+        transcribe_service = transcribe_service.with_snapshot_store(store);
+    }
+    if let Some(h) = transcribe_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("transcribe", h);
+    }
+    registry.register(Arc::new(transcribe_service));
+
+    // Amazon Translate (translate): awsJson1.1 text/document translation control
+    // plane (synchronous TranslateText / TranslateDocument passthrough, async
+    // batch translation jobs, parallel data, custom terminologies, supported
+    // languages, tags).
+    let translate_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("translate").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_translate::persistence::load_into(&store, &translate_state) {
+                Ok(fakecloud_translate::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded translate persistence snapshot");
+                }
+                Ok(fakecloud_translate::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no translate persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut translate_service = fakecloud_translate::TranslateService::new(translate_state.clone());
+    if let Some(store) = translate_snapshot_store {
+        translate_service = translate_service.with_snapshot_store(store);
+    }
+    if let Some(h) = translate_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("translate", h);
+    }
+    registry.register(Arc::new(translate_service));
+
+    // Amazon SWF (Simple Workflow Service): awsJson1_0 control plane (domains,
+    // versioned activity/workflow types, workflow executions with a real
+    // decider/worker state machine -- decision tasks, activity tasks, and the
+    // event history that ties them together -- plus pending-task counts and
+    // ARN-keyed domain tagging).
+    let swf_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("swf").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_swf::persistence::load_into(&store, &swf_state) {
+                Ok(fakecloud_swf::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded swf persistence snapshot");
+                }
+                Ok(fakecloud_swf::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no swf persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut swf_service = fakecloud_swf::SwfService::new(swf_state.clone());
+    if let Some(store) = swf_snapshot_store {
+        swf_service = swf_service.with_snapshot_store(store);
+    }
+    if let Some(h) = swf_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("swf", h);
+    }
+    registry.register(Arc::new(swf_service));
+
+    // Amazon Timestream (Write + Query): awsJson1_0 control plane over one
+    // shared store -- databases, tables, ingested points (queryable via a
+    // bounded SQL handler), scheduled queries, batch-load tasks, account
+    // settings, endpoint discovery, and ARN-keyed tagging. Both SDK clients
+    // share the `Timestream_20181101` target prefix.
+    let timestream_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("timestream").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_timestream::persistence::load_into(&store, &timestream_state) {
+                Ok(fakecloud_timestream::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded timestream persistence snapshot");
+                }
+                Ok(fakecloud_timestream::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no timestream persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut timestream_service =
+        fakecloud_timestream::TimestreamService::new(timestream_state.clone());
+    if let Some(store) = timestream_snapshot_store {
+        timestream_service = timestream_service.with_snapshot_store(store);
+    }
+    if let Some(h) = timestream_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("timestream", h);
+    }
+    registry.register(Arc::new(timestream_service));
+
+    // AWS Shield / Shield Advanced: awsJson1.1 control plane (protections,
+    // protection groups, the annual auto-renewing subscription, emergency
+    // contacts, DRT access, proactive engagement, application-layer automatic
+    // response, health-check association, tags). Attack surfacing is honest
+    // (empty list / zeroed statistics; no synthetic DDoS records).
+    let shield_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("shield").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_shield::persistence::load_into(&store, &shield_state) {
+                Ok(fakecloud_shield::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded shield persistence snapshot");
+                }
+                Ok(fakecloud_shield::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no shield persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut shield_service = fakecloud_shield::ShieldService::new(shield_state.clone());
+    if let Some(store) = shield_snapshot_store {
+        shield_service = shield_service.with_snapshot_store(store);
+    }
+    if let Some(h) = shield_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("shield", h);
+    }
+    registry.register(Arc::new(shield_service));
+    // Amazon Comprehend (comprehend): awsJson1.1 NLP control + inference plane
+    // (synchronous + batch detection, nine async analysis-job families, custom
+    // document classifiers + entity recognizers, endpoints, flywheels +
+    // iterations, datasets, resource policies, model import, tags).
+    let comprehend_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("comprehend").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_comprehend::persistence::load_into(&store, &comprehend_state) {
+                Ok(fakecloud_comprehend::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded comprehend persistence snapshot");
+                }
+                Ok(fakecloud_comprehend::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no comprehend persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut comprehend_service =
+        fakecloud_comprehend::ComprehendService::new(comprehend_state.clone());
+    if let Some(store) = comprehend_snapshot_store {
+        comprehend_service = comprehend_service.with_snapshot_store(store);
+    }
+    if let Some(h) = comprehend_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("comprehend", h);
+    }
+    registry.register(Arc::new(comprehend_service));
+
+    // AWS Support (support): awsJson1.1 support-cases + Trusted Advisor control
+    // plane (cases, communications, attachment sets, severity levels, the
+    // Trusted Advisor check catalogue + refresh state machine).
+    let support_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("support").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_support::persistence::load_into(&store, &support_state) {
+                Ok(fakecloud_support::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded support persistence snapshot");
+                }
+                Ok(fakecloud_support::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no support persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut support_service = fakecloud_support::SupportService::new(support_state.clone());
+    if let Some(store) = support_snapshot_store {
+        support_service = support_service.with_snapshot_store(store);
+    }
+    if let Some(h) = support_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("support", h);
+    }
+    registry.register(Arc::new(support_service));
     let cloudwatch_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -4623,6 +5251,64 @@ async fn main() {
     }
     registry.register(Arc::new(memorydb_service));
 
+    // Amazon Managed Service for Apache Flink (kinesisanalyticsv2) control plane.
+    let kinesisanalyticsv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("kinesisanalyticsv2").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_kinesisanalyticsv2::persistence::load_into(
+                &store,
+                &kinesisanalyticsv2_state,
+            ) {
+                Ok(fakecloud_kinesisanalyticsv2::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded kinesisanalyticsv2 persistence snapshot");
+                }
+                Ok(fakecloud_kinesisanalyticsv2::persistence::LoadOutcome::Empty) => {
+                    tracing::info!(
+                        "no kinesisanalyticsv2 persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut kinesisanalyticsv2_service =
+        fakecloud_kinesisanalyticsv2::Ka2Service::new(kinesisanalyticsv2_state.clone())
+            .with_ec2_state(ec2_state.clone());
+    if let Some(store) = kinesisanalyticsv2_snapshot_store {
+        kinesisanalyticsv2_service = kinesisanalyticsv2_service.with_snapshot_store(store);
+    }
+    // Amazon Managed Service for Apache Flink: a Flink-flavor application with a
+    // JAR in S3 runs as a REAL Apache Flink job in a Docker container (the
+    // MQ/MSK data-plane bar). Attach the backing-container runtime + the
+    // in-process S3 reader used to fetch the application's code JAR. `None` when
+    // no container CLI is available or the backend is disabled -> the app stays
+    // on the control-plane state machine.
+    if let Some(flink_runtime) = fakecloud_kinesisanalyticsv2::FlinkRuntime::new().map(Arc::new) {
+        kinesisanalyticsv2_service = kinesisanalyticsv2_service
+            .with_runtime(flink_runtime)
+            .with_s3(s3_delivery_for_logs.clone());
+    }
+    // Re-attach backing Flink containers for persisted RUNNING apps (same
+    // restart-recovery contract as MSK / MQ / RDS). Fire-and-forget per app.
+    kinesisanalyticsv2_service
+        .recover_persisted_containers()
+        .await;
+    // CloudFormation `AWS::KinesisAnalyticsV2::*` resources mutate the ka2 state
+    // directly; register its snapshot hook so a CFN-provisioned application is
+    // written through to disk after a stack op, matching the direct API.
+    if let Some(h) = kinesisanalyticsv2_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kinesisanalyticsv2", h);
+    }
+    registry.register(Arc::new(kinesisanalyticsv2_service));
+
     // Cloud Map (servicediscovery) namespace control plane.
     let servicediscovery_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -5180,6 +5866,52 @@ async fn main() {
     }
     registry.register(Arc::new(mq_service));
 
+    // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control plane.
+    // Full 59-op control plane with persistence; the real Kafka-broker data
+    // plane is a later batch.
+    let kafka_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("kafka").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_kafka::persistence::load_into(&store, &kafka_state) {
+                Ok(fakecloud_kafka::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded kafka persistence snapshot");
+                }
+                Ok(fakecloud_kafka::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no kafka persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut kafka_service = fakecloud_kafka::KafkaService::new(kafka_state.clone());
+    if let Some(store) = kafka_snapshot_store {
+        kafka_service = kafka_service.with_snapshot_store(store);
+    }
+    // MSK clusters are backed by REAL single-node Kafka broker containers so a
+    // client genuinely produces/consumes through them (the RDS/ElastiCache/MQ
+    // bar). Attach the runtime constructed earlier alongside the other backing
+    // runtimes.
+    if let Some(ref rt) = kafka_runtime {
+        kafka_service = kafka_service.with_runtime(rt.clone());
+    }
+    // Recreate backing containers for persisted clusters the snapshot claims
+    // should be running (same restart-recovery contract as RDS #1338 / MQ).
+    // Fire-and-forget: one task per cluster, so a slow broker bring-up doesn't
+    // block startup.
+    kafka_service.recover_persisted_containers().await;
+    if let Some(h) = kafka_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("kafka", h);
+    }
+    registry.register(Arc::new(kafka_service));
+
     // AWS CodeCommit: awsJson1.1 git-repository control plane (repositories,
     // branches, commits/files/blobs, pull requests, approval-rule templates,
     // comments, triggers, tagging) over a real content-addressed object store.
@@ -5279,6 +6011,390 @@ async fn main() {
         cfn_snapshot_hooks.insert("appconfig", h);
     }
     registry.register(Arc::new(appconfig_service));
+
+    let mwaa_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("mwaa").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_mwaa::persistence::load_into(&store, &mwaa_state) {
+                Ok(fakecloud_mwaa::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded mwaa persistence snapshot");
+                }
+                Ok(fakecloud_mwaa::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no mwaa persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut mwaa_service = fakecloud_mwaa::MwaaService::new(mwaa_state.clone());
+    if let Some(store) = mwaa_snapshot_store {
+        mwaa_service = mwaa_service.with_snapshot_store(store);
+    }
+    if let Some(h) = mwaa_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("mwaa", h);
+    }
+    registry.register(Arc::new(mwaa_service));
+
+    let xray_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("xray").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_xray::persistence::load_into(&store, &xray_state) {
+                Ok(fakecloud_xray::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded xray persistence snapshot");
+                }
+                Ok(fakecloud_xray::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no xray persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut xray_service = fakecloud_xray::XrayService::new(xray_state.clone());
+    if let Some(store) = xray_snapshot_store {
+        xray_service = xray_service.with_snapshot_store(store);
+    }
+    if let Some(h) = xray_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("xray", h);
+    }
+    registry.register(Arc::new(xray_service));
+
+    let appsync_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("appsync").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_appsync::persistence::load_into(&store, &appsync_state) {
+                Ok(fakecloud_appsync::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded appsync persistence snapshot");
+                }
+                Ok(fakecloud_appsync::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no appsync persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut appsync_service = fakecloud_appsync::AppSyncService::new(appsync_state.clone());
+    if let Some(store) = appsync_snapshot_store {
+        appsync_service = appsync_service.with_snapshot_store(store);
+    }
+    if let Some(h) = appsync_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("appsync", h);
+    }
+    registry.register(Arc::new(appsync_service));
+
+    let amplify_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("amplify").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_amplify::persistence::load_into(&store, &amplify_state) {
+                Ok(fakecloud_amplify::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded amplify persistence snapshot");
+                }
+                Ok(fakecloud_amplify::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no amplify persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut amplify_service = fakecloud_amplify::AmplifyService::new(amplify_state.clone());
+    if let Some(store) = amplify_snapshot_store {
+        amplify_service = amplify_service.with_snapshot_store(store);
+    }
+    if let Some(h) = amplify_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("amplify", h);
+    }
+    registry.register(Arc::new(amplify_service));
+
+    let mediaconvert_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("mediaconvert").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_mediaconvert::persistence::load_into(&store, &mediaconvert_state) {
+                Ok(fakecloud_mediaconvert::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded mediaconvert persistence snapshot");
+                }
+                Ok(fakecloud_mediaconvert::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no mediaconvert persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut mediaconvert_service =
+        fakecloud_mediaconvert::MediaConvertService::new(mediaconvert_state.clone());
+    if let Some(store) = mediaconvert_snapshot_store {
+        mediaconvert_service = mediaconvert_service.with_snapshot_store(store);
+    }
+    if let Some(h) = mediaconvert_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("mediaconvert", h);
+    }
+    registry.register(Arc::new(mediaconvert_service));
+
+    let serverlessrepo_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("serverlessrepo").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_serverlessrepo::persistence::load_into(&store, &serverlessrepo_state) {
+                Ok(fakecloud_serverlessrepo::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded serverlessrepo persistence snapshot");
+                }
+                Ok(fakecloud_serverlessrepo::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no serverlessrepo persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut serverlessrepo_service =
+        fakecloud_serverlessrepo::ServerlessRepoService::new(serverlessrepo_state.clone());
+    if let Some(store) = serverlessrepo_snapshot_store {
+        serverlessrepo_service = serverlessrepo_service.with_snapshot_store(store);
+    }
+    if let Some(h) = serverlessrepo_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("serverlessrepo", h);
+    }
+    registry.register(Arc::new(serverlessrepo_service));
+
+    let iotdata_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("iotdata").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_iotdata::persistence::load_into(&store, &iotdata_state) {
+                Ok(fakecloud_iotdata::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded iotdata persistence snapshot");
+                }
+                Ok(fakecloud_iotdata::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no iotdata persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut iotdata_service = fakecloud_iotdata::IotDataService::new(iotdata_state.clone());
+    if let Some(store) = iotdata_snapshot_store {
+        iotdata_service = iotdata_service.with_snapshot_store(store);
+    }
+    if let Some(h) = iotdata_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iotdata", h);
+    }
+    registry.register(Arc::new(iotdata_service));
+
+    // Amazon Pinpoint: restJson1 control plane over apps, campaigns, segments,
+    // endpoints, channels, journeys, templates, jobs, event streams,
+    // recommenders, and tags. Signs as `mobiletargeting`, aliased to `pinpoint`.
+    let pinpoint_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("pinpoint").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_pinpoint::persistence::load_into(&store, &pinpoint_state) {
+                Ok(fakecloud_pinpoint::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded pinpoint persistence snapshot");
+                }
+                Ok(fakecloud_pinpoint::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no pinpoint persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut pinpoint_service = fakecloud_pinpoint::PinpointService::new(pinpoint_state.clone());
+    if let Some(store) = pinpoint_snapshot_store {
+        pinpoint_service = pinpoint_service.with_snapshot_store(store);
+    }
+    if let Some(h) = pinpoint_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("pinpoint", h);
+    }
+    registry.register(Arc::new(pinpoint_service));
+
+    let iot_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("iot").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_iot::persistence::load_into(&store, &iot_state) {
+                Ok(fakecloud_iot::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded iot persistence snapshot");
+                }
+                Ok(fakecloud_iot::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no iot persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut iot_service = fakecloud_iot::IotService::new(iot_state.clone());
+    if let Some(store) = iot_snapshot_store {
+        iot_service = iot_service.with_snapshot_store(store);
+    }
+    if let Some(h) = iot_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iot", h);
+    }
+    registry.register(Arc::new(iot_service));
+
+    let iotwireless_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("iotwireless").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_iotwireless::persistence::load_into(&store, &iotwireless_state) {
+                Ok(fakecloud_iotwireless::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded iotwireless persistence snapshot");
+                }
+                Ok(fakecloud_iotwireless::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no iotwireless persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut iotwireless_service =
+        fakecloud_iotwireless::IotWirelessService::new(iotwireless_state.clone());
+    if let Some(store) = iotwireless_snapshot_store {
+        iotwireless_service = iotwireless_service.with_snapshot_store(store);
+    }
+    if let Some(h) = iotwireless_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iotwireless", h);
+    }
+    registry.register(Arc::new(iotwireless_service));
+
+    let managedblockchain_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("managedblockchain").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_managedblockchain::persistence::load_into(
+                &store,
+                &managedblockchain_state,
+            ) {
+                Ok(fakecloud_managedblockchain::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded managedblockchain persistence snapshot");
+                }
+                Ok(fakecloud_managedblockchain::persistence::LoadOutcome::Empty) => {
+                    tracing::info!(
+                        "no managedblockchain persistence snapshot found; starting empty"
+                    );
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut managedblockchain_service =
+        fakecloud_managedblockchain::ManagedBlockchainService::new(managedblockchain_state.clone());
+    if let Some(store) = managedblockchain_snapshot_store {
+        managedblockchain_service = managedblockchain_service.with_snapshot_store(store);
+    }
+    if let Some(h) = managedblockchain_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("managedblockchain", h);
+    }
+    registry.register(Arc::new(managedblockchain_service));
+
+    let fis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("fis").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_fis::persistence::load_into(&store, &fis_state) {
+                Ok(fakecloud_fis::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded fis persistence snapshot");
+                }
+                Ok(fakecloud_fis::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no fis persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut fis_service = fakecloud_fis::FisService::new(fis_state.clone());
+    if let Some(store) = fis_snapshot_store {
+        fis_service = fis_service.with_snapshot_store(store);
+    }
+    if let Some(h) = fis_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("fis", h);
+    }
+    registry.register(Arc::new(fis_service));
 
     // Resource Groups Tagging API. Reads aggregate every service's live tags
     // through a shared TagProviderRegistry, plus tags applied directly to
@@ -9842,7 +10958,7 @@ async fn main() {
                 move || async move {
                     let accounts = bas.read();
                     let mut out: Vec<serde_json::Value> = Vec::new();
-                    for (_acct, state) in accounts.accounts.iter() {
+                    for state in accounts.accounts.values() {
                         for (agent_id, agent) in state.agents.iter() {
                             let aliases: Vec<serde_json::Value> = state
                                 .agent_aliases
@@ -9931,7 +11047,7 @@ async fn main() {
                 move || async move {
                     let accounts = bars.read();
                     let mut out: Vec<serde_json::Value> = Vec::new();
-                    for (_acct, state) in accounts.accounts.iter() {
+                    for state in accounts.accounts.values() {
                         for inv in state.invocations.iter() {
                             out.push(serde_json::json!({
                                 "invocationId": inv.invocation_id,
@@ -10382,6 +11498,9 @@ async fn main() {
         rt.stop_all().await;
     }
     if let Some(rt) = mq_runtime {
+        rt.stop_all().await;
+    }
+    if let Some(rt) = kafka_runtime {
         rt.stop_all().await;
     }
     if let Some(rt) = ec2_runtime {

@@ -151,7 +151,23 @@ pub fn generate(
 
         // String too long (above max length)
         if let Some(max) = traits.length_max {
-            if max < 100000 {
+            // A member bound to the URL (`@httpLabel` / `@httpQuery`) carries its
+            // too-long value in the request URI. `http::Uri` caps the whole URI
+            // at ~64 KiB, so a `max + 1` string for a member whose `@length` max
+            // approaches that limit produces a URI no HTTP client can build --
+            // the request is unsendable by construction (mirroring the
+            // `omission_is_wire_observable` / `bodyless_method` skips above).
+            // Skip it rather than emit a variant that can only ever CRASH on the
+            // client side.
+            let url_bound = member.traits.http_label || member.traits.http_query.is_some() || {
+                model
+                    .shapes
+                    .get(&member.target)
+                    .map(|s| s.traits.http_label || s.traits.http_query.is_some())
+                    .unwrap_or(false)
+            };
+            let uri_safe = !url_bound || (max as usize) < 65_000;
+            if max < 100000 && uri_safe {
                 // Don't generate absurdly large strings
                 if let ShapeType::String { .. } = &shape.shape_type {
                     let mut input = build_required_input(model, input_shape_id, overrides);

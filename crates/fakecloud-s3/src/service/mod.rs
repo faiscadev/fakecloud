@@ -2580,6 +2580,24 @@ pub(crate) fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// Parse the CompleteMultipartUpload XML body into (part_number, etag) pairs.
+/// Strip the surrounding quotes AWS clients wrap a part ETag in, so the value
+/// matches the bare hex ETag fakecloud stores. The quote character arrives in
+/// several encodings depending on the client's XML serializer: a literal `"`
+/// (aws-cli/boto), the named entity `&quot;`, or the numeric character
+/// references `&#34;` / `&#x22;` (aws-sdk-go-v2 — the terraform provider). All
+/// must be removed, else a valid part is rejected with `InvalidPart` on
+/// CompleteMultipartUpload. (2026-07-07: go-SDK multipart uploads of large
+/// objects, e.g. the KinesisAnalyticsV2 tfacc app JAR, failed on this.)
+pub(crate) fn strip_etag_quotes(s: &str) -> String {
+    s.replace("&quot;", "")
+        .replace("&#34;", "")
+        .replace("&#x22;", "")
+        .replace("&#X22;", "")
+        .replace('"', "")
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn parse_complete_multipart_xml(xml: &str) -> Vec<(u32, String)> {
     let mut parts = Vec::new();
     let mut remaining = xml;
@@ -2589,8 +2607,7 @@ pub(crate) fn parse_complete_multipart_xml(xml: &str) -> Vec<(u32, String)> {
             let part_body = &after[..part_end];
             let part_num =
                 extract_xml_value(part_body, "PartNumber").and_then(|s| s.parse::<u32>().ok());
-            let etag = extract_xml_value(part_body, "ETag")
-                .map(|s| s.replace("&quot;", "").replace('"', ""));
+            let etag = extract_xml_value(part_body, "ETag").map(|s| strip_etag_quotes(&s));
             if let (Some(num), Some(e)) = (part_num, etag) {
                 parts.push((num, e));
             }
@@ -3103,4 +3120,45 @@ mod compute_checksum_tests {
     }
 
     use base64::Engine as _;
+}
+
+#[cfg(test)]
+mod complete_multipart_parse_tests {
+    use super::parse_complete_multipart_xml;
+
+    // 2026-07-07: aws-sdk-go-v2 (the terraform AWS provider) serializes the
+    // part ETag with the quote char as the numeric reference `&#34;`, e.g.
+    // <ETag>&#34;<hex>&#34;</ETag>. The parser must decode that to the bare hex
+    // so it matches the stored part ETag; otherwise every large go-SDK
+    // multipart upload fails CompleteMultipartUpload with InvalidPart.
+    #[test]
+    fn parses_go_sdk_numeric_quote_entity_etag() {
+        let xml = "<CompleteMultipartUpload>\
+            <Part><PartNumber>1</PartNumber><ETag>&#34;100bffa249c1cbde1a66242835cdab03&#34;</ETag></Part>\
+            <Part><PartNumber>2</PartNumber><ETag>&#x22;5df1aff8ceab081b20d677b2d4f7eab1&#x22;</ETag></Part>\
+            </CompleteMultipartUpload>";
+        let parts = parse_complete_multipart_xml(xml);
+        assert_eq!(
+            parts,
+            vec![
+                (1, "100bffa249c1cbde1a66242835cdab03".to_string()),
+                (2, "5df1aff8ceab081b20d677b2d4f7eab1".to_string()),
+            ]
+        );
+    }
+
+    // aws-cli / boto send the quote as a literal `"` or the named entity
+    // `&quot;` — both must still parse to the same bare hex.
+    #[test]
+    fn parses_cli_literal_and_named_quote_etag() {
+        let xml = "<CompleteMultipartUpload>\
+            <Part><PartNumber>1</PartNumber><ETag>\"abc123\"</ETag></Part>\
+            <Part><PartNumber>2</PartNumber><ETag>&quot;def456&quot;</ETag></Part>\
+            </CompleteMultipartUpload>";
+        let parts = parse_complete_multipart_xml(xml);
+        assert_eq!(
+            parts,
+            vec![(1, "abc123".to_string()), (2, "def456".to_string())]
+        );
+    }
 }

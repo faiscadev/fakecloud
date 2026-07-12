@@ -56,6 +56,17 @@ async fn make_rule(server: &TestServer, name: &str) {
 }
 
 async fn make_channel(server: &TestServer) {
+    // Real AWS Config validates that the delivery channel's S3 bucket exists at
+    // PutDeliveryChannel time (otherwise NoSuchBucketException), so create the
+    // bucket first — the same precondition the operation requires against AWS.
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("config-bucket")
+        .send()
+        .await
+        .unwrap();
     let (s, b) = cfg(
         server,
         "PutDeliveryChannel",

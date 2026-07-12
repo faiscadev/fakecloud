@@ -40,6 +40,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "kinesis" => Protocol::Json {
             target_prefix: "Kinesis_20131202",
         },
+        "kinesisanalyticsv2" => Protocol::Json {
+            target_prefix: "KinesisAnalytics_20180523",
+        },
         "ecr" => Protocol::Json {
             target_prefix: "AmazonEC2ContainerRegistry_V20150921",
         },
@@ -79,6 +82,41 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         },
         "glue" => Protocol::Json {
             target_prefix: "AWSGlue",
+        },
+        "emr" => Protocol::Json {
+            target_prefix: "ElasticMapReduce",
+        },
+        "textract" => Protocol::Json {
+            target_prefix: "Textract",
+        },
+        // Amazon Transcribe: awsJson1.1 (speech-to-text control plane).
+        "transcribe" => Protocol::Json {
+            target_prefix: "Transcribe",
+        },
+        // Amazon Translate: awsJson1_1 (text/document translation control plane).
+        "translate" => Protocol::Json {
+            target_prefix: "AWSShineFrontendService_20170701",
+        },
+        // AWS Shield / Shield Advanced: awsJson1_1.
+        "shield" => Protocol::Json {
+            target_prefix: "AWSShield_20160616",
+        },
+        // Amazon SWF (Simple Workflow Service): awsJson1_0.
+        "swf" => Protocol::Json {
+            target_prefix: "SimpleWorkflowService",
+        },
+        // Amazon Timestream (Write + Query): awsJson1_0. Both SDK clients share
+        // the `Timestream_20181101` target prefix.
+        "timestream" => Protocol::Json {
+            target_prefix: "Timestream_20181101",
+        },
+        // Amazon Comprehend: awsJson1.1 (NLP control + inference plane).
+        "comprehend" => Protocol::Json {
+            target_prefix: "Comprehend_20171127",
+        },
+        // AWS Support: awsJson1.1 (support cases + Trusted Advisor control plane).
+        "support" => Protocol::Json {
+            target_prefix: "AWSSupport_20130415",
         },
         "cloudcontrolapi" => Protocol::Json {
             target_prefix: "CloudApiService",
@@ -151,6 +189,9 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "monitoring" => Protocol::Query,
         "s3" => Protocol::Rest,
         "eks" => Protocol::Rest,
+        // Amazon Managed Blockchain: restJson1 control plane (path-labelled
+        // `@http` URIs over networks/members/nodes/proposals + JSON bodies).
+        "managedblockchain" => Protocol::Rest,
         // Amazon S3 Glacier: restJson1, account-scoped paths, custom headers.
         "glacier" => Protocol::Rest,
         // AWS Backup: restJson1 control plane (@http traits + JSON bodies).
@@ -183,6 +224,8 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "scheduler" => Protocol::Rest,
         // EventBridge Pipes: restJson1 control plane (@http traits + JSON bodies).
         "pipes" => Protocol::Rest,
+        // AWS Fault Injection Simulator: restJson1 control plane.
+        "fis" => Protocol::Rest,
         // RDS Data API: restJson1, runs real SQL on the backing RDS container.
         "rds-data" => Protocol::Rest,
         // Aurora DSQL: restJson1 control plane (clusters, streams, policies).
@@ -207,6 +250,51 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // Amazon MQ: restJson1 control plane (path-labelled `@http` URIs over
         // brokers, configurations, users, and tags). Signs as `mq`.
         "mq" => Protocol::Rest,
+        // Amazon MSK (Managed Streaming for Apache Kafka): restJson1 control
+        // plane (path-labelled `@http` URIs over clusters, configurations,
+        // operations, replicators, VPC connections, and topics). Signs as `kafka`.
+        "kafka" => Protocol::Rest,
+        // Amazon MWAA (Managed Workflows for Apache Airflow): restJson1 control
+        // plane (path-labelled `@http` URIs over environments, access tokens,
+        // and tags). Signs as `airflow`; the probe signs with `mwaa`.
+        "mwaa" => Protocol::Rest,
+        // AWS X-Ray: restJson1 control plane + trace data plane (fixed
+        // `POST /<Op>` URIs; JSON bodies). Signs as `xray`.
+        "xray" => Protocol::Rest,
+        "appsync" => Protocol::Rest,
+        // AWS Amplify: restJson1 hosting control plane (path-labelled `@http`
+        // URIs over apps, branches, domains, webhooks, jobs; JSON bodies).
+        // Signs as `amplify`.
+        "amplify" => Protocol::Rest,
+        // AWS Elemental MediaConvert: restJson1 video-transcoding control plane
+        // (path-labelled `@http` URIs under `/2017-08-29` over queues, presets,
+        // job templates, jobs, policy, endpoints; JSON bodies). Signs as
+        // `mediaconvert`.
+        "mediaconvert" => Protocol::Rest,
+        // AWS Serverless Application Repository: restJson1 control plane
+        // (path-labelled `@http` URIs under `/applications` over applications,
+        // versions, sharing policies, CloudFormation change sets/templates, and
+        // dependencies; JSON bodies). Signs as `serverlessrepo`.
+        "serverlessrepo" => Protocol::Rest,
+        // AWS IoT Data Plane: restJson1 device-shadow + retained-message data
+        // plane (path-labelled `@http` URIs over things' classic/named shadows,
+        // MQTT publish topics, retained messages, and connections; raw
+        // `@httpPayload` shadow documents). Signs as `iotdata`.
+        "iotdata" => Protocol::Rest,
+        // Amazon Pinpoint: restJson1 control plane (RESTful `@http` method +
+        // path routing under `/v1/...` over apps, campaigns, segments,
+        // endpoints, channels, journeys, templates, jobs, event streams,
+        // recommenders, and tags; JSON bodies). Signs as `mobiletargeting`,
+        // aliased to `pinpoint`; the conformance probe uses the service-map
+        // `service_name` (`pinpoint`).
+        "pinpoint" => Protocol::Rest,
+        // AWS IoT Core control plane: restJson1 registry / jobs / rules /
+        // security control plane (path-labelled `@http` URIs). Signs as `iot`.
+        "iot" => Protocol::Rest,
+        // AWS IoT Wireless control plane: restJson1 LoRaWAN / Sidewalk registry
+        // (collection-POST creates + path-labelled reads). Signs as
+        // `iotwireless`.
+        "iotwireless" => Protocol::Rest,
         // REST-XML services — distinct wire format from restJson1 but the
         // probe uses the same `@http` trait-driven URL builder for both
         // and reads response bodies as opaque text.
@@ -215,6 +303,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
         // for clarity instead of relying on the default fall-through.
         "rds" => Protocol::Query,
+        // Amazon DocumentDB — RDS-shaped Query API on the `rds` signing scope.
+        "docdb" => Protocol::Query,
+        // Amazon Neptune — RDS-shaped Query API on the `rds` signing scope.
+        "neptune" => Protocol::Query,
         "elasticache" => Protocol::Query,
         "elasticbeanstalk" => Protocol::Query,
         "elasticloadbalancing" => Protocol::Query,

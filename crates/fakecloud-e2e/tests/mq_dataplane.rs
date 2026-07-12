@@ -200,6 +200,152 @@ async fn activemq_broker_delivers_a_message_over_stomp() {
         .expect("delete broker");
 }
 
+/// The backing container id for a broker (via its `fakecloud-mq` label), or
+/// empty when none is running.
+fn broker_container_id(broker_id: &str) -> String {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=fakecloud-mq={broker_id}"),
+        ])
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn rebooting_an_activemq_broker_preserves_durable_messages() {
+    if !require_docker_or_skip("rebooting_an_activemq_broker_preserves_durable_messages") {
+        return;
+    }
+
+    let server = TestServer::start().await;
+    let client = mq_client(&server).await;
+
+    let username = "fcadmin";
+    let password = "FakecloudMQ1234";
+    let created = client
+        .create_broker()
+        .broker_name("fc-activemq-reboot")
+        .engine_type(EngineType::Activemq)
+        .host_instance_type("mq.t3.micro")
+        .deployment_mode(DeploymentMode::SingleInstance)
+        .publicly_accessible(false)
+        .auto_minor_version_upgrade(false)
+        .users(
+            User::builder()
+                .username(username)
+                .password(password)
+                .console_access(true)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create broker");
+    let broker_id = created.broker_id().expect("broker id").to_string();
+
+    let endpoints = wait_for_running(&server, &client, &broker_id, 300).await;
+    let stomp = endpoints
+        .iter()
+        .find(|e| e.starts_with("stomp://"))
+        .expect("a STOMP endpoint");
+    let addr = host_port(stomp);
+
+    // The backing container id BEFORE the reboot; a durable-message-preserving
+    // reboot must restart THIS SAME container (not remove + recreate it, which
+    // would wipe KahaDB).
+    let container_before = broker_container_id(&broker_id);
+    assert!(
+        !container_before.is_empty(),
+        "a RUNNING broker must have a backing container"
+    );
+
+    // Produce a PERSISTENT message to a queue, with NO consumer attached, and
+    // confirm the broker acknowledged persisting it (STOMP `receipt`).
+    let dest = "/queue/fakecloud.reboot.durable";
+    let body = "SURVIVE_THE_REBOOT";
+    {
+        let mut stream = stomp_authenticate(&addr, username, password).await;
+        let send = format!(
+            "SEND\ndestination:{dest}\npersistent:true\nreceipt:r-send\ncontent-type:text/plain\n\n{body}\0"
+        );
+        stream.write_all(send.as_bytes()).await.expect("SEND");
+        // Read frames until the RECEIPT confirms the persistent write landed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+                .await
+                .expect("timed out awaiting RECEIPT frame");
+            if frame.contains("RECEIPT") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "broker never acknowledged the persistent SEND"
+            );
+        }
+    }
+
+    // Reboot the broker. AWS preserves durable messages across a reboot.
+    client
+        .reboot_broker()
+        .broker_id(&broker_id)
+        .send()
+        .await
+        .expect("reboot broker");
+
+    // The reboot transitions REBOOT_IN_PROGRESS -> RUNNING; wait it out. Give the
+    // state machine a beat to leave RUNNING first so we don't observe the
+    // pre-reboot RUNNING.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let endpoints = wait_for_running(&server, &client, &broker_id, 300).await;
+    let stomp = endpoints
+        .iter()
+        .find(|e| e.starts_with("stomp://"))
+        .expect("a STOMP endpoint after reboot");
+    let addr = host_port(stomp);
+
+    // The SAME container was restarted in place -- proof the data directory
+    // (KahaDB) was never destroyed.
+    let container_after = broker_container_id(&broker_id);
+    assert_eq!(
+        container_before, container_after,
+        "reboot must restart the same container, not remove + recreate it"
+    );
+
+    // The persistent message queued before the reboot is redelivered after it.
+    let mut stream = stomp_authenticate(&addr, username, password).await;
+    let subscribe = format!("SUBSCRIBE\nid:sub-0\ndestination:{dest}\nack:auto\n\n\0");
+    stream
+        .write_all(subscribe.as_bytes())
+        .await
+        .expect("SUBSCRIBE");
+    let mut acc = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .expect("timed out awaiting redelivered MESSAGE frame");
+        acc.push_str(&frame);
+        if acc.contains("MESSAGE") && acc.contains(body) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "durable message did not survive the reboot; got: {acc}"
+        );
+    }
+
+    client
+        .delete_broker()
+        .broker_id(&broker_id)
+        .send()
+        .await
+        .expect("delete broker");
+}
+
 #[tokio::test]
 async fn rabbitmq_broker_speaks_amqp() {
     if !require_docker_or_skip("rabbitmq_broker_speaks_amqp") {

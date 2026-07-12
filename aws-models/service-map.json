@@ -79,6 +79,14 @@
     "repo_dir": "rds",
     "service_name": "rds"
   },
+  "docdb": {
+    "repo_dir": "docdb",
+    "service_name": "docdb"
+  },
+  "neptune": {
+    "repo_dir": "neptune",
+    "service_name": "neptune"
+  },
   "rds-data": {
     "repo_dir": "rds-data",
     "service_name": "rds-data"
@@ -194,6 +202,14 @@
   "glue": {
     "repo_dir": "glue",
     "service_name": "glue"
+  },
+  "emr": {
+    "repo_dir": "emr",
+    "service_name": "emr"
+  },
+  "textract": {
+    "repo_dir": "textract",
+    "service_name": "textract"
   },
   "organizations": {
     "repo_dir": "organizations",
@@ -318,5 +334,89 @@
   "mq": {
     "repo_dir": "mq",
     "service_name": "mq"
+  },
+  "kafka": {
+    "repo_dir": "kafka",
+    "service_name": "kafka"
+  },
+  "kinesisanalyticsv2": {
+    "repo_dir": "kinesis-analytics-v2",
+    "service_name": "kinesisanalyticsv2"
+  },
+  "mwaa": {
+    "repo_dir": "mwaa",
+    "service_name": "mwaa"
+  },
+  "fis": {
+    "repo_dir": "fis",
+    "service_name": "fis"
+  },
+  "xray": {
+    "repo_dir": "xray",
+    "service_name": "xray"
+  },
+  "appsync": {
+    "repo_dir": "appsync",
+    "service_name": "appsync"
+  },
+  "amplify": {
+    "repo_dir": "amplify",
+    "service_name": "amplify"
+  },
+  "mediaconvert": {
+    "repo_dir": "mediaconvert",
+    "service_name": "mediaconvert"
+  },
+  "serverlessrepo": {
+    "repo_dir": "serverlessapplicationrepository",
+    "service_name": "serverlessrepo"
+  },
+  "iotdata": {
+    "repo_dir": "iot-data-plane",
+    "service_name": "iotdata"
+  },
+  "pinpoint": {
+    "repo_dir": "pinpoint",
+    "service_name": "pinpoint"
+  },
+  "iot": {
+    "repo_dir": "iot",
+    "service_name": "iot"
+  },
+  "iotwireless": {
+    "repo_dir": "iot-wireless",
+    "service_name": "iotwireless"
+  },
+  "managedblockchain": {
+    "repo_dir": "managedblockchain",
+    "service_name": "managedblockchain"
+  },
+  "transcribe": {
+    "repo_dir": "transcribe",
+    "service_name": "transcribe"
+  },
+  "translate": {
+    "repo_dir": "translate",
+    "service_name": "translate"
+  },
+  "shield": {
+    "repo_dir": "shield",
+    "service_name": "shield"
+  },
+  "comprehend": {
+    "repo_dir": "comprehend",
+    "service_name": "comprehend"
+  },
+  "swf": {
+    "repo_dir": "swf",
+    "service_name": "swf"
+  },
+  "support": {
+    "repo_dir": "support",
+    "service_name": "support"
+  },
+  "timestream": {
+    "repo_dir": "timestream",
+    "service_name": "timestream"
   }
 }

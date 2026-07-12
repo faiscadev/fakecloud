@@ -740,8 +740,24 @@ impl TestServer {
         aws_sdk_rds::Client::new(&self.aws_config().await)
     }
 
+    pub async fn neptune_client(&self) -> aws_sdk_neptune::Client {
+        aws_sdk_neptune::Client::new(&self.aws_config().await)
+    }
+
     pub async fn ec2_client(&self) -> aws_sdk_ec2::Client {
         aws_sdk_ec2::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn docdb_client(&self) -> aws_sdk_docdb::Client {
+        aws_sdk_docdb::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn timestream_write_client(&self) -> aws_sdk_timestreamwrite::Client {
+        aws_sdk_timestreamwrite::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn timestream_query_client(&self) -> aws_sdk_timestreamquery::Client {
+        aws_sdk_timestreamquery::Client::new(&self.aws_config().await)
     }
 
     pub async fn elasticache_client(&self) -> aws_sdk_elasticache::Client {

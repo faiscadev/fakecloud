@@ -143,6 +143,18 @@ impl CodeBuildService {
     /// deterministic settle-on-read behavior unless they ask for the real one.
     pub fn with_backend_autodetect(mut self) -> Self {
         self.backend = CodeBuildBackend::detect();
+        // Reap build containers leaked by a previous (crashed) process. Runs in
+        // the background so startup is never blocked on a daemon call; guarded
+        // by a runtime check so embedders that call this off a Tokio runtime
+        // don't panic.
+        if let Some(backend) = &self.backend {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let cli = backend.cli().to_string();
+                handle.spawn(async move {
+                    crate::runtime::sweep_orphan_containers(&cli).await;
+                });
+            }
+        }
         self
     }
 
@@ -1061,19 +1073,16 @@ fn resolve_env_value(
             let Some(secrets) = secrets else {
                 return String::new();
             };
-            // CodeBuild's value is `secret-id` or `secret-id:json-key`.
-            let (secret_id, json_key) = match value.split_once(':') {
-                Some((id, key)) if !key.is_empty() => (id, Some(key)),
-                _ => (value, None),
-            };
+            // CodeBuild's `value` can be a bare secret name, `name:json-key`, a
+            // full secret ARN, or `arn:...:secret:name-suffix:json-key`. A secret
+            // name may itself contain `-` and `/` but never `:`, so the ARN's
+            // colons must be handled explicitly before splitting off the json key.
+            let (secret_ref, json_key) = split_secret_ref(value);
             let accounts = secrets.read();
             let Some(st) = accounts.get(account) else {
                 return String::new();
             };
-            // Accept a bare name or an ARN tail; strip the AWS 6-char suffix.
-            let name = secret_id.rsplit(":secret:").next().unwrap_or(secret_id);
-            let name = name.rsplit_once('-').map(|(n, _)| n).unwrap_or(name);
-            let Some(secret) = st.secrets.get(name).or_else(|| st.secrets.get(secret_id)) else {
+            let Some(secret) = find_secret(st, &secret_ref) else {
                 return String::new();
             };
             let Some(vid) = secret.current_version_id.as_ref() else {
@@ -1089,7 +1098,7 @@ fn resolve_env_value(
             match json_key {
                 Some(key) => serde_json::from_str::<Value>(&raw)
                     .ok()
-                    .and_then(|v| v.get(key).and_then(Value::as_str).map(str::to_string))
+                    .and_then(|v| v.get(&key).and_then(Value::as_str).map(str::to_string))
                     .unwrap_or_default(),
                 None => raw,
             }
@@ -1097,6 +1106,81 @@ fn resolve_env_value(
         // PLAINTEXT (and any unknown type) -> verbatim.
         _ => value.to_string(),
     }
+}
+
+/// Split a CodeBuild `SECRETS_MANAGER` env `value` into a secret reference (bare
+/// name or full ARN) and an optional json key. Because a full secret ARN
+/// (`arn:aws:secretsmanager:region:account:secret:name-suffix`) contains colons,
+/// a naive `split_once(':')` would truncate the ARN at `arn`. Secret names never
+/// contain `:`, so for a non-ARN input the first colon (if any) separates the
+/// json key; for an ARN input the json key is only the 8th colon-delimited
+/// segment (everything up to and including `secret:name-suffix` is the ARN).
+fn split_secret_ref(value: &str) -> (String, Option<String>) {
+    if value.starts_with("arn:aws:secretsmanager:") {
+        // arn(0) aws(1) secretsmanager(2) region(3) account(4) secret(5)
+        // name-suffix(6) [json-key(7)]
+        let parts: Vec<&str> = value.splitn(8, ':').collect();
+        if parts.len() >= 7 {
+            let arn = parts[..7].join(":");
+            let json_key = parts
+                .get(7)
+                .filter(|k| !k.is_empty())
+                .map(|k| k.to_string());
+            return (arn, json_key);
+        }
+        return (value.to_string(), None);
+    }
+    match value.split_once(':') {
+        Some((id, key)) if !key.is_empty() => (id.to_string(), Some(key.to_string())),
+        _ => (value.to_string(), None),
+    }
+}
+
+/// Strip the trailing `-<6 alphanumeric>` suffix AWS appends to a secret ARN's
+/// name segment (`prod-config-AbCdEf` -> `prod-config`). Only a segment that is
+/// exactly six alphanumeric characters is treated as the suffix, so a hyphenated
+/// user-supplied name is never mangled.
+fn strip_arn_secret_suffix(name_with_suffix: &str) -> &str {
+    match name_with_suffix.rsplit_once('-') {
+        Some((base, suffix))
+            if suffix.len() == 6 && suffix.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            base
+        }
+        _ => name_with_suffix,
+    }
+}
+
+/// Resolve a secret by name or ARN against a Secrets Manager account state,
+/// mirroring Secrets Manager's own lookup: exact name key, then full/partial ARN
+/// match, then the ARN's name segment (with the 6-char suffix stripped). A bare
+/// plaintext name is looked up verbatim and is never suffix-stripped, so a
+/// hyphenated name like `prod-config` cannot collide with a secret named `prod`.
+fn find_secret<'a>(
+    st: &'a fakecloud_secretsmanager::SecretsManagerState,
+    secret_ref: &str,
+) -> Option<&'a fakecloud_secretsmanager::Secret> {
+    if let Some(secret) = st.secrets.get(secret_ref) {
+        return Some(secret);
+    }
+    if secret_ref.starts_with("arn:aws:secretsmanager:") {
+        for secret in st.secrets.values() {
+            if secret.arn == secret_ref || secret.arn.starts_with(secret_ref) {
+                return Some(secret);
+            }
+        }
+        // Fall back to the name embedded in the ARN tail.
+        if let Some(tail) = secret_ref.rsplit(":secret:").next() {
+            let name = strip_arn_secret_suffix(tail);
+            if let Some(secret) = st.secrets.get(name) {
+                return Some(secret);
+            }
+            if let Some(secret) = st.secrets.get(tail) {
+                return Some(secret);
+            }
+        }
+    }
+    None
 }
 
 /// Next per-project `buildBatchNumber`, with the same monotonic semantics.
@@ -3642,5 +3726,175 @@ mod tests {
         )));
         // ResourceNotFound wins over the malformed exportConfig.
         assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    // ---------------------------------------------------------------------
+    // SECRETS_MANAGER env var resolution.
+    // ---------------------------------------------------------------------
+
+    /// Build a shared Secrets Manager state seeded with `(name, arn, secret_string)`
+    /// entries in the default account.
+    fn secrets_state(entries: &[(&str, &str, &str)]) -> SharedSecretsManagerState {
+        use fakecloud_secretsmanager::{Secret, SecretVersion};
+        use std::collections::BTreeMap;
+        let mut accounts: MultiAccountState<fakecloud_secretsmanager::SecretsManagerState> =
+            MultiAccountState::new("000000000000", "us-east-1", "");
+        let st = accounts.get_or_create("000000000000");
+        for (name, arn, secret_string) in entries {
+            let mut versions = BTreeMap::new();
+            versions.insert(
+                "v1".to_string(),
+                SecretVersion {
+                    version_id: "v1".to_string(),
+                    secret_string: Some(secret_string.to_string()),
+                    secret_binary: None,
+                    stages: vec!["AWSCURRENT".to_string()],
+                    created_at: Utc::now(),
+                },
+            );
+            st.secrets.insert(
+                name.to_string(),
+                Secret {
+                    name: name.to_string(),
+                    arn: arn.to_string(),
+                    description: None,
+                    kms_key_id: None,
+                    versions,
+                    current_version_id: Some("v1".to_string()),
+                    tags: vec![],
+                    tags_ever_set: false,
+                    deleted: false,
+                    deletion_date: None,
+                    created_at: Utc::now(),
+                    last_changed_at: Utc::now(),
+                    last_accessed_at: None,
+                    rotation_enabled: None,
+                    rotation_lambda_arn: None,
+                    rotation_rules: None,
+                    last_rotated_at: None,
+                    resource_policy: None,
+                    replica_regions: Vec::new(),
+                },
+            );
+        }
+        Arc::new(RwLock::new(accounts))
+    }
+
+    fn resolve_secret(state: &SharedSecretsManagerState, value: &str) -> String {
+        resolve_env_value(None, Some(state), "000000000000", "SECRETS_MANAGER", value)
+    }
+
+    #[test]
+    fn split_secret_ref_bare_name() {
+        assert_eq!(split_secret_ref("mysecret"), ("mysecret".to_string(), None));
+    }
+
+    #[test]
+    fn split_secret_ref_name_and_key() {
+        assert_eq!(
+            split_secret_ref("mysecret:username"),
+            ("mysecret".to_string(), Some("username".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_secret_ref_full_arn() {
+        let arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config-AbCdEf";
+        assert_eq!(split_secret_ref(arn), (arn.to_string(), None));
+    }
+
+    #[test]
+    fn split_secret_ref_arn_and_key() {
+        let arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config-AbCdEf";
+        assert_eq!(
+            split_secret_ref(&format!("{arn}:username")),
+            (arn.to_string(), Some("username".to_string()))
+        );
+    }
+
+    #[test]
+    fn strip_arn_secret_suffix_only_strips_six_char_suffix() {
+        // ARN tails always carry the `-<6 alnum>` suffix AWS appends; it is
+        // stripped even when the real name itself contains hyphens.
+        assert_eq!(strip_arn_secret_suffix("prod-config-AbCdEf"), "prod-config");
+        assert_eq!(strip_arn_secret_suffix("mysecret-A1b2C3"), "mysecret");
+        // A trailing segment that is not exactly six alphanumeric chars is not a
+        // suffix and is left intact (e.g. a name with no random tail).
+        assert_eq!(strip_arn_secret_suffix("prod-settings"), "prod-settings");
+        assert_eq!(strip_arn_secret_suffix("prod"), "prod");
+    }
+
+    #[test]
+    fn resolve_secret_bare_name() {
+        let st = secrets_state(&[(
+            "mysecret",
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:mysecret-A1b2C3",
+            "topsecret",
+        )]);
+        assert_eq!(resolve_secret(&st, "mysecret"), "topsecret");
+    }
+
+    #[test]
+    fn resolve_secret_name_with_json_key() {
+        let st = secrets_state(&[(
+            "creds",
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-A1b2C3",
+            r#"{"username":"alice","password":"pw"}"#,
+        )]);
+        assert_eq!(resolve_secret(&st, "creds:username"), "alice");
+        assert_eq!(resolve_secret(&st, "creds:password"), "pw");
+    }
+
+    #[test]
+    fn resolve_secret_full_arn() {
+        // The common `value = aws_secretsmanager_secret.x.arn` Terraform pattern.
+        let arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:mysecret-A1b2C3";
+        let st = secrets_state(&[("mysecret", arn, "topsecret")]);
+        assert_eq!(resolve_secret(&st, arn), "topsecret");
+    }
+
+    #[test]
+    fn resolve_secret_arn_with_json_key() {
+        let arn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:creds-A1b2C3";
+        let st = secrets_state(&[("creds", arn, r#"{"username":"alice"}"#)]);
+        assert_eq!(resolve_secret(&st, &format!("{arn}:username")), "alice");
+    }
+
+    #[test]
+    fn resolve_secret_hyphenated_plaintext_name_not_mangled() {
+        // A plaintext name that itself contains a hyphen must resolve verbatim,
+        // never suffix-stripped to `prod`.
+        let st = secrets_state(&[(
+            "prod-config",
+            "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config-A1b2C3",
+            "the-real-config",
+        )]);
+        assert_eq!(resolve_secret(&st, "prod-config"), "the-real-config");
+    }
+
+    #[test]
+    fn resolve_secret_hyphenated_name_does_not_collide() {
+        // Both `prod-config` and `prod` exist; a bare `prod-config` reference
+        // must NOT fetch `prod` (the old rsplit('-') truncation bug).
+        let st = secrets_state(&[
+            (
+                "prod-config",
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-config-A1b2C3",
+                "RIGHT",
+            ),
+            (
+                "prod",
+                "arn:aws:secretsmanager:us-east-1:000000000000:secret:prod-Z9y8X7",
+                "WRONG",
+            ),
+        ]);
+        assert_eq!(resolve_secret(&st, "prod-config"), "RIGHT");
+        assert_eq!(resolve_secret(&st, "prod"), "WRONG");
+    }
+
+    #[test]
+    fn resolve_secret_missing_yields_empty() {
+        let st = secrets_state(&[]);
+        assert_eq!(resolve_secret(&st, "nope"), "");
     }
 }

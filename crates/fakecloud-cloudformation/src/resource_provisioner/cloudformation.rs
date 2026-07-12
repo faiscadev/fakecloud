@@ -117,6 +117,8 @@ impl ResourceProvisioner {
             efs_state: self.efs_state.clone(),
             elasticbeanstalk_state: self.elasticbeanstalk_state.clone(),
             mq_state: self.mq_state.clone(),
+            kafka_state: self.kafka_state.clone(),
+            ka2_state: self.ka2_state.clone(),
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),
@@ -125,6 +127,7 @@ impl ResourceProvisioner {
             ecs_runtime: self.ecs_runtime.clone(),
             elasticache_runtime: self.elasticache_runtime.clone(),
             mq_runtime: self.mq_runtime.clone(),
+            kafka_runtime: self.kafka_runtime.clone(),
             // Share the parent's queues so nested-stack container resources are
             // drained and backed/reaped by the same parent op, and any deferred
             // custom-resource invokes are drained alongside the parent's.

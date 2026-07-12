@@ -197,6 +197,40 @@ pub async fn dispatch(
         detected
     };
 
+    // Amazon DocumentDB shares RDS's Query wire protocol, `rds` SigV4
+    // signing scope, and `rds.<region>.amazonaws.com` endpoint, so a real
+    // `aws-sdk-docdb` request is indistinguishable from `aws-sdk-rds` by
+    // signing name or host alone. The DocumentDB SDK does stamp an
+    // `api/docdb` token into its `user-agent`; use it to route the request
+    // to the dedicated `docdb` handler. (The conformance probe signs the
+    // `docdb` scope directly, so it never reaches this branch.) Requests
+    // without the token stay on `rds`.
+    let detected = if detected.service == "rds" && user_agent_indicates_docdb(&parts.headers) {
+        protocol::DetectedRequest {
+            service: "docdb".to_string(),
+            ..detected
+        }
+    } else {
+        detected
+    };
+
+    // Amazon Neptune shares RDS's Query wire protocol, `rds` SigV4 signing
+    // scope, and `rds.<region>.amazonaws.com` endpoint, so a real
+    // `aws-sdk-neptune` request is indistinguishable from `aws-sdk-rds` by
+    // signing name or host alone. The Neptune SDK does stamp an
+    // `api/neptune` token into its `user-agent`; use it to route the request
+    // to the dedicated `neptune` handler. (The conformance probe signs the
+    // `neptune` scope directly, so it never reaches this branch.) Requests
+    // without the token stay on `rds`.
+    let detected = if detected.service == "rds" && user_agent_indicates_neptune(&parts.headers) {
+        protocol::DetectedRequest {
+            service: "neptune".to_string(),
+            ..detected
+        }
+    } else {
+        detected
+    };
+
     // Look up service
     let service = match registry.get(&detected.service) {
         Some(s) => s,
@@ -1013,7 +1047,47 @@ fn parse_account_from_arn(arn: &str) -> Option<String> {
     }
 }
 
+/// Whether the request's `user-agent` (or `x-amz-user-agent`) carries the
+/// `api/neptune` SDK-metadata token the `aws-sdk-neptune` client stamps in.
+/// Used to disambiguate Neptune from RDS, which share the `rds` SigV4 scope
+/// and endpoint. Matches the `api/neptune` token that AWS SDKs emit (a
+/// leading `api/neptune` optionally followed by `#`/`/` and a version).
+fn user_agent_indicates_neptune(headers: &http::HeaderMap) -> bool {
+    for name in ["user-agent", "x-amz-user-agent"] {
+        if let Some(ua) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            for part in ua.split_whitespace() {
+                if let Some(rest) = part.strip_prefix("api/neptune") {
+                    if rest.is_empty() || rest.starts_with('#') || rest.starts_with('/') {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Extract region from User-Agent header suffix `region/<region>`.
+/// Whether the request's `user-agent` (or `x-amz-user-agent`) carries the
+/// `api/docdb` SDK-metadata token the `aws-sdk-docdb` client stamps in. Used
+/// to disambiguate DocumentDB from RDS, which share the `rds` SigV4 scope
+/// and endpoint. Matches the `api/docdb` token that AWS SDKs emit (a leading
+/// `api/docdb` optionally followed by `#`/`/` and a version).
+fn user_agent_indicates_docdb(headers: &http::HeaderMap) -> bool {
+    for name in ["user-agent", "x-amz-user-agent"] {
+        if let Some(ua) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            for part in ua.split_whitespace() {
+                if let Some(rest) = part.strip_prefix("api/docdb") {
+                    if rest.is_empty() || rest.starts_with('#') || rest.starts_with('/') {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn extract_region_from_user_agent(headers: &http::HeaderMap) -> Option<String> {
     let ua = headers.get("user-agent")?.to_str().ok()?;
     for part in ua.split_whitespace() {

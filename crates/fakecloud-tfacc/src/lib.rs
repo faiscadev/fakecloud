@@ -173,6 +173,16 @@ impl TestServer {
         Self(
             fakecloud_testkit::TestServer::start_with_env(&[
                 ("FAKECLOUD_MQ_DISABLE_BACKEND", "1"),
+                // Amazon MSK: a real Kafka broker makes GetBootstrapBrokers return
+                // `127.0.0.1:<port>` instead of the AWS-format
+                // `*.amazonaws.com:9092` the provider asserts; the data plane is
+                // proven separately by the msk-broker Docker E2E.
+                ("FAKECLOUD_KAFKA_DISABLE_BACKEND", "1"),
+                // Amazon Managed Service for Apache Flink: a real Flink-job
+                // container would race the provider's status/attribute
+                // assertions with async job settling; the data plane is proven
+                // separately by the kinesisanalyticsv2 Docker E2E.
+                ("FAKECLOUD_KINESISANALYTICSV2_DISABLE_BACKEND", "1"),
                 ("FAKECLOUD_CODEBUILD_DISABLE_BACKEND", "1"),
             ])
             .await,
@@ -201,18 +211,25 @@ pub struct GoTestRunner<'a> {
 
 /// Go `-parallel` degree for a service's `go test` invocation. Defaults to 4.
 ///
-/// `pipes` is special: unlike every other service it runs a persistent
-/// background execution loop (the Pipes runner) on the fakecloud side. That
-/// constant load *on top of* four concurrent terraform applies oversubscribes a
-/// 2-core CI runner badly enough that the server stops serving the provider's
-/// delete/`gone` poll requests promptly — a pipe hangs in DELETING and even
-/// unrelated SQS DeleteQueue waiters time out. Other services have no such loop,
-/// so parallel-4 is fine for them. Run the pipes acceptance tests serially so
-/// they don't oversubscribe the box; the suite is small and its behaviour is
-/// unchanged, this only bounds concurrency on constrained runners.
+/// Two services run serially because four concurrent terraform applies
+/// oversubscribe a 2-core CI runner badly enough that the fakecloud server
+/// stops serving the provider's poll requests promptly — resources hang in a
+/// transitional state and even unrelated waiters time out:
+/// - `pipes` runs a persistent background execution loop (the Pipes runner)
+///   whose constant load, on top of four applies, starves the server; a pipe
+///   hangs in DELETING and unrelated SQS DeleteQueue waiters time out.
+/// - `kinesisanalyticsv2` acc tests each upload the 66MB Flink app JAR (twice,
+///   count=2) and drive a full application start/update lifecycle; four of those
+///   in parallel saturate the box so the app's status poll never advances and
+///   the whole shard stalls (all tests pass fine serially — and at high
+///   parallelism on an unconstrained machine — so this is pure oversubscription,
+///   not a correctness bug). Serial keeps each test ~90s, so even the 11-test
+///   flink-core shard finishes in ~16min.
+///
+/// Other services have no such heavy per-test load, so parallel-4 is fine.
 fn parallelism_for(service: &str) -> u32 {
     match service {
-        "pipes" => 1,
+        "pipes" | "kinesisanalyticsv2" => 1,
         _ => 4,
     }
 }
@@ -415,6 +432,7 @@ pub const ENDPOINT_ENV_VARS: &[(&str, &str)] = &[
     ("AWS_ENDPOINT_URL_KMS", "kms"),
     ("AWS_ENDPOINT_URL_LOGS", "logs"),
     ("AWS_ENDPOINT_URL_KINESIS", "kinesis"),
+    ("AWS_ENDPOINT_URL_KAFKA", "kafka"),
     ("AWS_ENDPOINT_URL_RDS", "rds"),
     ("AWS_ENDPOINT_URL_DMS", "dms"),
     ("AWS_ENDPOINT_URL_DATABASE_MIGRATION_SERVICE", "dms"),

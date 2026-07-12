@@ -912,6 +912,8 @@ pub struct ResourceProvisioner {
     pub efs_state: fakecloud_efs::SharedEfsState,
     pub elasticbeanstalk_state: fakecloud_elasticbeanstalk::SharedEbState,
     pub mq_state: fakecloud_mq::SharedMqState,
+    pub kafka_state: fakecloud_kafka::SharedKafkaState,
+    pub ka2_state: fakecloud_kinesisanalyticsv2::SharedKa2State,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -926,6 +928,7 @@ pub struct ResourceProvisioner {
     pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
     pub mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
+    pub kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
     /// Intents queued by container-backed provisioners during the synchronous
     /// provisioning pass. After provisioning, `CreateStack` drains these and
     /// backs each freshly-inserted record with a real container in the
@@ -1015,6 +1018,10 @@ pub enum ContainerSpawnIntent {
     /// ActiveMQ/RabbitMQ container via the MQ runtime, matching the direct
     /// `CreateBroker` path.
     MqBroker { broker_id: String },
+    /// `AWS::MSK::Cluster` — back the inserted PROVISIONED cluster with a real
+    /// Apache Kafka container via the Kafka runtime, matching the direct
+    /// `CreateCluster` path.
+    MskCluster { cluster_arn: String },
 }
 
 /// A container-backed resource the synchronous delete pass removed from memory
@@ -1047,6 +1054,8 @@ pub enum ContainerTeardownIntent {
     Ec2Instance { instance_id: String },
     /// `AWS::AmazonMQ::Broker` -- stop + remove the ActiveMQ/RabbitMQ container.
     MqBroker { broker_id: String },
+    /// `AWS::MSK::Cluster` -- stop + remove the backing Apache Kafka container.
+    MskCluster { cluster_arn: String },
 }
 
 /// A queued custom-resource (`Custom::*`) Lambda invocation. Built by
@@ -1083,7 +1092,9 @@ mod eventbridge;
 mod firehose;
 mod glue;
 mod iam;
+mod kafka;
 mod kinesis;
+mod kinesisanalyticsv2;
 mod kms;
 mod lambda;
 mod logs;
@@ -1222,6 +1233,23 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::Configuration" => self.create_mq_configuration(resource),
             "AWS::AmazonMQ::ConfigurationAssociation" => {
                 self.create_mq_configuration_association(resource)
+            }
+            "AWS::MSK::Cluster" => self.create_msk_cluster(resource),
+            "AWS::MSK::ServerlessCluster" => self.create_msk_serverless_cluster(resource),
+            "AWS::MSK::Configuration" => self.create_msk_configuration(resource),
+            "AWS::MSK::ClusterPolicy" => self.create_msk_cluster_policy(resource),
+            "AWS::MSK::BatchScramSecret" => self.create_msk_batch_scram_secret(resource),
+            "AWS::MSK::VpcConnection" => self.create_msk_vpc_connection(resource),
+            "AWS::MSK::Replicator" => self.create_msk_replicator(resource),
+            "AWS::KinesisAnalyticsV2::Application" => self.create_ka2_application(resource),
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                self.create_ka2_application_output(resource)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                self.create_ka2_reference_data_source(resource)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                self.create_ka2_cloudwatch_logging_option(resource)
             }
             "AWS::CodeCommit::Repository" => self.create_codecommit_repository(resource),
             "AWS::EFS::FileSystem" => self.create_efs_file_system(resource),
@@ -1614,6 +1642,27 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::ConfigurationAssociation" => {
                 Some(self.create_mq_configuration_association(new_def)?)
             }
+            "AWS::MSK::Cluster" => Some(self.update_msk_cluster(existing, new_def)?),
+            "AWS::MSK::ServerlessCluster" => Some(self.update_msk_cluster(existing, new_def)?),
+            "AWS::MSK::Configuration" => Some(self.update_msk_configuration(existing, new_def)?),
+            "AWS::MSK::ClusterPolicy" => Some(self.update_msk_cluster_policy(existing, new_def)?),
+            "AWS::MSK::BatchScramSecret" => {
+                Some(self.update_msk_batch_scram_secret(existing, new_def)?)
+            }
+            "AWS::MSK::VpcConnection" => Some(self.update_msk_vpc_connection(existing, new_def)?),
+            "AWS::MSK::Replicator" => Some(self.update_msk_replicator(existing, new_def)?),
+            "AWS::KinesisAnalyticsV2::Application" => {
+                Some(self.update_ka2_application(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                Some(self.update_ka2_application_output(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                Some(self.update_ka2_reference_data_source(existing, new_def)?)
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                Some(self.update_ka2_cloudwatch_logging_option(existing, new_def)?)
+            }
             "AWS::CodeCommit::Repository" => {
                 Some(self.update_codecommit_repository(existing, new_def)?)
             }
@@ -1656,6 +1705,27 @@ impl ResourceProvisioner {
     /// attributes that change after creation (e.g. Lambda `FunctionUrl`)
     /// resolve correctly even when the URL was added in a separate pass.
     pub fn get_att(&self, resource: &StackResource, attribute: &str) -> Option<String> {
+        // Amazon MQ broker endpoint / IP attributes are the ONE captured set that
+        // legitimately goes stale: at create time the backing container is not up
+        // yet, so they are the cosmetic `*.amazonaws.com` synthesis, but they
+        // become the REAL bound `tcp://127.0.0.1:<port>` once the container
+        // settles. Resolve them LIVE so CFN GetAtt / outputs match what the direct
+        // DescribeBroker returns rather than serving the frozen cosmetic values.
+        const MQ_BROKER_LIVE_ATTRS: &[&str] = &[
+            "IpAddresses",
+            "OpenWireEndpoints",
+            "AmqpEndpoints",
+            "StompEndpoints",
+            "MqttEndpoints",
+            "WssEndpoints",
+        ];
+        if resource.resource_type == "AWS::AmazonMQ::Broker"
+            && MQ_BROKER_LIVE_ATTRS.contains(&attribute)
+        {
+            if let Some(v) = self.get_att_mq_broker(&resource.physical_id, attribute) {
+                return Some(v);
+            }
+        }
         // Captured attributes are the source of truth — they were computed
         // at create time and never go stale for the resources we ship today.
         if let Some(v) = resource.attributes.get(attribute) {
@@ -1756,6 +1826,19 @@ impl ResourceProvisioner {
             "AWS::AmazonMQ::Configuration" => {
                 self.get_att_mq_configuration(&resource.physical_id, attribute)
             }
+            "AWS::MSK::Cluster" | "AWS::MSK::ServerlessCluster" => {
+                self.get_att_msk_cluster(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::Configuration" => {
+                self.get_att_msk_configuration(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::ClusterPolicy" => {
+                self.get_att_msk_cluster_policy(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::VpcConnection" => {
+                self.get_att_msk_vpc_connection(&resource.physical_id, attribute)
+            }
+            "AWS::MSK::Replicator" => self.get_att_msk_replicator(&resource.physical_id, attribute),
             "AWS::CodeCommit::Repository" => {
                 self.get_att_codecommit_repository(&resource.physical_id, attribute)
             }
@@ -2010,6 +2093,46 @@ impl ResourceProvisioner {
                 Ok(())
             }
             "AWS::AmazonMQ::ConfigurationAssociation" => Ok(()),
+            "AWS::MSK::Cluster" | "AWS::MSK::ServerlessCluster" => {
+                self.delete_msk_cluster(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::Configuration" => {
+                self.delete_msk_configuration(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::ClusterPolicy" => {
+                self.delete_msk_cluster_policy(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::BatchScramSecret" => {
+                self.delete_msk_batch_scram_secret(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::VpcConnection" => {
+                self.delete_msk_vpc_connection(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::MSK::Replicator" => {
+                self.delete_msk_replicator(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::Application" => {
+                self.delete_ka2_application(&resource.physical_id);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationOutput" => {
+                self.delete_ka2_application_output(resource);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationReferenceDataSource" => {
+                self.delete_ka2_reference_data_source(resource);
+                Ok(())
+            }
+            "AWS::KinesisAnalyticsV2::ApplicationCloudWatchLoggingOption" => {
+                self.delete_ka2_cloudwatch_logging_option(resource);
+                Ok(())
+            }
             "AWS::CodeCommit::Repository" => {
                 self.delete_codecommit_repository(&resource.physical_id);
                 Ok(())
@@ -6672,6 +6795,12 @@ mod tests {
             mq_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
+            kafka_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            ka2_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -6679,6 +6808,7 @@ mod tests {
             ecs_runtime: None,
             elasticache_runtime: None,
             mq_runtime: None,
+            kafka_runtime: None,
             pending_container_spawns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_container_teardowns: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_custom_invokes: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -8080,6 +8210,68 @@ mod tests {
         assert_eq!(
             prov.get_att(&stack_resource, "TopicArn"),
             Some("captured-arn".to_string())
+        );
+    }
+
+    #[test]
+    fn getatt_mq_broker_endpoints_track_the_live_data_plane() {
+        // An MQ broker's endpoint attributes are captured cosmetic at create
+        // time (no container yet), but once a backing container binds they must
+        // resolve to the REAL `tcp://`/`amqp://<host>:<port>` the direct
+        // DescribeBroker returns -- CFN GetAtt is NOT frozen to the cosmetic set.
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::AmazonMQ::Broker",
+                "MyBroker",
+                serde_json::json!({
+                    "BrokerName": "cfn-live-ep",
+                    "EngineType": "ACTIVEMQ",
+                    "HostInstanceType": "mq.m5.large",
+                    "DeploymentMode": "SINGLE_INSTANCE",
+                    "PubliclyAccessible": false
+                }),
+            ))
+            .expect("create broker");
+        let broker_id = created.physical_id.clone();
+        // The captured attribute is the cosmetic amazonaws endpoint.
+        assert!(
+            created.attributes["AmqpEndpoints"].contains("amazonaws.com"),
+            "create-time capture is cosmetic: {}",
+            created.attributes["AmqpEndpoints"]
+        );
+        // Bind a live data plane, as settle_broker_up does once the container is up.
+        {
+            let mut g = prov.mq_state.write();
+            let acct = g.get_or_create("123456789012");
+            let mut ports = std::collections::BTreeMap::new();
+            ports.insert("amqp".to_string(), 15672u16);
+            ports.insert("openwire".to_string(), 15616u16);
+            acct.data_plane.insert(
+                broker_id.clone(),
+                fakecloud_mq::BrokerDataPlane {
+                    container_id: "c-live".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    ports,
+                },
+            );
+        }
+        // GetAtt now returns the REAL bound endpoints, not the cosmetic capture.
+        let amqp = prov
+            .get_att(&created, "AmqpEndpoints")
+            .expect("AmqpEndpoints");
+        assert!(
+            amqp.contains("amqp://127.0.0.1:15672") && !amqp.contains("amazonaws.com"),
+            "GetAtt must project the live data plane, got: {amqp}"
+        );
+        let ips = prov.get_att(&created, "IpAddresses").expect("IpAddresses");
+        assert!(ips.contains("127.0.0.1"), "IpAddresses live: {ips}");
+        let openwire = prov
+            .get_att(&created, "OpenWireEndpoints")
+            .expect("OpenWireEndpoints");
+        assert!(
+            openwire.contains("tcp://127.0.0.1:15616"),
+            "OpenWireEndpoints live: {openwire}"
         );
     }
 

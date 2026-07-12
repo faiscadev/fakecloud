@@ -578,7 +578,7 @@ fn build_endpoint_url(env_id: &str, region: &str) -> String {
     let hash = Uuid::new_v4().simple().to_string();
     format!(
         "awseb-{env_id}-AWSEBLoa{}-{}.{region}.elb.amazonaws.com",
-        &hash[..8].to_uppercase(),
+        hash[..8].to_uppercase(),
         &hash[8..16]
     )
 }
