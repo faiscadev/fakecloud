@@ -1780,7 +1780,7 @@ impl NeptuneService {
                 req.region, req.account_id
             ),
             db_subnet_group_description: description,
-            vpc_id: format!("vpc-{}", &resource_token()[..12].to_lowercase()),
+            vpc_id: format!("vpc-{}", resource_token()[..12].to_lowercase()),
             subnet_group_status: "Complete".to_string(),
             subnets,
             tags: parse_tags(req),

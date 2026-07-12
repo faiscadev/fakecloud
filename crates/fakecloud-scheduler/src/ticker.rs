@@ -705,12 +705,12 @@ mod tests {
         // Tick 1: initial fire fails, retry queued.
         ticker.tick(&mut cron, &mut pending, &mut retries);
         // Manually advance the pending fire so the next tick can pick it up.
-        for (_, p) in pending.iter_mut() {
+        for p in pending.values_mut() {
             p.fire_at = Utc::now() - chrono::Duration::seconds(1);
         }
         // Tick 2: first retry, fails, second retry queued.
         ticker.tick(&mut cron, &mut pending, &mut retries);
-        for (_, p) in pending.iter_mut() {
+        for p in pending.values_mut() {
             p.fire_at = Utc::now() - chrono::Duration::seconds(1);
         }
         // Tick 3: second retry, fails, retry budget exhausted -> DLQ.
@@ -773,7 +773,7 @@ mod tests {
         );
 
         // Advance the pending timestamp into the past and tick again.
-        for (_, p) in pending.iter_mut() {
+        for p in pending.values_mut() {
             p.fire_at = Utc::now() - chrono::Duration::seconds(1);
         }
         ticker.tick(&mut cron, &mut pending, &mut retries);
@@ -905,12 +905,12 @@ mod tests {
         // Tick 1: initial fire fails (call #1), retry queued.
         ticker.tick(&mut cron, &mut pending, &mut retries);
         assert_eq!(retries.len(), 1, "retry state must be tracked");
-        for (_, p) in pending.iter_mut() {
+        for p in pending.values_mut() {
             p.fire_at = Utc::now() - chrono::Duration::seconds(1);
         }
         // Tick 2: first retry fails (call #2), retry queued.
         ticker.tick(&mut cron, &mut pending, &mut retries);
-        for (_, p) in pending.iter_mut() {
+        for p in pending.values_mut() {
             p.fire_at = Utc::now() - chrono::Duration::seconds(1);
         }
         // Tick 3: second retry succeeds (call #3) -> retry state cleared.

@@ -857,7 +857,7 @@ impl CognitoIdentityService {
                 .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
                 .unwrap_or_else(generate_role_id)
         };
-        let session_name = format!("CognitoIdentityCredentials-{}", &identity_id);
+        let session_name = format!("CognitoIdentityCredentials-{}", identity_id);
         let assumed_role_arn =
             format!("arn:aws:sts::{target_account}:assumed-role/{role_name}/{session_name}");
         let assumed_role_id = format!("{role_id}:{session_name}");

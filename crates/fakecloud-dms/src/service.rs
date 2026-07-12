@@ -2228,7 +2228,7 @@ impl DmsService {
         let name = opt_str(b, "DataProviderName")
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| format!("data-provider-{}", &res_id()[..8].to_lowercase()));
+            .unwrap_or_else(|| format!("data-provider-{}", res_id()[..8].to_lowercase()));
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         if data
@@ -2374,7 +2374,7 @@ impl DmsService {
         let name = opt_str(b, "InstanceProfileName")
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| format!("instance-profile-{}", &res_id()[..8].to_lowercase()));
+            .unwrap_or_else(|| format!("instance-profile-{}", res_id()[..8].to_lowercase()));
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         if data
@@ -2524,7 +2524,7 @@ impl DmsService {
         let name = opt_str(b, "MigrationProjectName")
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| format!("migration-project-{}", &res_id()[..8].to_lowercase()));
+            .unwrap_or_else(|| format!("migration-project-{}", res_id()[..8].to_lowercase()));
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         if data
@@ -2890,7 +2890,7 @@ impl DmsService {
         let name = opt_str(b, "DataMigrationName")
             .filter(|s| !s.is_empty())
             .map(String::from)
-            .unwrap_or_else(|| format!("data-migration-{}", &res_id()[..8].to_lowercase()));
+            .unwrap_or_else(|| format!("data-migration-{}", res_id()[..8].to_lowercase()));
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
         if data

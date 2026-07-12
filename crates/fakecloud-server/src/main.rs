@@ -10881,7 +10881,7 @@ async fn main() {
                 move || async move {
                     let accounts = bas.read();
                     let mut out: Vec<serde_json::Value> = Vec::new();
-                    for (_acct, state) in accounts.accounts.iter() {
+                    for state in accounts.accounts.values() {
                         for (agent_id, agent) in state.agents.iter() {
                             let aliases: Vec<serde_json::Value> = state
                                 .agent_aliases
@@ -10970,7 +10970,7 @@ async fn main() {
                 move || async move {
                     let accounts = bars.read();
                     let mut out: Vec<serde_json::Value> = Vec::new();
-                    for (_acct, state) in accounts.accounts.iter() {
+                    for state in accounts.accounts.values() {
                         for inv in state.invocations.iter() {
                             out.push(serde_json::json!({
                                 "invocationId": inv.invocation_id,
