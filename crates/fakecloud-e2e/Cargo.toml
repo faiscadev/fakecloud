@@ -88,6 +88,7 @@ aws-sdk-iotdataplane = "1"
 aws-sdk-pinpoint = "1"
 aws-sdk-iot = "1"
 aws-sdk-iotwireless = "1"
+aws-sdk-sagemaker = "1"
 aws-sdk-managedblockchain = "1"
 aws-sdk-kinesisanalyticsv2 = "1"
 # Pure-Rust Kafka client for the MSK data-plane produce/consume round trip.

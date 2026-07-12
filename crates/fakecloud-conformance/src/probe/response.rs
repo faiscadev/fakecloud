@@ -275,6 +275,23 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // returns it for the probes' out-of-bounds synthetic inputs on those
         // ops too. A handler returning it ran correctly.
         "shield" => &["InvalidParameterException"],
+        // Amazon SageMaker's Smithy model declares only four error shapes in
+        // total (`ResourceNotFound`, `ResourceInUse`, `ResourceLimitExceeded`,
+        // `ConflictException`) and enumerates them on only a subset of ops --
+        // many `Describe*` / `Delete*` / `Create*` operations declare no errors
+        // at all, yet the live API returns `ResourceNotFound` for a missing
+        // resource, `ResourceInUse` for a duplicate create, and a
+        // `ValidationException` for malformed input. These are SageMaker's
+        // service-wide "common errors"; a handler returning any of them to the
+        // probes' synthetic (non-existent / duplicate / invalid) inputs ran
+        // correctly. Source: SageMaker API reference "Common Errors".
+        "sagemaker" => &[
+            "ResourceNotFound",
+            "ResourceInUse",
+            "ResourceLimitExceeded",
+            "ConflictException",
+            "ValidationException",
+        ],
         _ => &[],
     }
 }

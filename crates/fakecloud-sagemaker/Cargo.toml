@@ -1,0 +1,25 @@
+[package]
+name = "fakecloud-sagemaker"
+description = "Amazon SageMaker control plane implementation for FakeCloud"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+
+[dependencies]
+fakecloud-core = { workspace = true }
+fakecloud-persistence = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+bytes = { workspace = true }
