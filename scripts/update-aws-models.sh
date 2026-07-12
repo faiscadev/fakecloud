@@ -26,6 +26,7 @@ SERVICES=(
     "serverlessrepo:serverlessapplicationrepository"
     "iotdata:iot-data-plane"
     "pinpoint:pinpoint"
+    "iot:iot"
     "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"

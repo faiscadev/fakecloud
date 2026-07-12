@@ -817,6 +817,13 @@ async fn main() {
             &endpoint_url,
         )),
     );
+    let iot_state: fakecloud_iot::SharedIotState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
     let managedblockchain_state: fakecloud_managedblockchain::SharedManagedBlockchainState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -6250,6 +6257,37 @@ async fn main() {
         cfn_snapshot_hooks.insert("pinpoint", h);
     }
     registry.register(Arc::new(pinpoint_service));
+
+    let iot_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("iot").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_iot::persistence::load_into(&store, &iot_state) {
+                Ok(fakecloud_iot::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded iot persistence snapshot");
+                }
+                Ok(fakecloud_iot::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no iot persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut iot_service = fakecloud_iot::IotService::new(iot_state.clone());
+    if let Some(store) = iot_snapshot_store {
+        iot_service = iot_service.with_snapshot_store(store);
+    }
+    if let Some(h) = iot_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iot", h);
+    }
+    registry.register(Arc::new(iot_service));
 
     let managedblockchain_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

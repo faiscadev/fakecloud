@@ -215,6 +215,7 @@ jobs:
           publish fakecloud-serverlessrepo   # only core/persistence deps
           publish fakecloud-iotdata          # only core/persistence deps
           publish fakecloud-pinpoint         # only core/persistence deps
+          publish fakecloud-iot              # only core/persistence deps
           publish fakecloud-managedblockchain # only core/persistence/aws deps
           publish fakecloud-servicediscovery # only core/persistence/aws deps
           publish fakecloud-account          # only core/persistence/aws deps
