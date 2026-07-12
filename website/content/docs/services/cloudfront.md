@@ -90,18 +90,30 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 ## Admin endpoints
 
-- `GET /_fakecloud/cloudfront/distributions` — list stored distributions with `{id, domainName, enabled, boundPort}`. `boundPort` is the local data-plane listener port (see below), or `null` when the distribution is not currently served. This is how tests discover where to send viewer requests, since the `*.cloudfront.net` domain is cosmetic.
+- `GET /_fakecloud/cloudfront/distributions` — list stored distributions with `{id, domainName, enabled, served}`. `domainName` is the distribution's `<id>.cloudfront.net` domain — send it as the `Host` header to fakecloud's main endpoint to reach the distribution (see below). `served` is `true` when the distribution is enabled and the data plane is active (`false` when disabled, or when the data plane is turned off via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`).
 - `POST /_fakecloud/cloudfront/distributions/{id}/status` — flip a stored distribution's reported `Status` (e.g. between `InProgress` and `Deployed`) without waiting on the auto-deploy tick. Body: `{"status": "Deployed"}`. Returns `204 No Content` on success and `404 Not Found` for an unknown id. Useful for tests that assert behavior gated on the post-deploy status.
 
 ## Local data plane
 
-fakecloud runs a single-node, in-process HTTP data plane for CloudFront (modeled on the ELBv2 ALB data plane). For each **enabled** distribution, a supervisor binds a `TcpListener` on `127.0.0.1:0` and records the port as `boundPort` (discover it via `GET /_fakecloud/cloudfront/distributions`); the listener is torn down when the distribution is disabled or deleted, and enabled distributions re-bind on startup in persistent mode. Viewer requests are served by:
+fakecloud runs a single-node, in-process HTTP data plane for CloudFront. Distributions are served **on fakecloud's own main `--addr` listener**, routed by the request `Host` header — there is no separate per-distribution port. A viewer request whose `Host` matches an **enabled** distribution's `DomainName` (`<id>.cloudfront.net`) or one of its alternate domain names (`Aliases` / CNAMEs) is served by the data plane; every other request (the AWS API, `/_fakecloud/*`) is dispatched normally.
 
+Because distributions share the main port, a distribution is reachable from outside a container whenever that port is published — no second listener to expose. This matches real CloudFront, where a distribution is reached by its domain, not a port:
+
+```bash
+docker run -d -p 4566:4566 ghcr.io/faiscadev/fakecloud:latest
+# ... create a distribution, note its DomainName (e.g. e1abc.cloudfront.net) ...
+# Reach it from the host by sending the distribution domain as Host:
+curl -s -H 'Host: e1abc.cloudfront.net' http://localhost:4566/
+```
+
+Viewer requests are served by:
+
+- **Host routing** — the `Host` header selects the distribution (its `<id>.cloudfront.net` domain or an alias CNAME; case-insensitive, port ignored).
 - **Path-pattern routing** — the request path is matched against the ordered `CacheBehaviors` (`*` / `?` globs, e.g. `/api/*`), falling back to the `DefaultCacheBehavior`, to pick the target origin.
 - **Origin fetch** — the origin is reverse-proxied. An S3-website origin (`*.s3-website-<region>.amazonaws.com`) is reached on fakecloud's own port with the website `Host` preserved (as real CloudFront treats an S3-website endpoint as a custom origin). A custom origin honors its `CustomOriginConfig`: an `https-only` protocol policy is fetched over HTTPS (otherwise HTTP), and the configured `HTTPPort` / `HTTPSPort` is used unless the origin `DomainName` already carries an explicit `host:port`.
 - **CustomErrorResponses** — an origin status matching a configured rule with a response page path is served from the default origin with the rule's `ResponseCode` (e.g. `404 -> /index.html` returned as `200`, the SPA deep-link fallback).
 
-Disable the data plane with `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE=1` to run control-plane only.
+Disable the data plane with `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE=1` to run control-plane only (distributions then report `served: false`).
 
 ## Caveats
 

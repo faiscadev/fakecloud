@@ -84,6 +84,23 @@ use fakecloud_stepfunctions::StepFunctionsService;
 mod hooks;
 use hooks::*;
 
+/// Outer middleware that serves CloudFront viewer traffic on the main listener.
+/// If the request's `Host` matches an enabled distribution, the data plane
+/// proxies it to the resolved origin; otherwise the request is handed back for
+/// normal AWS dispatch (the common case for all API / introspection traffic).
+async fn cloudfront_viewer_middleware(
+    axum::extract::State(dp): axum::extract::State<
+        std::sync::Arc<fakecloud_cloudfront::dataplane::CloudFrontDataPlane>,
+    >,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match dp.serve(req).await {
+        Ok(resp) => resp,
+        Err(req) => next.run(req).await,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -3279,10 +3296,16 @@ async fn main() {
     cloudfront_inner.rearm_in_progress();
     let cloudfront_service = Arc::new(cloudfront_inner);
     registry.register(cloudfront_service.clone());
-    // Start the in-process data plane: enabled distributions bind a listener
-    // and serve viewer traffic (discovered via /_fakecloud/cloudfront/*).
-    // Pass the server's own port so S3-website origins can be reached here.
-    cloudfront_service.start_dataplane(bound_addr.port());
+    // Build the in-process CloudFront data plane. Enabled distributions are served
+    // on THIS main listener, routed by the `Host` header (their `<id>.cloudfront.net`
+    // domain or an alias CNAME), via an outer middleware installed below. No second
+    // port is opened, so a distribution is reachable from outside a container
+    // whenever the main port is published. `bound_addr.port()` is passed so
+    // S3-website origins (served by this same process) can be reached here.
+    let cloudfront_dataplane = fakecloud_cloudfront::dataplane::CloudFrontDataPlane::new(
+        cloudfront_service.shared_state(),
+        bound_addr.port(),
+    );
     let cloudfront_introspection_state = cloudfront_state.clone();
     let route53_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -11517,7 +11540,14 @@ async fn main() {
             Extension(registry_arc)
         })
         .layer(Extension(Arc::new(config)))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        // Outermost: CloudFront viewer routing. Requests whose `Host` matches an
+        // enabled distribution are served by the data plane; everything else
+        // (the AWS API, `/_fakecloud/*`, health) falls straight through.
+        .layer(axum::middleware::from_fn_with_state(
+            cloudfront_dataplane,
+            cloudfront_viewer_middleware,
+        ));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

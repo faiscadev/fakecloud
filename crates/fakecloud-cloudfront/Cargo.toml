@@ -12,6 +12,7 @@ fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
 base64 = { workspace = true }
 boa_engine = "0.21"
 bytes = { workspace = true }

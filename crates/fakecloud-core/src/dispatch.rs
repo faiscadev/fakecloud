@@ -1012,7 +1012,11 @@ fn streaming_route(
 /// stress tests that push past the default.
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
-fn max_request_body_bytes() -> usize {
+/// The server-wide buffered request body cap in bytes, from
+/// `FAKECLOUD_MAX_REQUEST_BODY_BYTES` (default 1 GiB). Public so buffered
+/// sub-proxies (e.g. the CloudFront viewer data plane) apply the SAME cap as
+/// direct traffic rather than an inconsistent limit of their own.
+pub fn max_request_body_bytes() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         std::env::var("FAKECLOUD_MAX_REQUEST_BODY_BYTES")

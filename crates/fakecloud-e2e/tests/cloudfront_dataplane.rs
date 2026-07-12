@@ -1,9 +1,13 @@
 // crates/fakecloud-e2e/tests/cloudfront_dataplane.rs
-//! CloudFront data-plane E2E tests: distribution discovery
-//! (`/_fakecloud/cloudfront/distributions`) and the in-process data plane
-//! (listener lifecycle: bind on enable, tear down on disable/delete, rebind on
-//! startup in persistent mode). Origin routing + CustomErrorResponses are added
-//! by later tasks.
+//! CloudFront data-plane E2E tests. Distributions are served on the server's
+//! MAIN listener, routed by the `Host` header (their `<id>.cloudfront.net`
+//! domain or an alias CNAME) -- there is no per-distribution ephemeral port.
+//! These tests reach a distribution by sending a request to the main endpoint
+//! with the distribution's domain as `Host`, and cover: introspection discovery
+//! (`/_fakecloud/cloudfront/distributions`, the `served` flag), enable/disable
+//! serving lifecycle, S3-website + custom-origin routing, alias/CNAME routing,
+//! CustomErrorResponses (SPA fallback), startup rebind in persistent mode, and
+//! that non-matching (AWS API) traffic is NOT intercepted.
 
 // The SPA distribution config uses `ForwardedValues` (legacy, pre-cache-policy),
 // which the AWS SDK marks deprecated in favor of CachePolicyId. It is the
@@ -13,14 +17,28 @@
 mod helpers;
 
 use aws_sdk_cloudfront::types::{
-    CacheBehavior, CacheBehaviors, CookiePreference, CustomErrorResponse, CustomErrorResponses,
-    CustomOriginConfig, DefaultCacheBehavior, DistributionConfig, ForwardedValues, Headers,
-    ItemSelection, Origin, OriginProtocolPolicy, Origins, ViewerProtocolPolicy,
+    Aliases, CacheBehavior, CacheBehaviors, CookiePreference, CustomErrorResponse,
+    CustomErrorResponses, CustomOriginConfig, DefaultCacheBehavior, DistributionConfig,
+    ForwardedValues, Headers, ItemSelection, Origin, OriginProtocolPolicy, Origins,
+    ViewerProtocolPolicy,
 };
 use helpers::TestServer;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+/// GET the main server endpoint with an explicit `Host` header -- how a viewer
+/// reaches a distribution now that they are served on the main listener routed
+/// by `Host`. `host` is the distribution's `<id>.cloudfront.net` domain (or an
+/// alias CNAME).
+async fn viewer_get(server: &TestServer, host: &str, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{}{}", server.endpoint(), path))
+        .header(reqwest::header::HOST, host)
+        .send()
+        .await
+        .expect("viewer request sends")
+}
 
 /// Creates a minimal SPA-style distribution: an S3-website default origin,
 /// an optional `/api/*` custom origin cache behavior, and a 404 -> /index.html
@@ -37,6 +55,7 @@ pub async fn make_spa_distribution(
         &format!("spa-{}", uuid_like()),
         true,
         true,
+        &[],
     );
     let create = cf
         .create_distribution()
@@ -59,6 +78,7 @@ fn spa_config(
     caller_reference: &str,
     enabled: bool,
     with_error_rule: bool,
+    aliases: &[&str],
 ) -> DistributionConfig {
     let mut origins_items = vec![Origin::builder()
         .id("o1")
@@ -115,7 +135,17 @@ fn spa_config(
     let mut config_builder = DistributionConfig::builder()
         .caller_reference(caller_reference)
         .comment("spa e2e")
-        .enabled(enabled)
+        .enabled(enabled);
+
+    if !aliases.is_empty() {
+        let mut alias_builder = Aliases::builder().quantity(aliases.len() as i32);
+        for a in aliases {
+            alias_builder = alias_builder.items(*a);
+        }
+        config_builder = config_builder.aliases(alias_builder.build().unwrap());
+    }
+
+    config_builder = config_builder
         .origins(
             Origins::builder()
                 .quantity(origins_len)
@@ -187,12 +217,23 @@ fn uuid_like() -> String {
     )
 }
 
-/// Poll the introspection route until the distribution reports a bound port.
-async fn wait_for_bound_port(
+/// Poll the introspection route until the distribution reports `served: true`.
+/// Returns false if it never becomes served within the deadline.
+async fn wait_for_served(server: &TestServer, dist_id: &str, deadline: Duration) -> bool {
+    wait_for_served_state(server, dist_id, true, deadline).await
+}
+
+/// Poll until the distribution reports `served: false` (stopped serving).
+async fn wait_for_unserved(server: &TestServer, dist_id: &str, deadline: Duration) -> bool {
+    wait_for_served_state(server, dist_id, false, deadline).await
+}
+
+async fn wait_for_served_state(
     server: &TestServer,
     dist_id: &str,
+    want: bool,
     deadline: Duration,
-) -> Option<u16> {
+) -> bool {
     let url = format!("{}/_fakecloud/cloudfront/distributions", server.endpoint());
     let client = reqwest::Client::new();
     let start = std::time::Instant::now();
@@ -201,10 +242,10 @@ async fn wait_for_bound_port(
             if let Ok(v) = r.json::<serde_json::Value>().await {
                 if let Some(arr) = v.get("distributions").and_then(|x| x.as_array()) {
                     for d in arr {
-                        if d.get("id").and_then(|x| x.as_str()) == Some(dist_id) {
-                            if let Some(p) = d.get("boundPort").and_then(|x| x.as_u64()) {
-                                return Some(p as u16);
-                            }
+                        if d.get("id").and_then(|x| x.as_str()) == Some(dist_id)
+                            && d.get("served").and_then(|x| x.as_bool()) == Some(want)
+                        {
+                            return true;
                         }
                     }
                 }
@@ -212,7 +253,7 @@ async fn wait_for_bound_port(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    None
+    false
 }
 
 #[tokio::test]
@@ -236,7 +277,14 @@ async fn introspection_route_lists_distributions() {
         .await
         .unwrap();
     let arr = v["distributions"].as_array().unwrap();
-    assert!(arr.iter().any(|d| d["id"].as_str() == Some(dist.id())));
+    let entry = arr
+        .iter()
+        .find(|d| d["id"].as_str() == Some(dist.id()))
+        .expect("distribution listed");
+    // Enabled distribution is served on the main listener; the domain to reach
+    // it is surfaced as `domainName` (the Host to send).
+    assert_eq!(entry["served"].as_bool(), Some(true));
+    assert_eq!(entry["domainName"].as_str(), Some(dist.domain_name()));
 }
 
 /// Disable a distribution: fetch its config + ETag, flip `enabled` to false,
@@ -268,6 +316,7 @@ async fn disable_distribution(
         &caller_reference,
         false,
         true,
+        &[],
     );
     cf.update_distribution()
         .id(id)
@@ -278,33 +327,8 @@ async fn disable_distribution(
         .expect("update_distribution");
 }
 
-/// Poll until the distribution is no longer reporting a bound port (listener
-/// torn down). Returns false if it never unbinds within the deadline.
-async fn wait_for_unbound(server: &TestServer, dist_id: &str, deadline: Duration) -> bool {
-    let url = format!("{}/_fakecloud/cloudfront/distributions", server.endpoint());
-    let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
-    while start.elapsed() < deadline {
-        if let Ok(r) = client.get(&url).send().await {
-            if let Ok(v) = r.json::<serde_json::Value>().await {
-                if let Some(arr) = v.get("distributions").and_then(|x| x.as_array()) {
-                    let still_bound = arr.iter().any(|d| {
-                        d.get("id").and_then(|x| x.as_str()) == Some(dist_id)
-                            && d.get("boundPort").and_then(|x| x.as_u64()).is_some()
-                    });
-                    if !still_bound {
-                        return true;
-                    }
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    false
-}
-
 #[tokio::test]
-async fn binds_on_enable_and_stops_on_disable() {
+async fn serves_on_enable_and_stops_on_disable() {
     let server = TestServer::start().await;
     let cf = server.cloudfront_client().await;
     let dist = make_spa_distribution(
@@ -314,22 +338,20 @@ async fn binds_on_enable_and_stops_on_disable() {
     )
     .await;
 
-    // Bind on enable: the supervisor allocates a listener and records the port.
-    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
-        .await
-        .expect("data plane should bind a port for the enabled distribution");
+    // Enabled -> served on the main listener.
+    assert!(
+        wait_for_served(&server, dist.id(), Duration::from_secs(10)).await,
+        "enabled distribution should be served"
+    );
 
-    // The bound listener answers an HTTP request (this test asserts the
-    // lifecycle, not origin content — the default origin here has no bucket, so
-    // the proxied response is a 4xx/5xx; a successful send still proves the port
-    // is serving). Origin content is covered by the S3-website test.
-    reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/"))
-        .send()
-        .await
-        .expect("bound listener answers");
+    // A viewer request routed by Host is answered (this asserts serving, not
+    // origin content — the default origin here has no bucket, so the proxied
+    // response is a 4xx/5xx; a successful send still proves the data plane
+    // handled it). Origin content is covered by the S3-website test.
+    viewer_get(&server, dist.domain_name(), "/").await;
 
-    // Disable -> supervisor tears the listener down and clears bound_port.
+    // Disable -> the data plane stops serving it (served flips to false) and its
+    // Host no longer routes to a distribution.
     disable_distribution(
         &cf,
         dist.id(),
@@ -338,8 +360,8 @@ async fn binds_on_enable_and_stops_on_disable() {
     )
     .await;
     assert!(
-        wait_for_unbound(&server, dist.id(), Duration::from_secs(10)).await,
-        "disabled distribution should stop serving / clear bound_port"
+        wait_for_unserved(&server, dist.id(), Duration::from_secs(10)).await,
+        "disabled distribution should stop being served"
     );
 }
 
@@ -448,31 +470,21 @@ async fn serves_static_from_s3_website_origin_and_routes_api() {
         Some(&api_domain),
     )
     .await;
-    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
-        .await
-        .expect("bind");
-    let http = reqwest::Client::new();
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
+    let host = dist.domain_name();
 
     // Default (S3-website) origin serves the hashed asset.
-    let r = http
-        .get(format!("http://127.0.0.1:{port}/assets/app.js"))
-        .send()
-        .await
-        .unwrap();
+    let r = viewer_get(&server, host, "/assets/app.js").await;
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "APPJS");
 
     // /api/* routes to the custom origin (echo proves it hit the API origin).
-    let r = http
-        .get(format!("http://127.0.0.1:{port}/api/orders"))
-        .send()
-        .await
-        .unwrap();
+    let r = viewer_get(&server, host, "/api/orders").await;
     assert_eq!(r.text().await.unwrap(), "ECHO /api/orders");
 }
 
 #[tokio::test]
-async fn rebinds_enabled_distribution_on_restart_persistent() {
+async fn stays_served_after_restart_persistent() {
     let tmp = tempfile::tempdir().unwrap();
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let cf = server.cloudfront_client().await;
@@ -484,17 +496,20 @@ async fn rebinds_enabled_distribution_on_restart_persistent() {
     .await;
     let id = dist.id().to_string();
 
-    wait_for_bound_port(&server, &id, Duration::from_secs(10))
-        .await
-        .expect("distribution should bind before restart");
+    assert!(
+        wait_for_served(&server, &id, Duration::from_secs(10)).await,
+        "distribution should be served before restart"
+    );
 
-    // Restart from the same data dir: the persisted enabled distribution must
-    // re-bind on the first supervisor tick (startup rebind).
+    // Restart from the same data dir: the persisted enabled distribution is
+    // served again immediately on the main listener (no per-distribution
+    // listener to rebind, routing is derived from persisted state).
     server.restart().await;
 
-    wait_for_bound_port(&server, &id, Duration::from_secs(10))
-        .await
-        .expect("enabled distribution should rebind on startup in persistent mode");
+    assert!(
+        wait_for_served(&server, &id, Duration::from_secs(10)).await,
+        "enabled distribution should stay served after restart in persistent mode"
+    );
 }
 
 /// A distribution with an S3-website default origin and NO CustomErrorResponses,
@@ -509,6 +524,7 @@ async fn make_static_distribution(
         &format!("static-{}", uuid_like()),
         true,
         false,
+        &[],
     );
     let create = cf
         .create_distribution()
@@ -526,17 +542,11 @@ async fn spa_deep_route_falls_back_to_index_200() {
     make_website_bucket(&s3, "spa").await;
     let cf = server.cloudfront_client().await;
     let dist = make_spa_distribution(&cf, "spa.s3-website-us-east-1.amazonaws.com", None).await;
-    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
-        .await
-        .expect("bind");
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
 
     // Deep client-side route: no such S3 key -> origin 404 -> CustomErrorResponse
     // (404 -> /index.html) served as 200.
-    let r = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/orders/123"))
-        .send()
-        .await
-        .unwrap();
+    let r = viewer_get(&server, dist.domain_name(), "/orders/123").await;
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "<html>HOME</html>");
 }
@@ -548,16 +558,89 @@ async fn missing_path_stays_404_without_error_rule() {
     make_website_bucket(&s3, "static").await;
     let cf = server.cloudfront_client().await;
     let dist = make_static_distribution(&cf, "static.s3-website-us-east-1.amazonaws.com").await;
-    let port = wait_for_bound_port(&server, dist.id(), Duration::from_secs(10))
-        .await
-        .expect("bind");
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
 
     // With no CustomErrorResponses, a genuinely missing path keeps the origin's
     // 404 (the data plane does not rewrite it to 200).
-    let r = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/assets/nope.js"))
+    let r = viewer_get(&server, dist.domain_name(), "/assets/nope.js").await;
+    assert_eq!(r.status(), 404);
+}
+
+#[tokio::test]
+async fn routes_by_alias_cname() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    make_website_bucket(&s3, "aliassite").await;
+    let cf = server.cloudfront_client().await;
+
+    // Distribution with an alternate domain name (CNAME). A viewer request whose
+    // Host is the alias must route to this distribution -- a capability the old
+    // per-distribution ephemeral-port design could not express.
+    let alias = "cdn.example.test";
+    let config = spa_config(
+        "aliassite.s3-website-us-east-1.amazonaws.com",
+        None,
+        &format!("alias-{}", uuid_like()),
+        true,
+        true,
+        &[alias],
+    );
+    let dist = cf
+        .create_distribution()
+        .distribution_config(config)
         .send()
         .await
-        .unwrap();
-    assert_eq!(r.status(), 404);
+        .expect("create_distribution")
+        .distribution()
+        .expect("distribution")
+        .clone();
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
+
+    // Reachable both by the canonical <id>.cloudfront.net domain and by the alias.
+    let r = viewer_get(&server, dist.domain_name(), "/").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "<html>HOME</html>");
+
+    let r = viewer_get(&server, alias, "/").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "<html>HOME</html>");
+}
+
+#[tokio::test]
+async fn api_traffic_is_not_intercepted() {
+    // The viewer middleware must only intercept requests whose Host matches a
+    // distribution. Normal AWS API calls (Host = the endpoint authority, not a
+    // distribution domain) must pass straight through to dispatch even while a
+    // distribution exists.
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(
+        &cf,
+        "example-bucket.s3-website-us-east-1.amazonaws.com",
+        None,
+    )
+    .await;
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
+
+    // A CloudFront API call still works (proves the middleware passed it through).
+    let listed = cf
+        .list_distributions()
+        .send()
+        .await
+        .expect("list_distributions must pass through the viewer middleware");
+    let ids: Vec<_> = listed
+        .distribution_list()
+        .map(|l| l.items())
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d.id().to_string())
+        .collect();
+    assert!(ids.iter().any(|id| id == dist.id()));
+
+    // An S3 call (different service, non-matching Host) also works.
+    let s3 = server.s3_client().await;
+    s3.list_buckets()
+        .send()
+        .await
+        .expect("s3 list_buckets must pass through the viewer middleware");
 }

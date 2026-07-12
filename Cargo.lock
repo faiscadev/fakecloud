@@ -4907,6 +4907,7 @@ name = "fakecloud-cloudfront"
 version = "0.40.1"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "boa_engine",
  "bytes",
