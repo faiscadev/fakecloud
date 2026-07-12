@@ -672,7 +672,7 @@ impl StsService {
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
         let assumed_role_arn = format!(
             "arn:{}:sts::{}:assumed-role/{}/{}",
-            partition, account_id, role_name, &role_session_name
+            partition, account_id, role_name, role_session_name
         );
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 

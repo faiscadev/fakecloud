@@ -867,10 +867,9 @@ fn lookup_s3_addresses(
         &lower[..idx]
     } else if let Some(idx) = lower.find(".s3.") {
         &lower[..idx]
-    } else if let Some(idx) = lower.find(".s3-") {
-        &lower[..idx]
     } else {
-        return None;
+        let idx = lower.find(".s3-")?;
+        &lower[..idx]
     };
     if bucket.is_empty() {
         return None;

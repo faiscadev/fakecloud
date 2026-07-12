@@ -403,7 +403,7 @@ impl SsmService {
         let target_id = format!(
             "{}-{}",
             window_id,
-            &uuid::Uuid::new_v4().to_string().replace('-', "")
+            uuid::Uuid::new_v4().to_string().replace('-', "")
         );
 
         let mut accounts = self.state.write();
@@ -524,7 +524,7 @@ impl SsmService {
         let task_id = format!(
             "{}-{}",
             window_id,
-            &uuid::Uuid::new_v4().to_string().replace('-', "")
+            uuid::Uuid::new_v4().to_string().replace('-', "")
         );
 
         let mut accounts = self.state.write();

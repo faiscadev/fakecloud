@@ -954,7 +954,7 @@ fn redirect_action(
     };
     let port = cfg.port.clone();
     let port_seg = port
-        .and_then(|p| if p == "#{port}" { None } else { Some(p) })
+        .filter(|p| p != "#{port}")
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
     // Only the scheme and host are case-insensitive; path and query
