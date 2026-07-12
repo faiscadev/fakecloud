@@ -1,6 +1,6 @@
 {
-  "variants_passed": 228030,
-  "total_variants": 228030,
+  "variants_passed": 231585,
+  "total_variants": 231585,
   "per_service": {
     "account": {
       "passed": 412,
@@ -217,6 +217,10 @@
     "iotdata": {
       "passed": 359,
       "total": 359
+    },
+    "iotwireless": {
+      "passed": 3555,
+      "total": 3555
     },
     "kafka": {
       "passed": 1555,

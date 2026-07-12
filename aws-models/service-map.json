@@ -383,6 +383,10 @@
     "repo_dir": "iot",
     "service_name": "iot"
   },
+  "iotwireless": {
+    "repo_dir": "iot-wireless",
+    "service_name": "iotwireless"
+  },
   "managedblockchain": {
     "repo_dir": "managedblockchain",
     "service_name": "managedblockchain"

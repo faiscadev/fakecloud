@@ -87,6 +87,7 @@ fakecloud-serverlessrepo = { workspace = true }
 fakecloud-iotdata = { workspace = true }
 fakecloud-pinpoint = { workspace = true }
 fakecloud-iot = { workspace = true }
+fakecloud-iotwireless = { workspace = true }
 fakecloud-managedblockchain = { workspace = true }
 fakecloud-config = { workspace = true }
 fakecloud-route53resolver = { workspace = true }
