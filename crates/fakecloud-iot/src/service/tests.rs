@@ -280,6 +280,14 @@ fn create_keys_and_certificate_mints_real_shapes() {
         desc["certificateDescription"]["certificateArn"],
         doc["certificateArn"]
     );
+    // The server-generated `creationDate` is a restJson1 epoch-seconds number,
+    // not an RFC3339 string (which the aws-sdk timestamp deserializer rejects).
+    let creation_date = &desc["certificateDescription"]["creationDate"];
+    assert!(
+        creation_date.is_number(),
+        "creationDate must be a numeric epoch-seconds timestamp, got {creation_date:?}"
+    );
+    assert!(creation_date.as_f64().unwrap() > 1_600_000_000.0);
 }
 
 // ---------- attach thing principal ----------
@@ -351,6 +359,20 @@ fn job_and_topic_rule_lifecycle() {
     .unwrap();
     let rule = body_of(&run(&s, "GET", "/rules/r1", &[], Value::Null).unwrap());
     assert_eq!(rule["rule"]["ruleName"], "r1");
+    // restJson1 (IoT's protocol) wire-encodes timestamps as epoch-seconds JSON
+    // numbers, NOT RFC3339 strings. The aws-sdk timestamp deserializer rejects a
+    // string here, so `createdAt` must round-trip through create -> get as a
+    // number whose value is a plausible Unix epoch-seconds instant.
+    let created_at = &rule["rule"]["createdAt"];
+    assert!(
+        created_at.is_number(),
+        "createdAt must be a numeric epoch-seconds timestamp, got {created_at:?}"
+    );
+    let secs = created_at.as_f64().unwrap();
+    assert!(
+        secs > 1_600_000_000.0,
+        "createdAt {secs} is not a plausible epoch-seconds value"
+    );
 }
 
 // ---------- endpoint / registration code / tags ----------
@@ -761,7 +783,9 @@ fn build_success_request(meta: &OpMeta) -> (String, String, Vec<(String, String)
             Src::Header => headers.push((rule.wire.to_string(), string_val())),
             Src::Body => {
                 let v = match rule.kind {
-                    K::Str | K::Blob | K::Ts => Value::String(string_val()),
+                    K::Str | K::Blob => Value::String(string_val()),
+                    // restJson1 timestamps wire-encode as epoch-seconds numbers.
+                    K::Ts => Value::from(1_752_324_947.041_f64),
                     K::Int | K::Num => Value::Number(rule.min_val.unwrap_or(1).into()),
                     K::Bool => Value::Bool(true),
                     K::List => Value::Array(vec![]),

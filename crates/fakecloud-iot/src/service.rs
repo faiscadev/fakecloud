@@ -304,8 +304,14 @@ pub(crate) fn parse_body(body: &[u8]) -> Map<String, Value> {
     }
 }
 
-pub(crate) fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+/// Current time as a restJson1 timestamp: Unix epoch **seconds** encoded as a
+/// JSON number, with fractional milliseconds preserved (e.g. `1752324947.041`).
+/// This is the default `timestamp` wire format for the `restJson1` protocol
+/// (which AWS IoT Core uses), and is what the aws-sdk / aws-smithy timestamp
+/// deserializer expects — an RFC3339 string would be rejected.
+pub(crate) fn now_epoch() -> Value {
+    let millis = chrono::Utc::now().timestamp_millis();
+    Value::from(millis as f64 / 1000.0)
 }
 
 pub(crate) fn query_get<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -431,7 +437,10 @@ fn fnv(s: &str) -> u64 {
 /// Whether a JSON value's type is compatible with a modelled member kind.
 pub(crate) fn kind_matches(kind: K, v: &Value) -> bool {
     match kind {
-        K::Str | K::Blob | K::Ts => v.is_string(),
+        K::Str | K::Blob => v.is_string(),
+        // restJson1 timestamps wire-encode as epoch-seconds JSON numbers; accept
+        // a string too so any legacy/ISO stored value still projects.
+        K::Ts => v.is_string() || v.is_number(),
         K::Int | K::Num => v.is_number(),
         K::Bool => v.is_boolean(),
         K::List => v.is_array(),

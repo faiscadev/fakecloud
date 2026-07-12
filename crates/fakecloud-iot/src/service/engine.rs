@@ -16,7 +16,7 @@ use crate::generated::{OpMeta, K};
 use crate::state::IotData;
 
 use super::{
-    build_element, build_output, mint_arn, mint_uuid, now_iso, ok_json, query_get, resource_type,
+    build_element, build_output, mint_arn, mint_uuid, now_epoch, ok_json, query_get, resource_type,
     storage_key, Ctx,
 };
 
@@ -74,7 +74,7 @@ fn build_record(
                 );
             }
             K::Ts => {
-                record.insert((*wire).to_string(), Value::String(now_iso()));
+                record.insert((*wire).to_string(), now_epoch());
             }
             _ => {}
         }
@@ -130,7 +130,7 @@ pub(super) fn update(
         for (k, v) in body {
             obj.insert(k.clone(), v.clone());
         }
-        obj.insert("lastModifiedDate".to_string(), Value::String(now_iso()));
+        obj.insert("lastModifiedDate".to_string(), now_epoch());
     }
     let out = build_output(meta, &record);
     data.put_resource(&rtype, &key, record);

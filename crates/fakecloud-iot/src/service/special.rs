@@ -308,7 +308,7 @@ fn store_certificate(
         "certificateArn": arn,
         "status": if active { "ACTIVE" } else { "INACTIVE" },
         "certificatePem": placeholder_pem("CERTIFICATE", cert_id),
-        "creationDate": super::now_iso(),
+        "creationDate": super::now_epoch(),
         "caCertificateId": Value::Null,
     });
     let mut g = svc.state.write();
@@ -629,9 +629,7 @@ fn put_topic_rule(
         "ruleArn".to_string(),
         Value::String(mint_arn(ctx, "rules", name)),
     );
-    record
-        .entry("createdAt")
-        .or_insert_with(|| Value::String(super::now_iso()));
+    record.entry("createdAt").or_insert_with(super::now_epoch);
     // Preserve the disabled flag across a replace; default to enabled.
     let disabled = existing
         .as_ref()
