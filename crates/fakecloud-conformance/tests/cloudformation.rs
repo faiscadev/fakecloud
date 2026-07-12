@@ -18,9 +18,9 @@ const SIMPLE_TEMPLATE: &str = r#"{
 // Stack lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("cloudformation", "CreateStack", checksum = "796b3bcd")]
-#[test_action("cloudformation", "DescribeStacks", checksum = "ae6b90a4")]
-#[test_action("cloudformation", "DeleteStack", checksum = "de60ab3d")]
+#[test_action("cloudformation", "CreateStack", checksum = "305fd6f4")]
+#[test_action("cloudformation", "DescribeStacks", checksum = "1cb6a592")]
+#[test_action("cloudformation", "DeleteStack", checksum = "83ff08df")]
 #[tokio::test]
 async fn cloudformation_create_describe_delete_stack() {
     let server = TestServer::start().await;
@@ -172,7 +172,7 @@ async fn cloudformation_describe_stack_resources() {
 // UpdateStack
 // ---------------------------------------------------------------------------
 
-#[test_action("cloudformation", "UpdateStack", checksum = "46613ba0")]
+#[test_action("cloudformation", "UpdateStack", checksum = "6aeeb381")]
 #[tokio::test]
 async fn cloudformation_update_stack() {
     let server = TestServer::start().await;
@@ -287,7 +287,7 @@ async fn cfn_post(server: &TestServer, action: &str, params: &[(&str, &str)]) ->
 )]
 #[test_action("cloudformation", "CancelUpdateStack", checksum = "2ea0802c")]
 #[test_action("cloudformation", "ContinueUpdateRollback", checksum = "df1d3017")]
-#[test_action("cloudformation", "CreateChangeSet", checksum = "2c3f92cb")]
+#[test_action("cloudformation", "CreateChangeSet", checksum = "0ad063e9")]
 #[test_action("cloudformation", "CreateGeneratedTemplate", checksum = "1f77f497")]
 #[test_action("cloudformation", "CreateStackInstances", checksum = "e31e799a")]
 #[test_action("cloudformation", "CreateStackRefactor", checksum = "316d91f3")]
@@ -304,7 +304,7 @@ async fn cfn_post(server: &TestServer, action: &str, params: &[(&str, &str)]) ->
 #[test_action("cloudformation", "DeleteStackSet", checksum = "03dbedcc")]
 #[test_action("cloudformation", "DeregisterType", checksum = "0655643d")]
 #[test_action("cloudformation", "DescribeAccountLimits", checksum = "59b20123")]
-#[test_action("cloudformation", "DescribeChangeSet", checksum = "77a9b82c")]
+#[test_action("cloudformation", "DescribeChangeSet", checksum = "42c92889")]
 #[test_action("cloudformation", "DescribeChangeSetHooks", checksum = "02683306")]
 #[test_action("cloudformation", "DescribeEvents", checksum = "c27983c2")]
 #[test_action("cloudformation", "DescribeGeneratedTemplate", checksum = "b597597b")]
@@ -375,7 +375,7 @@ async fn cfn_post(server: &TestServer, action: &str, params: &[(&str, &str)]) ->
 #[test_action("cloudformation", "RecordHandlerProgress", checksum = "9fc527f8")]
 #[test_action("cloudformation", "RegisterPublisher", checksum = "0ffee522")]
 #[test_action("cloudformation", "RegisterType", checksum = "ac98b9ac")]
-#[test_action("cloudformation", "RollbackStack", checksum = "b3a3f1b7")]
+#[test_action("cloudformation", "RollbackStack", checksum = "5ff4caea")]
 #[test_action("cloudformation", "SetStackPolicy", checksum = "f5625560")]
 #[test_action("cloudformation", "SetTypeConfiguration", checksum = "1b0cc5f5")]
 #[test_action("cloudformation", "SetTypeDefaultVersion", checksum = "deba6bf5")]

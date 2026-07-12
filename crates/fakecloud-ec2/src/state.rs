@@ -628,6 +628,10 @@ pub struct VpcEndpoint {
     /// Security groups attached to an Interface endpoint's ENIs.
     #[serde(default)]
     pub security_group_ids: Vec<String>,
+    /// Who pays for the endpoint: `vpc-endpoint-account` (default) or
+    /// `vpc-endpoint-service-account`. Set by ModifyVpcEndpointPayerResponsibility.
+    #[serde(default)]
+    pub payer_responsibility: String,
 }
 
 /// A VPC endpoint service configuration (PrivateLink provider side).
@@ -1229,6 +1233,31 @@ pub struct VpcEncryptionControl {
     pub exclusions: BTreeMap<String, String>,
 }
 
+/// Account-level VPC encryption control (`ModifyAccountVpcEncryptionControl` /
+/// `DescribeAccountVpcEncryptionControl`). A single account-scoped singleton,
+/// distinct from the per-VPC `VpcEncryptionControl` above.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountVpcEncryptionControl {
+    /// `unmanaged` | `attempt-monitor` | `attempt-enforce`.
+    pub mode: String,
+    /// `default-state` | `transitions-in-progress` | `transitions-successful` | ...
+    pub state: String,
+    /// Per-resource-type exclusion state, xml-member-name -> `enabled` |
+    /// `disabled` | `enabling` | `disabling`.
+    #[serde(default)]
+    pub exclusions: BTreeMap<String, String>,
+}
+
+impl Default for AccountVpcEncryptionControl {
+    fn default() -> Self {
+        Self {
+            mode: "unmanaged".to_string(),
+            state: "default-state".to_string(),
+            exclusions: BTreeMap::new(),
+        }
+    }
+}
+
 /// A VPC block-public-access exclusion (`CreateVpcBlockPublicAccessExclusion`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VpcBpaExclusion {
@@ -1334,6 +1363,10 @@ pub struct Ec2State {
     pub vpc_peerings: BTreeMap<String, VpcPeering>,
     #[serde(default)]
     pub vpc_endpoints: BTreeMap<String, VpcEndpoint>,
+    /// Account-level VPC encryption control singleton (None = never modified,
+    /// reported with default `unmanaged` / `default-state`).
+    #[serde(default)]
+    pub account_vpc_encryption_control: Option<AccountVpcEncryptionControl>,
     #[serde(default)]
     pub endpoint_services: BTreeMap<String, EndpointService>,
     #[serde(default)]

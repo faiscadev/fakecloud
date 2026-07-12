@@ -1992,7 +1992,7 @@ async fn ec2_delete_key_pair() {
         .all(|k| k.key_name() != Some("kp4")));
 }
 
-#[test_action("ec2", "CreatePlacementGroup", checksum = "66a063d2")]
+#[test_action("ec2", "CreatePlacementGroup", checksum = "d75eaee7")]
 #[tokio::test]
 async fn ec2_create_placement_group() {
     let s = TestServer::start().await;
@@ -2007,7 +2007,7 @@ async fn ec2_create_placement_group() {
     assert_eq!(r.placement_group().unwrap().group_name(), Some("pg1"));
 }
 
-#[test_action("ec2", "DescribePlacementGroups", checksum = "a75a2b4a")]
+#[test_action("ec2", "DescribePlacementGroups", checksum = "50d35e54")]
 #[tokio::test]
 async fn ec2_describe_placement_groups() {
     let s = TestServer::start().await;
@@ -2983,7 +2983,7 @@ async fn ec2_detach_volume() {
     assert_eq!(r.volume_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "ModifyVolume", checksum = "5f399766")]
+#[test_action("ec2", "ModifyVolume", checksum = "a66e5eb0")]
 #[tokio::test]
 async fn ec2_modify_volume() {
     let s = TestServer::start().await;
@@ -3002,7 +3002,7 @@ async fn ec2_modify_volume() {
     );
 }
 
-#[test_action("ec2", "DescribeVolumesModifications", checksum = "d60ecd74")]
+#[test_action("ec2", "DescribeVolumesModifications", checksum = "1a5f1257")]
 #[tokio::test]
 async fn ec2_describe_volumes_modifications() {
     let s = TestServer::start().await;
@@ -4148,7 +4148,7 @@ async fn make_vpce(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVpcEndpoint", checksum = "71acdc45")]
+#[test_action("ec2", "CreateVpcEndpoint", checksum = "5d77f198")]
 #[tokio::test]
 async fn ec2_create_vpc_endpoint() {
     let s = TestServer::start().await;
@@ -4169,7 +4169,7 @@ async fn ec2_create_vpc_endpoint() {
         .starts_with("vpce-"));
 }
 
-#[test_action("ec2", "DescribeVpcEndpoints", checksum = "9443c193")]
+#[test_action("ec2", "DescribeVpcEndpoints", checksum = "08305ed3")]
 #[tokio::test]
 async fn ec2_describe_vpc_endpoints() {
     let s = TestServer::start().await;
@@ -4228,7 +4228,7 @@ async fn ec2_describe_vpc_endpoint_services() {
     assert!(!r.service_names().is_empty());
 }
 
-#[test_action("ec2", "DescribeVpcEndpointConnections", checksum = "7ecaebfb")]
+#[test_action("ec2", "DescribeVpcEndpointConnections", checksum = "1f07a4c8")]
 #[tokio::test]
 async fn ec2_describe_vpc_endpoint_connections() {
     let s = TestServer::start().await;
@@ -5692,7 +5692,7 @@ async fn make_host(c: &aws_sdk_ec2::Client) -> String {
         .clone()
 }
 
-#[test_action("ec2", "AllocateHosts", checksum = "d9e19054")]
+#[test_action("ec2", "AllocateHosts", checksum = "ee797dd1")]
 #[tokio::test]
 async fn ec2_allocate_hosts() {
     let s = TestServer::start().await;
@@ -5708,7 +5708,7 @@ async fn ec2_allocate_hosts() {
     assert_eq!(r.host_ids().len(), 2);
 }
 
-#[test_action("ec2", "DescribeHosts", checksum = "5af4373d")]
+#[test_action("ec2", "DescribeHosts", checksum = "69d55287")]
 #[tokio::test]
 async fn ec2_describe_hosts() {
     let s = TestServer::start().await;
@@ -12548,6 +12548,64 @@ async fn ec2_modify_ipam_pool_allocation() {
         "Action=ModifyIpamPoolAllocation&Version=2016-11-15&IpamPoolAllocationId=ipam-pool-alloc-1",
     )
     .await;
+}
+
+#[test_action("ec2", "DescribeAccountVpcEncryptionControl", checksum = "424c5aa4")]
+#[tokio::test]
+async fn ec2_describe_account_vpc_encryption_control() {
+    let server = TestServer::start().await;
+    let resp = ec2_raw(
+        &server,
+        "Action=DescribeAccountVpcEncryptionControl&Version=2016-11-15",
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    // Unset account reports the default unmanaged / default-state control.
+    assert!(body.contains("<accountVpcEncryptionControl>"), "{body}");
+    assert!(body.contains("<mode>unmanaged</mode>"), "{body}");
+    assert!(body.contains("<state>default-state</state>"), "{body}");
+}
+
+#[test_action("ec2", "ModifyAccountVpcEncryptionControl", checksum = "a1e6d839")]
+#[tokio::test]
+async fn ec2_modify_account_vpc_encryption_control() {
+    let server = TestServer::start().await;
+    let resp = ec2_raw(
+        &server,
+        "Action=ModifyAccountVpcEncryptionControl&Version=2016-11-15\
+         &Mode=attempt-enforce&LambdaExclusion=enable",
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<mode>attempt-enforce</mode>"), "{body}");
+    // The enabled Lambda exclusion is reflected in the response.
+    assert!(
+        body.contains("<lambda><state>enabled</state></lambda>"),
+        "{body}"
+    );
+}
+
+#[test_action("ec2", "ModifyVpcEndpointPayerResponsibility", checksum = "f3767a31")]
+#[tokio::test]
+async fn ec2_modify_vpc_endpoint_payer_responsibility() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let id = make_vpce(&c).await;
+    let resp = ec2_raw(
+        &server,
+        &format!(
+            "Action=ModifyVpcEndpointPayerResponsibility&Version=2016-11-15\
+             &VpcEndpointId={id}&PayerResponsibility=vpc-endpoint-service-account\
+             &Scope=vpc-endpoint-charges"
+        ),
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(body.contains(&format!("<vpcEndpointId>{id}</vpcEndpointId>")), "{body}");
+    assert!(
+        body.contains("<payerResponsibilityType>vpc-endpoint-service-account</payerResponsibilityType>"),
+        "{body}"
+    );
 }
 
 #[test_action("ec2", "AttachImageWatermark", checksum = "fb734a5c")]

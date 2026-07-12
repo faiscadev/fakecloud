@@ -1,10 +1,10 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 5,605 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 5,611 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 5,605 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 5,611 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
@@ -15,7 +15,7 @@ fakecloud provides 100% API conformance across 5,605 operations. Unlike mocks, f
 ## Supported Services
 
 ### Compute & Containers
-- **EC2**: 769 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instances run as real containers — Docker/Podman by default or native Kubernetes Pods (`FAKECLOUD_EC2_BACKEND=k8s`) — running user-data at boot, with start/stop/reboot/terminate mapped to the container lifecycle and `GetConsoleOutput` returning the container log; degrades to metadata-only when no container runtime is present.
+- **EC2**: 772 operations. The complete EC2 control plane — VPCs, subnets, security groups, route tables, gateways, instances, EBS, AMIs, the full 74-op Transit Gateway surface, Site-to-Site + Client VPN, IPAM, Verified Access, Network Insights, and Outpost / local-gateway networking. Instances run as real containers — Docker/Podman by default or native Kubernetes Pods (`FAKECLOUD_EC2_BACKEND=k8s`) — running user-data at boot, with start/stop/reboot/terminate mapped to the container lifecycle and `GetConsoleOutput` returning the container log; degrades to metadata-only when no container runtime is present.
 - **Lambda**: 70 operations. Full execution environment in real Docker containers across 23 runtimes, cross-service triggers (S3, SNS, SQS, EventBridge).
 - **ECR**: 58 operations. Full OCI v2 Distribution protocol support for `docker push` and `docker pull`.
 - **ECS**: 77 operations. Real Fargate-style task execution via Docker, services with rolling deployments, ECS Exec.

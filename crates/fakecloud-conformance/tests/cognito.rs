@@ -4576,3 +4576,104 @@ async fn cognito_user_pool_replica_lifecycle() {
     .unwrap();
     assert_eq!(resp.status(), 200);
 }
+
+// ---------------------------------------------------------------------------
+// Provisioned throughput limits (account-level)
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "UpdateProvisionedLimit", checksum = "c699b2c9")]
+#[tokio::test]
+async fn cognito_update_provisioned_limit() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let limit_definition = serde_json::json!({
+        "LimitClass": "API_CATEGORY",
+        "Attributes": { "apiCategory": "UserAuthentication" }
+    });
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.UpdateProvisionedLimit",
+        )
+        .json(&serde_json::json!({
+            "LimitDefinition": limit_definition,
+            "RequestedLimitValue": 500
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Limit"]["ProvisionedLimitValue"], 500);
+    assert_eq!(body["Limit"]["LimitDefinition"]["LimitClass"], "API_CATEGORY");
+    assert_eq!(
+        body["Limit"]["LimitDefinition"]["Attributes"]["apiCategory"],
+        "UserAuthentication"
+    );
+}
+
+#[test_action("cognito-idp", "GetProvisionedLimit", checksum = "d6c3b6be")]
+#[tokio::test]
+async fn cognito_get_provisioned_limit() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = server.endpoint();
+
+    let limit_definition = serde_json::json!({
+        "LimitClass": "API_CATEGORY",
+        "Attributes": { "apiCategory": "UserAuthentication" }
+    });
+
+    // Unset definition reports a provisioned value of 0 (free-tier only).
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.GetProvisionedLimit",
+        )
+        .json(&serde_json::json!({ "LimitDefinition": limit_definition }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Limit"]["ProvisionedLimitValue"], 0);
+
+    // After provisioning, Get echoes the stored value back.
+    let update = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.UpdateProvisionedLimit",
+        )
+        .json(&serde_json::json!({
+            "LimitDefinition": limit_definition,
+            "RequestedLimitValue": 250
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), 200);
+
+    let resp = http
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.GetProvisionedLimit",
+        )
+        .json(&serde_json::json!({ "LimitDefinition": limit_definition }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Limit"]["ProvisionedLimitValue"], 250);
+}

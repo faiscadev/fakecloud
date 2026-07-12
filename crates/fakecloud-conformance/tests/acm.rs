@@ -26,7 +26,7 @@ async fn make_cert(server: &TestServer, domain: &str) -> String {
         .to_string()
 }
 
-#[test_action("acm", "RequestCertificate", checksum = "795348c4")]
+#[test_action("acm", "RequestCertificate", checksum = "040fb904")]
 #[tokio::test]
 async fn acm_request_certificate() {
     let server = TestServer::start().await;
@@ -38,7 +38,7 @@ async fn acm_request_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "DescribeCertificate", checksum = "d8f31b97")]
+#[test_action("acm", "DescribeCertificate", checksum = "8aa8ceaa")]
 #[tokio::test]
 async fn acm_describe_certificate() {
     let server = TestServer::start().await;
@@ -51,7 +51,7 @@ async fn acm_describe_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "ListCertificates", checksum = "e06172c7")]
+#[test_action("acm", "ListCertificates", checksum = "715fca42")]
 #[tokio::test]
 async fn acm_list_certificates() {
     let server = TestServer::start().await;
@@ -59,7 +59,7 @@ async fn acm_list_certificates() {
     acm.list_certificates().send().await.unwrap();
 }
 
-#[test_action("acm", "DeleteCertificate", checksum = "2881e632")]
+#[test_action("acm", "DeleteCertificate", checksum = "5478fa21")]
 #[tokio::test]
 async fn acm_delete_certificate() {
     let server = TestServer::start().await;
@@ -72,7 +72,7 @@ async fn acm_delete_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "ImportCertificate", checksum = "14eb26f8")]
+#[test_action("acm", "ImportCertificate", checksum = "e4238636")]
 #[tokio::test]
 async fn acm_import_certificate() {
     let server = TestServer::start().await;
@@ -85,7 +85,7 @@ async fn acm_import_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "ExportCertificate", checksum = "0d462416")]
+#[test_action("acm", "ExportCertificate", checksum = "b6507262")]
 #[tokio::test]
 async fn acm_export_certificate() {
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
@@ -121,7 +121,7 @@ async fn acm_export_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "GetCertificate", checksum = "4a899d0a")]
+#[test_action("acm", "GetCertificate", checksum = "bc969a34")]
 #[tokio::test]
 async fn acm_get_certificate() {
     let server = TestServer::start().await;
@@ -134,7 +134,7 @@ async fn acm_get_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "RenewCertificate", checksum = "a7519f9c")]
+#[test_action("acm", "RenewCertificate", checksum = "c5e940bd")]
 #[tokio::test]
 async fn acm_renew_certificate() {
     let server = TestServer::start().await;
@@ -147,7 +147,7 @@ async fn acm_renew_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "RevokeCertificate", checksum = "24bd5e25")]
+#[test_action("acm", "RevokeCertificate", checksum = "0d126732")]
 #[tokio::test]
 async fn acm_revoke_certificate() {
     let server = TestServer::start().await;
@@ -161,7 +161,7 @@ async fn acm_revoke_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "ResendValidationEmail", checksum = "e5d1dca9")]
+#[test_action("acm", "ResendValidationEmail", checksum = "7fc43329")]
 #[tokio::test]
 async fn acm_resend_validation_email() {
     let server = TestServer::start().await;
@@ -185,7 +185,7 @@ async fn acm_resend_validation_email() {
         .unwrap();
 }
 
-#[test_action("acm", "AddTagsToCertificate", checksum = "68f86501")]
+#[test_action("acm", "AddTagsToCertificate", checksum = "9e285fa1")]
 #[tokio::test]
 async fn acm_add_tags() {
     let server = TestServer::start().await;
@@ -199,7 +199,7 @@ async fn acm_add_tags() {
         .unwrap();
 }
 
-#[test_action("acm", "RemoveTagsFromCertificate", checksum = "59c03653")]
+#[test_action("acm", "RemoveTagsFromCertificate", checksum = "9527abb3")]
 #[tokio::test]
 async fn acm_remove_tags() {
     let server = TestServer::start().await;
@@ -219,7 +219,7 @@ async fn acm_remove_tags() {
         .unwrap();
 }
 
-#[test_action("acm", "ListTagsForCertificate", checksum = "07259da8")]
+#[test_action("acm", "ListTagsForCertificate", checksum = "1fb5690b")]
 #[tokio::test]
 async fn acm_list_tags() {
     let server = TestServer::start().await;
@@ -257,7 +257,7 @@ async fn acm_put_account_config() {
         .unwrap();
 }
 
-#[test_action("acm", "UpdateCertificateOptions", checksum = "7663903f")]
+#[test_action("acm", "UpdateCertificateOptions", checksum = "01fc07d9")]
 #[tokio::test]
 async fn acm_update_options() {
     let server = TestServer::start().await;
@@ -277,7 +277,7 @@ async fn acm_update_options() {
         .unwrap();
 }
 
-#[test_action("acm", "SearchCertificates", checksum = "96284413")]
+#[test_action("acm", "SearchCertificates", checksum = "4d6418b5")]
 #[tokio::test]
 async fn acm_search_certificates() {
     let server = TestServer::start().await;

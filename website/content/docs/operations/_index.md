@@ -1271,6 +1271,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetGroup`
 - `GetIdentityProviderByIdentifier`
 - `GetLogDeliveryConfiguration`
+- `GetProvisionedLimit`
 - `GetSigningCertificate`
 - `GetTokensFromRefreshToken`
 - `GetUICustomization`
@@ -1314,6 +1315,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateGroup`
 - `UpdateIdentityProvider`
 - `UpdateManagedLoginBranding`
+- `UpdateProvisionedLimit`
 - `UpdateResourceServer`
 - `UpdateTerms`
 - `UpdateUserAttributes`
@@ -4638,21 +4640,43 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 ## [ACM](@/docs/services/acm.md)
 
 - `AddTagsToCertificate`
+- `CreateAcmeDomainValidation`
+- `CreateAcmeEndpoint`
+- `CreateAcmeExternalAccountBinding`
+- `DeleteAcmeDomainValidation`
+- `DeleteAcmeEndpoint`
+- `DeleteAcmeExternalAccountBinding`
 - `DeleteCertificate`
+- `DescribeAcmeAccount`
+- `DescribeAcmeDomainValidation`
+- `DescribeAcmeEndpoint`
+- `DescribeAcmeExternalAccountBinding`
 - `DescribeCertificate`
 - `ExportCertificate`
 - `GetAccountConfiguration`
+- `GetAcmeExternalAccountBindingCredentials`
 - `GetCertificate`
 - `ImportCertificate`
+- `ListAcmeAccounts`
+- `ListAcmeDomainValidations`
+- `ListAcmeEndpoints`
+- `ListAcmeExternalAccountBindings`
 - `ListCertificates`
 - `ListTagsForCertificate`
+- `ListTagsForResource`
 - `PutAccountConfiguration`
 - `RemoveTagsFromCertificate`
 - `RenewCertificate`
 - `RequestCertificate`
 - `ResendValidationEmail`
+- `RevokeAcmeAccount`
+- `RevokeAcmeExternalAccountBinding`
 - `RevokeCertificate`
 - `SearchCertificates`
+- `TagResource`
+- `UntagResource`
+- `UpdateAcmeDomainValidation`
+- `UpdateAcmeEndpoint`
 - `UpdateCertificateOptions`
 
 ## [ACM PCA](@/docs/services/acm-pca.md)
@@ -4821,6 +4845,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutCompositeAlarm`
 - `PutDashboard`
 - `PutInsightRule`
+- `PutLogAlarm`
 - `PutManagedInsightRules`
 - `PutMetricAlarm`
 - `PutMetricData`
@@ -5115,6 +5140,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `TagResource`
 - `TestConnection`
 - `UntagResource`
+- `UpdateAsset`
 - `UpdateBlueprint`
 - `UpdateCatalog`
 - `UpdateClassifier`
@@ -5484,6 +5510,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeregisterTransitGatewayMulticastGroupMembers`
 - `DeregisterTransitGatewayMulticastGroupSources`
 - `DescribeAccountAttributes`
+- `DescribeAccountVpcEncryptionControl`
 - `DescribeAddressTransfers`
 - `DescribeAddresses`
 - `DescribeAddressesAttribute`
@@ -5824,6 +5851,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListSnapshotsInRecycleBin`
 - `ListVolumesInRecycleBin`
 - `LockSnapshot`
+- `ModifyAccountVpcEncryptionControl`
 - `ModifyAddressAttribute`
 - `ModifyAvailabilityZoneGroup`
 - `ModifyCapacityReservation`
@@ -5894,6 +5922,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyVpcEncryptionControl`
 - `ModifyVpcEndpoint`
 - `ModifyVpcEndpointConnectionNotification`
+- `ModifyVpcEndpointPayerResponsibility`
 - `ModifyVpcEndpointServiceConfiguration`
 - `ModifyVpcEndpointServicePayerResponsibility`
 - `ModifyVpcEndpointServicePermissions`

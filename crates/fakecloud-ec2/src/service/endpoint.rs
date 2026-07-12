@@ -86,6 +86,7 @@ pub(crate) fn create_vpc_endpoint(
             .map(|v| v == "true")
             .unwrap_or(false),
         security_group_ids: indexed_list(&req.query_params, "SecurityGroupId"),
+        payer_responsibility: "vpc-endpoint-account".to_string(),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -212,6 +213,51 @@ pub(crate) fn modify_vpc_endpoint(
         "ModifyVpcEndpoint",
         &req.request_id,
         &ec2_return(true),
+    ))
+}
+
+/// `ModifyVpcEndpointPayerResponsibility` — set who pays for an endpoint's
+/// charges. Persists the choice on the endpoint and echoes the resulting
+/// `payerResponsibilitySet`.
+pub(crate) fn modify_vpc_endpoint_payer_responsibility(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = require(&req.query_params, "VpcEndpointId")?;
+    let payer = require(&req.query_params, "PayerResponsibility")?;
+    validate_enum(
+        &req.query_params,
+        "PayerResponsibility",
+        &["vpc-endpoint-account", "vpc-endpoint-service-account"],
+    )?;
+    let scope = require(&req.query_params, "Scope")?;
+    validate_enum(&req.query_params, "Scope", &["vpc-endpoint-charges"])?;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let e = state.vpc_endpoints.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidVpcEndpointId.NotFound",
+                format!("The Vpc Endpoint Id '{id}' does not exist"),
+            )
+        })?;
+        e.payer_responsibility = payer.clone();
+    }
+    let entry = format!(
+        "<item>{}{}</item>",
+        ec2_elem("scope", &scope),
+        ec2_elem("payerResponsibilityType", &payer),
+    );
+    let body = format!(
+        "{}<payerResponsibilitySet>{}</payerResponsibilitySet>",
+        ec2_elem("vpcEndpointId", &id),
+        entry,
+    );
+    Ok(Ec2Service::respond(
+        "ModifyVpcEndpointPayerResponsibility",
+        &req.request_id,
+        &body,
     ))
 }
 
@@ -774,6 +820,7 @@ mod tests {
                 route_table_ids: vec![],
                 private_dns_enabled: false,
                 security_group_ids: vec![],
+                payer_responsibility: "vpc-endpoint-account".into(),
             },
         );
     }

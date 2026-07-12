@@ -86,14 +86,14 @@ async fn cloudwatch_metrics() {
         .unwrap();
 }
 
-#[test_action("monitoring", "PutMetricAlarm", checksum = "a560e392")]
-#[test_action("monitoring", "DescribeAlarms", checksum = "f175b6e3")]
-#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "712268e1")]
+#[test_action("monitoring", "PutMetricAlarm", checksum = "afe4e4a0")]
+#[test_action("monitoring", "DescribeAlarms", checksum = "f66670be")]
+#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "ed2833f6")]
 #[test_action("monitoring", "SetAlarmState", checksum = "bd020d12")]
 #[test_action("monitoring", "EnableAlarmActions", checksum = "bf17737e")]
 #[test_action("monitoring", "DisableAlarmActions", checksum = "d9efce2a")]
-#[test_action("monitoring", "DescribeAlarmHistory", checksum = "d4a884b0")]
-#[test_action("monitoring", "DeleteAlarms", checksum = "17da01d7")]
+#[test_action("monitoring", "DescribeAlarmHistory", checksum = "1c70b414")]
+#[test_action("monitoring", "DeleteAlarms", checksum = "5da6f200")]
 #[tokio::test]
 async fn cloudwatch_alarms() {
     let server = TestServer::start().await;

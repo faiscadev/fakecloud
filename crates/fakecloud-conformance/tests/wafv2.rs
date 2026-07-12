@@ -99,7 +99,7 @@ async fn make_regex_set(server: &TestServer, name: &str) -> (String, String, Str
     )
 }
 
-#[test_action("wafv2", "CreateWebACL", checksum = "43232eb5")]
+#[test_action("wafv2", "CreateWebACL", checksum = "873d72b8")]
 #[tokio::test]
 async fn waf_create_web_acl() {
     let server = TestServer::start().await;
@@ -116,7 +116,7 @@ async fn waf_create_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetWebACL", checksum = "587701da")]
+#[test_action("wafv2", "GetWebACL", checksum = "d506010c")]
 #[tokio::test]
 async fn waf_get_web_acl() {
     let server = TestServer::start().await;
@@ -147,7 +147,7 @@ async fn waf_list_web_acls() {
         .unwrap();
 }
 
-#[test_action("wafv2", "UpdateWebACL", checksum = "43cbab40")]
+#[test_action("wafv2", "UpdateWebACL", checksum = "83206526")]
 #[tokio::test]
 async fn waf_update_web_acl() {
     let server = TestServer::start().await;
@@ -467,7 +467,7 @@ async fn waf_disassociate_web_acl() {
         .unwrap();
 }
 
-#[test_action("wafv2", "GetWebACLForResource", checksum = "ee84a23c")]
+#[test_action("wafv2", "GetWebACLForResource", checksum = "d7bb6379")]
 #[tokio::test]
 async fn waf_get_web_acl_for_resource() {
     let server = TestServer::start().await;
@@ -481,7 +481,7 @@ async fn waf_get_web_acl_for_resource() {
         .unwrap();
 }
 
-#[test_action("wafv2", "ListResourcesForWebACL", checksum = "9ca5a0ca")]
+#[test_action("wafv2", "ListResourcesForWebACL", checksum = "0321ae3c")]
 #[tokio::test]
 async fn waf_list_resources_for_web_acl() {
     let server = TestServer::start().await;
