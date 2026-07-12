@@ -1,5 +1,5 @@
 use super::*;
-use crate::generated::{OpMeta, K, OPS};
+use crate::generated::{Field, OpMeta, Verb, K, OPS};
 use fakecloud_core::multi_account::MultiAccountState;
 use fakecloud_core::service::AwsRequest;
 use parking_lot::RwLock;
@@ -100,6 +100,74 @@ fn accepted_error(meta: &OpMeta, code: &str) -> bool {
     meta.errors.contains(&code) || COMMON_ERRORS.contains(&code)
 }
 
+/// Whether a JSON value's type matches a modelled member kind (mirrors the
+/// engine / CI shape validator: timestamps wire as numbers).
+fn json_kind_ok(kind: K, v: &Value) -> bool {
+    match kind {
+        K::Str | K::Blob => v.is_string(),
+        K::Ts => v.is_number() || v.is_string(),
+        K::Int | K::Num => v.is_number(),
+        K::Bool => v.is_boolean(),
+        K::List => v.is_array(),
+        K::Map | K::Struct => v.is_object(),
+    }
+}
+
+/// Assert that every `@required` member in `fields` is present in `obj` with the
+/// right JSON type, recursing into required structures and into the required
+/// members of every present list element. This mirrors what the CI conformance
+/// shape-validator checks and is what previously shipped broken.
+fn check_required(
+    op: &str,
+    prefix: &str,
+    obj: &Value,
+    fields: &[Field],
+    failures: &mut Vec<String>,
+) {
+    let Some(map) = obj.as_object() else {
+        failures.push(format!("{op}: {prefix} is not an object"));
+        return;
+    };
+    for f in fields {
+        match map.get(f.wire) {
+            None | Some(Value::Null) => {
+                failures.push(format!("{op}: missing required '{}' at {prefix}", f.wire));
+            }
+            Some(v) => {
+                if !json_kind_ok(f.kind, v) {
+                    failures.push(format!(
+                        "{op}: required '{}' at {prefix} has wrong type ({v})",
+                        f.wire
+                    ));
+                    continue;
+                }
+                match f.kind {
+                    // A union has no @required members; presence + object type is
+                    // all the shape validator checks (mirrors CI).
+                    K::Struct if f.is_union => {}
+                    K::Struct => {
+                        check_required(op, &format!("{prefix}.{}", f.wire), v, f.children, failures)
+                    }
+                    K::List if f.elem_kind == K::Struct => {
+                        if let Some(arr) = v.as_array() {
+                            for (i, el) in arr.iter().enumerate() {
+                                check_required(
+                                    op,
+                                    &format!("{prefix}.{}[{i}]", f.wire),
+                                    el,
+                                    f.children,
+                                    failures,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 // ---------- in-process conformance proxy ----------
 //
 // The live-server conformance probe cannot run in the local sandbox, so this
@@ -107,6 +175,13 @@ fn accepted_error(meta: &OpMeta, code: &str) -> bool {
 // the ~403 operations, a model-valid request must NOT crash (HTTP 500) and must
 // return either a 2xx response or a 4xx whose error code is declared in the
 // operation's Smithy `errors` list or in SageMaker's service-wide common errors.
+//
+// It ALSO validates every success response against the model's output shape:
+// every `@required` output member (recursively, including nested structures and
+// list elements) must be present and of the right JSON type. This mirrors the CI
+// shape-validator, whose `SHAPE_MISMATCH: missing required field` failures this
+// suite must now catch (they previously shipped because the test only checked
+// the status code).
 #[test]
 fn every_operation_passes_success_criteria() {
     let s = svc();
@@ -117,6 +192,9 @@ fn every_operation_passes_success_criteria() {
             Ok(resp) => {
                 if !resp.status.is_success() {
                     failures.push(format!("{}: unexpected status {}", meta.op, resp.status));
+                } else {
+                    let json = resp_json(&resp);
+                    check_required(meta.op, "$", &json, meta.req_out, &mut failures);
                 }
             }
             Err(AwsServiceError::AwsError { status, code, .. }) => {
@@ -140,6 +218,57 @@ fn every_operation_passes_success_criteria() {
     assert!(
         failures.is_empty(),
         "{} operations failed the success criteria:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+// Every non-scalar List operation must, when it has elements, emit elements
+// carrying their required fields (the `ListAI*` `$.X[0].Status` failure class).
+// Seed one bare record per family so the list is non-empty, then validate the
+// element against the model's element required-member tree.
+#[test]
+fn list_elements_carry_required_fields() {
+    let mut failures: Vec<String> = Vec::new();
+    for meta in OPS {
+        if !matches!(meta.verb, Verb::List) || meta.list_scalar || meta.req_elem.is_empty() {
+            continue;
+        }
+        // `ListTags` is served by the resource-specific tag handler (its elements
+        // come from the ARN-keyed tag store, not the generic resource engine), so
+        // seeding a resource family does not populate it.
+        if meta.op == "ListTags" {
+            continue;
+        }
+        let s = svc();
+        {
+            let mut g = s.state.write();
+            let data = g.get_or_create("000000000000");
+            data.put_resource(meta.family, "seed", Value::Object(Map::new()));
+        }
+        let listed = resp_json(&run(&s, meta.op, build_success_body(meta)).unwrap());
+        let field = meta
+            .list_field
+            .expect("non-scalar list op has a list field");
+        let arr = listed[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{}: {field} must be an array", meta.op));
+        assert!(
+            !arr.is_empty(),
+            "{}: seeded list must have an element",
+            meta.op
+        );
+        check_required(
+            meta.op,
+            &format!("$.{field}[0]"),
+            &arr[0],
+            meta.req_elem,
+            &mut failures,
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "{} list elements missing required fields:\n{}",
         failures.len(),
         failures.join("\n")
     );

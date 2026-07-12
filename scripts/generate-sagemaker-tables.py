@@ -115,6 +115,84 @@ def struct_members(tid):
     return list(s.get("members", {}).items())
 
 
+def list_length_min(tid):
+    """The @length `min` of a list shape, if any."""
+    s = resolve(tid)
+    if not s or s["type"] != "list":
+        return None
+    return (s.get("traits", {}).get("smithy.api#length", {}) or {}).get("min")
+
+
+# Maximum recursion depth when expanding the required-output-member tree. The
+# SageMaker model nests required structures at most ~4 levels; the cap plus the
+# on-path cycle guard keeps generation terminating on self-referential shapes.
+MAX_REQ_DEPTH = 6
+
+
+def is_union(tid):
+    s = resolve(tid)
+    return bool(s and s["type"] == "union")
+
+
+def field_for(mn, m, path, depth):
+    """Describe a single member `mn` (with member shape `m`) as a field dict.
+
+    For a structure member, `children` holds its own required members. For a
+    union member, `is_union` is set and `children` holds exactly its first member
+    (so a synthesised union carries exactly one member). For a list member,
+    `elem_kind` is the element kind, `list_min` the list's `@length` min, and
+    (for a structure element) `children` the element's required members."""
+    mtr = m.get("traits", {})
+    ctid = m["target"]
+    kn = kind_of(ctid)
+    mn_min, _mx, rmin, _rmx = constraints(ctid, mtr)
+    evs = enum_values(ctid) if kn == "Str" else None
+    fld = {
+        "wire": mn, "kind": kn, "enums": evs,
+        "min_len": mn_min, "min_val": rmin,
+        "list_min": None, "elem_kind": "Str", "children": [],
+        "is_union": False,
+    }
+    if kn == "Struct" and is_union(ctid):
+        fld["is_union"] = True
+        # Populate exactly the first union member so the value is a valid union.
+        mems = struct_members(ctid)
+        if mems and ctid not in path and depth <= MAX_REQ_DEPTH:
+            fmn, fm = mems[0]
+            fld["children"] = [field_for(fmn, fm, path + [ctid], depth + 1)]
+    elif kn == "Struct" and ctid not in path:
+        fld["children"] = required_tree(ctid, path + [ctid], depth + 1)
+    elif kn == "List":
+        fld["list_min"] = list_length_min(ctid)
+        ls = resolve(ctid)
+        elt = ls.get("member", {}).get("target") if ls else None
+        ek = kind_of(elt) if elt else "Str"
+        fld["elem_kind"] = ek
+        if ek == "Struct" and elt and elt not in path:
+            fld["children"] = required_tree(elt, path + [elt], depth + 1)
+        elif ek == "Str" and elt:
+            # A scalar (possibly enum) element: reuse `enums` to carry the
+            # element's valid values so a synthesised element is valid.
+            fld["enums"] = enum_values(elt)
+    return fld
+
+
+def required_tree(tid, path, depth):
+    """Recursively describe every `@required` member of structure `tid`.
+
+    Recursion stops at `MAX_REQ_DEPTH` or when a shape reappears on the current
+    ancestor path (cycle guard)."""
+    s = resolve(tid)
+    if not s or s["type"] not in ("structure", "union") or depth > MAX_REQ_DEPTH:
+        return []
+    fields = []
+    for mn, m in struct_members(tid):
+        if "smithy.api#required" not in m.get("traits", {}):
+            continue
+        fields.append(field_for(mn, m, path, depth))
+    return fields
+
+
 VERBS = ["Create", "Describe", "Delete", "List", "Update", "Get", "Stop",
          "Start", "Register", "Deregister", "Add", "Batch", "Search", "Send",
          "Retry", "Import", "Query", "Enable", "Disable", "Associate",
@@ -223,6 +301,7 @@ for name in ops:
     # first list-typed output member -> list projection
     list_elem = None
     list_scalar = False
+    req_elem = []
     if out:
         for mn, m in struct_members(out):
             if kind_of(m["target"]) == "List":
@@ -236,13 +315,22 @@ for name in ops:
                     for emn, em in struct_members(elt):
                         elems.append({"wire": emn, "kind": kind_of(em["target"])})
                 list_elem = {"wire": mn, "elems": elems}
+                # Required members the projected list element must carry.
+                if elt and ek == "Struct":
+                    req_elem = required_tree(elt, [out, elt], 2)
                 break
+
+    # Full required-output-member tree (recursive): every @required output
+    # member, and for structure/list members their required sub-members, so the
+    # engine can synthesise a shape-valid value for each server-derived member.
+    req_out = required_tree(out, [out], 1) if out else []
 
     meta[name] = {
         "verb": verb, "family": fam, "key_member": key_member,
         "arn_path": kebab(fam) if fam else "",
         "errors": errs, "rules": rules, "omembers": omembers,
         "list_elem": list_elem, "list_scalar": list_scalar,
+        "req_out": req_out, "req_elem": req_elem,
         "has_input": bool(inp),
     }
 
@@ -261,6 +349,23 @@ def opt_i(x):
 
 def kind(k):
     return f"K::{k}"
+
+
+def render_fields(fields):
+    """Render a list of required-field dicts as a Rust `&[Field]` literal."""
+    if not fields:
+        return "&[]"
+    parts = []
+    for f in fields:
+        enums = "&[" + ", ".join(rs(e) for e in (f.get("enums") or [])) + "]"
+        parts.append(
+            "Field { wire: %s, kind: %s, enums: %s, min_len: %s, min_val: %s, list_min: %s, elem_kind: %s, is_union: %s, children: %s }" % (
+                rs(f["wire"]), kind(f["kind"]), enums,
+                opt_i(f.get("min_len")), opt_i(f.get("min_val")),
+                opt_i(f.get("list_min")), kind(f.get("elem_kind", "Str")),
+                "true" if f.get("is_union") else "false",
+                render_fields(f.get("children") or [])))
+    return "&[" + ", ".join(parts) + "]"
 
 
 verbmap = {"Create": "Create", "Get": "Get", "List": "List",
@@ -288,6 +393,26 @@ out.append("    pub max_val: Option<i64>,")
 out.append("    pub enums: &'static [&'static str],")
 out.append("}")
 out.append("")
+out.append("/// A `@required` output member (recursively for structures / list")
+out.append("/// elements), enough for the engine to synthesise a shape-valid value.")
+out.append("pub struct Field {")
+out.append("    pub wire: &'static str,")
+out.append("    pub kind: K,")
+out.append("    pub enums: &'static [&'static str],")
+out.append("    pub min_len: Option<u64>,")
+out.append("    pub min_val: Option<i64>,")
+out.append("    /// For a list member, its `@length` min (>=1 means at least one element).")
+out.append("    pub list_min: Option<u64>,")
+out.append("    /// For a list member, the element kind (`children` holds the")
+out.append("    /// element's required members when it is a structure).")
+out.append("    pub elem_kind: K,")
+out.append("    /// Whether this member is a union (synthesise exactly one member).")
+out.append("    pub is_union: bool,")
+out.append("    /// Required members of a structure member, the single first member of")
+out.append("    /// a union, or the required members of a list element structure.")
+out.append("    pub children: &'static [Field],")
+out.append("}")
+out.append("")
 out.append("pub struct OpMeta {")
 out.append("    pub op: &'static str,")
 out.append("    pub verb: Verb,")
@@ -301,6 +426,10 @@ out.append("    pub omembers: &'static [(&'static str, K)],")
 out.append("    pub list_field: Option<&'static str>,")
 out.append("    pub list_elems: &'static [(&'static str, K)],")
 out.append("    pub list_scalar: bool,")
+out.append("    /// The output shape's required-member tree.")
+out.append("    pub req_out: &'static [Field],")
+out.append("    /// The required-member tree of the primary list's element structure.")
+out.append("    pub req_elem: &'static [Field],")
 out.append("}")
 out.append("")
 out.append("pub static OPS: &[OpMeta] = &[")
@@ -324,12 +453,14 @@ for name in sorted(meta):
     else:
         lf_s = "None"
         le = "&[]"
+    req_out_s = render_fields(m["req_out"])
+    req_elem_s = render_fields(m["req_elem"])
     out.append(
-        "    OpMeta { op: %s, verb: Verb::%s, family: %s, key_member: %s, arn_path: %s, has_input: %s, errors: %s, rules: %s, omembers: %s, list_field: %s, list_elems: %s, list_scalar: %s }," % (
+        "    OpMeta { op: %s, verb: Verb::%s, family: %s, key_member: %s, arn_path: %s, has_input: %s, errors: %s, rules: %s, omembers: %s, list_field: %s, list_elems: %s, list_scalar: %s, req_out: %s, req_elem: %s }," % (
             rs(name), verbmap[m["verb"]], rs(m["family"]), rs(m["key_member"]),
             rs(m["arn_path"]), "true" if m["has_input"] else "false",
             errs, rules_s, omem, lf_s, le,
-            "true" if m["list_scalar"] else "false"))
+            "true" if m["list_scalar"] else "false", req_out_s, req_elem_s))
 out.append("];")
 out.append("")
 out.append("pub static ACTIONS: &[&str] = &[")

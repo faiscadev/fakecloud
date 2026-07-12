@@ -151,27 +151,28 @@ impl SageMakerService {
             Verb::Update => {
                 let mut g = self.state.write();
                 let data = g.get_or_create(&ctx.account);
-                Ok((engine::update(data, meta, &body)?, true))
+                Ok((engine::update(data, &ctx, meta, &body)?, true))
             }
             Verb::Delete => {
                 let mut g = self.state.write();
                 let data = g.get_or_create(&ctx.account);
-                Ok((engine::delete(data, meta, &body), true))
+                Ok((engine::delete(data, &ctx, meta, &body), true))
             }
             Verb::Get => {
                 let g = self.state.read();
                 let data = g.get(&ctx.account);
-                Ok((engine::get(data, meta, &body)?, false))
+                Ok((engine::get(data, &ctx, meta, &body)?, false))
             }
             Verb::List => {
                 let g = self.state.read();
                 let data = g.get(&ctx.account);
-                Ok((engine::list(data, meta, &body), false))
+                Ok((engine::list(data, &ctx, meta, &body), false))
             }
             Verb::Action => {
                 // Any action not claimed by `special` is accepted as a
-                // control-plane no-op returning an empty (shape-valid) body.
-                Ok((ok_json(Value::Object(Map::new())), false))
+                // control-plane no-op whose response carries every required
+                // output member (synthesised from the request identifier).
+                Ok((engine::action(&ctx, meta, &body), false))
             }
         }
     }
