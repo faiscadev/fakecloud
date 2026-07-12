@@ -2344,3 +2344,43 @@ async fn entities_and_misc() {
     glue.import_catalog_to_glue().send().await.unwrap();
     glue.get_catalog_import_status().send().await.unwrap();
 }
+
+// ----------------------------------------------------------------------------
+// Data Catalog assets
+// ----------------------------------------------------------------------------
+
+// UpdateAsset is newer than the typed aws-sdk-glue client, so drive it over raw
+// awsJson1.1. It updates a pre-existing asset; with no CreateAsset/PutAsset
+// handler yet, an unknown identifier returns EntityNotFoundException — the same
+// contract AWS enforces for an absent asset.
+#[test_action("glue", "UpdateAsset", checksum = "5d3e3e31")]
+#[tokio::test]
+async fn update_asset_unknown_identifier() {
+    let server = TestServer::start().await;
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/glue/aws4_request, SignedHeaders=host, Signature=0";
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("Authorization", auth)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "AWSGlue.UpdateAsset")
+        .body(
+            serde_json::json!({
+                "Identifier": "asset-does-not-exist",
+                "Name": "renamed",
+                "Description": "updated description"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400, "UpdateAsset unknown id should be 400");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let err = body["__type"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("EntityNotFoundException"),
+        "expected EntityNotFoundException, got {err}"
+    );
+}

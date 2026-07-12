@@ -20,8 +20,8 @@ fn make_python_zip() -> Vec<u8> {
 // Function lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateFunction", checksum = "f7076114")]
-#[test_action("lambda", "GetFunction", checksum = "57f68067")]
+#[test_action("lambda", "CreateFunction", checksum = "708369b0")]
+#[test_action("lambda", "GetFunction", checksum = "5f44f3b7")]
 #[test_action("lambda", "DeleteFunction", checksum = "22b50c89")]
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
@@ -422,7 +422,7 @@ async fn lambda_list_versions_by_function() {
 
 #[test_action("lambda", "GetFunctionConfiguration", checksum = "4d62937b")]
 #[test_action("lambda", "UpdateFunctionConfiguration", checksum = "3f7a88a0")]
-#[test_action("lambda", "UpdateFunctionCode", checksum = "32f6c196")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "db47265b")]
 #[tokio::test]
 async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
@@ -492,9 +492,9 @@ async fn lambda_invoke_async_and_stream() {
     }
 }
 
-#[test_action("lambda", "PublishLayerVersion", checksum = "3ba91caf")]
-#[test_action("lambda", "GetLayerVersion", checksum = "76bb0ab8")]
-#[test_action("lambda", "GetLayerVersionByArn", checksum = "974e0a01")]
+#[test_action("lambda", "PublishLayerVersion", checksum = "54a5ff56")]
+#[test_action("lambda", "GetLayerVersion", checksum = "4d7ad0c9")]
+#[test_action("lambda", "GetLayerVersionByArn", checksum = "9802f8c7")]
 #[test_action("lambda", "ListLayers", checksum = "bb68d1a8")]
 #[test_action("lambda", "ListLayerVersions", checksum = "1b7464f9")]
 #[test_action("lambda", "DeleteLayerVersion", checksum = "b20beffd")]

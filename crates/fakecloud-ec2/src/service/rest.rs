@@ -20,9 +20,10 @@ use crate::service_helpers::{
     validate_length, validate_max_results,
 };
 use crate::state::{
-    Ec2State, EventWindowTimeRange, FpgaImage, InstanceEventWindow, ManagedPrefixList,
-    PrefixListEntry, RouteServer, Tag, TrafficMirrorFilter, TrafficMirrorFilterRule,
-    TrafficMirrorSession, TrafficMirrorTarget, VpcBpaExclusion, VpcEncryptionControl,
+    AccountVpcEncryptionControl, Ec2State, EventWindowTimeRange, FpgaImage, InstanceEventWindow,
+    ManagedPrefixList, PrefixListEntry, RouteServer, Tag, TrafficMirrorFilter,
+    TrafficMirrorFilterRule, TrafficMirrorSession, TrafficMirrorTarget, VpcBpaExclusion,
+    VpcEncryptionControl,
 };
 
 /// `us-east-1` fallback for a request with no explicit region.
@@ -4014,6 +4015,104 @@ pub(crate) fn modify_vpc_encryption_control(
         &format!(
             "<vpcEncryptionControl>{}</vpcEncryptionControl>",
             vpc_encryption_control_xml(&c, &tags)
+        ),
+    ))
+}
+
+/// The eight resource-type exclusions an account VPC encryption control tracks,
+/// paired with the ModifyAccountVpcEncryptionControl request param that sets
+/// each. Unlike the per-VPC control, the account request params have no
+/// `Exclusion` suffix.
+const ACCOUNT_VPC_ENC_EXCLUSIONS: &[(&str, &str)] = &[
+    ("internetGateway", "InternetGateway"),
+    ("egressOnlyInternetGateway", "EgressOnlyInternetGateway"),
+    ("natGateway", "NatGateway"),
+    ("virtualPrivateGateway", "VirtualPrivateGateway"),
+    ("vpcPeering", "VpcPeering"),
+    ("lambda", "Lambda"),
+    ("vpcLattice", "VpcLattice"),
+    ("elasticFileSystem", "ElasticFileSystem"),
+];
+
+fn account_vpc_encryption_control_xml(c: &AccountVpcEncryptionControl) -> String {
+    let exclusions: String = ACCOUNT_VPC_ENC_EXCLUSIONS
+        .iter()
+        .map(|(name, _)| {
+            let st = c
+                .exclusions
+                .get(*name)
+                .map(String::as_str)
+                .unwrap_or("disabled");
+            format!("<{name}><state>{st}</state></{name}>")
+        })
+        .collect();
+    format!(
+        "{}{}<exclusions>{}</exclusions>{}{}",
+        ec2_elem("state", &c.state),
+        ec2_elem("mode", &c.mode),
+        exclusions,
+        ec2_elem("managedBy", "account"),
+        ec2_elem("lastUpdateTimestamp", "2024-01-01T00:00:00.000Z"),
+    )
+}
+
+pub(crate) fn describe_account_vpc_encryption_control(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state.read();
+    let default = AccountVpcEncryptionControl::default();
+    let c = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.account_vpc_encryption_control.as_ref())
+        .unwrap_or(&default);
+    Ok(Ec2Service::respond(
+        "DescribeAccountVpcEncryptionControl",
+        &req.request_id,
+        &format!(
+            "<accountVpcEncryptionControl>{}</accountVpcEncryptionControl>",
+            account_vpc_encryption_control_xml(c)
+        ),
+    ))
+}
+
+pub(crate) fn modify_account_vpc_encryption_control(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    validate_enum(
+        &req.query_params,
+        "Mode",
+        &["unmanaged", "attempt-monitor", "attempt-enforce"],
+    )?;
+    for (_, param) in ACCOUNT_VPC_ENC_EXCLUSIONS {
+        validate_enum(&req.query_params, param, &["enable", "disable"])?;
+    }
+    let c = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let entry = state
+            .account_vpc_encryption_control
+            .get_or_insert_with(AccountVpcEncryptionControl::default);
+        if let Some(m) = req.query_params.get("Mode").filter(|v| !v.is_empty()) {
+            entry.mode = m.clone();
+        }
+        for (name, param) in ACCOUNT_VPC_ENC_EXCLUSIONS {
+            if let Some(v) = req.query_params.get(*param).filter(|v| !v.is_empty()) {
+                let st = if v == "enable" { "enabled" } else { "disabled" };
+                entry.exclusions.insert((*name).to_string(), st.to_string());
+            }
+        }
+        // A completed modification leaves the control in a successful state.
+        entry.state = "transitions-successful".to_string();
+        entry.clone()
+    };
+    Ok(Ec2Service::respond(
+        "ModifyAccountVpcEncryptionControl",
+        &req.request_id,
+        &format!(
+            "<accountVpcEncryptionControl>{}</accountVpcEncryptionControl>",
+            account_vpc_encryption_control_xml(&c)
         ),
     ))
 }

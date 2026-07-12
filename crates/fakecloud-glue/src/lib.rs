@@ -4,6 +4,7 @@ pub mod partition_filter;
 pub(crate) mod service;
 pub(crate) mod state;
 
+pub(crate) mod assets;
 pub(crate) mod blueprints;
 pub(crate) mod catalog;
 pub(crate) mod common;

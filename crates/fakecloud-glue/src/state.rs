@@ -62,6 +62,8 @@ pub struct GlueState {
 
     // --- generic JSON-backed control-plane resource families ---
     #[serde(default)]
+    pub assets: JsonStore,
+    #[serde(default)]
     pub crawlers: JsonStore,
     #[serde(default)]
     pub classifiers: JsonStore,

@@ -690,6 +690,9 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeCapacityReservationCancellationQuotes",
     "DescribeIpamPoolAllocations",
     "ModifyIpamPoolAllocation",
+    "DescribeAccountVpcEncryptionControl",
+    "ModifyAccountVpcEncryptionControl",
+    "ModifyVpcEndpointPayerResponsibility",
     "AdvertiseByoipCidr",
     "AssociateEnclaveCertificateIamRole",
     "AssociateIamInstanceProfile",
@@ -2640,6 +2643,15 @@ impl AwsService for Ec2Service {
             }
             "DescribeIpamPoolAllocations" => rest::describe_ipam_pool_allocations(self, &request),
             "ModifyIpamPoolAllocation" => rest::modify_ipam_pool_allocation(self, &request),
+            "DescribeAccountVpcEncryptionControl" => {
+                rest::describe_account_vpc_encryption_control(self, &request)
+            }
+            "ModifyAccountVpcEncryptionControl" => {
+                rest::modify_account_vpc_encryption_control(self, &request)
+            }
+            "ModifyVpcEndpointPayerResponsibility" => {
+                endpoint::modify_vpc_endpoint_payer_responsibility(self, &request)
+            }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidAction",

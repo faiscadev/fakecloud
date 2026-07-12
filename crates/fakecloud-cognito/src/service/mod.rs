@@ -7,6 +7,7 @@ mod identity_providers;
 mod legacy;
 mod mfa;
 mod misc;
+mod provisioned_limits;
 mod resource_servers;
 mod user_pool_replicas;
 mod user_pools;
@@ -342,6 +343,7 @@ fn is_mutating_action(action: &str) -> bool {
             | "ListUserImportJobs"
             | "ListTerms"
             | "ListWebAuthnCredentials"
+            | "GetProvisionedLimit"
             | "AdminGetUser"
             | "AdminGetDevice"
             | "AdminListDevices"
@@ -497,6 +499,8 @@ impl AwsService for CognitoService {
             "CompleteWebAuthnRegistration" => self.complete_web_authn_registration(&req),
             "DeleteWebAuthnCredential" => self.delete_web_authn_credential(&req),
             "ListWebAuthnCredentials" => self.list_web_authn_credentials(&req),
+            "GetProvisionedLimit" => self.get_provisioned_limit(&req),
+            "UpdateProvisionedLimit" => self.update_provisioned_limit(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "cognito-idp",
                 &req.action,
@@ -636,6 +640,8 @@ impl AwsService for CognitoService {
             "CompleteWebAuthnRegistration",
             "DeleteWebAuthnCredential",
             "ListWebAuthnCredentials",
+            "GetProvisionedLimit",
+            "UpdateProvisionedLimit",
         ]
     }
 }

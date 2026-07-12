@@ -1037,6 +1037,184 @@
         "smithy.api#pattern": "^[0-9]{12}$"
       }
     },
+    "com.amazonaws.ec2#AccountVpcEncryptionControl": {
+      "type": "structure",
+      "members": {
+        "State": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControlState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "State",
+            "smithy.api#documentation": "<p>The current state of the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "state"
+          }
+        },
+        "Mode": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControlMode",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Mode",
+            "smithy.api#documentation": "<p>The encryption mode for the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "mode"
+          }
+        },
+        "Exclusions": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControlExclusions",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Exclusions",
+            "smithy.api#documentation": "<p>Information about the traffic exclusions for the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "exclusions"
+          }
+        },
+        "ManagedBy": {
+          "target": "com.amazonaws.ec2#ManagedBy",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ManagedBy",
+            "smithy.api#documentation": "<p>The entity that manages the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "managedBy"
+          }
+        },
+        "LastUpdateTimestamp": {
+          "target": "com.amazonaws.ec2#MillisecondDateTime",
+          "traits": {
+            "aws.protocols#ec2QueryName": "LastUpdateTimestamp",
+            "smithy.api#documentation": "<p>The date and time when the account-level VPC Encryption Control configuration was last updated.</p>",
+            "smithy.api#xmlName": "lastUpdateTimestamp"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Describes the account-level VPC Encryption Control configuration, including its mode, state, and exclusions.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html\">Enforce VPC encryption in transit</a> in the <i>Amazon VPC User Guide</i>.</p>"
+      }
+    },
+    "com.amazonaws.ec2#AccountVpcEncryptionControlExclusions": {
+      "type": "structure",
+      "members": {
+        "InternetGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "InternetGateway",
+            "smithy.api#documentation": "<p>The exclusion configuration for internet gateway resource.</p>",
+            "smithy.api#xmlName": "internetGateway"
+          }
+        },
+        "EgressOnlyInternetGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "EgressOnlyInternetGateway",
+            "smithy.api#documentation": "<p>The exclusion configuration for egress-only internet gateway resource.</p>",
+            "smithy.api#xmlName": "egressOnlyInternetGateway"
+          }
+        },
+        "NatGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "NatGateway",
+            "smithy.api#documentation": "<p>The exclusion configuration for NAT gateway resource.</p>",
+            "smithy.api#xmlName": "natGateway"
+          }
+        },
+        "VirtualPrivateGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "VirtualPrivateGateway",
+            "smithy.api#documentation": "<p>The exclusion configuration for virtual private gateway resource.</p>",
+            "smithy.api#xmlName": "virtualPrivateGateway"
+          }
+        },
+        "VpcPeering": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "VpcPeering",
+            "smithy.api#documentation": "<p>The exclusion configuration for VPC peering connection resource.</p>",
+            "smithy.api#xmlName": "vpcPeering"
+          }
+        },
+        "Lambda": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Lambda",
+            "smithy.api#documentation": "<p>The exclusion configuration for Lambda service.</p>",
+            "smithy.api#xmlName": "lambda"
+          }
+        },
+        "VpcLattice": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "VpcLattice",
+            "smithy.api#documentation": "<p>The exclusion configuration for VPC Lattice service.</p>",
+            "smithy.api#xmlName": "vpcLattice"
+          }
+        },
+        "ElasticFileSystem": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionState",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ElasticFileSystem",
+            "smithy.api#documentation": "<p>The exclusion configuration for Elastic File System service.</p>",
+            "smithy.api#xmlName": "elasticFileSystem"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Describes the exclusion configurations for the various resource types in the account-level VPC Encryption Control configuration.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html\">Enforce VPC encryption in transit</a> in the <i>Amazon VPC User Guide</i>.</p>"
+      }
+    },
+    "com.amazonaws.ec2#AccountVpcEncryptionControlMode": {
+      "type": "enum",
+      "members": {
+        "unmanaged": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "unmanaged"
+          }
+        },
+        "attempt_monitor": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "attempt-monitor"
+          }
+        },
+        "attempt_enforce": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "attempt-enforce"
+          }
+        }
+      }
+    },
+    "com.amazonaws.ec2#AccountVpcEncryptionControlState": {
+      "type": "enum",
+      "members": {
+        "default_state": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "default-state"
+          }
+        },
+        "transitions_in_progress": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "transitions-in-progress"
+          }
+        },
+        "transitions_partially_successful": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "transitions-partially-successful"
+          }
+        },
+        "transitions_successful": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "transitions-successful"
+          }
+        },
+        "transitions_failed": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "transitions-failed"
+          }
+        }
+      }
+    },
     "com.amazonaws.ec2#ActiveInstance": {
       "type": "structure",
       "members": {
@@ -2027,6 +2205,12 @@
             "smithy.api#documentation": "<p>The ID of the Availability Zone.</p>"
           }
         },
+        "CpuOptions": {
+          "target": "com.amazonaws.ec2#HostCpuOptionsRequest",
+          "traits": {
+            "smithy.api#documentation": "<p>The CPU configuration options to apply to the Dedicated Host.</p>"
+          }
+        },
         "AutoPlacement": {
           "target": "com.amazonaws.ec2#AutoPlacement",
           "traits": {
@@ -2249,6 +2433,12 @@
           "target": "smithy.api#Unit",
           "traits": {
             "smithy.api#enumValue": "pending"
+          }
+        },
+        "configuring": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "configuring"
           }
         }
       }
@@ -3286,6 +3476,9 @@
           "target": "com.amazonaws.ec2#DescribeAccountAttributes"
         },
         {
+          "target": "com.amazonaws.ec2#DescribeAccountVpcEncryptionControl"
+        },
+        {
           "target": "com.amazonaws.ec2#DescribeAddresses"
         },
         {
@@ -4306,6 +4499,9 @@
           "target": "com.amazonaws.ec2#LockSnapshot"
         },
         {
+          "target": "com.amazonaws.ec2#ModifyAccountVpcEncryptionControl"
+        },
+        {
           "target": "com.amazonaws.ec2#ModifyAddressAttribute"
         },
         {
@@ -4514,6 +4710,9 @@
         },
         {
           "target": "com.amazonaws.ec2#ModifyVpcEndpointConnectionNotification"
+        },
+        {
+          "target": "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibility"
         },
         {
           "target": "com.amazonaws.ec2#ModifyVpcEndpointServiceConfiguration"
@@ -6049,6 +6248,23 @@
             }
           ],
           "version": "1.0"
+        }
+      }
+    },
+    "com.amazonaws.ec2#AmdSevSnp": {
+      "type": "enum",
+      "members": {
+        "enabled": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "enabled"
+          }
+        },
+        "disabled": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "disabled"
+          }
         }
       }
     },
@@ -11424,7 +11640,7 @@
         "target": "com.amazonaws.ec2#CancelCapacityReservationResult"
       },
       "traits": {
-        "smithy.api#documentation": "<p>Cancels the specified Capacity Reservation, releases the reserved capacity, and\n\t\t\tchanges the Capacity Reservation's state to <code>cancelled</code>.</p>\n         <p>You can cancel a Capacity Reservation that is in the following states:</p>\n         <ul>\n            <li>\n               <p>\n                  <code>assessing</code>\n               </p>\n            </li>\n            <li>\n               <p>\n                  <code>scheduled</code>\n               </p>\n            </li>\n            <li>\n               <p>\n                  <code>active</code> and there is no commitment duration or the commitment\n\t\t\t\t\tduration has elapsed.</p>\n            </li>\n            <li>\n               <p>\n                  <code>active</code> during the commitment duration, if you provide a\n\t\t\t\t\tcancellation quote ID and accept the cancellation charges. Use\n\t\t\t\t\t<code>CreateCapacityReservationCancellationQuote</code> to generate a quote.\n\t\t\t\t\tThe Capacity Reservation transitions to <code>cancelling</code> while charges\n\t\t\t\t\tare applied.</p>\n            </li>\n         </ul>\n         <note>\n            <p>You can't modify or cancel a Capacity Block. For more information, see <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html\">Capacity Blocks for ML</a>.</p>\n         </note>\n         <p>If a future-dated Capacity Reservation enters the <code>delayed</code> state, the\n\t\t\tcommitment duration is waived, and you can cancel it as soon as it enters the\n\t\t\t\t<code>active</code> state.</p>\n         <p>Instances running in the reserved capacity continue running until you stop them.\n\t\t\tStopped instances that target the Capacity Reservation can no longer launch. Modify\n\t\t\tthese instances to either target a different Capacity Reservation, launch On-Demand\n\t\t\tInstance capacity, or run in any open Capacity Reservation that has matching attributes\n\t\t\tand sufficient capacity.</p>"
+        "smithy.api#documentation": "<p>Cancels the specified Capacity Reservation, releases the reserved capacity, and\n\t\t\tchanges the Capacity Reservation's state to <code>cancelled</code>.</p>\n         <p>You can cancel a Capacity Reservation that is in the following states:</p>\n         <ul>\n            <li>\n               <p>\n                  <code>assessing</code>\n               </p>\n            </li>\n            <li>\n               <p>\n                  <code>scheduled</code> \u2014 requires a cancellation quote. Use\n\t\t\t\t\t<code>CreateCapacityReservationCancellationQuote</code> to generate a quote,\n\t\t\t\t\tthen pass the quote ID with <code>ApplyCancellationCharges</code> set to\n\t\t\t\t\t<code>commitment-wind-down</code>. The cancellation charge depends on how\n\t\t\t\t\tclose the reservation is to its start date.</p>\n            </li>\n            <li>\n               <p>\n                  <code>active</code> and there is no commitment duration or the commitment\n\t\t\t\t\tduration has elapsed.</p>\n            </li>\n            <li>\n               <p>\n                  <code>active</code> during the commitment duration \u2014 requires a\n\t\t\t\t\tcancellation quote. Use\n\t\t\t\t\t<code>CreateCapacityReservationCancellationQuote</code> to generate a quote,\n\t\t\t\t\tthen pass the quote ID with <code>ApplyCancellationCharges</code> set to\n\t\t\t\t\t<code>commitment-wind-down</code>. The Capacity Reservation transitions to\n\t\t\t\t\t<code>cancelling</code> while charges are applied.</p>\n            </li>\n            <li>\n               <p>\n                  <code>delayed</code> \u2014 the commitment duration is waived, so no\n\t\t\t\t\tcancellation charge applies.</p>\n            </li>\n         </ul>\n         <note>\n            <p>You can't modify or cancel a Capacity Block. For more information, see <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html\">Capacity Blocks for ML</a>.</p>\n         </note>\n         <p>Instances running in the reserved capacity continue running until you stop them.\n\t\t\tStopped instances that target the Capacity Reservation can no longer launch. Modify\n\t\t\tthese instances to either target a different Capacity Reservation, launch On-Demand\n\t\t\tInstance capacity, or run in any open Capacity Reservation that has matching attributes\n\t\t\tand sufficient capacity.</p>"
       }
     },
     "com.amazonaws.ec2#CancelCapacityReservationFleetError": {
@@ -22769,7 +22985,7 @@
         "target": "com.amazonaws.ec2#CreatePlacementGroupResult"
       },
       "traits": {
-        "smithy.api#documentation": "<p>Creates a placement group in which to launch instances. The strategy of the placement\n            group determines how the instances are organized within the group. </p>\n         <p>A <code>cluster</code> placement group is a logical grouping of instances within a\n            single Availability Zone that benefit from low network latency, high network throughput.\n            A <code>spread</code> placement group places instances on distinct hardware. A\n                <code>partition</code> placement group places groups of instances in different\n            partitions, where instances in one partition do not share the same hardware with\n            instances in another partition.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html\">Placement groups</a> in the\n                <i>Amazon EC2 User Guide</i>.</p>",
+        "smithy.api#documentation": "<p>Creates a placement group in which to launch instances. The strategy of the placement\n            group determines how the instances are organized within the group. </p>\n         <p>A <code>cluster</code> placement group is a logical grouping of instances within a\n            single Availability Zone that benefit from low network latency, high network throughput.\n            A <code>spread</code> placement group places instances on distinct hardware. A\n                <code>partition</code> placement group places groups of instances in different\n            partitions, where instances in one partition do not share the same hardware with\n            instances in another partition. A <code>precision-time</code> placement group places\n            instances on supported hardware with direct access to high-precision time sources in\n            Amazon Web Services infrastructure.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html\">Placement groups</a> in the\n                <i>Amazon EC2 User Guide</i>.</p>",
         "smithy.api#examples": [
           {
             "title": "To create a placement group",
@@ -22815,6 +23031,12 @@
           "target": "com.amazonaws.ec2#OperatorRequest",
           "traits": {
             "smithy.api#documentation": "<p>Reserved for internal use.</p>"
+          }
+        },
+        "ParentGroupId": {
+          "target": "com.amazonaws.ec2#PlacementGroupId",
+          "traits": {
+            "smithy.api#documentation": "<p>The ID of a parent placement group. Valid only when <b>Strategy</b>\n            is set to <code>cluster</code>.</p>"
           }
         },
         "DryRun": {
@@ -31163,7 +31385,7 @@
         "target": "smithy.api#Unit"
       },
       "traits": {
-        "smithy.api#documentation": "<p>Deletes the specified placement group. You must terminate all instances in the\n            placement group before you can delete the placement group. For more information, see\n                <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html\">Placement groups</a> in the <i>Amazon EC2 User Guide</i>.</p>",
+        "smithy.api#documentation": "<p>Deletes the specified placement group. You must terminate all instances in the\n            placement group before you can delete the placement group. You cannot delete a\n            placement group that is a parent of a cluster placement group. Delete the cluster\n            placement groups first. For more information, see\n                <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html\">Placement groups</a> in the <i>Amazon EC2 User Guide</i>.</p>",
         "smithy.api#examples": [
           {
             "title": "To delete a placement group",
@@ -34559,6 +34781,48 @@
             "aws.protocols#ec2QueryName": "AccountAttributeSet",
             "smithy.api#documentation": "<p>Information about the account attributes.</p>",
             "smithy.api#xmlName": "accountAttributeSet"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#output": {}
+      }
+    },
+    "com.amazonaws.ec2#DescribeAccountVpcEncryptionControl": {
+      "type": "operation",
+      "input": {
+        "target": "com.amazonaws.ec2#DescribeAccountVpcEncryptionControlRequest"
+      },
+      "output": {
+        "target": "com.amazonaws.ec2#DescribeAccountVpcEncryptionControlResult"
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Describes the account-level VPC Encryption Control configuration for your account. VPC Encryption Control enables you to enforce encryption for all data in transit within and between VPCs to meet compliance requirements.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html\">Enforce VPC encryption in transit</a> in the <i>Amazon VPC User Guide</i>.</p>"
+      }
+    },
+    "com.amazonaws.ec2#DescribeAccountVpcEncryptionControlRequest": {
+      "type": "structure",
+      "members": {
+        "DryRun": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Checks whether you have the required permissions for the action, without actually making the request, \n   and provides an error response. If you have the required permissions, the error response is <code>DryRunOperation</code>. \n   Otherwise, it is <code>UnauthorizedOperation</code>.</p>"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#input": {}
+      }
+    },
+    "com.amazonaws.ec2#DescribeAccountVpcEncryptionControlResult": {
+      "type": "structure",
+      "members": {
+        "AccountVpcEncryptionControl": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControl",
+          "traits": {
+            "aws.protocols#ec2QueryName": "AccountVpcEncryptionControl",
+            "smithy.api#documentation": "<p>Information about the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "accountVpcEncryptionControl"
           }
         }
       },
@@ -45205,7 +45469,7 @@
         "Filters": {
           "target": "com.amazonaws.ec2#FilterList",
           "traits": {
-            "smithy.api#documentation": "<p>The filters.</p>\n         <ul>\n            <li>\n               <p>\n                  <code>group-name</code> - The name of the placement group.</p>\n            </li>\n            <li>\n               <p>\n                  <code>group-arn</code> - The Amazon Resource Name (ARN) of the placement\n                    group.</p>\n            </li>\n            <li>\n               <p>\n                  <code>spread-level</code> - The spread level for the placement group\n                        (<code>host</code> | <code>rack</code>). </p>\n            </li>\n            <li>\n               <p>\n                  <code>state</code> - The state of the placement group (<code>pending</code> |\n                        <code>available</code> | <code>deleting</code> |\n                    <code>deleted</code>).</p>\n            </li>\n            <li>\n               <p>\n                  <code>strategy</code> - The strategy of the placement group\n                        (<code>cluster</code> | <code>spread</code> |\n                    <code>partition</code>).</p>\n            </li>\n            <li>\n               <p>\n                  <code>tag:<key></code> - The key/value combination of a tag assigned to the resource. Use the tag key in the filter name and the tag value as the filter value.\n    For example, to find all resources that have a tag with the key <code>Owner</code> and the value <code>TeamA</code>, specify <code>tag:Owner</code> for the filter name and <code>TeamA</code> for the filter value.</p>\n            </li>\n            <li>\n               <p>\n                  <code>tag-key</code> - The key of a tag assigned to the resource. Use this filter to find all resources that have a tag with a specific key, regardless of the tag value.</p>\n            </li>\n         </ul>",
+            "smithy.api#documentation": "<p>The filters.</p>\n         <ul>\n            <li>\n               <p>\n                  <code>group-name</code> - The name of the placement group.</p>\n            </li>\n            <li>\n               <p>\n                  <code>group-arn</code> - The Amazon Resource Name (ARN) of the placement\n                    group.</p>\n            </li>\n            <li>\n               <p>\n                  <code>spread-level</code> - The spread level for the placement group\n                        (<code>host</code> | <code>rack</code>). </p>\n            </li>\n            <li>\n               <p>\n                  <code>state</code> - The state of the placement group (<code>pending</code> |\n                        <code>available</code> | <code>deleting</code> |\n                    <code>deleted</code>).</p>\n            </li>\n            <li>\n               <p>\n                  <code>strategy</code> - The strategy of the placement group\n                        (<code>cluster</code> | <code>spread</code> |\n                    <code>partition</code> | <code>precision-time</code>).</p>\n            </li>\n            <li>\n               <p>\n                  <code>tag:<key></code> - The key/value combination of a tag assigned to the resource. Use the tag key in the filter name and the tag value as the filter value.\n    For example, to find all resources that have a tag with the key <code>Owner</code> and the value <code>TeamA</code>, specify <code>tag:Owner</code> for the filter name and <code>TeamA</code> for the filter value.</p>\n            </li>\n            <li>\n               <p>\n                  <code>tag-key</code> - The key of a tag assigned to the resource. Use this filter to find all resources that have a tag with a specific key, regardless of the tag value.</p>\n            </li>\n         </ul>",
             "smithy.api#xmlName": "Filter"
           }
         }
@@ -51777,6 +52041,12 @@
           "target": "com.amazonaws.ec2#Integer",
           "traits": {
             "smithy.api#documentation": "<p>The maximum number of results (up to a limit of 500) to be returned in a paginated\n      request. For more information, see <a href=\"https://docs.aws.amazon.com/AWSEC2/latest/APIReference/Query-Requests.html#api-pagination\">Pagination</a>.</p>"
+          }
+        },
+        "IncludeManagedResources": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Indicates whether to include managed resources in the output. If this parameter is set to <code>true</code>, the output includes resources that are managed by Amazon Web Services services, even if managed resource visibility is set to hidden.</p>"
           }
         }
       },
@@ -70113,10 +70383,48 @@
             "smithy.api#documentation": "<p>The ID of the Outpost hardware asset on which the Dedicated Host is allocated.</p>",
             "smithy.api#xmlName": "assetId"
           }
+        },
+        "CpuOptions": {
+          "target": "com.amazonaws.ec2#HostCpuOptions",
+          "traits": {
+            "aws.protocols#ec2QueryName": "CpuOptions",
+            "smithy.api#documentation": "<p>The CPU options for the Dedicated Host, including AMD Secure Encrypted Virtualization-Secure Nested Paging (AMD SEV-SNP) settings.</p>",
+            "smithy.api#xmlName": "cpuOptions"
+          }
         }
       },
       "traits": {
         "smithy.api#documentation": "<p>Describes the properties of the Dedicated Host.</p>"
+      }
+    },
+    "com.amazonaws.ec2#HostCpuOptions": {
+      "type": "structure",
+      "members": {
+        "AmdSevSnp": {
+          "target": "com.amazonaws.ec2#AmdSevSnp",
+          "traits": {
+            "aws.protocols#ec2QueryName": "AmdSevSnp",
+            "smithy.api#documentation": "<p>Specifies whether AMD Secure Encrypted Virtualization-Secure Nested Paging (AMD SEV-SNP) is enabled or disabled for the Dedicated Host. If you don't specify a value, AMD SEV-SNP is <code>disabled</code>.</p>",
+            "smithy.api#xmlName": "amdSevSnp"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Contains the CPU options for a Dedicated Host, including AMD Secure Encrypted Virtualization-Secure Nested Paging (AMD SEV-SNP) settings.</p>"
+      }
+    },
+    "com.amazonaws.ec2#HostCpuOptionsRequest": {
+      "type": "structure",
+      "members": {
+        "AmdSevSnp": {
+          "target": "com.amazonaws.ec2#AmdSevSnp",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether AMD Secure Encrypted Virtualization-Secure Nested Paging (AMD SEV-SNP) is enabled or disabled for the Dedicated Host. If you don't specify a value, AMD SEV-SNP is <code>disabled</code>.</p>"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Contains the CPU configuration options for a Dedicated Host allocation request. Options include AMD Secure Encrypted Virtualization-Secure Nested Paging (AMD SEV-SNP) settings.</p>"
       }
     },
     "com.amazonaws.ec2#HostInstance": {
@@ -96198,6 +96506,102 @@
     "com.amazonaws.ec2#MillisecondDateTime": {
       "type": "timestamp"
     },
+    "com.amazonaws.ec2#ModifyAccountVpcEncryptionControl": {
+      "type": "operation",
+      "input": {
+        "target": "com.amazonaws.ec2#ModifyAccountVpcEncryptionControlRequest"
+      },
+      "output": {
+        "target": "com.amazonaws.ec2#ModifyAccountVpcEncryptionControlResult"
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Modifies the account-level VPC Encryption Control configuration. This sets the encryption control mode and resource exclusions that apply to the VPCs in your account. VPC Encryption Control enables you to enforce encryption for all data in transit within and between VPCs to meet compliance requirements.</p>\n         <p>For more information, see <a href=\"https://docs.aws.amazon.com/vpc/latest/userguide/vpc-encryption-controls.html\">Enforce VPC encryption in transit</a> in the <i>Amazon VPC User Guide</i>.</p>"
+      }
+    },
+    "com.amazonaws.ec2#ModifyAccountVpcEncryptionControlRequest": {
+      "type": "structure",
+      "members": {
+        "DryRun": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Checks whether you have the required permissions for the action, without actually making the request, \n   and provides an error response. If you have the required permissions, the error response is <code>DryRunOperation</code>. \n   Otherwise, it is <code>UnauthorizedOperation</code>.</p>"
+          }
+        },
+        "Mode": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControlMode",
+          "traits": {
+            "smithy.api#documentation": "<p>The encryption mode for the account encryption control configuration.</p>"
+          }
+        },
+        "InternetGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude internet gateway resource from account-level encryption enforcement.</p>"
+          }
+        },
+        "EgressOnlyInternetGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude egress-only internet gateway resource from account-level encryption enforcement.</p>"
+          }
+        },
+        "NatGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude NAT gateway resource from account-level encryption enforcement.</p>"
+          }
+        },
+        "VirtualPrivateGateway": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude virtual private gateway resource from account-level encryption enforcement.</p>"
+          }
+        },
+        "VpcPeering": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude VPC peering connection resource from account-level encryption enforcement.</p>"
+          }
+        },
+        "Lambda": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude Lambda service from account-level encryption enforcement.</p>"
+          }
+        },
+        "VpcLattice": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude VPC Lattice service from account-level encryption enforcement.</p>"
+          }
+        },
+        "ElasticFileSystem": {
+          "target": "com.amazonaws.ec2#VpcEncryptionControlExclusionStateInput",
+          "traits": {
+            "smithy.api#documentation": "<p>Specifies whether to exclude Elastic File System service from account-level encryption enforcement.</p>"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#input": {}
+      }
+    },
+    "com.amazonaws.ec2#ModifyAccountVpcEncryptionControlResult": {
+      "type": "structure",
+      "members": {
+        "AccountVpcEncryptionControl": {
+          "target": "com.amazonaws.ec2#AccountVpcEncryptionControl",
+          "traits": {
+            "aws.protocols#ec2QueryName": "AccountVpcEncryptionControl",
+            "smithy.api#documentation": "<p>Information about the account-level VPC Encryption Control configuration.</p>",
+            "smithy.api#xmlName": "accountVpcEncryptionControl"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#output": {}
+      }
+    },
     "com.amazonaws.ec2#ModifyAddressAttribute": {
       "type": "operation",
       "input": {
@@ -101997,6 +102401,86 @@
         "smithy.api#output": {}
       }
     },
+    "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibility": {
+      "type": "operation",
+      "input": {
+        "target": "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibilityRequest"
+      },
+      "output": {
+        "target": "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibilityResult"
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Modifies the billing account for VPC endpoint usage/charges.</p>"
+      }
+    },
+    "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibilityRequest": {
+      "type": "structure",
+      "members": {
+        "DryRun": {
+          "target": "com.amazonaws.ec2#Boolean",
+          "traits": {
+            "smithy.api#documentation": "<p>Checks whether you have the required permissions for the action, without actually making the request, \n   and provides an error response. If you have the required permissions, the error response is <code>DryRunOperation</code>. \n   Otherwise, it is <code>UnauthorizedOperation</code>.</p>"
+          }
+        },
+        "ServiceId": {
+          "target": "com.amazonaws.ec2#VpcEndpointServiceId",
+          "traits": {
+            "smithy.api#documentation": "<p>The ID of the VPC endpoint service.</p>"
+          }
+        },
+        "VpcEndpointId": {
+          "target": "com.amazonaws.ec2#VpcEndpointId",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The ID of the VPC endpoint.</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "PayerResponsibility": {
+          "target": "com.amazonaws.ec2#PayerResponsibilityType",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The Amazon Web Services account to which the usage of VPC endpoint is charged.</p>",
+            "smithy.api#required": {}
+          }
+        },
+        "Scope": {
+          "target": "com.amazonaws.ec2#PayerResponsibilityScope",
+          "traits": {
+            "smithy.api#clientOptional": {},
+            "smithy.api#documentation": "<p>The scope of usage/charges for which the billing account is being modified.</p>",
+            "smithy.api#required": {}
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#input": {}
+      }
+    },
+    "com.amazonaws.ec2#ModifyVpcEndpointPayerResponsibilityResult": {
+      "type": "structure",
+      "members": {
+        "VpcEndpointId": {
+          "target": "com.amazonaws.ec2#String",
+          "traits": {
+            "aws.protocols#ec2QueryName": "VpcEndpointId",
+            "smithy.api#documentation": "<p>The ID of the VPC endpoint.</p>",
+            "smithy.api#xmlName": "vpcEndpointId"
+          }
+        },
+        "PayerResponsibilities": {
+          "target": "com.amazonaws.ec2#PayerResponsibilitySet",
+          "traits": {
+            "aws.protocols#ec2QueryName": "PayerResponsibilitySet",
+            "smithy.api#documentation": "<p>The payer responsibility settings for the VPC endpoint.</p>",
+            "smithy.api#xmlName": "payerResponsibilitySet"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#output": {}
+      }
+    },
     "com.amazonaws.ec2#ModifyVpcEndpointRequest": {
       "type": "structure",
       "members": {
@@ -107054,6 +107538,67 @@
         }
       }
     },
+    "com.amazonaws.ec2#PayerResponsibilityEntry": {
+      "type": "structure",
+      "members": {
+        "Scope": {
+          "target": "com.amazonaws.ec2#PayerResponsibilityScope",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Scope",
+            "smithy.api#documentation": "<p>The scope of usage/charges.</p>",
+            "smithy.api#xmlName": "scope"
+          }
+        },
+        "PayerResponsibilityType": {
+          "target": "com.amazonaws.ec2#PayerResponsibilityType",
+          "traits": {
+            "aws.protocols#ec2QueryName": "PayerResponsibilityType",
+            "smithy.api#documentation": "<p>The Amazon Web Services account to which the usage is charged.</p>",
+            "smithy.api#xmlName": "payerResponsibilityType"
+          }
+        }
+      },
+      "traits": {
+        "smithy.api#documentation": "<p>Describes a payer responsibility setting for a VPC endpoint.</p>"
+      }
+    },
+    "com.amazonaws.ec2#PayerResponsibilityScope": {
+      "type": "enum",
+      "members": {
+        "VpcEndpointCharges": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "vpc-endpoint-charges"
+          }
+        }
+      }
+    },
+    "com.amazonaws.ec2#PayerResponsibilitySet": {
+      "type": "list",
+      "member": {
+        "target": "com.amazonaws.ec2#PayerResponsibilityEntry",
+        "traits": {
+          "smithy.api#xmlName": "item"
+        }
+      }
+    },
+    "com.amazonaws.ec2#PayerResponsibilityType": {
+      "type": "enum",
+      "members": {
+        "VpcEndpointAccount": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "vpc-endpoint-account"
+          }
+        },
+        "VpcEndpointServiceAccount": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "vpc-endpoint-service-account"
+          }
+        }
+      }
+    },
     "com.amazonaws.ec2#PaymentOption": {
       "type": "enum",
       "members": {
@@ -107817,6 +108362,14 @@
             "smithy.api#documentation": "<p>The service provider that manages the Placement Group.</p>",
             "smithy.api#xmlName": "operator"
           }
+        },
+        "ParentGroupId": {
+          "target": "com.amazonaws.ec2#PlacementGroupId",
+          "traits": {
+            "aws.protocols#ec2QueryName": "ParentGroupId",
+            "smithy.api#documentation": "<p>The ID of the parent placement group.</p>",
+            "smithy.api#xmlName": "parentGroupId"
+          }
         }
       },
       "traits": {
@@ -107974,6 +108527,12 @@
           "target": "smithy.api#Unit",
           "traits": {
             "smithy.api#enumValue": "partition"
+          }
+        },
+        "precision_time": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "precision-time"
           }
         }
       }
@@ -134832,6 +135391,14 @@
             "smithy.api#documentation": "<p>The modification completion or failure time.</p>",
             "smithy.api#xmlName": "endTime"
           }
+        },
+        "Operator": {
+          "target": "com.amazonaws.ec2#OperatorResponse",
+          "traits": {
+            "aws.protocols#ec2QueryName": "Operator",
+            "smithy.api#documentation": "<p>The service provider that manages the resource.</p>",
+            "smithy.api#xmlName": "operator"
+          }
         }
       },
       "traits": {
@@ -136668,6 +137235,14 @@
             "smithy.api#documentation": "<p>The Region where the service is hosted.</p>",
             "smithy.api#xmlName": "serviceRegion"
           }
+        },
+        "PayerResponsibilities": {
+          "target": "com.amazonaws.ec2#PayerResponsibilitySet",
+          "traits": {
+            "aws.protocols#ec2QueryName": "PayerResponsibilitySet",
+            "smithy.api#documentation": "<p>The payer responsibility settings for the endpoint.</p>",
+            "smithy.api#xmlName": "payerResponsibilitySet"
+          }
         }
       },
       "traits": {
@@ -136884,6 +137459,14 @@
             "aws.protocols#ec2QueryName": "VpcEndpointRegion",
             "smithy.api#documentation": "<p>The Region of the endpoint.</p>",
             "smithy.api#xmlName": "vpcEndpointRegion"
+          }
+        },
+        "PayerResponsibilities": {
+          "target": "com.amazonaws.ec2#PayerResponsibilitySet",
+          "traits": {
+            "aws.protocols#ec2QueryName": "PayerResponsibilitySet",
+            "smithy.api#documentation": "<p>The payer responsibility settings for the endpoint.</p>",
+            "smithy.api#xmlName": "payerResponsibilitySet"
           }
         }
       },

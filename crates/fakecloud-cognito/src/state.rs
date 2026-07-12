@@ -133,6 +133,14 @@ pub struct CognitoState {
     /// `ListUserPoolReplicas`; only secondary regions live in this map.
     #[serde(default)]
     pub user_pool_replicas: BTreeMap<String, BTreeMap<String, ReplicaEntry>>,
+    /// Account-level provisioned throughput limits, keyed by the canonical
+    /// serialization of the request's `LimitDefinition` (LimitClass plus its
+    /// sorted attribute map). The stored value is the account's requested
+    /// provisioned limit for that definition; `GetProvisionedLimit` echoes it
+    /// back and `UpdateProvisionedLimit` sets it. Definitions never explicitly
+    /// provisioned report a provisioned value of 0 (free-tier only).
+    #[serde(default)]
+    pub provisioned_limits: BTreeMap<String, i64>,
 }
 
 /// A secondary-region replica of a user pool.
@@ -283,6 +291,7 @@ impl CognitoState {
             principal_tag_attribute_maps: BTreeMap::new(),
             pre_token_gen_invocations: Vec::new(),
             user_pool_replicas: BTreeMap::new(),
+            provisioned_limits: BTreeMap::new(),
         }
     }
 
@@ -314,6 +323,7 @@ impl CognitoState {
         self.principal_tag_attribute_maps.clear();
         self.pre_token_gen_invocations.clear();
         self.user_pool_replicas.clear();
+        self.provisioned_limits.clear();
     }
 }
 
