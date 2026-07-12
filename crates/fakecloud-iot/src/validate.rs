@@ -63,6 +63,13 @@ impl Inputs<'_> {
 
 /// Validate a request against the operation's model-derived constraints.
 pub fn validate(meta: &OpMeta, inputs: &Inputs) -> Result<(), AwsServiceError> {
+    // A required `@httpPayload` member is the entire request body; enforce its
+    // presence (an absent / empty body is a client error). Payload members are
+    // not part of the per-member `rules`, so this is checked separately.
+    if meta.req_payload && inputs.body.is_empty() {
+        return Err(invalid(meta, "Missing required request payload."));
+    }
+
     for rule in meta.rules {
         // Resolve the member's string value (label/query/header) or JSON value
         // (body), and whether it is present at all.

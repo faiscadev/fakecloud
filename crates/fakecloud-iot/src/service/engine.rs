@@ -160,7 +160,8 @@ fn wrapper_field(op: &str) -> Option<&'static str> {
         "DescribeAuthorizer" => "authorizerDescription",
         "DescribeRoleAlias" => "roleAliasDescription",
         "DescribeStream" => "streamInfo",
-        "DescribeJob" => "job",
+        // DescribeJob is handled in `special` (it lifts `documentSource` to a
+        // top-level member alongside the `job` wrapper).
         "DescribeCertificateProvider" | "DescribeManagedJobTemplate" => return None,
         _ => return None,
     })
@@ -193,8 +194,23 @@ pub(super) fn list(
     query: &[(String, String)],
 ) -> AwsResponse {
     let rtype = resource_type(meta);
-    let records = data.map(|d| d.list_resources(&rtype)).unwrap_or_default();
-    let elements: Vec<Value> = records.iter().map(|r| build_element(meta, r)).collect();
+    let entries = data
+        .map(|d| d.list_resource_entries(&rtype))
+        .unwrap_or_default();
+    // A `list<string>` output member (e.g. metricNames / dimensionNames /
+    // roleAliases) serialises each element as the resource's identifier string
+    // (its storage key); otherwise each element is the projected object.
+    let elements: Vec<Value> = if meta.list_scalar {
+        entries
+            .iter()
+            .map(|(id, _)| Value::String(id.clone()))
+            .collect()
+    } else {
+        entries
+            .iter()
+            .map(|(_, r)| build_element(meta, r))
+            .collect()
+    };
 
     let page_size = query_get(query, "maxResults")
         .or_else(|| query_get(query, "pageSize"))

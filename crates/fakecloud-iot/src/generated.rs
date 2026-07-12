@@ -65,6 +65,8 @@ pub struct OpMeta {
     pub omembers: &'static [(&'static str, K)],
     pub list_field: Option<&'static str>,
     pub list_elems: &'static [(&'static str, K)],
+    pub list_scalar: bool,
+    pub req_payload: bool,
 }
 
 pub static OPS: &[OpMeta] = &[
@@ -102,6 +104,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AddThingToBillingGroup",
@@ -147,6 +151,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AddThingToThingGroup",
@@ -192,6 +198,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AssociateSbomWithPackageVersion",
@@ -269,6 +277,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AssociateTargetsWithJob",
@@ -331,6 +341,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AttachPolicy",
@@ -376,6 +388,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AttachPrincipalPolicy",
@@ -421,6 +435,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AttachSecurityProfile",
@@ -469,6 +485,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "AttachThingPrincipal",
@@ -528,6 +546,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelAuditMitigationActionsTask",
@@ -563,6 +583,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelAuditTask",
@@ -597,6 +619,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelCertificateTransfer",
@@ -632,6 +656,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelDetectMitigationActionsTask",
@@ -667,6 +693,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelJob",
@@ -729,6 +757,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CancelJobExecution",
@@ -779,6 +809,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ClearDefaultAuthorizer",
@@ -800,6 +832,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ConfirmTopicRuleDestination",
@@ -833,6 +867,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateAuditSuppression",
@@ -902,6 +938,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateAuthorizer",
@@ -969,6 +1007,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizerName", K::Str), ("authorizerArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateBillingGroup",
@@ -1002,6 +1042,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateCertificateFromCsr",
@@ -1036,6 +1078,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateCertificateProvider",
@@ -1109,6 +1153,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateCommand",
@@ -1207,6 +1253,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("commandId", K::Str), ("commandArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateCustomMetric",
@@ -1272,6 +1320,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("metricName", K::Str), ("metricArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateDimension",
@@ -1337,6 +1387,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("name", K::Str), ("arn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateDomainConfiguration",
@@ -1450,6 +1502,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateDynamicThingGroup",
@@ -1516,6 +1570,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateFleetMetric",
@@ -1659,6 +1715,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("metricName", K::Str), ("metricArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateJob",
@@ -1762,6 +1820,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateJobTemplate",
@@ -1828,6 +1888,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("jobTemplateArn", K::Str), ("jobTemplateId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateKeysAndCertificate",
@@ -1853,6 +1915,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateMitigationAction",
@@ -1911,6 +1975,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("actionArn", K::Str), ("actionId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateOTAUpdate",
@@ -2018,6 +2084,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreatePackage",
@@ -2087,6 +2155,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreatePackageVersion",
@@ -2187,6 +2257,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreatePolicy",
@@ -2237,6 +2309,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreatePolicyVersion",
@@ -2292,6 +2366,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateProvisioningClaim",
@@ -2332,6 +2408,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateProvisioningTemplate",
@@ -2413,6 +2491,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateProvisioningTemplateVersion",
@@ -2467,6 +2547,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateRoleAlias",
@@ -2523,6 +2605,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("roleAlias", K::Str), ("roleAliasArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateScheduledAudit",
@@ -2592,6 +2676,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("scheduledAuditArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateSecurityProfile",
@@ -2651,6 +2737,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateStream",
@@ -2724,6 +2812,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateThing",
@@ -2784,6 +2874,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateThingGroup",
@@ -2830,6 +2922,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateThingType",
@@ -2865,6 +2959,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "CreateTopicRule",
@@ -2897,6 +2993,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: true,
     },
     OpMeta {
         op: "CreateTopicRuleDestination",
@@ -2928,6 +3026,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("topicRuleDestination", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteAccountAuditConfiguration",
@@ -2947,6 +3047,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteAuditSuppression",
@@ -2992,6 +3094,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteAuthorizer",
@@ -3024,6 +3128,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteBillingGroup",
@@ -3053,6 +3159,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCACertificate",
@@ -3085,6 +3193,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCertificate",
@@ -3118,6 +3228,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCertificateProvider",
@@ -3153,6 +3265,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCommand",
@@ -3182,6 +3296,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCommandExecution",
@@ -3224,6 +3340,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteCustomMetric",
@@ -3252,6 +3370,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteDimension",
@@ -3280,6 +3400,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteDomainConfiguration",
@@ -3314,6 +3436,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteDynamicThingGroup",
@@ -3346,6 +3470,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteFleetMetric",
@@ -3377,6 +3503,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteJob",
@@ -3408,6 +3536,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteJobExecution",
@@ -3469,6 +3599,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteJobTemplate",
@@ -3498,6 +3630,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteMitigationAction",
@@ -3530,6 +3664,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteOTAUpdate",
@@ -3562,6 +3698,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeletePackage",
@@ -3603,6 +3741,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeletePackageVersion",
@@ -3660,6 +3800,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeletePolicy",
@@ -3692,6 +3834,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeletePolicyVersion",
@@ -3742,6 +3886,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteProvisioningTemplate",
@@ -3777,6 +3923,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteProvisioningTemplateVersion",
@@ -3827,6 +3975,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteRegistrationCode",
@@ -3847,6 +3997,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteRoleAlias",
@@ -3879,6 +4031,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteScheduledAudit",
@@ -3912,6 +4066,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteSecurityProfile",
@@ -3944,6 +4100,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteStream",
@@ -3976,6 +4134,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteThing",
@@ -4008,6 +4168,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteThingGroup",
@@ -4037,6 +4199,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteThingType",
@@ -4068,6 +4232,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteTopicRule",
@@ -4098,6 +4264,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteTopicRuleDestination",
@@ -4128,6 +4296,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeleteV2LoggingLevel",
@@ -4175,6 +4345,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DeprecateThingType",
@@ -4210,6 +4382,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAccountAuditConfiguration",
@@ -4228,6 +4402,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAuditFinding",
@@ -4261,6 +4437,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("finding", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAuditMitigationActionsTask",
@@ -4308,6 +4486,8 @@ pub static OPS: &[OpMeta] = &[
             ("roleArn", K::Str),
             ("actionParams", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAuditSuppression",
@@ -4360,6 +4540,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAuditTask",
@@ -4400,6 +4582,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeAuthorizer",
@@ -4431,6 +4615,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizerDescription", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeBillingGroup",
@@ -4467,6 +4653,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeCACertificate",
@@ -4501,6 +4689,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeCertificate",
@@ -4532,6 +4722,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("certificateDescription", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeCertificateProvider",
@@ -4573,6 +4765,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("accountDefaultForOperations"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeCustomMetric",
@@ -4609,6 +4803,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeDefaultAuthorizer",
@@ -4630,6 +4826,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizerDescription", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeDetectMitigationActionsTask",
@@ -4664,6 +4862,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskSummary", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeDimension",
@@ -4700,6 +4900,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("stringValues"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeDomainConfiguration",
@@ -4753,6 +4955,8 @@ pub static OPS: &[OpMeta] = &[
             ("serverCertificateStatus", K::Str),
             ("serverCertificateStatusDetail", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeEncryptionConfiguration",
@@ -4779,6 +4983,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeEndpoint",
@@ -4808,6 +5014,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("endpointAddress", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeEventConfigurations",
@@ -4826,6 +5034,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeFleetMetric",
@@ -4871,6 +5081,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeIndex",
@@ -4906,6 +5118,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeJob",
@@ -4935,6 +5149,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("documentSource", K::Str), ("job", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeJobExecution",
@@ -4982,6 +5198,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("execution", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeJobTemplate",
@@ -5025,6 +5243,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("maintenanceWindows"),
         list_elems: &[("startTime", K::Str), ("durationInMinutes", K::Int)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeManagedJobTemplate",
@@ -5065,6 +5285,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("environments"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeMitigationAction",
@@ -5107,6 +5329,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeProvisioningTemplate",
@@ -5152,6 +5376,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeProvisioningTemplateVersion",
@@ -5205,6 +5431,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeRoleAlias",
@@ -5236,6 +5464,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("roleAliasDescription", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeScheduledAudit",
@@ -5276,6 +5506,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("targetCheckNames"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeSecurityProfile",
@@ -5327,6 +5559,8 @@ pub static OPS: &[OpMeta] = &[
             ("suppressAlerts", K::Bool),
             ("exportMetric", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeStream",
@@ -5358,6 +5592,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("streamInfo", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeThing",
@@ -5398,6 +5634,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeThingGroup",
@@ -5438,6 +5676,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeThingRegistrationTask",
@@ -5481,6 +5721,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DescribeThingType",
@@ -5518,6 +5760,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DetachPolicy",
@@ -5562,6 +5806,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DetachPrincipalPolicy",
@@ -5606,6 +5852,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DetachSecurityProfile",
@@ -5652,6 +5900,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DetachThingPrincipal",
@@ -5700,6 +5950,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DisableTopicRule",
@@ -5734,6 +5986,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "DisassociateSbomFromPackageVersion",
@@ -5794,6 +6048,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "EnableTopicRule",
@@ -5828,6 +6084,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetBehaviorModelTrainingSummaries",
@@ -5880,6 +6138,8 @@ pub static OPS: &[OpMeta] = &[
             ("datapointsCollectionPercentage", K::Num),
             ("lastModelRefreshDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetBucketsAggregation",
@@ -5949,6 +6209,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("totalCount", K::Int), ("buckets", K::List)],
         list_field: Some("buckets"),
         list_elems: &[("keyValue", K::Str), ("count", K::Int)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetCardinality",
@@ -6007,6 +6269,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("cardinality", K::Int)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetCommand",
@@ -6058,6 +6322,8 @@ pub static OPS: &[OpMeta] = &[
             ("valueConditions", K::List),
             ("description", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetCommandExecution",
@@ -6114,6 +6380,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetEffectivePolicies",
@@ -6150,6 +6418,8 @@ pub static OPS: &[OpMeta] = &[
             ("policyArn", K::Str),
             ("policyDocument", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetIndexingConfiguration",
@@ -6173,6 +6443,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetJobDocument",
@@ -6206,6 +6478,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("document", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetLoggingOptions",
@@ -6224,6 +6498,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("roleArn", K::Str), ("logLevel", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetOTAUpdate",
@@ -6255,6 +6531,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("otaUpdateInfo", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPackage",
@@ -6291,6 +6569,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPackageConfiguration",
@@ -6305,6 +6585,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("versionUpdateByJobsConfig", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPackageVersion",
@@ -6366,6 +6648,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPercentiles",
@@ -6424,6 +6708,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("percentiles", K::List)],
         list_field: Some("percentiles"),
         list_elems: &[("percent", K::Num), ("value", K::Num)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPolicy",
@@ -6463,6 +6749,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetPolicyVersion",
@@ -6521,6 +6809,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetRegistrationCode",
@@ -6541,6 +6831,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("registrationCode", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetStatistics",
@@ -6599,6 +6891,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("statistics", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetThingConnectivityData",
@@ -6649,6 +6943,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetTopicRule",
@@ -6678,6 +6974,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("ruleArn", K::Str), ("rule", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetTopicRuleDestination",
@@ -6707,6 +7005,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("topicRuleDestination", K::Struct)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "GetV2LoggingOptions",
@@ -6734,6 +7034,8 @@ pub static OPS: &[OpMeta] = &[
             ("logLevel", K::Str),
             ("logDestination", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListActiveViolations",
@@ -6825,6 +7127,8 @@ pub static OPS: &[OpMeta] = &[
             ("lastViolationTime", K::Ts),
             ("violationStartTime", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAttachedPolicies",
@@ -6881,6 +7185,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("policies", K::List), ("nextMarker", K::Str)],
         list_field: Some("policies"),
         list_elems: &[("policyName", K::Str), ("policyArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuditFindings",
@@ -6934,6 +7240,8 @@ pub static OPS: &[OpMeta] = &[
             ("reasonForNonComplianceCode", K::Str),
             ("isSuppressed", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuditMitigationActionsExecutions",
@@ -7018,6 +7326,8 @@ pub static OPS: &[OpMeta] = &[
             ("errorCode", K::Str),
             ("message", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuditMitigationActionsTasks",
@@ -7111,6 +7421,8 @@ pub static OPS: &[OpMeta] = &[
             ("startTime", K::Ts),
             ("taskStatus", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuditSuppressions",
@@ -7149,6 +7461,8 @@ pub static OPS: &[OpMeta] = &[
             ("suppressIndefinitely", K::Bool),
             ("description", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuditTasks",
@@ -7227,6 +7541,8 @@ pub static OPS: &[OpMeta] = &[
             ("taskStatus", K::Str),
             ("taskType", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListAuthorizers",
@@ -7281,6 +7597,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizers", K::List), ("nextMarker", K::Str)],
         list_field: Some("authorizers"),
         list_elems: &[("authorizerName", K::Str), ("authorizerArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListBillingGroups",
@@ -7323,6 +7641,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("billingGroups", K::List), ("nextToken", K::Str)],
         list_field: Some("billingGroups"),
         list_elems: &[("groupName", K::Str), ("groupArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCACertificates",
@@ -7382,6 +7702,8 @@ pub static OPS: &[OpMeta] = &[
             ("status", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCertificateProviders",
@@ -7415,6 +7737,8 @@ pub static OPS: &[OpMeta] = &[
             ("certificateProviderName", K::Str),
             ("certificateProviderArn", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCertificates",
@@ -7464,6 +7788,8 @@ pub static OPS: &[OpMeta] = &[
             ("certificateMode", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCertificatesByCA",
@@ -7527,6 +7853,8 @@ pub static OPS: &[OpMeta] = &[
             ("certificateMode", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCommandExecutions",
@@ -7617,6 +7945,8 @@ pub static OPS: &[OpMeta] = &[
             ("startedAt", K::Ts),
             ("completedAt", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCommands",
@@ -7688,6 +8018,8 @@ pub static OPS: &[OpMeta] = &[
             ("lastUpdatedAt", K::Ts),
             ("pendingDeletion", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListCustomMetrics",
@@ -7716,6 +8048,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("metricNames", K::List), ("nextToken", K::Str)],
         list_field: Some("metricNames"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListDetectMitigationActionsExecutions",
@@ -7793,6 +8127,8 @@ pub static OPS: &[OpMeta] = &[
             ("errorCode", K::Str),
             ("message", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListDetectMitigationActionsTasks",
@@ -7860,6 +8196,8 @@ pub static OPS: &[OpMeta] = &[
             ("actionsDefinition", K::List),
             ("taskStatistics", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListDimensions",
@@ -7888,6 +8226,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("dimensionNames", K::List), ("nextToken", K::Str)],
         list_field: Some("dimensionNames"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListDomainConfigurations",
@@ -7946,6 +8286,8 @@ pub static OPS: &[OpMeta] = &[
             ("domainConfigurationArn", K::Str),
             ("serviceType", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListFleetMetrics",
@@ -7976,6 +8318,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("fleetMetrics", K::List), ("nextToken", K::Str)],
         list_field: Some("fleetMetrics"),
         list_elems: &[("metricName", K::Str), ("metricArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListIndices",
@@ -8006,6 +8350,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("indexNames", K::List), ("nextToken", K::Str)],
         list_field: Some("indexNames"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListJobExecutionsForJob",
@@ -8072,6 +8418,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("executionSummaries", K::List), ("nextToken", K::Str)],
         list_field: Some("executionSummaries"),
         list_elems: &[("thingArn", K::Str), ("jobExecutionSummary", K::Struct)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListJobExecutionsForThing",
@@ -8149,6 +8497,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("executionSummaries", K::List), ("nextToken", K::Str)],
         list_field: Some("executionSummaries"),
         list_elems: &[("jobId", K::Str), ("jobExecutionSummary", K::Struct)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListJobTemplates",
@@ -8182,6 +8532,8 @@ pub static OPS: &[OpMeta] = &[
             ("description", K::Str),
             ("createdAt", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListJobs",
@@ -8273,6 +8625,8 @@ pub static OPS: &[OpMeta] = &[
             ("completedAt", K::Ts),
             ("isConcurrent", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListManagedJobTemplates",
@@ -8321,6 +8675,8 @@ pub static OPS: &[OpMeta] = &[
             ("environments", K::List),
             ("templateVersion", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListMetricValues",
@@ -8418,6 +8774,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("metricDatumList", K::List), ("nextToken", K::Str)],
         list_field: Some("metricDatumList"),
         list_elems: &[("timestamp", K::Ts), ("value", K::Struct)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListMitigationActions",
@@ -8470,6 +8828,8 @@ pub static OPS: &[OpMeta] = &[
             ("actionArn", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListOTAUpdates",
@@ -8524,6 +8884,8 @@ pub static OPS: &[OpMeta] = &[
             ("otaUpdateArn", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListOutgoingCertificates",
@@ -8574,6 +8936,8 @@ pub static OPS: &[OpMeta] = &[
             ("transferMessage", K::Str),
             ("creationDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPackageVersions",
@@ -8636,6 +9000,8 @@ pub static OPS: &[OpMeta] = &[
             ("creationDate", K::Ts),
             ("lastModifiedDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPackages",
@@ -8669,6 +9035,8 @@ pub static OPS: &[OpMeta] = &[
             ("creationDate", K::Ts),
             ("lastModifiedDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPolicies",
@@ -8712,6 +9080,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("policies", K::List), ("nextMarker", K::Str)],
         list_field: Some("policies"),
         list_elems: &[("policyName", K::Str), ("policyArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPolicyPrincipals",
@@ -8767,6 +9137,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("principals", K::List), ("nextMarker", K::Str)],
         list_field: Some("principals"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPolicyVersions",
@@ -8806,6 +9178,8 @@ pub static OPS: &[OpMeta] = &[
             ("isDefaultVersion", K::Bool),
             ("createDate", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPrincipalPolicies",
@@ -8861,6 +9235,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("policies", K::List), ("nextMarker", K::Str)],
         list_field: Some("policies"),
         list_elems: &[("policyName", K::Str), ("policyArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPrincipalThings",
@@ -8905,6 +9281,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("things", K::List), ("nextToken", K::Str)],
         list_field: Some("things"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListPrincipalThingsV2",
@@ -8960,6 +9338,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("principalThingObjects", K::List), ("nextToken", K::Str)],
         list_field: Some("principalThingObjects"),
         list_elems: &[("thingName", K::Str), ("thingPrincipalType", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListProvisioningTemplateVersions",
@@ -9011,6 +9391,8 @@ pub static OPS: &[OpMeta] = &[
             ("creationDate", K::Ts),
             ("isDefaultVersion", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListProvisioningTemplates",
@@ -9048,6 +9430,8 @@ pub static OPS: &[OpMeta] = &[
             ("enabled", K::Bool),
             ("type", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListRelatedResourcesForAuditFinding",
@@ -9094,6 +9478,8 @@ pub static OPS: &[OpMeta] = &[
             ("resourceIdentifier", K::Struct),
             ("additionalInfo", K::Map),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListRoleAliases",
@@ -9137,6 +9523,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("roleAliases", K::List), ("nextMarker", K::Str)],
         list_field: Some("roleAliases"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListSbomValidationResults",
@@ -9215,6 +9603,8 @@ pub static OPS: &[OpMeta] = &[
             ("errorCode", K::Str),
             ("errorMessage", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListScheduledAudits",
@@ -9249,6 +9639,8 @@ pub static OPS: &[OpMeta] = &[
             ("dayOfMonth", K::Str),
             ("dayOfWeek", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListSecurityProfiles",
@@ -9305,6 +9697,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("securityProfileIdentifiers"),
         list_elems: &[("name", K::Str), ("arn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListSecurityProfilesForTarget",
@@ -9353,6 +9747,8 @@ pub static OPS: &[OpMeta] = &[
             ("securityProfileIdentifier", K::Struct),
             ("target", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListStreams",
@@ -9388,6 +9784,8 @@ pub static OPS: &[OpMeta] = &[
             ("streamVersion", K::Int),
             ("description", K::Str),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListTagsForResource",
@@ -9417,6 +9815,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("tags", K::List), ("nextToken", K::Str)],
         list_field: Some("tags"),
         list_elems: &[("Key", K::Str), ("Value", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListTargetsForPolicy",
@@ -9473,6 +9873,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("targets", K::List), ("nextMarker", K::Str)],
         list_field: Some("targets"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListTargetsForSecurityProfile",
@@ -9519,6 +9921,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("securityProfileTargets", K::List), ("nextToken", K::Str)],
         list_field: Some("securityProfileTargets"),
         list_elems: &[("arn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingGroups",
@@ -9572,6 +9976,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("thingGroups", K::List), ("nextToken", K::Str)],
         list_field: Some("thingGroups"),
         list_elems: &[("groupName", K::Str), ("groupArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingGroupsForThing",
@@ -9618,6 +10024,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("thingGroups", K::List), ("nextToken", K::Str)],
         list_field: Some("thingGroups"),
         list_elems: &[("groupName", K::Str), ("groupArn", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingPrincipals",
@@ -9666,6 +10074,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("principals", K::List), ("nextToken", K::Str)],
         list_field: Some("principals"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingPrincipalsV2",
@@ -9725,6 +10135,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("thingPrincipalObjects", K::List), ("nextToken", K::Str)],
         list_field: Some("thingPrincipalObjects"),
         list_elems: &[("principal", K::Str), ("thingPrincipalType", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingRegistrationTaskReports",
@@ -9786,6 +10198,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("resourceLinks"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingRegistrationTasks",
@@ -9834,6 +10248,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskIds", K::List), ("nextToken", K::Str)],
         list_field: Some("taskIds"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingTypes",
@@ -9882,6 +10298,8 @@ pub static OPS: &[OpMeta] = &[
             ("thingTypeProperties", K::Struct),
             ("thingTypeMetadata", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThings",
@@ -9953,6 +10371,8 @@ pub static OPS: &[OpMeta] = &[
             ("attributes", K::Map),
             ("version", K::Int),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingsInBillingGroup",
@@ -9999,6 +10419,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("things", K::List), ("nextToken", K::Str)],
         list_field: Some("things"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListThingsInThingGroup",
@@ -10045,6 +10467,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("things", K::List), ("nextToken", K::Str)],
         list_field: Some("things"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "ListTopicRuleDestinations",
@@ -10082,6 +10506,8 @@ pub static OPS: &[OpMeta] = &[
             ("httpUrlSummary", K::Struct),
             ("vpcDestinationSummary", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListTopicRules",
@@ -10117,6 +10543,8 @@ pub static OPS: &[OpMeta] = &[
             ("createdAt", K::Ts),
             ("ruleDisabled", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListV2LoggingLevels",
@@ -10165,6 +10593,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("logTargetConfigurations", K::List), ("nextToken", K::Str)],
         list_field: Some("logTargetConfigurations"),
         list_elems: &[("logTarget", K::Struct), ("logLevel", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ListViolationEvents",
@@ -10277,6 +10707,8 @@ pub static OPS: &[OpMeta] = &[
             ("verificationStateDescription", K::Str),
             ("violationEventTime", K::Ts),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "PutVerificationStateOnViolation",
@@ -10338,6 +10770,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RegisterCACertificate",
@@ -10397,6 +10831,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("certificateArn", K::Str), ("certificateId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RegisterCertificate",
@@ -10462,6 +10898,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("certificateArn", K::Str), ("certificateId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RegisterCertificateWithoutCA",
@@ -10515,6 +10953,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("certificateArn", K::Str), ("certificateId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RegisterThing",
@@ -10547,6 +10987,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("certificatePem", K::Str), ("resourceArns", K::Map)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RejectCertificateTransfer",
@@ -10595,6 +11037,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RemoveThingFromBillingGroup",
@@ -10640,6 +11084,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "RemoveThingFromThingGroup",
@@ -10685,6 +11131,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ReplaceTopicRule",
@@ -10716,6 +11164,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: true,
     },
     OpMeta {
         op: "SearchIndex",
@@ -10786,6 +11236,8 @@ pub static OPS: &[OpMeta] = &[
             ("deviceDefender", K::Str),
             ("connectivity", K::Struct),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "SetDefaultAuthorizer",
@@ -10818,6 +11270,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizerName", K::Str), ("authorizerArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "SetDefaultPolicyVersion",
@@ -10867,6 +11321,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "SetLoggingOptions",
@@ -10885,6 +11341,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: true,
     },
     OpMeta {
         op: "SetV2LoggingLevel",
@@ -10928,6 +11386,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "SetV2LoggingOptions",
@@ -10956,6 +11416,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "StartAuditMitigationActionsTask",
@@ -11026,6 +11488,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "StartDetectMitigationActionsTask",
@@ -11096,6 +11560,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "StartOnDemandAuditTask",
@@ -11125,6 +11591,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "StartThingRegistrationTask",
@@ -11189,6 +11657,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("taskId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "StopThingRegistrationTask",
@@ -11223,6 +11693,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "TagResource",
@@ -11266,6 +11738,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "TestAuthorization",
@@ -11304,6 +11778,8 @@ pub static OPS: &[OpMeta] = &[
             ("authDecision", K::Str),
             ("missingContextValues", K::List),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "TestInvokeAuthorizer",
@@ -11370,6 +11846,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("policyDocuments"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "TransferCertificate",
@@ -11430,6 +11908,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("transferredCertificateArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UntagResource",
@@ -11472,6 +11952,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateAccountAuditConfiguration",
@@ -11500,6 +11982,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateAuditSuppression",
@@ -11557,6 +12041,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateAuthorizer",
@@ -11624,6 +12110,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("authorizerName", K::Str), ("authorizerArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateBillingGroup",
@@ -11667,6 +12155,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("version", K::Int)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateCACertificate",
@@ -11722,6 +12212,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateCertificate",
@@ -11774,6 +12266,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateCertificateProvider",
@@ -11835,6 +12329,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateCommand",
@@ -11895,6 +12391,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateCustomMetric",
@@ -11944,6 +12442,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateDimension",
@@ -11993,6 +12493,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: Some("stringValues"),
         list_elems: &[],
+        list_scalar: true,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateDomainConfiguration",
@@ -12072,6 +12574,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateDynamicThingGroup",
@@ -12141,6 +12645,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("version", K::Int)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateEncryptionConfiguration",
@@ -12195,6 +12701,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateEventConfigurations",
@@ -12213,6 +12721,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateFleetMetric",
@@ -12344,6 +12854,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateIndexingConfiguration",
@@ -12364,6 +12876,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateJob",
@@ -12406,6 +12920,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateMitigationAction",
@@ -12452,6 +12968,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("actionArn", K::Str), ("actionId", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdatePackage",
@@ -12517,6 +13035,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdatePackageConfiguration",
@@ -12546,6 +13066,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdatePackageVersion",
@@ -12638,6 +13160,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateProvisioningTemplate",
@@ -12695,6 +13219,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateRoleAlias",
@@ -12750,6 +13276,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("roleAlias", K::Str), ("roleAliasArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateScheduledAudit",
@@ -12807,6 +13335,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("scheduledAuditArn", K::Str)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateSecurityProfile",
@@ -12883,6 +13413,8 @@ pub static OPS: &[OpMeta] = &[
             ("suppressAlerts", K::Bool),
             ("exportMetric", K::Bool),
         ],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateStream",
@@ -12955,6 +13487,8 @@ pub static OPS: &[OpMeta] = &[
         ],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateThing",
@@ -13000,6 +13534,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateThingGroup",
@@ -13043,6 +13579,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("version", K::Int)],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateThingGroupsForThing",
@@ -13075,6 +13613,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateThingType",
@@ -13106,6 +13646,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "UpdateTopicRuleDestination",
@@ -13149,6 +13691,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[],
         list_field: None,
         list_elems: &[],
+        list_scalar: false,
+        req_payload: false,
     },
     OpMeta {
         op: "ValidateSecurityProfileBehaviors",
@@ -13180,6 +13724,8 @@ pub static OPS: &[OpMeta] = &[
         omembers: &[("valid", K::Bool), ("validationErrors", K::List)],
         list_field: Some("validationErrors"),
         list_elems: &[("errorMessage", K::Str)],
+        list_scalar: false,
+        req_payload: false,
     },
 ];
 

@@ -150,14 +150,21 @@ for k in ops:
             mtr=m.get('traits',{})
             if binding(mtr) not in ('body','payload'): continue
             omembers.append({'wire':wire_name(mn,m),'kind':kind_of(m['target'])})
-    # list element (first list-typed output member)
+    # list element (first list-typed output member). `list_scalar` is set when
+    # the element is a plain scalar (e.g. `list<string>` name lists such as
+    # ListCustomMetrics.metricNames): the engine then serialises each element as
+    # the stored resource's identifier string rather than as an object.
     list_elem=None
+    list_scalar=False
     if out and sn(out)!='Unit':
         for mn,m in struct_members(out):
             if binding(m.get('traits',{})) not in ('body','payload'): continue
             if kind_of(m['target'])=='List':
                 ls=resolve(m['target'])
                 elt=ls.get('member',{}).get('target') if ls else None
+                ek=kind_of(elt) if elt else 'Struct'
+                if ek in ('Str','Int','Num','Bool','Blob','Ts'):
+                    list_scalar=True
                 elems=[]
                 if elt:
                     for emn,em in struct_members(elt):
@@ -165,8 +172,19 @@ for k in ops:
                         elems.append({'wire':wire_name(emn,em),'kind':kind_of(em['target'])})
                 list_elem={'wire':wire_name(mn,m),'elems':elems}
                 break
+    # A required @httpPayload member: the whole request body is that member, so
+    # the generic validator enforces its presence (an empty body is a client
+    # error) even though payload members are not part of the per-member rules.
+    req_payload=False
+    if inp and sn(inp)!='Unit':
+        for mn,m in struct_members(inp):
+            mtr=m.get('traits',{})
+            if 'smithy.api#httpPayload' in mtr and 'smithy.api#required' in mtr:
+                req_payload=True
+                break
     meta[name]={'method':method,'segs':segs,'verb':verb,'rtype':rtype,'errors':errs,
-        'rules':rules,'omembers':omembers,'list_elem':list_elem,
+        'rules':rules,'omembers':omembers,'list_elem':list_elem,'list_scalar':list_scalar,
+        'req_payload':req_payload,
         'nlabels':len(label_segs),'has_input': bool(inp and sn(inp)!='Unit')}
 json.dump(meta,open('iot_meta.json','w'))
 print("ops:",len(meta))
@@ -222,6 +240,8 @@ out.append("    pub rules: &'static [Rule],")
 out.append("    pub omembers: &'static [(&'static str, K)],")
 out.append("    pub list_field: Option<&'static str>,")
 out.append("    pub list_elems: &'static [(&'static str, K)],")
+out.append("    pub list_scalar: bool,")
+out.append("    pub req_payload: bool,")
 out.append("}")
 out.append("")
 verbmap={'create':'Create','get':'Get','list':'List','update':'Update','delete':'Delete','action':'Action'}
@@ -252,9 +272,10 @@ for name in sorted(meta):
         lf_s=f"Some({lf})"
     else:
         lf_s="None"; le="&[]"
-    out.append("    OpMeta { op: %s, method: %s, segs: %s, verb: Verb::%s, rtype: %s, nlabels: %d, has_input: %s, errors: %s, rules: %s, omembers: %s, list_field: %s, list_elems: %s }," % (
+    out.append("    OpMeta { op: %s, method: %s, segs: %s, verb: Verb::%s, rtype: %s, nlabels: %d, has_input: %s, errors: %s, rules: %s, omembers: %s, list_field: %s, list_elems: %s, list_scalar: %s, req_payload: %s }," % (
         rs(name), rs(m['method']), segs_s, verbmap[m['verb']], rs(m['rtype']), m['nlabels'],
-        'true' if m['has_input'] else 'false', errs, rules_s, omem, lf_s, le))
+        'true' if m['has_input'] else 'false', errs, rules_s, omem, lf_s, le,
+        'true' if m['list_scalar'] else 'false', 'true' if m['req_payload'] else 'false'))
 out.append("];")
 out.append("")
 out.append("pub static ACTIONS: &[&str] = &[")

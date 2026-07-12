@@ -85,6 +85,16 @@ impl IotData {
             .unwrap_or_default()
     }
 
+    /// All records of a type as `(id, record)` pairs, ordered by id. Used by
+    /// list operations whose output element is a plain identifier string (the
+    /// stored key) rather than a projected object.
+    pub fn list_resource_entries(&self, rtype: &str) -> Vec<(String, Value)> {
+        self.resources
+            .get(rtype)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
     /// Next unique sequence value for id minting.
     pub fn next_seq(&mut self) -> u64 {
         self.seq += 1;

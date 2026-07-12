@@ -543,6 +543,156 @@ fn search_index_bounded_query() {
     assert!(matches!(err, AwsServiceError::AwsError { status, .. } if status.is_client_error()));
 }
 
+// ---------- output-shape regressions (conformance) ----------
+
+#[test]
+fn scalar_name_lists_are_arrays_of_strings() {
+    let s = svc();
+    // Custom metrics: metricNames is list<string>.
+    run(
+        &s,
+        "POST",
+        "/custom-metric/m1",
+        &[],
+        json!({"metricType": "number", "clientRequestToken": "t"}),
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/custom-metrics", &[], Value::Null).unwrap());
+    assert_eq!(listed["metricNames"], json!(["m1"]));
+
+    // Dimensions: dimensionNames is list<string>.
+    run(
+        &s,
+        "POST",
+        "/dimensions/d1",
+        &[],
+        json!({"type": "TOPIC_FILTER", "stringValues": ["x"], "clientRequestToken": "t"}),
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/dimensions", &[], Value::Null).unwrap());
+    assert_eq!(listed["dimensionNames"], json!(["d1"]));
+
+    // Role aliases: roleAliases is list<string>.
+    run(
+        &s,
+        "POST",
+        "/role-aliases/r1",
+        &[],
+        json!({"roleArn": "arn:aws:iam::000000000000:role/x"}),
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/role-aliases", &[], Value::Null).unwrap());
+    assert_eq!(listed["roleAliases"], json!(["r1"]));
+}
+
+#[test]
+fn list_security_profiles_has_name_and_arn() {
+    let s = svc();
+    run(&s, "POST", "/security-profiles/sp1", &[], json!({})).unwrap();
+    let listed = body_of(&run(&s, "GET", "/security-profiles", &[], Value::Null).unwrap());
+    let ids = listed["securityProfileIdentifiers"].as_array().unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0]["name"], "sp1");
+    assert!(ids[0]["arn"]
+        .as_str()
+        .unwrap()
+        .contains(":securityprofile/sp1"));
+}
+
+#[test]
+fn required_payload_omission_is_rejected() {
+    let s = svc();
+    // CreateTopicRule / ReplaceTopicRule / SetLoggingOptions require an
+    // @httpPayload body; an empty body is a client error.
+    for (method, path) in [
+        ("POST", "/rules/r1"),
+        ("PATCH", "/rules/r1"),
+        ("POST", "/loggingOptions"),
+    ] {
+        let err = expect_err(run(&s, method, path, &[], Value::Null));
+        assert!(
+            matches!(&err, AwsServiceError::AwsError { status, .. } if status.is_client_error()),
+            "{method} {path} should reject empty payload, got {err:?}"
+        );
+    }
+    // A non-empty payload is accepted.
+    run(
+        &s,
+        "POST",
+        "/rules/r1",
+        &[],
+        json!({"sql": "SELECT * FROM 'x'", "actions": []}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn audit_suppression_description_round_trips() {
+    let s = svc();
+    let ri = json!({"deviceCertificateId": "abcdef"});
+    run(
+        &s,
+        "POST",
+        "/audit/suppressions/create",
+        &[],
+        json!({"checkName": "LOGGING_DISABLED_CHECK", "resourceIdentifier": ri,
+               "description": "created", "clientRequestToken": "t"}),
+    )
+    .unwrap();
+    let desc = body_of(
+        &run(
+            &s,
+            "POST",
+            "/audit/suppressions/describe",
+            &[],
+            json!({"checkName": "LOGGING_DISABLED_CHECK", "resourceIdentifier": ri}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(desc["description"], "created");
+
+    // Update echoes the new description on the next describe.
+    run(
+        &s,
+        "PATCH",
+        "/audit/suppressions/update",
+        &[],
+        json!({"checkName": "LOGGING_DISABLED_CHECK", "resourceIdentifier": ri,
+               "description": "updated"}),
+    )
+    .unwrap();
+    let desc = body_of(
+        &run(
+            &s,
+            "POST",
+            "/audit/suppressions/describe",
+            &[],
+            json!({"checkName": "LOGGING_DISABLED_CHECK", "resourceIdentifier": ri}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(desc["description"], "updated");
+}
+
+#[test]
+fn create_job_document_source_round_trips() {
+    let s = svc();
+    run(
+        &s,
+        "PUT",
+        "/jobs/j1",
+        &[],
+        json!({"targets": ["arn:aws:iot:us-east-1:000000000000:thing/t1"],
+               "documentSource": "https://example.com/doc.json"}),
+    )
+    .unwrap();
+    // DescribeJob returns documentSource as a top-level member, not inside job.
+    let desc = body_of(&run(&s, "GET", "/jobs/j1", &[], Value::Null).unwrap());
+    assert_eq!(desc["documentSource"], "https://example.com/doc.json");
+    assert_eq!(desc["job"]["jobId"], "j1");
+    assert!(desc["job"].get("documentSource").is_none());
+}
+
 // ---------- every operation routes to a handler ----------
 
 #[test]
@@ -631,6 +781,12 @@ fn build_success_request(meta: &OpMeta) -> (String, String, Vec<(String, String)
     } else {
         format!("{path}?{query_str}")
     };
+    // A required `@httpPayload` member is the whole body; supply a non-empty
+    // one so the model-valid request is accepted (the payload contents are not
+    // otherwise constrained here).
+    if meta.req_payload && body.is_empty() {
+        body.insert("payload".to_string(), json!({}));
+    }
     let body_val = if body.is_empty() {
         Value::Null
     } else {
@@ -690,12 +846,13 @@ fn required_body_omission_is_rejected_for_every_op() {
     let s = svc();
     let mut failures: Vec<String> = Vec::new();
     for meta in OPS {
-        // Find a required body member to omit; skip ops without one.
+        // Find a required body member (or a required @httpPayload) to omit;
+        // skip ops without one.
         let has_required_body = meta
             .rules
             .iter()
             .any(|r| r.req && matches!(r.src, Src::Body));
-        if !has_required_body {
+        if !has_required_body && !meta.req_payload {
             continue;
         }
         let (method, path, headers, _body) = build_success_request(meta);

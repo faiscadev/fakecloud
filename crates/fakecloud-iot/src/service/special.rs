@@ -242,6 +242,23 @@ pub(super) fn dispatch(
 
         "SearchIndex" => Ok(Some(search_index(svc, ctx, meta, body)?)),
 
+        // Security profiles: the list returns identifier objects `{name, arn}`
+        // projected from the stored profile (whose fields are named
+        // `securityProfileName` / `securityProfileArn`).
+        "ListSecurityProfiles" => Ok(Some(list_security_profiles(svc, ctx))),
+
+        // Audit suppressions are body-keyed (checkName + resourceIdentifier)
+        // rather than URI-addressed, so they need explicit persistence.
+        "CreateAuditSuppression" => Ok(Some(put_audit_suppression(svc, ctx, body, false))),
+        "UpdateAuditSuppression" => Ok(Some(put_audit_suppression(svc, ctx, body, true))),
+        "DescribeAuditSuppression" => Ok(Some(describe_audit_suppression(svc, ctx, meta, body)?)),
+        "DeleteAuditSuppression" => Ok(Some(delete_audit_suppression(svc, ctx, body))),
+        "ListAuditSuppressions" => Ok(Some(list_audit_suppressions(svc, ctx))),
+
+        // DescribeJob returns `documentSource` as a top-level member alongside
+        // the `job` wrapper (the model places it outside the Job struct).
+        "DescribeJob" => Ok(Some(describe_job(svc, ctx, meta, labels)?)),
+
         // Topic rules: the rule payload is the request body (`@httpPayload`);
         // GetTopicRule nests it under `rule` alongside the `ruleArn`.
         "CreateTopicRule" | "ReplaceTopicRule" => Ok(Some(put_topic_rule(svc, ctx, labels, body))),
@@ -261,7 +278,7 @@ fn placeholder_pem(kind: &str, id: &str) -> String {
     let seed = super::mint_hex64(&format!("{kind}:{id}"));
     format!(
         "-----BEGIN {kind}-----\nMIIB{}\n-----END {kind}-----\n",
-        &seed
+        seed
     )
 }
 
@@ -737,4 +754,171 @@ fn search_index(
         })
         .collect();
     Ok((ok_json(json!({ "things": docs })), false))
+}
+
+// ---------- security profiles ----------
+
+fn list_security_profiles(svc: &IotService, ctx: &Ctx) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let records = g
+        .get(&ctx.account)
+        .map(|d| d.list_resources("security-profiles"))
+        .unwrap_or_default();
+    let identifiers: Vec<Value> = records
+        .into_iter()
+        .filter_map(|r| {
+            let name = r.get("securityProfileName").and_then(Value::as_str)?;
+            let arn = r.get("securityProfileArn").and_then(Value::as_str)?;
+            Some(json!({ "name": name, "arn": arn }))
+        })
+        .collect();
+    (
+        ok_json(json!({ "securityProfileIdentifiers": identifiers })),
+        false,
+    )
+}
+
+// ---------- audit suppressions ----------
+
+/// Audit suppressions are identified by `checkName` + `resourceIdentifier`
+/// (both in the request body), not by a URI label. This builds a stable
+/// storage key from those two fields, canonicalising the `resourceIdentifier`
+/// object so key ordering does not matter across create / describe / delete.
+fn suppression_key(body: &Map<String, Value>) -> String {
+    let check = body_str(body, "checkName").unwrap_or("");
+    let ri = body
+        .get("resourceIdentifier")
+        .map(canonical_json)
+        .unwrap_or_default();
+    format!("{check}\u{1f}{ri}")
+}
+
+fn canonical_json(v: &Value) -> String {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{k}={}", canonical_json(&m[*k])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The declared members of an audit suppression (create/update input and
+/// describe/list output share these).
+const SUPPRESSION_FIELDS: &[&str] = &[
+    "checkName",
+    "resourceIdentifier",
+    "expirationDate",
+    "suppressIndefinitely",
+    "description",
+];
+
+fn put_audit_suppression(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+    is_update: bool,
+) -> (AwsResponse, bool) {
+    let key = suppression_key(body);
+    let mut record = Map::new();
+    for field in SUPPRESSION_FIELDS {
+        if let Some(v) = body.get(*field) {
+            record.insert((*field).to_string(), v.clone());
+        }
+    }
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if is_update {
+        if let Some(existing) = data
+            .get_resource("audit-suppressions", &key)
+            .and_then(Value::as_object)
+            .cloned()
+        {
+            let mut merged = existing;
+            for (k, v) in record {
+                merged.insert(k, v);
+            }
+            record = merged;
+        }
+    }
+    data.put_resource("audit-suppressions", &key, Value::Object(record));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+fn describe_audit_suppression(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let key = suppression_key(body);
+    let g = svc.state.read();
+    match g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("audit-suppressions", &key))
+        .cloned()
+    {
+        Some(record) => Ok((ok_json(record), false)),
+        None => Err(super::engine::not_found(meta, &key)),
+    }
+}
+
+fn delete_audit_suppression(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let key = suppression_key(body);
+    let mut g = svc.state.write();
+    g.get_or_create(&ctx.account)
+        .remove_resource("audit-suppressions", &key);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+fn list_audit_suppressions(svc: &IotService, ctx: &Ctx) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let suppressions = g
+        .get(&ctx.account)
+        .map(|d| d.list_resources("audit-suppressions"))
+        .unwrap_or_default();
+    (ok_json(json!({ "suppressions": suppressions })), false)
+}
+
+// ---------- jobs ----------
+
+fn describe_job(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let job_id = labels.get("jobId").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    match g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("jobs", &job_id))
+        .cloned()
+    {
+        Some(mut record) => {
+            // `documentSource` is a top-level member of DescribeJobResponse,
+            // outside the `job` wrapper; lift it out of the stored record.
+            let document_source = record
+                .as_object_mut()
+                .and_then(|o| o.remove("documentSource"))
+                .filter(|v| !v.is_null());
+            let mut out = Map::new();
+            if let Some(ds) = document_source {
+                out.insert("documentSource".to_string(), ds);
+            }
+            out.insert("job".to_string(), record);
+            Ok((ok_json(Value::Object(out)), false))
+        }
+        None => Err(super::engine::not_found(meta, &job_id)),
+    }
 }
