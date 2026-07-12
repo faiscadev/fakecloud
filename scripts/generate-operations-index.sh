@@ -81,6 +81,7 @@ SERVICES=(
     "iotdata|AWS IoT Data Plane|iotdata"
     "pinpoint|Amazon Pinpoint|pinpoint"
     "iot|AWS IoT Core|iot"
+    "iotwireless|AWS IoT Wireless|iotwireless"
     "managedblockchain|Amazon Managed Blockchain|managedblockchain"
     "appsync|AWS AppSync|appsync"
     "glacier|Amazon S3 Glacier|glacier"

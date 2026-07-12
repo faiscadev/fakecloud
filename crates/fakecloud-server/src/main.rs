@@ -824,6 +824,13 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let iotwireless_state: fakecloud_iotwireless::SharedIotWirelessState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        )),
+    );
     let managedblockchain_state: fakecloud_managedblockchain::SharedManagedBlockchainState =
         Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
@@ -6288,6 +6295,38 @@ async fn main() {
         cfn_snapshot_hooks.insert("iot", h);
     }
     registry.register(Arc::new(iot_service));
+
+    let iotwireless_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("iotwireless").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_iotwireless::persistence::load_into(&store, &iotwireless_state) {
+                Ok(fakecloud_iotwireless::persistence::LoadOutcome::Loaded(accounts)) => {
+                    tracing::info!(accounts, "loaded iotwireless persistence snapshot");
+                }
+                Ok(fakecloud_iotwireless::persistence::LoadOutcome::Empty) => {
+                    tracing::info!("no iotwireless persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!("{err}")),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut iotwireless_service =
+        fakecloud_iotwireless::IotWirelessService::new(iotwireless_state.clone());
+    if let Some(store) = iotwireless_snapshot_store {
+        iotwireless_service = iotwireless_service.with_snapshot_store(store);
+    }
+    if let Some(h) = iotwireless_service.snapshot_hook() {
+        cfn_snapshot_hooks.insert("iotwireless", h);
+    }
+    registry.register(Arc::new(iotwireless_service));
 
     let managedblockchain_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

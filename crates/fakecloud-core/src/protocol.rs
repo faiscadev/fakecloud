@@ -122,6 +122,11 @@ const REST_JSON_SERVICES: &[&str] = &[
     // `/policies/{policyName}`, `/jobs/{jobId}`, `/rules/{ruleName}`, ...).
     // Signs as `iot`.
     "iot",
+    // AWS IoT Wireless control plane: restJson1 LoRaWAN / Sidewalk registry
+    // (collection-POST creates + path-labelled reads over `/destinations`,
+    // `/wireless-devices/{Identifier}`, `/fuota-tasks/{Id}`, ...). Signs as
+    // `iotwireless`.
+    "iotwireless",
 ];
 
 /// Detected service name and action from an incoming HTTP request.

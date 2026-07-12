@@ -27,6 +27,7 @@ SERVICES=(
     "iotdata:iot-data-plane"
     "pinpoint:pinpoint"
     "iot:iot"
+    "iotwireless:iot-wireless"
     "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"

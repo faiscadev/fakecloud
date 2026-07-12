@@ -1457,6 +1457,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-iotwireless"
+version = "1.106.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e189bc8b2316c3084b2286fea67a1f767ec00bc64ff1df85a2a394608cdbb056"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-kafka"
 version = "1.108.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4288,6 +4312,7 @@ dependencies = [
  "fakecloud-identitystore",
  "fakecloud-iot",
  "fakecloud-iotdata",
+ "fakecloud-iotwireless",
  "fakecloud-k8s",
  "fakecloud-kafka",
  "fakecloud-kinesis",
@@ -5361,6 +5386,7 @@ dependencies = [
  "aws-sdk-iam",
  "aws-sdk-iot",
  "aws-sdk-iotdataplane",
+ "aws-sdk-iotwireless",
  "aws-sdk-kafka",
  "aws-sdk-kinesis",
  "aws-sdk-kinesisanalyticsv2",
@@ -5812,6 +5838,26 @@ dependencies = [
 
 [[package]]
 name = "fakecloud-iotdata"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fakecloud-iotwireless"
 version = "0.40.1"
 dependencies = [
  "async-trait",
