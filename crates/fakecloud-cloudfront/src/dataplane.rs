@@ -80,7 +80,9 @@ impl CloudFrontDataPlane {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|e| {
-                warn!("CloudFront data plane: failed to build reqwest client: {e}; serving disabled");
+                warn!(
+                    "CloudFront data plane: failed to build reqwest client: {e}; serving disabled"
+                );
                 // Decline to serve: a default client lacks the invalid-cert /
                 // no-redirect / timeout behavior the data plane relies on, so
                 // proxying through it would silently misbehave.
