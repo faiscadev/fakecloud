@@ -1,0 +1,15 @@
+# CVE-2026-39822 — Go stdlib os.Root symlink-following vulnerability (HIGH),
+# fixed upstream in go1.26.5 / 1.27.0-rc.2.
+#
+# Present ONLY in the bundled static Docker CLI (/usr/local/bin/docker, from the
+# docker-cli build stage), which is compiled with go1.26.4. As of 2026-07-12 no
+# Docker static release ships a go>=1.26.5 toolchain (latest 29.6.1 is still on
+# go1.26.4), so the CLI version cannot yet be bumped past it.
+#
+# Not exploitable in fakecloud's usage: fakecloud shells out to the docker CLI
+# purely for container lifecycle (run/exec/cp/rm) and never invokes the os.Root
+# symlink-traversal code path. Our own binary is Rust.
+#
+# REMOVE this entry once a Docker static release built with go>=1.26.5 exists and
+# DOCKER_CLI_VERSION in the Dockerfile is bumped to it.
+CVE-2026-39822

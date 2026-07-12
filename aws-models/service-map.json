@@ -387,6 +387,10 @@
     "repo_dir": "iot-wireless",
     "service_name": "iotwireless"
   },
+  "sagemaker": {
+    "repo_dir": "sagemaker",
+    "service_name": "sagemaker"
+  },
   "managedblockchain": {
     "repo_dir": "managedblockchain",
     "service_name": "managedblockchain"

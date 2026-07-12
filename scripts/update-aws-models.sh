@@ -28,6 +28,7 @@ SERVICES=(
     "pinpoint:pinpoint"
     "iot:iot"
     "iotwireless:iot-wireless"
+    "sagemaker:sagemaker"
     "managedblockchain:managedblockchain"
     "config:config-service"
     "identitystore:identitystore"

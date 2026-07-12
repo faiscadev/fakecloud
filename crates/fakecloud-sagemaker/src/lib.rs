@@ -1,0 +1,50 @@
+//! Amazon SageMaker (`sagemaker`) awsJson1.1 control-plane service for fakecloud.
+//!
+//! The full ~403-operation Amazon SageMaker Smithy model (SDK id `SageMaker`,
+//! SigV4 signing name `sagemaker`, awsJson1.1 protocol). Every request is a
+//! `POST /` whose operation is selected by the `X-Amz-Target: SageMaker.<Op>`
+//! header, with all inputs carried in the JSON body (no HTTP path / label /
+//! query bindings). The operation table, per-operation input constraints,
+//! output member shapes, list element shapes, resource families and identifier
+//! members are generated from the Smithy model (see `src/generated.rs`,
+//! produced by `scripts/generate-sagemaker-tables.py`), so the control plane
+//! tracks the model exactly.
+//!
+//! **What is real.** Every named resource family — models, endpoints, endpoint
+//! configs, training / processing / transform / labeling / compilation / AutoML
+//! / hyper-parameter-tuning jobs, notebook instances (+ lifecycle configs),
+//! model packages (+ groups), pipelines, feature groups, domains, user
+//! profiles, spaces, apps, images, experiments, trials, actions, artifacts,
+//! contexts, clusters, inference components, monitoring schedules, workteams,
+//! workforces, and the rest — mints a proper ARN, persists its accepted input
+//! attributes plus creation / last-modified timestamps, and echoes them back
+//! on `Describe*` / `List*`. Create is conflict-checked (`ResourceInUse`),
+//! Describe / Update / Delete round-trip by the resource's identifier (name,
+//! id, or ARN), and `AddTags` / `ListTags` / `DeleteTags` persist tags keyed by
+//! ARN. State is account-partitioned and persisted across restarts. Input
+//! validation is model-derived: required members, string `@length`, numeric
+//! `@range`, and `@enum` constraints are enforced, returning SageMaker's
+//! `ValidationException` / `ResourceNotFound` / `ResourceInUse`.
+//!
+//! **Honest emulation choices (documented, not stubbed):**
+//! * This is the SageMaker **control plane** only. There is no ML execution
+//!   plane: training / processing / transform / AutoML / tuning jobs are
+//!   created, persisted and described, but no container is scheduled, no model
+//!   is trained, and no inference endpoint serves traffic. Jobs and endpoints
+//!   are not advanced through a live lifecycle by a background scheduler.
+//! * Timestamps are emitted as awsJson1.1 epoch-second JSON numbers.
+//! * A handful of resources whose `Describe*` identifier is a service-minted
+//!   Id / ARN distinct from the create-time Name (e.g. `Domain`, `ImageVersion`,
+//!   `ModelCardExportJob`) resolve by scanning the family's minted identifiers,
+//!   so a describe by the returned Id / ARN still round-trips.
+
+pub mod generated;
+pub mod persistence;
+pub mod service;
+pub mod state;
+pub mod validate;
+
+pub use service::{SageMakerService, SAGEMAKER_ACTIONS};
+pub use state::{
+    SageMakerData, SageMakerSnapshot, SharedSageMakerState, SAGEMAKER_SNAPSHOT_SCHEMA_VERSION,
+};

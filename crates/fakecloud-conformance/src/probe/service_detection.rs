@@ -101,6 +101,10 @@ pub(super) fn service_protocol(service_name: &str) -> Protocol {
         "shield" => Protocol::Json {
             target_prefix: "AWSShield_20160616",
         },
+        // Amazon SageMaker: awsJson1.1 (ML control plane).
+        "sagemaker" => Protocol::Json {
+            target_prefix: "SageMaker",
+        },
         // Amazon SWF (Simple Workflow Service): awsJson1_0.
         "swf" => Protocol::Json {
             target_prefix: "SimpleWorkflowService",

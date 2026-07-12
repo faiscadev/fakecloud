@@ -621,6 +621,9 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // `X-Amz-Target: GraniteServiceVersion20100801.<Operation>` and a JSON
         // body. The service registry key is `monitoring`.
         s if s.starts_with("GraniteServiceVersion") => "monitoring",
+        // Amazon SageMaker: awsJson1.1. The service shape short name is the
+        // target prefix (`SageMaker.<Operation>`).
+        "SageMaker" => "sagemaker",
         _ => return None,
     };
 

@@ -1977,6 +1977,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-sagemaker"
+version = "1.201.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec8806f65b8fa169cf9fdd9a37b8920b6181673d5ba9bec19f58213a90e1f4d9"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-scheduler"
 version = "1.97.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4342,6 +4366,7 @@ dependencies = [
  "fakecloud-route53resolver",
  "fakecloud-s3",
  "fakecloud-s3tables",
+ "fakecloud-sagemaker",
  "fakecloud-scheduler",
  "fakecloud-sdk",
  "fakecloud-secretsmanager",
@@ -5404,6 +5429,7 @@ dependencies = [
  "aws-sdk-rdsdata",
  "aws-sdk-route53",
  "aws-sdk-s3",
+ "aws-sdk-sagemaker",
  "aws-sdk-scheduler",
  "aws-sdk-secretsmanager",
  "aws-sdk-serverlessapplicationrepository",
@@ -6527,6 +6553,24 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-sagemaker"
+version = "0.40.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
