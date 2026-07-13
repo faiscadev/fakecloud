@@ -79,7 +79,7 @@ impl EventBridgeDeliveryImpl {
         // Find matching rules and their targets
         let account_id = state.account_id.clone();
         let region = state.region.clone();
-        let matching_targets: Vec<_> = state
+        let matching_targets: Vec<(String, crate::state::EventTarget)> = state
             .rules
             .values()
             .filter(|r| {
@@ -93,9 +93,11 @@ impl EventBridgeDeliveryImpl {
                         &account_id,
                         &region,
                         &[],
+                        &event_id,
+                        &now.to_rfc3339(),
                     )
             })
-            .flat_map(|r| r.targets.clone())
+            .flat_map(|r| r.targets.iter().map(|t| (r.arn.clone(), t.clone())))
             .collect();
 
         // Drop the lock before delivering
@@ -136,8 +138,15 @@ impl EventBridgeDeliveryImpl {
             account_id: &resolved_account,
             region: &region,
         };
-        for target in matching_targets {
-            dispatch_event_target(&ctx, &target, &event_json, &event_id, detail_type);
+        for (rule_arn, target) in matching_targets {
+            dispatch_event_target(
+                &ctx,
+                &target,
+                &event_json,
+                &event_id,
+                detail_type,
+                Some(&rule_arn),
+            );
         }
     }
 }

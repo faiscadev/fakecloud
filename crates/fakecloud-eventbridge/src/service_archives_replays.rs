@@ -475,7 +475,9 @@ impl EventBridgeService {
     ) {
         let target_arn = &target.arn;
         let body_str = if let Some(ref transformer) = target.input_transformer {
-            apply_input_transformer(transformer, event_json)
+            // Replay does not track which rule matched, so the rule-arn
+            // reserved variable is left unresolved here.
+            apply_input_transformer(transformer, event_json, None)
         } else if let Some(ref input) = target.input {
             input.clone()
         } else if let Some(ref input_path) = target.input_path {

@@ -27,11 +27,18 @@ pub(crate) fn validate_put_events_entry(
             "ErrorMessage": "Parameter Detail is not valid. Reason: Detail is a required argument.",
         }));
     }
-    if serde_json::from_str::<Value>(detail).is_err() {
-        return Err(json!({
-            "ErrorCode": "MalformedDetail",
-            "ErrorMessage": "Detail is malformed.",
-        }));
+    // AWS requires Detail to be a well-formed JSON *object* (`{...}`).
+    // A syntactically valid but non-object payload (e.g. `"a string"`,
+    // `123`, or `[...]`) is rejected with MalformedDetail, matching the
+    // real service; previously any valid JSON was accepted.
+    match serde_json::from_str::<Value>(detail) {
+        Ok(v) if v.is_object() => {}
+        _ => {
+            return Err(json!({
+                "ErrorCode": "MalformedDetail",
+                "ErrorMessage": "Detail is malformed.",
+            }));
+        }
     }
     Ok(())
 }
@@ -283,7 +290,18 @@ pub(crate) fn validate_pattern_values(value: &Value, path: &str) -> Result<(), A
                 };
                 match val {
                     Value::Object(_) => validate_pattern_values(val, &new_path)?,
-                    Value::Array(_) => {} // Arrays are fine at leaf level
+                    Value::Array(items) => {
+                        // Validate matcher objects that appear in a leaf list
+                        // (e.g. `{"numeric": [...]}`), rejecting malformed
+                        // ones at PutRule/TestEventPattern time.
+                        for item in items {
+                            if let Value::Object(m) = item {
+                                if let Some(num) = m.get("numeric") {
+                                    validate_numeric_matcher(num, &new_path)?;
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
@@ -386,6 +404,12 @@ fn sanitize_invocation_http_params(inv: &Value) -> Value {
 }
 
 /// Match an event against an EventBridge event pattern.
+///
+/// `id` and `time` are the event's generated envelope fields; they are
+/// woven into the synthetic match event (alongside the constant
+/// `version` of `"0"`) so patterns targeting `id`/`time`/`version` are
+/// matchable, which they previously were not.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn matches_pattern(
     pattern_json: Option<&str>,
     source: &str,
@@ -394,6 +418,8 @@ pub(crate) fn matches_pattern(
     account: &str,
     region: &str,
     resources: &[String],
+    id: &str,
+    time: &str,
 ) -> bool {
     let pattern_json = match pattern_json {
         Some(p) => p,
@@ -411,12 +437,15 @@ pub(crate) fn matches_pattern(
 
     let detail_value: Value = serde_json::from_str(detail).unwrap_or(json!({}));
     let event = json!({
+        "version": "0",
+        "id": id,
         "source": source,
         "detail-type": detail_type,
         "detail": detail_value,
         "account": account,
         "region": region,
         "resources": resources,
+        "time": time,
     });
 
     matches_value(&pattern, &event)
@@ -425,13 +454,12 @@ pub(crate) fn matches_pattern(
 pub(crate) fn matches_value(pattern: &Value, event_value: &Value) -> bool {
     match pattern {
         Value::Object(obj) => {
-            // `$or` is a sibling-level alternation: any alternative pattern
-            // matched against this same event level passes the whole object.
-            if let Some(Value::Array(alternatives)) = obj.get("$or") {
-                return alternatives
-                    .iter()
-                    .any(|alt| matches_value(alt, event_value));
-            }
+            // All sibling keys are ANDed together, and `$or` is a
+            // sibling-level alternation group that is *also* ANDed with the
+            // rest of the object. Previously `$or` short-circuited and the
+            // sibling constraints were never evaluated, so a pattern like
+            // `{"source": ["aws.ec2"], "$or": [...]}` matched events from any
+            // source as long as one alternative matched.
             for (key, sub_pattern) in obj {
                 if key == "$or" {
                     continue;
@@ -441,9 +469,26 @@ pub(crate) fn matches_value(pattern: &Value, event_value: &Value) -> bool {
                     return false;
                 }
             }
+            if let Some(Value::Array(alternatives)) = obj.get("$or") {
+                if !alternatives
+                    .iter()
+                    .any(|alt| matches_value(alt, event_value))
+                {
+                    return false;
+                }
+            }
             true
         }
-        Value::Array(arr) => arr.iter().any(|elem| matches_single(elem, event_value)),
+        // A content-filter list matches if ANY of its elements matches the
+        // event value. When the event value is itself an array, AWS matches
+        // if ANY element of the event array satisfies the filter element
+        // (the whole array is still passed first so presence-style matchers
+        // like `exists` see it), so array-valued event fields are matchable.
+        Value::Array(arr) => arr.iter().any(|elem| {
+            matches_single(elem, event_value)
+                || matches!(event_value, Value::Array(items)
+                    if items.iter().any(|item| matches_single(elem, item)))
+        }),
         _ => false,
     }
 }
@@ -493,24 +538,13 @@ pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool 
                     Value::Number(_) => event_value != anything_but_val,
                     // Nested-matcher negation, e.g.
                     // {"anything-but": {"prefix": "x"}} matches when the
-                    // field does NOT start with "x". Previously the object
-                    // form always matched, so excluded events were still
-                    // delivered (bug-audit 2026-05-28, 1.14).
-                    Value::Object(nested) => {
-                        let fv = event_value.as_str();
-                        if let Some(p) = nested.get("prefix").and_then(|v| v.as_str()) {
-                            !fv.is_some_and(|s| s.starts_with(p))
-                        } else if let Some(suf) = nested.get("suffix").and_then(|v| v.as_str()) {
-                            !fv.is_some_and(|s| s.ends_with(suf))
-                        } else if let Some(eic) =
-                            nested.get("equals-ignore-case").and_then(|v| v.as_str())
-                        {
-                            !fv.is_some_and(|s| s.eq_ignore_ascii_case(eic))
-                        } else {
-                            // Unknown nested matcher: default to matching.
-                            true
-                        }
-                    }
+                    // field does NOT start with "x". Each inner matcher
+                    // accepts a single string or a list of strings; `cidr`
+                    // and `wildcard` are supported too. An unknown/malformed
+                    // inner matcher is conservatively treated as excluding
+                    // the event rather than always delivering it (which the
+                    // previous `else => true` did).
+                    Value::Object(nested) => matches_anything_but_nested(nested, event_value),
                     _ => true,
                 };
             }
@@ -520,6 +554,56 @@ pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool 
             false
         }
         _ => values_equal(pattern_elem, event_value),
+    }
+}
+
+/// Evaluate a nested `anything-but` matcher (e.g.
+/// `{"anything-but": {"prefix": "x"}}`). Returns `true` when the field does
+/// NOT satisfy the inner matcher. Each inner matcher accepts a single string
+/// or a list of strings. Unknown or malformed inner matchers return `false`
+/// (exclude the event) so a filter the caller intended never over-delivers.
+fn matches_anything_but_nested(
+    nested: &serde_json::Map<String, Value>,
+    event_value: &Value,
+) -> bool {
+    let fv = event_value.as_str();
+    // Apply `pred` to a single-string or list-of-strings inner value and
+    // return whether ANY entry matched. A non-string inner value is
+    // malformed and reported as "no decision" via None.
+    fn any_str_hit(v: &Value, pred: &dyn Fn(&str) -> bool) -> Option<bool> {
+        match v {
+            Value::String(s) => Some(pred(s)),
+            Value::Array(a) => Some(a.iter().filter_map(|x| x.as_str()).any(pred)),
+            _ => None,
+        }
+    }
+
+    if let Some(p) = nested.get("prefix") {
+        match any_str_hit(p, &|s| fv.is_some_and(|x| x.starts_with(s))) {
+            Some(hit) => !hit,
+            None => false,
+        }
+    } else if let Some(p) = nested.get("suffix") {
+        match any_str_hit(p, &|s| fv.is_some_and(|x| x.ends_with(s))) {
+            Some(hit) => !hit,
+            None => false,
+        }
+    } else if let Some(p) = nested.get("equals-ignore-case") {
+        match any_str_hit(p, &|s| fv.is_some_and(|x| x.eq_ignore_ascii_case(s))) {
+            Some(hit) => !hit,
+            None => false,
+        }
+    } else if let Some(p) = nested.get("wildcard") {
+        match any_str_hit(p, &|s| fv.is_some_and(|x| wildcard_matches(s, x))) {
+            Some(hit) => !hit,
+            None => false,
+        }
+    } else if let Some(c) = nested.get("cidr").and_then(|v| v.as_str()) {
+        !fv.is_some_and(|x| cidr_matches(c, x))
+    } else {
+        // Unknown / unsupported nested matcher: cannot evaluate, so
+        // conservatively exclude rather than deliver.
+        false
     }
 }
 
@@ -647,6 +731,8 @@ pub(crate) fn archive_matching_event(
             account_id,
             region,
             resources,
+            &event.event_id,
+            &event.time.to_rfc3339(),
         );
         if !pattern_matches {
             continue;
@@ -700,6 +786,8 @@ pub(crate) fn collect_replay_events_with_targets(
                         account_id,
                         region,
                         &event.resources,
+                        &event.event_id,
+                        &event.time.to_rfc3339(),
                     )
             })
             .flat_map(|r| r.targets.clone())
@@ -717,12 +805,19 @@ pub(crate) fn matches_numeric(numeric_arr: &Value, event_value: &Value) -> bool 
         Some(a) => a,
         None => return false,
     };
+    // An empty matcher (`{"numeric": []}`) or one with a dangling trailing
+    // operator (odd length) is invalid and must not match anything; the
+    // old `while i + 1 < arr.len()` loop silently accepted both, so an
+    // empty matcher matched every value.
+    if arr.is_empty() || arr.len() % 2 != 0 {
+        return false;
+    }
     let actual = match event_value.as_f64() {
         Some(n) => n,
         None => return false,
     };
     let mut i = 0;
-    while i + 1 < arr.len() {
+    while i < arr.len() {
         let op = match arr[i].as_str() {
             Some(s) => s,
             None => return false,
@@ -736,7 +831,10 @@ pub(crate) fn matches_numeric(numeric_arr: &Value, event_value: &Value) -> bool 
             ">=" => actual >= threshold,
             "<" => actual < threshold,
             "<=" => actual <= threshold,
-            "=" => (actual - threshold).abs() < f64::EPSILON,
+            // Exact double equality, matching AWS. The previous absolute
+            // `f64::EPSILON` comparison was wrong at large magnitudes (e.g.
+            // 1e18 vs 1e18 + 1000 compared equal).
+            "=" => actual == threshold,
             _ => return false,
         };
         if !ok {
@@ -745,6 +843,39 @@ pub(crate) fn matches_numeric(numeric_arr: &Value, event_value: &Value) -> bool 
         i += 2;
     }
     true
+}
+
+/// Validate the shape of a `{"numeric": [...]}` matcher at pattern-validation
+/// time so malformed matchers surface as `InvalidEventPatternException`
+/// rather than silently never (or always) matching.
+fn validate_numeric_matcher(numeric: &Value, path: &str) -> Result<(), AwsServiceError> {
+    let invalid = |reason: &str| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidEventPatternException",
+            format!("Event pattern is not valid. Reason: {reason} at '{path}'"),
+        )
+    };
+    let arr = numeric
+        .as_array()
+        .ok_or_else(|| invalid("\"numeric\" must be an array"))?;
+    if arr.is_empty() || arr.len() % 2 != 0 {
+        return Err(invalid("\"numeric\" must be operator/value pairs"));
+    }
+    let mut i = 0;
+    while i < arr.len() {
+        let op = arr[i]
+            .as_str()
+            .ok_or_else(|| invalid("\"numeric\" operator must be a string"))?;
+        if !matches!(op, ">" | ">=" | "<" | "<=" | "=") {
+            return Err(invalid("unsupported \"numeric\" operator"));
+        }
+        if arr[i + 1].as_f64().is_none() {
+            return Err(invalid("\"numeric\" value must be a number"));
+        }
+        i += 2;
+    }
+    Ok(())
 }
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
@@ -765,7 +896,17 @@ pub(crate) fn resolve_json_path(event: &Value, path: &str) -> Option<Value> {
 }
 
 /// Apply an EventBridge InputTransformer to an event.
-pub(crate) fn apply_input_transformer(transformer: &Value, event: &Value) -> String {
+///
+/// Besides user-defined `InputPathsMap` variables, EventBridge exposes a set
+/// of predefined reserved variables that are resolved here:
+///   * `<aws.events.event.json>` — the whole matched event as JSON.
+///   * `<aws.events.event.ingestion-time>` — the event's `time` field.
+///   * `<aws.events.rule-arn>` — the ARN of the matching rule (when known).
+pub(crate) fn apply_input_transformer(
+    transformer: &Value,
+    event: &Value,
+    rule_arn: Option<&str>,
+) -> String {
     let input_paths_map = transformer
         .get("InputPathsMap")
         .and_then(|v| v.as_object())
@@ -796,6 +937,22 @@ pub(crate) fn apply_input_transformer(transformer: &Value, event: &Value) -> Str
             other => other.to_string(),
         };
         result = result.replace(&placeholder, &replacement);
+    }
+
+    // Resolve EventBridge's predefined reserved variables.
+    if result.contains("<aws.events.event.json>") {
+        result = result.replace("<aws.events.event.json>", &event.to_string());
+    }
+    if result.contains("<aws.events.event.ingestion-time>") {
+        let ingestion_time = event
+            .get("time")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        result = result.replace("<aws.events.event.ingestion-time>", &ingestion_time);
+    }
+    if let Some(arn) = rule_arn {
+        result = result.replace("<aws.events.rule-arn>", arn);
     }
 
     result
@@ -1038,11 +1195,12 @@ pub(crate) fn dispatch_event_target(
     event_json: &Value,
     event_id: &str,
     detail_type: &str,
+    rule_arn: Option<&str>,
 ) {
     let arn = &target.arn;
     let event_str = event_json.to_string();
     let body_str = if let Some(ref transformer) = target.input_transformer {
-        apply_input_transformer(transformer, event_json)
+        apply_input_transformer(transformer, event_json, rule_arn)
     } else if let Some(ref input) = target.input {
         input.clone()
     } else if let Some(ref input_path) = target.input_path {

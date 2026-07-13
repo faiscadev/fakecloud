@@ -637,6 +637,23 @@ impl EventBridgeService {
         if let Some(pattern) = body["EventPattern"].as_str().filter(|s| !s.is_empty()) {
             validate_event_pattern(pattern)?;
         }
+        // Reject a malformed ScheduleExpression up front, like AWS. Previously
+        // only the length was checked, so a rule with e.g. `rate(5 minute)` or
+        // `cron(bad)` was stored and simply never fired.
+        if let Some(schedule) = body["ScheduleExpression"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            if !crate::scheduler::is_valid_schedule_expression(schedule) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "Parameter ScheduleExpression is not valid. Reason: {schedule} is not a valid expression."
+                    ),
+                ));
+            }
+        }
         validate_optional_enum_value(
             "State",
             &body["State"],
@@ -1196,7 +1213,7 @@ impl EventBridgeService {
         })?;
 
         // Parse the pattern JSON
-        let _pattern: Value = serde_json::from_str(event_pattern).map_err(|_| {
+        let pattern: Value = serde_json::from_str(event_pattern).map_err(|_| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidEventPatternException",
@@ -1204,32 +1221,15 @@ impl EventBridgeService {
             )
         })?;
 
-        let source = event["source"].as_str().unwrap_or("");
-        let detail_type = event["detail-type"].as_str().unwrap_or("");
-        let detail = event
-            .get("detail")
-            .map(|v| serde_json::to_string(v).unwrap_or_default())
-            .unwrap_or_else(|| "{}".to_string());
-        let account = event["account"].as_str().unwrap_or("");
-        let region = event["region"].as_str().unwrap_or("");
-        let resources: Vec<String> = event["resources"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Reject an invalid pattern (scalar leaf, malformed numeric matcher,
+        // etc.) with InvalidEventPatternException instead of silently
+        // returning {"Result": false}.
+        validate_pattern_values(&pattern, "")?;
 
-        let result = matches_pattern(
-            Some(event_pattern),
-            source,
-            detail_type,
-            &detail,
-            account,
-            region,
-            &resources,
-        );
+        // Match directly against the caller-supplied event so all of its
+        // fields — including id / time / version — are matchable, rather than
+        // reconstructing a partial synthetic event that dropped them.
+        let result = matches_value(&pattern, &event);
 
         Ok(AwsResponse::ok_json(json!({ "Result": result })))
     }
@@ -1425,8 +1425,9 @@ impl EventBridgeService {
 
             state.events.push(event);
 
-            // Find matching rules and their targets
-            let matching_targets: Vec<EventTarget> = state
+            // Find matching rules and their targets, carrying each rule's ARN
+            // so the InputTransformer can resolve `<aws.events.rule-arn>`.
+            let matching_targets: Vec<(String, EventTarget)> = state
                 .rules
                 .values()
                 .filter(|r| {
@@ -1440,9 +1441,11 @@ impl EventBridgeService {
                             &req.account_id,
                             &req.region,
                             &resources,
+                            &event_id,
+                            &time.to_rfc3339(),
                         )
                 })
-                .flat_map(|r| r.targets.clone())
+                .flat_map(|r| r.targets.iter().map(|t| (r.arn.clone(), t.clone())))
                 .collect();
 
             if !matching_targets.is_empty() {
@@ -1490,8 +1493,15 @@ impl EventBridgeService {
                 account_id: &req.account_id,
                 region: &req.region,
             };
-            for target in targets {
-                dispatch_event_target(&ctx, &target, &event_json, &event_id, &detail_type);
+            for (rule_arn, target) in targets {
+                dispatch_event_target(
+                    &ctx,
+                    &target,
+                    &event_json,
+                    &event_id,
+                    &detail_type,
+                    Some(&rule_arn),
+                );
             }
         }
 

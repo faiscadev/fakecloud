@@ -386,7 +386,7 @@ impl EventBridgeService {
             state.events.push(event);
 
             // Route to rules attached to the partner event bus.
-            let matching_targets: Vec<EventTarget> = state
+            let matching_targets: Vec<(String, EventTarget)> = state
                 .rules
                 .values()
                 .filter(|r| {
@@ -400,9 +400,11 @@ impl EventBridgeService {
                             &req.account_id,
                             &req.region,
                             &resources,
+                            &event_id,
+                            &time.to_rfc3339(),
                         )
                 })
-                .flat_map(|r| r.targets.clone())
+                .flat_map(|r| r.targets.iter().map(|t| (r.arn.clone(), t.clone())))
                 .collect();
 
             if !matching_targets.is_empty() {
@@ -445,8 +447,15 @@ impl EventBridgeService {
                 account_id: &req.account_id,
                 region: &req.region,
             };
-            for target in targets {
-                dispatch_event_target(&ctx, &target, &event_json, &event_id, &detail_type);
+            for (rule_arn, target) in targets {
+                dispatch_event_target(
+                    &ctx,
+                    &target,
+                    &event_json,
+                    &event_id,
+                    &detail_type,
+                    Some(&rule_arn),
+                );
             }
         }
 

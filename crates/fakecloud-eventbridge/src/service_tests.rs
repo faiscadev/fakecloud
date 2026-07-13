@@ -10,6 +10,8 @@ fn test_matches(pattern_json: Option<&str>, source: &str, detail_type: &str, det
         "123456789012",
         "us-east-1",
         &[],
+        "test-event-id",
+        "2026-01-01T00:00:00Z",
     )
 }
 
@@ -300,6 +302,191 @@ fn mixed_matchers_and_literals() {
         "{}"
     ));
     assert!(!test_matches(Some(pattern), "other.source", "Event", "{}"));
+}
+
+// ---- $or ANDs its sibling constraints (H1) ----
+
+#[test]
+fn or_group_is_anded_with_siblings() {
+    let pattern = r#"{"source":["aws.ec2"],"$or":[{"detail":{"state":["running"]}},{"detail":{"state":["stopped"]}}]}"#;
+    // Sibling source must still hold: an s3 event does NOT match even though
+    // an $or alternative would.
+    assert!(!test_matches(
+        Some(pattern),
+        "aws.s3",
+        "Event",
+        r#"{"state":"running"}"#
+    ));
+    // Matching source AND one $or alternative matches.
+    assert!(test_matches(
+        Some(pattern),
+        "aws.ec2",
+        "Event",
+        r#"{"state":"stopped"}"#
+    ));
+    // Matching source but NO $or alternative does not match.
+    assert!(!test_matches(
+        Some(pattern),
+        "aws.ec2",
+        "Event",
+        r#"{"state":"terminated"}"#
+    ));
+}
+
+// ---- array-valued event fields match content filters (H2) ----
+
+#[test]
+fn array_valued_field_matches_content_filter() {
+    // event tags is an array; pattern lists a single wanted value.
+    assert!(test_matches(
+        Some(r#"{"detail":{"tags":["b"]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["a","b"]}"#
+    ));
+    assert!(!test_matches(
+        Some(r#"{"detail":{"tags":["z"]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["a","b"]}"#
+    ));
+}
+
+#[test]
+fn array_valued_field_matches_prefix_filter() {
+    assert!(test_matches(
+        Some(r#"{"detail":{"tags":[{"prefix":"pre"}]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["nope","prefixed"]}"#
+    ));
+    assert!(!test_matches(
+        Some(r#"{"detail":{"tags":[{"prefix":"pre"}]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["nope","other"]}"#
+    ));
+}
+
+// ---- anything-but nested matchers (L1) ----
+
+#[test]
+fn anything_but_nested_prefix_excludes() {
+    let pattern = r#"{"detail":{"name":[{"anything-but":{"prefix":"tmp-"}}]}}"#;
+    // Value starting with tmp- is excluded (no match).
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"name":"tmp-file"}"#
+    ));
+    // Any other value matches.
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"name":"prod-file"}"#
+    ));
+}
+
+#[test]
+fn anything_but_nested_cidr_excludes() {
+    let pattern = r#"{"detail":{"ip":[{"anything-but":{"cidr":"10.0.0.0/8"}}]}}"#;
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"ip":"10.1.2.3"}"#
+    ));
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"ip":"192.168.0.1"}"#
+    ));
+}
+
+// ---- numeric matcher exactness / validation (L2) ----
+
+#[test]
+fn numeric_equals_is_exact_at_large_magnitude() {
+    // 1e18 vs 1e18 + 1000 must NOT be equal (old absolute-epsilon bug).
+    assert!(!test_matches(
+        Some(r#"{"detail":{"n":[{"numeric":["=",1e18]}]}}"#),
+        "app",
+        "Event",
+        r#"{"n":1.000000000000001e18}"#
+    ));
+    assert!(test_matches(
+        Some(r#"{"detail":{"n":[{"numeric":["=",1e18]}]}}"#),
+        "app",
+        "Event",
+        r#"{"n":1e18}"#
+    ));
+}
+
+#[test]
+fn empty_numeric_matcher_matches_nothing() {
+    // Runtime matcher must not match everything; validation also rejects it.
+    assert!(!matches_numeric(&json!([]), &json!(5)));
+}
+
+// ---- id / time / version become matchable (L4) ----
+
+#[test]
+fn version_field_is_matchable() {
+    assert!(test_matches(
+        Some(r#"{"version":["0"]}"#),
+        "app",
+        "Event",
+        "{}"
+    ));
+    assert!(!test_matches(
+        Some(r#"{"version":["9"]}"#),
+        "app",
+        "Event",
+        "{}"
+    ));
+}
+
+#[test]
+fn id_field_is_matchable() {
+    // The synthetic event now carries the id passed to matches_pattern.
+    assert!(test_matches(
+        Some(r#"{"id":["test-event-id"]}"#),
+        "app",
+        "Event",
+        "{}"
+    ));
+}
+
+// ---- InputTransformer reserved variables (M2) ----
+
+#[test]
+fn input_transformer_resolves_reserved_variables() {
+    let event = json!({
+        "id": "evt-1",
+        "source": "aws.ec2",
+        "detail-type": "State Change",
+        "detail": {"state": "running"},
+        "time": "2026-01-02T03:04:05Z",
+    });
+    let transformer = json!({
+        "InputPathsMap": {"st": "$.detail.state"},
+        "InputTemplate": "\"<st> at <aws.events.event.ingestion-time> rule <aws.events.rule-arn> json=<aws.events.event.json>\""
+    });
+    let out = apply_input_transformer(
+        &transformer,
+        &event,
+        Some("arn:aws:events:us-east-1:123456789012:rule/r"),
+    );
+    assert!(out.contains("running"));
+    assert!(out.contains("2026-01-02T03:04:05Z"));
+    assert!(out.contains("arn:aws:events:us-east-1:123456789012:rule/r"));
+    // <aws.events.event.json> expands to the full event JSON.
+    assert!(out.contains("\\\"state\\\":\\\"running\\\"") || out.contains("aws.ec2"));
+    // No unresolved reserved placeholders remain.
+    assert!(!out.contains("<aws.events."));
 }
 
 // ---- list_connections / list_api_destinations filtering & pagination ----
@@ -820,6 +1007,39 @@ fn test_event_pattern_no_match() {
     let resp = svc.test_event_pattern(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["Result"], false);
+}
+
+#[test]
+fn test_event_pattern_invalid_pattern_errors() {
+    // A scalar leaf (must be an object or array) is an invalid pattern and
+    // must surface InvalidEventPatternException, not {"Result": false}.
+    let svc = make_service();
+    let req = make_request(
+        "TestEventPattern",
+        json!({
+            "EventPattern": r#"{"source": "my.app"}"#,
+            "Event": r#"{"source": "my.app"}"#
+        }),
+    );
+    let err = svc.test_event_pattern(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidEventPatternException");
+}
+
+#[test]
+fn test_event_pattern_matches_id_field() {
+    // Matching directly against the caller-supplied event makes id/time/
+    // version matchable (previously dropped by a synthetic rebuild).
+    let svc = make_service();
+    let req = make_request(
+        "TestEventPattern",
+        json!({
+            "EventPattern": r#"{"id": ["abc-123"]}"#,
+            "Event": r#"{"id": "abc-123", "source": "my.app", "detail": {}}"#
+        }),
+    );
+    let resp = svc.test_event_pattern(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Result"], true);
 }
 
 #[test]
@@ -1632,6 +1852,41 @@ fn put_rule_accepts_schedule_on_non_default_bus() {
 }
 
 #[test]
+fn put_rule_rejects_malformed_schedule_expression() {
+    let svc = make_service();
+    // Singular/plural mismatch.
+    let req = make_request(
+        "PutRule",
+        json!({ "Name": "bad-rate", "ScheduleExpression": "rate(5 minute)" }),
+    );
+    let err = svc.put_rule(&req).err().expect("expected error");
+    assert_eq!(err.code(), "ValidationException");
+
+    // Malformed cron.
+    let req = make_request(
+        "PutRule",
+        json!({ "Name": "bad-cron", "ScheduleExpression": "cron(bad)" }),
+    );
+    let err = svc.put_rule(&req).err().expect("expected error");
+    assert_eq!(err.code(), "ValidationException");
+}
+
+#[test]
+fn put_rule_accepts_valid_schedule_expression() {
+    let svc = make_service();
+    let req = make_request(
+        "PutRule",
+        json!({ "Name": "ok-rate", "ScheduleExpression": "rate(5 minutes)" }),
+    );
+    svc.put_rule(&req).expect("valid rate is accepted");
+    let req = make_request(
+        "PutRule",
+        json!({ "Name": "ok-cron", "ScheduleExpression": "cron(0 12 * * ? *)" }),
+    );
+    svc.put_rule(&req).expect("valid cron is accepted");
+}
+
+#[test]
 fn put_rule_rejects_unknown_event_bus() {
     let svc = make_service();
     let req = make_request(
@@ -2399,6 +2654,32 @@ fn put_events_basic() {
         .unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["FailedEntryCount"], 0);
+}
+
+#[test]
+fn put_events_rejects_non_object_detail() {
+    // AWS requires Detail to be a JSON object. A valid-JSON-but-non-object
+    // payload (a bare string / number / array) is rejected with
+    // MalformedDetail rather than accepted.
+    let svc = make_service();
+    let resp = svc
+        .put_events(&make_request(
+            "PutEvents",
+            json!({
+                "Entries": [
+                    {"Source": "aws.s3", "DetailType": "T", "Detail": "\"just a string\""},
+                    {"Source": "aws.s3", "DetailType": "T", "Detail": "[1,2,3]"},
+                    {"Source": "aws.s3", "DetailType": "T", "Detail": "{}"},
+                ]
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], 2);
+    assert_eq!(body["Entries"][0]["ErrorCode"], "MalformedDetail");
+    assert_eq!(body["Entries"][1]["ErrorCode"], "MalformedDetail");
+    // The object detail succeeds and gets an EventId.
+    assert!(body["Entries"][2]["EventId"].is_string());
 }
 
 // ── Archives ──
