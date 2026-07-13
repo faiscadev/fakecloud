@@ -140,3 +140,146 @@ async fn sagemaker_control_plane_lifecycle() {
         .expect_err("describe after delete should fail");
     assert!(format!("{err:?}").contains("ResourceNotFound"));
 }
+
+/// `StartPipelineExecution` is the only creation path for a pipeline execution;
+/// the started execution must then be resolvable by Describe / List.
+#[tokio::test]
+async fn sagemaker_pipeline_execution_round_trip() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    let started = client
+        .start_pipeline_execution()
+        .pipeline_name("my-pipeline")
+        .pipeline_execution_display_name("run-1")
+        .send()
+        .await
+        .expect("start_pipeline_execution");
+    let exec_arn = started
+        .pipeline_execution_arn()
+        .expect("pipeline_execution_arn")
+        .to_string();
+    assert!(
+        exec_arn.contains(":pipeline/my-pipeline/execution/"),
+        "unexpected execution arn: {exec_arn}"
+    );
+
+    // Describe resolves the started execution by its minted ARN.
+    let described = client
+        .describe_pipeline_execution()
+        .pipeline_execution_arn(&exec_arn)
+        .send()
+        .await
+        .expect("describe_pipeline_execution");
+    assert_eq!(described.pipeline_execution_arn(), Some(exec_arn.as_str()));
+    assert!(described
+        .pipeline_arn()
+        .unwrap_or_default()
+        .contains(":pipeline/my-pipeline"));
+
+    // List surfaces the execution summary for the pipeline.
+    let listed = client
+        .list_pipeline_executions()
+        .pipeline_name("my-pipeline")
+        .send()
+        .await
+        .expect("list_pipeline_executions");
+    assert!(
+        listed
+            .pipeline_execution_summaries()
+            .iter()
+            .any(|s| s.pipeline_execution_arn() == Some(exec_arn.as_str())),
+        "started execution should appear in the summaries"
+    );
+}
+
+/// `AddAssociation` is the only creation path for a lineage edge; the edge must
+/// then be listed and deletable.
+#[tokio::test]
+async fn sagemaker_association_round_trip() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    let src = "arn:aws:sagemaker:us-east-1:000000000000:experiment/exp";
+    let dst = "arn:aws:sagemaker:us-east-1:000000000000:artifact/art";
+    client
+        .add_association()
+        .source_arn(src)
+        .destination_arn(dst)
+        .send()
+        .await
+        .expect("add_association");
+
+    let listed = client
+        .list_associations()
+        .send()
+        .await
+        .expect("list_associations");
+    assert!(
+        listed
+            .association_summaries()
+            .iter()
+            .any(|a| a.source_arn() == Some(src) && a.destination_arn() == Some(dst)),
+        "added association should appear in the summaries"
+    );
+
+    // Delete removes exactly that edge.
+    client
+        .delete_association()
+        .source_arn(src)
+        .destination_arn(dst)
+        .send()
+        .await
+        .expect("delete_association");
+    let listed = client
+        .list_associations()
+        .send()
+        .await
+        .expect("list_associations after delete");
+    assert!(
+        !listed
+            .association_summaries()
+            .iter()
+            .any(|a| a.source_arn() == Some(src)),
+        "deleted association should be gone"
+    );
+}
+
+/// A List operation's `NameContains` filter must narrow the result to matching
+/// records rather than returning the whole family.
+#[tokio::test]
+async fn sagemaker_list_name_contains_filter() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+    let role = "arn:aws:iam::000000000000:role/r";
+
+    for name in ["alpha-model", "beta-model"] {
+        client
+            .create_model()
+            .model_name(name)
+            .execution_role_arn(role)
+            .send()
+            .await
+            .expect("create_model");
+    }
+
+    let listed = client
+        .list_models()
+        .name_contains("alpha")
+        .send()
+        .await
+        .expect("list_models with NameContains");
+    let names: Vec<&str> = listed
+        .models()
+        .iter()
+        .filter_map(|m| m.model_name())
+        .collect();
+    assert!(
+        names.contains(&"alpha-model"),
+        "filtered list should contain alpha-model, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"beta-model"),
+        "NameContains=alpha should exclude beta-model, got {names:?}"
+    );
+}

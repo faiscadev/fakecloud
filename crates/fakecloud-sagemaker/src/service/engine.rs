@@ -178,13 +178,54 @@ fn fill_required(
 pub(crate) fn kind_matches(kind: K, v: &Value) -> bool {
     match kind {
         K::Str | K::Blob => v.is_string(),
-        // awsJson1.1 timestamps wire-encode as epoch-second JSON numbers; accept
-        // a string too so any legacy/ISO stored value still projects.
-        K::Ts => v.is_string() || v.is_number(),
+        // awsJson1.1 timestamps wire-encode as epoch-second JSON numbers only; a
+        // string (e.g. an ISO-8601 value a raw client posted into a timestamp
+        // input member) is *not* a valid on-wire timestamp and would be rejected
+        // by the SDK deserialiser. Such values are coerced to a number at
+        // projection time (see `coerce_ts`), never echoed as a string.
+        K::Ts => v.is_number(),
         K::Int | K::Num => v.is_number(),
         K::Bool => v.is_boolean(),
         K::List => v.is_array(),
         K::Map | K::Struct => v.is_object(),
+    }
+}
+
+/// Coerce a stored timestamp value into the awsJson1.1 wire form (epoch-second
+/// JSON number). A number passes through; a string is parsed as epoch seconds or
+/// RFC3339 and converted; anything else yields `None` so the member is dropped
+/// rather than emitted as an SDK-rejecting string.
+fn coerce_ts(v: &Value) -> Option<Value> {
+    if v.is_number() {
+        return Some(v.clone());
+    }
+    let s = v.as_str()?;
+    if let Ok(n) = s.parse::<f64>() {
+        return Some(Value::from(n));
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(Value::from(dt.timestamp_millis() as f64 / 1000.0));
+    }
+    None
+}
+
+/// Project a stored record's members onto the given `(wire, kind)` projection,
+/// keeping members whose JSON type matches the modelled kind and coercing
+/// timestamps to their numeric wire form.
+fn project(obj: Option<&Map<String, Value>>, members: &[(&str, K)], out: &mut Map<String, Value>) {
+    let Some(obj) = obj else { return };
+    for (wire, kind) in members {
+        let Some(v) = obj.get(*wire) else { continue };
+        if v.is_null() {
+            continue;
+        }
+        if *kind == K::Ts {
+            if let Some(n) = coerce_ts(v) {
+                out.insert((*wire).to_string(), n);
+            }
+        } else if kind_matches(*kind, v) {
+            out.insert((*wire).to_string(), v.clone());
+        }
     }
 }
 
@@ -194,15 +235,7 @@ pub(crate) fn kind_matches(kind: K, v: &Value) -> bool {
 /// response is valid against the model's output shape.
 pub(crate) fn build_output(ctx: &Ctx, meta: &OpMeta, key: &str, record: &Value) -> Value {
     let mut out = Map::new();
-    if let Some(obj) = record.as_object() {
-        for (wire, kind) in meta.omembers {
-            if let Some(v) = obj.get(*wire) {
-                if !v.is_null() && kind_matches(*kind, v) {
-                    out.insert((*wire).to_string(), v.clone());
-                }
-            }
-        }
-    }
+    project(record.as_object(), meta.omembers, &mut out);
     fill_required(ctx, meta, key, &mut out, meta.req_out);
     Value::Object(out)
 }
@@ -212,15 +245,7 @@ pub(crate) fn build_output(ctx: &Ctx, meta: &OpMeta, key: &str, record: &Value) 
 /// fields the shape validator checks, e.g. a summary's status).
 fn build_element(ctx: &Ctx, meta: &OpMeta, key: &str, record: &Value) -> Value {
     let mut out = Map::new();
-    if let Some(obj) = record.as_object() {
-        for (wire, kind) in meta.list_elems {
-            if let Some(v) = obj.get(*wire) {
-                if !v.is_null() && kind_matches(*kind, v) {
-                    out.insert((*wire).to_string(), v.clone());
-                }
-            }
-        }
-    }
+    project(record.as_object(), meta.list_elems, &mut out);
     fill_required(ctx, meta, key, &mut out, meta.req_elem);
     Value::Object(out)
 }
@@ -399,15 +424,92 @@ pub(super) fn action(ctx: &Ctx, meta: &OpMeta, body: &Map<String, Value>) -> Aws
     ok_json(out)
 }
 
+/// Persist a resource whose *only* creation path is an Action verb (e.g. a
+/// pipeline execution started by `StartPipelineExecution`), so the sibling
+/// Describe / List / Update / Delete operations resolve it. Builds the standard
+/// record — the caller-provided `seed` (request body plus any pre-minted ARNs /
+/// status the handler set), completed with minted ARNs/ids and creation /
+/// last-modified timestamps — stores it under `key` in the family, and returns
+/// the action's declared output projection.
+pub(super) fn action_create(
+    data: &mut SageMakerData,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    key: &str,
+    seed: &Map<String, Value>,
+) -> AwsResponse {
+    let record = build_record(ctx, meta, key, seed);
+    let out = build_output(ctx, meta, key, &record);
+    data.put_resource(meta.family, key, record);
+    ok_json(out)
+}
+
+/// Apply the common request-side List filters an operation carries generically,
+/// comparing against the stored record. Filters not present in `body` are
+/// ignored; a record is kept only if it satisfies every present filter:
+///
+/// * `NameContains` — substring of the storage key or any `*Name` member.
+/// * `CreationTimeAfter` / `CreationTimeBefore` — numeric bounds on the record's
+///   `CreationTime` (a record without one fails a present bound).
+/// * `StatusEquals` — equality against any `*Status` member the record carries
+///   (a record that stores no status member is excluded when this filter is set,
+///   since its state is not persisted).
+///
+/// Deliberately not mapped generically (skipped): sort (`SortBy`/`SortOrder`),
+/// type/label filters keyed to a specific member name (`SourceType`,
+/// `LabelingJobStatus`-style per-op enums already covered by `*Status`), and
+/// resource-scoping members (e.g. `PipelineName` on `ListPipelineExecutions`)
+/// whose semantics vary per op.
+fn passes_filters(id: &str, record: &Value, body: &Map<String, Value>) -> bool {
+    let obj = record.as_object();
+    if let Some(needle) = body.get("NameContains").and_then(Value::as_str) {
+        let hit = id.contains(needle)
+            || obj
+                .map(|o| {
+                    o.iter().any(|(k, v)| {
+                        k.ends_with("Name") && v.as_str().is_some_and(|s| s.contains(needle))
+                    })
+                })
+                .unwrap_or(false);
+        if !hit {
+            return false;
+        }
+    }
+    let creation = obj.and_then(|o| o.get("CreationTime")).and_then(Value::as_f64);
+    if let Some(after) = body.get("CreationTimeAfter").and_then(Value::as_f64) {
+        if creation.map(|c| c >= after) != Some(true) {
+            return false;
+        }
+    }
+    if let Some(before) = body.get("CreationTimeBefore").and_then(Value::as_f64) {
+        if creation.map(|c| c <= before) != Some(true) {
+            return false;
+        }
+    }
+    if let Some(status) = body.get("StatusEquals").and_then(Value::as_str) {
+        let hit = obj
+            .map(|o| {
+                o.iter()
+                    .any(|(k, v)| k.ends_with("Status") && v.as_str() == Some(status))
+            })
+            .unwrap_or(false);
+        if !hit {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) fn list(
     data: Option<&SageMakerData>,
     ctx: &Ctx,
     meta: &OpMeta,
     body: &Map<String, Value>,
 ) -> AwsResponse {
-    let entries = data
+    let mut entries = data
         .map(|d| d.list_resource_entries(meta.family))
         .unwrap_or_default();
+    entries.retain(|(id, r)| passes_filters(id, r, body));
 
     // A `list<string>` element serialises as the resource's identifier string
     // (its storage key); otherwise each element is the projected object.

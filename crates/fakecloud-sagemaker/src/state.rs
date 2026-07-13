@@ -68,23 +68,33 @@ impl SageMakerData {
     }
 
     /// Resolve a caller-supplied identifier value to a stored key within a
-    /// family. Matches the direct storage key first, then falls back to any
-    /// record whose Name / Id / Arn-shaped identifier member equals the value
-    /// (so a resource keyed by its Name can still be described by the minted
-    /// Id or ARN the create returned).
+    /// family. Matches the direct storage key first, then falls back to a record
+    /// whose *canonical* identifier member — `{Family}Name`, `{Family}Id` or
+    /// `{Family}Arn` — equals the value (so a resource keyed by its Name can
+    /// still be described by the minted Id or ARN the create returned).
+    ///
+    /// The fallback is restricted to the family's own canonical members rather
+    /// than any suffix-matching `*Name` / `*Id` / `*Arn` member, so an unrelated
+    /// member that happens to carry an equal value (e.g. a shared `RoleArn`, or a
+    /// cross-referenced `SourceArn`) on a sibling record cannot mis-resolve to
+    /// the wrong record.
     pub fn resolve_key(&self, family: &str, value: &str) -> Option<String> {
         let m = self.resources.get(family)?;
         if m.contains_key(value) {
             return Some(value.to_string());
         }
+        let canonical = [
+            format!("{family}Name"),
+            format!("{family}Id"),
+            format!("{family}Arn"),
+        ];
         for (k, rec) in m {
             if let Some(obj) = rec.as_object() {
-                for (mk, mv) in obj {
-                    if (mk.ends_with("Name") || mk.ends_with("Id") || mk.ends_with("Arn"))
-                        && mv.as_str() == Some(value)
-                    {
-                        return Some(k.clone());
-                    }
+                if canonical
+                    .iter()
+                    .any(|cand| obj.get(cand).and_then(Value::as_str) == Some(value))
+                {
+                    return Some(k.clone());
                 }
             }
         }
@@ -150,5 +160,18 @@ mod tests {
         );
         assert!(d.remove_resource("Model", "m1").is_some());
         assert!(d.get_resource("Model", "m1").is_none());
+    }
+
+    #[test]
+    fn resolve_key_ignores_noncanonical_sibling_member() {
+        let mut d = SageMakerData::default();
+        let shared = "arn:aws:iam::0:role/shared";
+        // A record keyed by its name, carrying an unrelated RoleArn member.
+        d.put_resource("Model", "m1", json!({"ModelName": "m1", "RoleArn": shared}));
+        // Resolving by the shared RoleArn must NOT mis-match m1: RoleArn is not a
+        // canonical Model identifier member.
+        assert_eq!(d.resolve_key("Model", shared), None);
+        // The canonical ModelName still resolves.
+        assert_eq!(d.resolve_key("Model", "m1").as_deref(), Some("m1"));
     }
 }

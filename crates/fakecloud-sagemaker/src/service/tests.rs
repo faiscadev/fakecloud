@@ -404,3 +404,133 @@ fn unknown_action_is_not_implemented() {
     let err = expect_err(run(&s, "NotARealSageMakerOp", Value::Null));
     assert!(matches!(err, AwsServiceError::ActionNotImplemented { .. }));
 }
+
+// StartPipelineExecution is the only creation path for a pipeline execution, so
+// it must persist a record the Describe / List siblings can resolve.
+#[test]
+fn pipeline_execution_action_persists() {
+    let s = svc();
+    let started = resp_json(
+        &run(
+            &s,
+            "StartPipelineExecution",
+            json!({"PipelineName": "p1", "ClientRequestToken": "a".repeat(32)}),
+        )
+        .unwrap(),
+    );
+    let arn = started["PipelineExecutionArn"].as_str().unwrap().to_string();
+    assert!(arn.contains(":pipeline/p1/execution/"), "arn: {arn}");
+
+    let described = resp_json(
+        &run(
+            &s,
+            "DescribePipelineExecution",
+            json!({"PipelineExecutionArn": arn}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(described["PipelineExecutionArn"], arn);
+    assert_eq!(described["PipelineExecutionStatus"], "Executing");
+
+    let listed = resp_json(
+        &run(&s, "ListPipelineExecutions", json!({"PipelineName": "p1"})).unwrap(),
+    );
+    let sums = listed["PipelineExecutionSummaries"].as_array().unwrap();
+    assert!(sums.iter().any(|x| x["PipelineExecutionArn"] == arn));
+}
+
+// ImportHubContent is the only creation path for hub content.
+#[test]
+fn import_hub_content_action_persists() {
+    let s = svc();
+    let imported = resp_json(
+        &run(
+            &s,
+            "ImportHubContent",
+            json!({
+                "HubName": "h1",
+                "HubContentName": "c1",
+                "HubContentType": "Model",
+                "DocumentSchemaVersion": "1.0.0",
+                "HubContentDocument": "{}"
+            }),
+        )
+        .unwrap(),
+    );
+    assert!(imported["HubContentArn"].as_str().unwrap().contains("c1"));
+    assert!(imported["HubArn"].as_str().unwrap().contains("h1"));
+
+    let described = resp_json(
+        &run(
+            &s,
+            "DescribeHubContent",
+            json!({"HubName": "h1", "HubContentType": "Model", "HubContentName": "c1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(described["HubContentName"], "c1");
+    assert_eq!(described["HubName"], "h1");
+}
+
+// AddAssociation persists the edge; DeleteAssociation removes exactly it.
+#[test]
+fn association_action_persists_and_deletes() {
+    let s = svc();
+    let src = "arn:aws:sagemaker:us-east-1:000000000000:experiment/e";
+    let dst = "arn:aws:sagemaker:us-east-1:000000000000:artifact/a";
+    run(
+        &s,
+        "AddAssociation",
+        json!({"SourceArn": src, "DestinationArn": dst}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListAssociations", Value::Null).unwrap());
+    let sums = listed["AssociationSummaries"].as_array().unwrap();
+    assert!(sums
+        .iter()
+        .any(|x| x["SourceArn"] == src && x["DestinationArn"] == dst));
+
+    run(
+        &s,
+        "DeleteAssociation",
+        json!({"SourceArn": src, "DestinationArn": dst}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListAssociations", Value::Null).unwrap());
+    assert!(listed["AssociationSummaries"].as_array().unwrap().is_empty());
+}
+
+// NameContains must narrow a List result to matching records.
+#[test]
+fn list_name_contains_filters_results() {
+    let s = svc();
+    for name in ["alpha-model", "beta-model"] {
+        run(&s, "CreateModel", json!({ "ModelName": name })).unwrap();
+    }
+    let listed = resp_json(&run(&s, "ListModels", json!({"NameContains": "alpha"})).unwrap());
+    let models = listed["Models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["ModelName"], "alpha-model");
+}
+
+// A stored string timestamp must project to a numeric epoch on read, never an
+// SDK-rejecting string.
+#[test]
+fn string_timestamp_coerced_to_number_on_read() {
+    let s = svc();
+    {
+        let mut g = s.state.write();
+        let data = g.get_or_create("000000000000");
+        data.put_resource(
+            "Model",
+            "m",
+            json!({"ModelName": "m", "CreationTime": "1752324947.041"}),
+        );
+    }
+    let described = resp_json(&run(&s, "DescribeModel", json!({"ModelName": "m"})).unwrap());
+    assert!(
+        described["CreationTime"].is_number(),
+        "CreationTime must coerce to a number, got {:?}",
+        described["CreationTime"]
+    );
+}
