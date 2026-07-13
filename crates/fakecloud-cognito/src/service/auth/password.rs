@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// A plausible masked email destination for an unknown user, used when
+/// PreventUserExistenceErrors=ENABLED so ForgotPassword doesn't reveal that
+/// the account doesn't exist. Deterministic in the username's first char so
+/// repeated calls look stable, mirroring how a real masked destination reads.
+fn fake_masked_destination(username: &str) -> String {
+    let first = username.chars().next().unwrap_or('u').to_ascii_lowercase();
+    format!("{first}***@***.com")
+}
+
 impl CognitoService {
     pub(crate) fn change_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -13,8 +22,10 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Look up user from access token
-        let token_data = state.access_tokens.get(access_token).ok_or_else(|| {
+        // Look up user from access token. Must reject expired tokens — a bare
+        // map lookup let an expired-but-unrevoked token still change the
+        // password (bug-hunt M3).
+        let token_data = state.valid_access_token(access_token).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",
@@ -106,18 +117,33 @@ impl CognitoService {
             )
         })?;
         let pool_id = client.user_pool_id.clone();
+        let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
-        let user = state
+        let user = match state
             .users
             .get_mut(&pool_id)
             .and_then(|users| users.get_mut(username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
+        {
+            Some(u) => u,
+            None => {
+                // PreventUserExistenceErrors=ENABLED: don't leak that the user
+                // is unknown — return plausible CodeDeliveryDetails (L3).
+                if masks_existence {
+                    return Ok(AwsResponse::ok_json(json!({
+                        "CodeDeliveryDetails": {
+                            "Destination": fake_masked_destination(username),
+                            "DeliveryMedium": "EMAIL",
+                            "AttributeName": "email"
+                        }
+                    })));
+                }
+                return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "UserNotFoundException",
                     "User does not exist.",
-                )
-            })?;
+                ));
+            }
+        };
 
         let code = generate_confirmation_code();
         user.confirmation_code = Some(code.clone());
@@ -228,6 +254,7 @@ impl CognitoService {
             )
         })?;
         let pool_id = client.user_pool_id.clone();
+        let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
         // Validate password against pool policy
         let password_policy = state
@@ -244,17 +271,29 @@ impl CognitoService {
             .password_policy
             .clone();
 
-        let user = state
+        let user = match state
             .users
             .get_mut(&pool_id)
             .and_then(|users| users.get_mut(username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
+        {
+            Some(u) => u,
+            None => {
+                // PreventUserExistenceErrors=ENABLED: an unknown user is
+                // indistinguishable from a wrong code (L3).
+                if masks_existence {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "CodeMismatchException",
+                        "Invalid verification code provided, please try again.",
+                    ));
+                }
+                return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "UserNotFoundException",
                     "User does not exist.",
-                )
-            })?;
+                ));
+            }
+        };
 
         // Validate confirmation code
         match &user.confirmation_code {

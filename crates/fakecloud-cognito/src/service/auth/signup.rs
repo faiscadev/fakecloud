@@ -222,18 +222,31 @@ impl CognitoService {
             )
         })?;
         let pool_id = client.user_pool_id.clone();
+        let masks_existence = client.prevent_user_existence_errors.as_deref() == Some("ENABLED");
 
-        let user = state
+        let user = match state
             .users
             .get_mut(&pool_id)
             .and_then(|users| users.get_mut(username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
+        {
+            Some(u) => u,
+            None => {
+                // PreventUserExistenceErrors=ENABLED: an unknown user must not
+                // be distinguishable from a wrong code (L3).
+                if masks_existence {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "CodeMismatchException",
+                        "Invalid verification code provided, please try again.",
+                    ));
+                }
+                return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "UserNotFoundException",
                     "User does not exist.",
-                )
-            })?;
+                ));
+            }
+        };
 
         // Validate confirmation code against the stored value before
         // promoting the user to CONFIRMED. Without this check anyone

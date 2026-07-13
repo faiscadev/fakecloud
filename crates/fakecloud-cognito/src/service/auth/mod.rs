@@ -9,7 +9,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
     AccessTokenData, AuthEvent, ChallengeResult, CognitoState, PreTokenGenInvocation,
-    RefreshTokenData, SessionData, SharedCognitoState, UserAttribute,
+    RefreshTokenData, SessionData, SharedCognitoState, User, UserAttribute, UserPool,
 };
 use crate::triggers::{self, TriggerSource};
 use crate::user_status;
@@ -96,7 +96,67 @@ struct AdminAuthLookup {
 
 enum AdminAuthOutcome {
     Tokens(TokenSet),
-    NewPasswordRequired { session: String },
+    NewPasswordRequired {
+        session: String,
+    },
+    /// A second-factor MFA challenge (SOFTWARE_TOKEN_MFA / SMS_MFA / MFA_SETUP)
+    /// that must be satisfied before tokens are minted.
+    MfaChallenge {
+        challenge_name: &'static str,
+        session: String,
+        /// Masked destination for SMS_MFA CodeDeliveryDetails, if any.
+        sms_destination: Option<String>,
+    },
+}
+
+/// Decide whether a successful first authentication factor (password or SRP)
+/// must be followed by a second-factor MFA challenge, and which one.
+///
+/// Returns the AWS `ChallengeName` to issue, or `None` to proceed straight to
+/// tokens. Mirrors real Cognito: a pool with `MfaConfiguration = OFF` never
+/// challenges; `ON` always requires a second factor (falling back to
+/// `MFA_SETUP` when the user has enrolled none); `OPTIONAL` challenges only
+/// users who have actually enabled a factor.
+fn required_mfa_challenge(pool: &UserPool, user: &User) -> Option<&'static str> {
+    let cfg = pool.mfa_configuration.as_str();
+    if !matches!(cfg, "ON" | "OPTIONAL") {
+        // "OFF" (or any unrecognized/empty value) => no MFA.
+        return None;
+    }
+
+    let prefs = user.mfa_preferences.as_ref();
+    // A verified TOTP counts as software-token MFA unless the user explicitly
+    // disabled it via SetUserMFAPreference.
+    let software = user.totp_verified && prefs.map(|p| p.software_token_enabled).unwrap_or(true);
+    // SMS MFA needs both the preference and a phone number to deliver to.
+    let sms = prefs.map(|p| p.sms_enabled).unwrap_or(false)
+        && user.attributes.iter().any(|a| a.name == "phone_number");
+
+    match (software, sms) {
+        (true, true) => {
+            if prefs.map(|p| p.sms_preferred).unwrap_or(false) {
+                Some("SMS_MFA")
+            } else {
+                Some("SOFTWARE_TOKEN_MFA")
+            }
+        }
+        (true, false) => Some("SOFTWARE_TOKEN_MFA"),
+        (false, true) => Some("SMS_MFA"),
+        // No usable factor enrolled: a mandatory pool forces setup; an
+        // OPTIONAL pool lets the user through.
+        (false, false) => (cfg == "ON").then_some("MFA_SETUP"),
+    }
+}
+
+/// Mask a phone number for `CodeDeliveryDetails`, e.g. `+15551234567` ->
+/// `+*******4567`, matching how Cognito reports the SMS destination.
+fn mask_phone(phone: &str) -> String {
+    let n = phone.chars().count();
+    if n <= 4 {
+        return "*".repeat(n);
+    }
+    let visible: String = phone.chars().skip(n - 4).collect();
+    format!("{}{}", "*".repeat(n - 4), visible)
 }
 
 mod admin;

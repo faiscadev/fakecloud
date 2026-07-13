@@ -947,6 +947,19 @@ impl CognitoIdentityService {
             )
         })?;
 
+        // When the source and destination resolve to the same identity there is
+        // nothing to merge — remove()+get_mut() on the same key would panic
+        // (remove the identity, then unwrap a None). Treat it as a no-op
+        // success, returning the identity id (a self-merge is idempotent).
+        if source_id == dest_id {
+            if let Some(ident) = state.federated_identities.get_mut(&dest_id) {
+                ident.last_modified_date = Utc::now();
+            }
+            return Ok(AwsResponse::ok_json(json!({
+                "IdentityId": dest_id,
+            })));
+        }
+
         let source = state.federated_identities.remove(&source_id).unwrap();
         let dest = state.federated_identities.get_mut(&dest_id).unwrap();
         for (k, v) in source.developer_logins {
@@ -1238,5 +1251,99 @@ impl CognitoIdentityService {
             "UseDefaults": use_defaults,
             "PrincipalTags": principal_tags,
         })))
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn svc() -> CognitoIdentityService {
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let iam = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        CognitoIdentityService::new(state, iam)
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "cognito-identity".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    // M1: MergeDeveloperIdentities where source == destination previously
+    // panicked (remove() the identity, then unwrap a None get_mut on the same
+    // key). It must be a no-op success now.
+    #[test]
+    fn merge_developer_identities_self_merge_is_noop() {
+        let svc = svc();
+        let create = block_on(svc.handle(req(
+            "CreateIdentityPool",
+            json!({
+                "IdentityPoolName": "devpool",
+                "AllowUnauthenticatedIdentities": true,
+                "DeveloperProviderName": "login.example.com"
+            }),
+        )))
+        .expect("create identity pool");
+        let cb: Value = serde_json::from_slice(create.body.expect_bytes()).unwrap();
+        let pool_id = cb["IdentityPoolId"].as_str().unwrap().to_string();
+
+        // Mint a developer-authenticated identity.
+        let tok = block_on(svc.handle(req(
+            "GetOpenIdTokenForDeveloperIdentity",
+            json!({
+                "IdentityPoolId": pool_id,
+                "Logins": { "login.example.com": "user-1" }
+            }),
+        )))
+        .expect("get open id token for developer identity");
+        let tb: Value = serde_json::from_slice(tok.body.expect_bytes()).unwrap();
+        let identity_id = tb["IdentityId"].as_str().unwrap().to_string();
+
+        // Self-merge: source == destination.
+        let resp = block_on(svc.handle(req(
+            "MergeDeveloperIdentities",
+            json!({
+                "IdentityPoolId": pool_id,
+                "DeveloperProviderName": "login.example.com",
+                "SourceUserIdentifier": "user-1",
+                "DestinationUserIdentifier": "user-1"
+            }),
+        )))
+        .expect("self-merge must not panic / error");
+        let rb: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(rb["IdentityId"].as_str(), Some(identity_id.as_str()));
+
+        // The identity is still present (nothing was deleted).
+        let accounts = svc.state.read();
+        let st = accounts.get("123456789012").unwrap();
+        assert!(st.federated_identities.contains_key(&identity_id));
     }
 }

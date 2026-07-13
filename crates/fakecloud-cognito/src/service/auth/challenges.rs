@@ -110,6 +110,9 @@ impl CognitoService {
             }
             "PASSWORD_VERIFIER" => self.respond_password_verifier(client_id, session, body, req),
             "SELECT_CHALLENGE" => self.respond_select_challenge(client_id, session, body, req),
+            "SOFTWARE_TOKEN_MFA" | "SMS_MFA" | "MFA_SETUP" => {
+                self.respond_mfa_challenge(challenge_name, client_id, session, body, req)
+            }
             "CUSTOM_CHALLENGE" => {
                 self.respond_custom_challenge(client_id, session, body, req)
                     .await
@@ -120,6 +123,242 @@ impl CognitoService {
                 format!("Unsupported challenge: {challenge_name}"),
             )),
         }
+    }
+
+    /// After a first factor succeeds, decide whether the pool/user configuration
+    /// demands a second-factor MFA challenge. When it does, stash a challenge
+    /// session (generating + dispatching an SMS code for SMS_MFA) and return the
+    /// challenge response the caller should send back instead of tokens. `None`
+    /// means no MFA is owed and the caller may mint tokens.
+    ///
+    /// This is the fix for the sign-in MFA bypass: every password/SRP success
+    /// path funnels through here before issuing tokens.
+    pub(super) fn maybe_mfa_challenge(
+        &self,
+        pool_id: &str,
+        client_id: &str,
+        username: &str,
+        req: &AwsRequest,
+    ) -> Option<AwsResponse> {
+        let (
+            challenge_name,
+            session,
+            sms_code,
+            phone,
+            sms_destination,
+            user_attrs,
+            region,
+            account_id,
+        ) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let pool = state.user_pools.get(pool_id)?;
+            let user = state.users.get(pool_id).and_then(|u| u.get(username))?;
+            let challenge_name = super::required_mfa_challenge(pool, user)?;
+
+            let phone = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "phone_number")
+                .map(|a| a.value.clone());
+            let sms_destination = phone.as_deref().map(super::mask_phone);
+            let user_attrs = triggers::collect_user_attributes(user);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            // For SMS_MFA generate a delivery code and keep it in the session so
+            // the challenge response can validate what was actually sent.
+            let sms_code = (challenge_name == "SMS_MFA").then(generate_confirmation_code);
+            let session = Uuid::new_v4().to_string();
+            state.sessions.insert(
+                session.clone(),
+                SessionData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.to_string(),
+                    client_id: client_id.to_string(),
+                    challenge_name: challenge_name.to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: sms_code.clone(),
+                },
+            );
+            (
+                challenge_name,
+                session,
+                sms_code,
+                phone,
+                sms_destination,
+                user_attrs,
+                region,
+                account_id,
+            )
+        };
+
+        // Deliver the SMS code once the state lock is released.
+        if let (Some(code), Some(phone)) = (sms_code.as_ref(), phone.as_ref()) {
+            self.dispatch_verification_sms(
+                pool_id,
+                Some(client_id),
+                username,
+                &user_attrs,
+                phone,
+                code,
+                TriggerSource::CustomSmsSenderAuthentication,
+                &region,
+                &account_id,
+            );
+        }
+
+        let mut params = serde_json::Map::new();
+        params.insert("USERNAME".to_string(), json!(username));
+        params.insert("USER_ID_FOR_SRP".to_string(), json!(username));
+        if challenge_name == "SMS_MFA" {
+            if let Some(dest) = sms_destination.as_ref() {
+                params.insert("CODE_DELIVERY_DELIVERY_MEDIUM".to_string(), json!("SMS"));
+                params.insert("CODE_DELIVERY_DESTINATION".to_string(), json!(dest));
+            }
+        }
+        if challenge_name == "MFA_SETUP" {
+            params.insert(
+                "MFAS_CAN_SETUP".to_string(),
+                json!("[\"SOFTWARE_TOKEN_MFA\"]"),
+            );
+        }
+
+        Some(AwsResponse::ok_json(json!({
+            "ChallengeName": challenge_name,
+            "Session": session,
+            "ChallengeParameters": params,
+        })))
+    }
+
+    /// Validate an MFA second factor and, on success, mint tokens. Handles
+    /// `SOFTWARE_TOKEN_MFA` (RFC 6238 TOTP), `SMS_MFA` (the code dispatched at
+    /// challenge time) and `MFA_SETUP` (the user must have associated + verified
+    /// a software token via this session first).
+    pub(super) fn respond_mfa_challenge(
+        &self,
+        challenge_name: &str,
+        client_id: &str,
+        session: &str,
+        body: &Value,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let responses = body["ChallengeResponses"].as_object().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "ChallengeResponses is required",
+            )
+        })?;
+
+        let (pool_id, username, region, stored_sms_code, totp_secret, totp_verified) = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let sess = state.sessions.get(session).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session for the user, session is expired.",
+                )
+            })?;
+            if sess.challenge_name != challenge_name || sess.client_id != client_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                ));
+            }
+            let pool_id = sess.user_pool_id.clone();
+            let username = sess.username.clone();
+            let stored_sms_code = sess.challenge_metadata.clone();
+            let (totp_secret, totp_verified) = state
+                .users
+                .get(&pool_id)
+                .and_then(|u| u.get(&username))
+                .map(|u| (u.totp_secret.clone(), u.totp_verified))
+                .unwrap_or((None, false));
+            (
+                pool_id,
+                username,
+                state.region.clone(),
+                stored_sms_code,
+                totp_secret,
+                totp_verified,
+            )
+        };
+
+        let code_mismatch = || {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CodeMismatchException",
+                "Invalid code received for user",
+            )
+        };
+
+        match challenge_name {
+            "SOFTWARE_TOKEN_MFA" => {
+                let code = responses
+                    .get("SOFTWARE_TOKEN_MFA_CODE")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(code_mismatch)?;
+                let secret = totp_secret.ok_or_else(code_mismatch)?;
+                if !crate::totp::verify_totp(&secret, code) {
+                    self.record_mfa_failure(&req.account_id, &pool_id, &username, client_id);
+                    return Err(code_mismatch());
+                }
+            }
+            "SMS_MFA" => {
+                let code = responses
+                    .get("SMS_MFA_CODE")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(code_mismatch)?;
+                let expected = stored_sms_code.ok_or_else(code_mismatch)?;
+                if !crate::srp::ct_eq(expected.as_bytes(), code.as_bytes()) {
+                    self.record_mfa_failure(&req.account_id, &pool_id, &username, client_id);
+                    return Err(code_mismatch());
+                }
+            }
+            "MFA_SETUP" => {
+                // The user must have associated + verified a software token via
+                // this session (AssociateSoftwareToken + VerifySoftwareToken)
+                // before completing MFA_SETUP.
+                if totp_secret.is_none() || !totp_verified {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Software token has not been verified for MFA setup.",
+                    ));
+                }
+            }
+            _ => unreachable!("dispatched only for MFA challenge names"),
+        }
+
+        // Single-use session, then mint tokens.
+        {
+            let mut accounts = self.state.write();
+            accounts
+                .get_or_create(&req.account_id)
+                .sessions
+                .remove(session);
+        }
+        self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+    }
+
+    /// Record a failed MFA attempt in the auth-event log for introspection.
+    fn record_mfa_failure(&self, account_id: &str, pool_id: &str, username: &str, client_id: &str) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.auth_events.push(AuthEvent {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: "SIGN_IN_FAILURE".to_string(),
+            username: username.to_string(),
+            user_pool_id: pool_id.to_string(),
+            client_id: Some(client_id.to_string()),
+            timestamp: Utc::now(),
+            success: false,
+            feedback_value: None,
+        });
     }
 
     /// If the user still owes a forced password reset, return a
@@ -304,6 +543,11 @@ impl CognitoService {
             return Ok(resp);
         }
 
+        // Enforce a second factor when the pool/user requires MFA.
+        if let Some(resp) = self.maybe_mfa_challenge(&pool_id, client_id, &username, req) {
+            return Ok(resp);
+        }
+
         self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
     }
 
@@ -413,6 +657,10 @@ impl CognitoService {
                 if let Some(resp) =
                     self.maybe_force_new_password(&pool_id, client_id, &username, req)
                 {
+                    return Ok(resp);
+                }
+                // Enforce a second factor when the pool/user requires MFA.
+                if let Some(resp) = self.maybe_mfa_challenge(&pool_id, client_id, &username, req) {
                     return Ok(resp);
                 }
                 self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
